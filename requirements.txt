@@ -1,0 +1,16 @@
+# Sprunki Ultimate Master - Python Dependencies (Final)
+
+colorama
+keyboard
+numpy
+opencv-python
+Pillow
+psutil
+pyautogui
+pygetwindow
+pywin32
+requests
+scikit-image  # <--- Đã sửa
+tqdm
+websocket-client
+websockets

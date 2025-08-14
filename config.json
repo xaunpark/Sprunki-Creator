@@ -1,0 +1,194 @@
+{
+  "version": "1.0.0",
+  "application": {
+    "name": "Sprunki Ultimate Master",
+    "debug_mode": false,
+    "log_level": "INFO"
+  },
+  "obs": {
+    "host": "192.168.1.17",
+    "port": 4455,
+    "password": "BDdtMRgQabXu3sy1",
+    "connection_timeout": 10,
+    "retry_attempts": 3,
+    "websocket_url": "ws://192.168.1.14:4455"
+  },
+  "output": {
+    "base_directory": "C:\\Users\\dinht\\Videos\\SPRUNKI",
+    "create_project_folders": true,
+    "video_format": "mp4",
+    "video_quality": "high",
+    "filename_format": "{project_slug}-{mode}-{timestamp}",
+    "master_video_suffix": "showcase",
+    "individual_video_prefix": {
+      "normal": "n-",
+      "horror": "h-",
+      "bonus": "b-"
+    }
+  },
+  "chrome": {
+    "executable_paths": [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+    ],
+    "debugging_port": 9222,
+    "user_data_dir": "chrome_debug_profile",
+    "window_size": "1280,720",
+    "headless": false,
+    "load_extensions": true
+  },
+  "game": {
+    "supported_domains": [
+      "cocrea.world"
+    ],
+    "default_timeout": 30,
+    "page_load_wait": 20,
+    "game_load_wait": 10,
+    "max_pagedown_attempts": 5,
+    "fullscreen_wait": 8,
+    "intro_skip_clicks": 10
+  },
+  "automation": {
+    "pyautogui": {
+      "pause": 0.08,
+      "duration": 0.2,
+      "failsafe": true,
+      "mouse_speed": 1.0
+    },
+    "drag_delays": {
+      "first_icon": {
+        "approach": 0.5,
+        "focus": 0.3,
+        "hold": 0.4,
+        "drag": 1.0,
+        "drop": 0.5,
+        "post_drop": 0.3
+      },
+      "normal_icon": {
+        "approach": 0.25,
+        "focus": 0.15,
+        "hold": 0.25,
+        "drag": 0.6,
+        "drop": 0.3,
+        "post_drop": 0.2
+      }
+    },
+    "recording_duration": {
+      "icon_showcase": 15,
+      "horror_transition": 15,
+      "remix_playback": 15
+    },
+    "screen_width": 1920,
+    "screen_height": 1080,
+    "domain_adjustments": {
+      "cocrea.world": {
+        "extra_focus_time": 0.15,
+        "drag_speed_multiplier": 1.2,
+        "requires_double_click": false,
+        "stability_factor": 0.9
+      }
+    }
+  },
+  "image_detection": {
+    "assets_directory": "image_assets",
+    "confidence_threshold": 0.85,
+    "retry_interval": 0.5,
+    "max_retry_attempts": 20,
+    "template_matching": {
+      "method": "cv2.TM_CCOEFF_NORMED",
+      "scale_factors": [
+        1.0,
+        0.9,
+        1.1
+      ],
+      "rotation_angles": [
+        0,
+        -5,
+        5
+      ]
+    }
+  },
+  "processing": {
+    "max_retries": 2,
+    "auto_skip_on_error": true,
+    "pause_between_items": 5,
+    "parallel_processing": false,
+    "create_summary_report": true,
+    "cleanup_temp_files": true
+  },
+  "ui": {
+    "theme": "default",
+    "window_size": "950x900",
+    "show_advanced_options": false,
+    "auto_save_queue": true,
+    "confirmation_dialogs": true,
+    "progress_update_interval": 2000
+  },
+  "logging": {
+    "enabled": true,
+    "directory": "logs",
+    "max_file_size_mb": 10,
+    "backup_count": 5,
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "date_format": "%Y-%m-%d %H:%M:%S",
+    "console_output": true,
+    "file_output": true
+  },
+  "performance": {
+    "enable_metrics": true,
+    "track_operation_timing": true,
+    "memory_monitoring": false,
+    "cpu_monitoring": false,
+    "optimization_mode": "balanced"
+  },
+  "advanced": {
+    "json_generation": {
+      "horror_test_duration": 25,
+      "coordinate_validation": true,
+      "screenshot_comparison": false,
+      "backup_generation_method": "fallback"
+    },
+    "video_processing": {
+      "recording_buffer_seconds": 2,
+      "post_processing_enabled": false,
+      "quality_validation": true,
+      "file_size_monitoring": true
+    },
+    "error_recovery": {
+      "auto_retry_enabled": true,
+      "exponential_backoff": true,
+      "max_backoff_seconds": 30,
+      "recovery_strategies": [
+        "restart_component",
+        "clear_cache",
+        "reset_browser",
+        "skip_item"
+      ]
+    }
+  },
+  "extensions": {
+    "ublock_origin": {
+      "enabled": true,
+      "directory": "extensions",
+      "auto_update": false
+    },
+    "custom_scripts": {
+      "enabled": false,
+      "directory": "custom_scripts"
+    }
+  },
+  "hotkeys": {
+    "emergency_stop": "esc",
+    "pause_processing": "ctrl+p",
+    "resume_processing": "ctrl+r",
+    "stop_processing": "ctrl+s",
+    "global_enabled": true
+  },
+  "notifications": {
+    "system_notifications": true,
+    "completion_notification": true,
+    "error_notification": true,
+    "sound_enabled": false,
+    "sound_file": "notification.wav"
+  }
+}

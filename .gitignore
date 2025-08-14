@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Env / secrets
+.env
+.env.*
+venv/
+.venv/
+ENV/
+
+# VS Code
+.vscode/
+
+# Logs & artefacts
+*.log
+logs/
+
+# Databases (bạn muốn public DB thì xoá 2 dòng dưới)
+*.db
+*.sqlite3
+
+# Selenium / WebDriver cache
+.wdm/
+*.crdownload
+chromedriver*
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+#Chrome
+sprunki-automation-profile/
+chrome_debug_profile/
+dist/
+extensions/
+JSON/
+output/
+temp/
