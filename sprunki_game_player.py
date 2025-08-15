@@ -1251,7 +1251,7 @@ class SprunkiGamePlayer:
             print("🔄 Executing triple-click return from safe position...")
             
             # Triple click positions: top, center, bottom
-            click_offset = 25
+            click_offset = 90
             click_points = [
                 (center_x, center_y - click_offset),  # Top
                 (center_x, center_y),                 # Center  

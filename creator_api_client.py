@@ -199,6 +199,13 @@ class CreatorService:
         """Initialize game player and OBS controller for a specific job."""
         try:
             print("⚙️ Initializing components for new job...")
+            
+            # ADDED: Cleanup previous OBS controller if exists
+            if hasattr(self, 'obs_controller') and self.obs_controller:
+                print("🧹 Cleaning up previous OBS controller...")
+                self.obs_controller = None
+                time.sleep(1)  # Brief pause for cleanup
+            
             self.game_player = SprunkiGamePlayer()
             self.game_player.config = config_data
             
@@ -213,7 +220,10 @@ class CreatorService:
             self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
             self.game_player.current_remix_index = 0
             
+            # Enhanced OBS controller initialization for service mode
+            print("🎥 Initializing OBS controller for service mode...")
             self.obs_controller = SprunkiController()
+            
             if not self.obs_controller.load_config_from_dict(config_data):
                 print("❌ OBS Error: Could not load recording area config!")
                 return False
@@ -224,6 +234,8 @@ class CreatorService:
             
         except Exception as e:
             print(f"❌ Error initializing components: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def start(self):
@@ -371,9 +383,28 @@ class CreatorService:
     def _process_video_for_item(self, item, queue_id: int) -> bool:
         """Process video using existing logic"""
         try:
+            # ADDED: Enhanced debug for service mode
+            print(f"🎥 Processing video for item: {item.project_slug}")
+            print(f"📊 Mode: {item.mode}")
+            print(f"🔗 URL: {item.source_url}")
+            print(f"📋 JSON data available: {item.json_data is not None}")
+            
             self.api_client.update_job_status(queue_id, 'processing', {
                 'stage': 'video_processing'
             })
+            
+            # ADDED: Test OBS connection before processing
+            if hasattr(self, 'obs_controller') and self.obs_controller:
+                print("🔍 Testing OBS connection...")
+                test_ws = self.obs_controller.connect_obs_fast()
+                if test_ws:
+                    print("✅ OBS connection test successful")
+                    test_ws.close()
+                else:
+                    print("❌ OBS connection test failed")
+                    self.api_client.update_job_status(queue_id, 'failed',
+                        error_log="OBS connection test failed before video processing")
+                    return False
             
             success = self.processing_manager._process_video_for_item(item)
             
@@ -398,6 +429,8 @@ class CreatorService:
                 
         except Exception as e:
             print(f"❌ Video processing error: {e}")
+            import traceback
+            traceback.print_exc()
             self.api_client.update_job_status(queue_id, 'failed',
                 error_log=f"Video processing error: {str(e)}")
             return False
