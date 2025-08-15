@@ -1676,3 +1676,71 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Error: {e}")
         input("Press Enter to exit...")
+
+# Add this class to replace tkinter GUI
+class SprunkiCreatorService:
+    """
+    API-driven Creator Service
+    Replaces tkinter GUI with API integration
+    """
+    
+    def __init__(self):
+        # Use existing config system
+        self.config_manager = initialize_config()
+        
+        # Initialize processing manager (existing code)
+        self.processing_manager = UnifiedProcessingManager(self)
+        
+        # API client
+        from creator_api_client import CreatorService
+        self.service = CreatorService()
+        
+        print("🤖 Creator Service Mode - No GUI")
+    
+    def run_as_service(self):
+        """Run as API-driven service instead of GUI"""
+        try:
+            print("🚀 Starting Creator Service...")
+            
+            if self.service.start():
+                print("✅ Creator Service running")
+                print("🔗 Connected to Tracker for job processing")
+                print("⌨️ Press Ctrl+C to stop")
+                
+                # Keep service running
+                while self.service.running:
+                    time.sleep(1)
+            else:
+                print("❌ Failed to start Creator Service")
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Service shutdown requested")
+        finally:
+            self.service.stop()
+            print("✅ Creator Service stopped")
+    
+    # Keep existing methods for compatibility
+    def _initialize_components(self, config_data):
+        """Existing method - no changes"""
+        # ... existing code unchanged
+        pass
+    
+    def on_processing_complete(self):
+        """Modified for service mode"""
+        print("✅ Job processing completed")
+        # No GUI updates needed
+
+# Add service mode entry point
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "--service":
+        # Run as API service
+        print("🤖 Starting Sprunki Creator Service Mode")
+        service = SprunkiCreatorService()
+        service.run_as_service()
+    else:
+        # Run existing GUI mode
+        print("🎮 Starting Sprunki Ultimate Master GUI")
+        master = SprunkiUltimateMaster()
+        master.run()        
