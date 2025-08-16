@@ -264,7 +264,153 @@ class SprunkiJSONGenerator:
             }
         });
         '''
-        
+
+        self.js_find_skip_intro = '''
+        new Promise(async (resolve, reject) => {
+            try {
+                console.log("🔍 Searching for ALL Skip Intro buttons (multiple detection)...");
+                
+                function findVM() {
+                    if (window.__vm && window.__vm.runtime) return window.__vm;
+                    function getReactKey(el) { return Object.keys(el).find(k => k.startsWith('__react')); }
+                    const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
+                    for (const selector of selectors) {
+                        const elements = document.querySelectorAll(selector);
+                        for (const el of elements) {
+                            const reactKey = getReactKey(el);
+                            if (!reactKey) continue;
+                            let fiber = el[reactKey]; let depth = 0;
+                            while (fiber && depth++ < 100) {
+                                const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
+                                if (props?.vm && props.vm.runtime) { window.__vm = props.vm; return props.vm; }
+                                fiber = fiber.return;
+                            }
+                        }
+                    }
+                    return null;
+                }
+                
+                const toPixelWithMenu = (logicX, logicY) => {
+                    if (logicX === null || logicY === null) return { x: null, y: null };
+                    const stageW = 640; const stageH = 360; const screenW = 1920; const screenH = 1080; const menuWidth = 78;
+                    const viewportW = screenW - menuWidth; const scale = Math.min(viewportW / stageW, screenH / stageH);
+                    const canvasW = stageW * scale; const canvasH = stageH * scale; const leftOffset = menuWidth;
+                    const topOffset = (screenH - canvasH) / 2; const canvasCenterX = leftOffset + (canvasW / 2);
+                    const canvasCenterY = topOffset + (canvasH / 2); const pixelX = canvasCenterX + (logicX * scale);
+                    const pixelY = canvasCenterY - (logicY * scale);
+                    return { x: Math.round(pixelX), y: Math.round(pixelY) };
+                };
+                
+                const vm = findVM();
+                if (!vm) {
+                    console.log("❌ VM not found - cannot search for Skip Intro buttons");
+                    resolve({ found: false, count: 0, buttons: [], reason: "vm_not_found" });
+                    return;
+                }
+                
+                const allTargets = vm.runtime.targets.map(t => t);
+                console.log(`🎯 Total targets found: ${allTargets.length}`);
+                
+                // Find ALL targets with name "Intro" and costume "Skip"
+                const introTargets = allTargets.filter(target => {
+                    if (target.sprite.name !== "Intro") {
+                        return false;
+                    }
+                    
+                    const hasSkipCostume = target.sprite.costumes.some(costume => 
+                        costume.name === "Skip"
+                    );
+                    
+                    return hasSkipCostume;
+                });
+                
+                console.log(`🔍 Found ${introTargets.length} 'Intro' targets with 'Skip' costume`);
+                
+                if (introTargets.length === 0) {
+                    console.log("ℹ️ No Skip Intro buttons found");
+                    
+                    // DEBUG: Check for alternative patterns
+                    const skipCostumeTargets = allTargets.filter(target => 
+                        target.sprite.costumes.some(costume => costume.name === "Skip")
+                    );
+                    
+                    if (skipCostumeTargets.length > 0) {
+                        console.log(`🔍 Found ${skipCostumeTargets.length} targets with 'Skip' costume but different names:`);
+                        skipCostumeTargets.forEach((target, index) => {
+                            console.log(`   Target ${index + 1}: '${target.sprite.name}' - Position: (${target.x}, ${target.y}) - Visible: ${target.visible}`);
+                        });
+                    }
+                    
+                    resolve({ found: false, count: 0, buttons: [], reason: "target_not_found" });
+                    return;
+                }
+                
+                // Process ALL intro targets
+                const skipIntroButtons = [];
+                
+                introTargets.forEach((target, index) => {
+                    console.log(`\\n🎯 Processing Intro Target ${index + 1}/${introTargets.length}:`);
+                    console.log(`   - Logic Position: (${target.x}, ${target.y})`);
+                    console.log(`   - Visible: ${target.visible}`);
+                    console.log(`   - Current Costume: ${target.sprite.costumes[target.currentCostume]?.name || 'Unknown'}`);
+                    console.log(`   - All Costumes: ${target.sprite.costumes.map(c => c.name).join(', ')}`);
+                    
+                    // Convert coordinates regardless of visibility (some might be programmatically shown)
+                    const pixelCoords = toPixelWithMenu(target.x, target.y);
+                    
+                    if (pixelCoords.x !== null && pixelCoords.y !== null) {
+                        const buttonInfo = {
+                            index: index + 1,
+                            x: pixelCoords.x,
+                            y: pixelCoords.y,
+                            logicX: target.x,
+                            logicY: target.y,
+                            visible: target.visible,
+                            targetName: target.sprite.name,
+                            currentCostumeName: target.sprite.costumes[target.currentCostume]?.name || 'Unknown',
+                            allCostumes: target.sprite.costumes.map(c => c.name)
+                        };
+                        
+                        skipIntroButtons.push(buttonInfo);
+                        
+                        console.log(`   ✅ Converted to pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
+                        console.log(`   📋 Added to click list (${target.visible ? 'VISIBLE' : 'HIDDEN'})`);
+                    } else {
+                        console.log(`   ❌ Coordinate conversion failed for target ${index + 1}`);
+                    }
+                });
+                
+                // Summary
+                const visibleButtons = skipIntroButtons.filter(btn => btn.visible);
+                const hiddenButtons = skipIntroButtons.filter(btn => !btn.visible);
+                
+                console.log(`\\n📊 SKIP INTRO BUTTONS SUMMARY:`);
+                console.log(`   - Total found: ${skipIntroButtons.length}`);
+                console.log(`   - Visible: ${visibleButtons.length}`);
+                console.log(`   - Hidden: ${hiddenButtons.length}`);
+                
+                if (skipIntroButtons.length > 0) {
+                    console.log(`\\n🎯 Will click ALL ${skipIntroButtons.length} buttons to ensure success:`);
+                    skipIntroButtons.forEach((btn, index) => {
+                        console.log(`   ${index + 1}. (${btn.x}, ${btn.y}) - ${btn.visible ? 'VISIBLE' : 'HIDDEN'} - Costume: ${btn.currentCostumeName}`);
+                    });
+                }
+                
+                resolve({
+                    found: skipIntroButtons.length > 0,
+                    count: skipIntroButtons.length,
+                    buttons: skipIntroButtons,
+                    visibleCount: visibleButtons.length,
+                    hiddenCount: hiddenButtons.length,
+                    reason: skipIntroButtons.length > 0 ? "success" : "no_valid_buttons"
+                });
+                
+            } catch(e) { 
+                console.error("❌ Error searching for Skip Intro buttons:", e);
+                resolve({ found: false, count: 0, buttons: [], reason: "error", error: e.toString() }); 
+            }
+        });
+        '''
         # Full layout capture JavaScript
         self.js_full_layout = r'''
         new Promise(async (resolve, reject) => {
@@ -432,6 +578,85 @@ class SprunkiJSONGenerator:
                 
                 const customRecordingArea = calculateRecordingArea(slots, allTargets);
                 
+                // =====================================================
+                // NEW: Find Skip Intro Button Logic
+                // =====================================================
+                function findSkipIntroButton(allTargets) {
+                    console.log("🔍 Searching for Skip Intro button...");
+                    
+                    try {
+                        // Search for target with name "Intro" and costume "Skip"
+                        const introTarget = allTargets.find(target => {
+                            // Check if target name is "Intro"
+                            if (target.sprite.name !== "Intro") {
+                                return false;
+                            }
+                            
+                            // Check if target has costume with name "Skip"
+                            const hasSkipCostume = target.sprite.costumes.some(costume => 
+                                costume.name === "Skip"
+                            );
+                            
+                            if (hasSkipCostume) {
+                                console.log(`✅ Found Skip Intro target: ${target.sprite.name}`);
+                                console.log(`   - Position: (${target.x}, ${target.y})`);
+                                console.log(`   - Visible: ${target.visible}`);
+                                console.log(`   - Costumes: ${target.sprite.costumes.map(c => c.name).join(', ')}`);
+                                return true;
+                            }
+                            
+                            return false;
+                        });
+                        
+                        if (introTarget) {
+                            // Convert logic coordinates to pixel coordinates
+                            const pixelCoords = toPixelWithMenu(introTarget.x, introTarget.y);
+                            
+                            if (pixelCoords.x !== null && pixelCoords.y !== null) {
+                                console.log(`✅ Skip Intro button found at pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
+                                return {
+                                    x: pixelCoords.x,
+                                    y: pixelCoords.y,
+                                    visible: introTarget.visible,
+                                    targetName: introTarget.sprite.name,
+                                    currentCostume: introTarget.currentCostume,
+                                    costumes: introTarget.sprite.costumes.map(c => c.name)
+                                };
+                            } else {
+                                console.warn("⚠️ Skip Intro target found but coordinates conversion failed");
+                                return null;
+                            }
+                        } else {
+                            console.log("ℹ️ Skip Intro button not found (no target with name 'Intro' and costume 'Skip')");
+                            return null;
+                        }
+                        
+                    } catch (error) {
+                        console.error("❌ Error while searching for Skip Intro button:", error);
+                        return null;
+                    }
+                }
+
+                // Find Skip Intro button
+                const skipIntroButton = findSkipIntroButton(allTargets);
+
+                // Log the result for debugging
+                if (skipIntroButton) {
+                    console.log("🎯 Skip Intro Button Detection Result:");
+                    console.log(`   - Found: YES`);
+                    console.log(`   - Coordinates: (${skipIntroButton.x}, ${skipIntroButton.y})`);
+                    console.log(`   - Visible: ${skipIntroButton.visible}`);
+                    console.log(`   - Target Name: ${skipIntroButton.targetName}`);
+                    console.log(`   - Available Costumes: ${skipIntroButton.costumes.join(', ')}`);
+                } else {
+                    console.log("🎯 Skip Intro Button Detection Result:");
+                    console.log(`   - Found: NO`);
+                    console.log(`   - Reason: Target 'Intro' with costume 'Skip' not found in allTargets`);
+                }
+                // =====================================================
+                // END: Find Skip Intro Button Logic
+                // =====================================================
+
                 const result = {
                     timestamp: new Date().toISOString(),
                     pageTitle: customPageTitle,
@@ -440,10 +665,11 @@ class SprunkiJSONGenerator:
                         icons: icons, 
                         slots: slots, 
                         bonus: [], 
-                        recordingArea: customRecordingArea 
+                        recordingArea: customRecordingArea,
+                        skipIntroButton: skipIntroButton  // NEW: Add Skip Intro button coordinates
                     }
                 };
-                
+
                 console.log("Full layout capture completed!");
                 resolve(result);
 
@@ -1367,9 +1593,85 @@ class SprunkiJSONGenerator:
             print("✅ JavaScript environment ready")
             
             print("🖱️ Skipping intros via CDP...")
-            for i in range(10):
+            # ============================
+            # MULTI-TARGET SKIP INTRO: Click ALL Skip Intro buttons + Blind Clicks
+            # ============================
+            print("\n🔍 MULTI-TARGET SKIP INTRO: Finding and clicking ALL Skip Intro buttons...")
+
+            # Phase 1: Find ALL Skip Intro buttons
+            print("📍 Phase 1: Searching for ALL Skip Intro buttons...")
+
+            skip_intro_response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate", 
+                "params": {"expression": self.js_find_skip_intro, "awaitPromise": True, "returnByValue": True}
+            })
+
+            smart_clicks_performed = 0
+            all_buttons = []
+
+            if skip_intro_response and 'result' in skip_intro_response:
+                skip_result = skip_intro_response.get('result', {}).get('result', {}).get('value')
+                
+                if skip_result and skip_result.get('found'):
+                    all_buttons = skip_result.get('buttons', [])
+                    button_count = skip_result.get('count', 0)
+                    visible_count = skip_result.get('visibleCount', 0)
+                    hidden_count = skip_result.get('hiddenCount', 0)
+                    
+                    print(f"✅ Found {button_count} Skip Intro buttons:")
+                    print(f"   📊 Visible: {visible_count}, Hidden: {hidden_count}")
+                    
+                    # Click ALL buttons found
+                    for i, button in enumerate(all_buttons):
+                        button_num = i + 1
+                        x, y = button['x'], button['y']
+                        visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
+                        costume_name = button.get('currentCostumeName', 'Unknown')
+                        
+                        print(f"🎯 Clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
+                        
+                        # Click this specific button
+                        self._simulate_click_via_cdp(ws, x, y)
+                        time.sleep(0.8)  # Wait between clicks
+                        
+                        smart_clicks_performed += 1
+                    
+                    print(f"✅ Smart clicks completed: {smart_clicks_performed} buttons clicked!")
+                    
+                else:
+                    reason = skip_result.get('reason', 'unknown') if skip_result else 'no_result'
+                    print(f"ℹ️ No Skip Intro buttons found - Reason: {reason}")
+                    print("🔄 Will use blind click method only...")
+
+            # Phase 2: ALWAYS perform blind clicks for additional assurance
+            if smart_clicks_performed > 0:
+                print("🔄 Phase 2: Performing ADDITIONAL blind clicks for triple protection...")
+                print("   → This ensures intro skipping even if smart clicks had edge cases")
+            else:
+                print("🖱️ Phase 2: Performing STANDARD blind clicks (no smart buttons found)...")
+
+            # Perform blind clicks regardless of smart click success
+            for i in range(self.intro_skip_clicks):  # Use config value
                 self._simulate_click_via_cdp(ws, 960, 540)
                 time.sleep(0.5)
+
+            # Summary
+            if smart_clicks_performed > 0:
+                print("🎉 MULTI-TARGET SKIP INTRO COMPLETED:")
+                print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons clicked successfully")
+                print(f"   ✅ Button details: {len(all_buttons)} total found")
+                for i, button in enumerate(all_buttons):
+                    visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
+                    print(f"      {i+1}. ({button['x']}, {button['y']}) - {visible_status}")
+                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} additional clicks performed")
+                print("   🛡️ Triple protection ensures maximum skip success rate")
+            else:
+                print("🎉 STANDARD SKIP INTRO COMPLETED:")
+                print("   ⚠️ Smart clicks: N/A (No Skip Intro buttons found)")
+                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} clicks performed")
+                print("   🔄 Standard method used as fallback")
+
+            print("🎮 Skip intro phase finished - Game should be ready for interaction")
             
             # Initialize final result variables
             final_has_horror = False

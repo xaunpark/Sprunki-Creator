@@ -170,7 +170,122 @@ class SprunkiGamePlayer:
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.08
         pyautogui.DURATION = 0.2
-        
+
+        # NEW: JavaScript for finding ALL Skip Intro buttons (Multi-Target Detection)
+        self.js_find_skip_intro = '''
+        new Promise(async (resolve, reject) => {
+            try {
+                console.log("🔍 [GAME PLAYER] Searching for ALL Skip Intro buttons...");
+                
+                function findVM() {
+                    if (window.__vm && window.__vm.runtime) return window.__vm;
+                    function getReactKey(el) { return Object.keys(el).find(k => k.startsWith('__react')); }
+                    const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
+                    for (const selector of selectors) {
+                        const elements = document.querySelectorAll(selector);
+                        for (const el of elements) {
+                            const reactKey = getReactKey(el);
+                            if (!reactKey) continue;
+                            let fiber = el[reactKey]; let depth = 0;
+                            while (fiber && depth++ < 100) {
+                                const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
+                                if (props?.vm && props.vm.runtime) { window.__vm = props.vm; return props.vm; }
+                                fiber = fiber.return;
+                            }
+                        }
+                    }
+                    return null;
+                }
+                
+                const toPixelWithMenu = (logicX, logicY) => {
+                    if (logicX === null || logicY === null) return { x: null, y: null };
+                    const stageW = 640; const stageH = 360; const screenW = 1920; const screenH = 1080; const menuWidth = 78;
+                    const viewportW = screenW - menuWidth; const scale = Math.min(viewportW / stageW, screenH / stageH);
+                    const canvasW = stageW * scale; const canvasH = stageH * scale; const leftOffset = menuWidth;
+                    const topOffset = (screenH - canvasH) / 2; const canvasCenterX = leftOffset + (canvasW / 2);
+                    const canvasCenterY = topOffset + (canvasH / 2); const pixelX = canvasCenterX + (logicX * scale);
+                    const pixelY = canvasCenterY - (logicY * scale);
+                    return { x: Math.round(pixelX), y: Math.round(pixelY) };
+                };
+                
+                const vm = findVM();
+                if (!vm) {
+                    console.log("❌ [GAME PLAYER] VM not found - cannot search for Skip Intro buttons");
+                    resolve({ found: false, count: 0, buttons: [], reason: "vm_not_found" });
+                    return;
+                }
+                
+                const allTargets = vm.runtime.targets.map(t => t);
+                console.log(`🎯 [GAME PLAYER] Total targets found: ${allTargets.length}`);
+                
+                // Find ALL targets with name "Intro" and costume "Skip"
+                const introTargets = allTargets.filter(target => {
+                    if (target.sprite.name !== "Intro") {
+                        return false;
+                    }
+                    
+                    const hasSkipCostume = target.sprite.costumes.some(costume => 
+                        costume.name === "Skip"
+                    );
+                    
+                    return hasSkipCostume;
+                });
+                
+                console.log(`🔍 [GAME PLAYER] Found ${introTargets.length} 'Intro' targets with 'Skip' costume`);
+                
+                if (introTargets.length === 0) {
+                    console.log("ℹ️ [GAME PLAYER] No Skip Intro buttons found");
+                    resolve({ found: false, count: 0, buttons: [], reason: "target_not_found" });
+                    return;
+                }
+                
+                // Process ALL intro targets
+                const skipIntroButtons = [];
+                
+                introTargets.forEach((target, index) => {
+                    console.log(`\\n🎯 [GAME PLAYER] Processing Intro Target ${index + 1}/${introTargets.length}:`);
+                    console.log(`   - Logic Position: (${target.x}, ${target.y})`);
+                    console.log(`   - Visible: ${target.visible}`);
+                    console.log(`   - Current Costume: ${target.sprite.costumes[target.currentCostume]?.name || 'Unknown'}`);
+                    
+                    const pixelCoords = toPixelWithMenu(target.x, target.y);
+                    
+                    if (pixelCoords.x !== null && pixelCoords.y !== null) {
+                        const buttonInfo = {
+                            index: index + 1,
+                            x: pixelCoords.x,
+                            y: pixelCoords.y,
+                            logicX: target.x,
+                            logicY: target.y,
+                            visible: target.visible,
+                            targetName: target.sprite.name,
+                            currentCostumeName: target.sprite.costumes[target.currentCostume]?.name || 'Unknown'
+                        };
+                        
+                        skipIntroButtons.push(buttonInfo);
+                        console.log(`   ✅ [GAME PLAYER] Converted to pixel: (${pixelCoords.x}, ${pixelCoords.y}) - ${target.visible ? 'VISIBLE' : 'HIDDEN'}`);
+                    }
+                });
+                
+                const visibleButtons = skipIntroButtons.filter(btn => btn.visible);
+                
+                console.log(`\\n📊 [GAME PLAYER] BUTTONS SUMMARY: Total: ${skipIntroButtons.length}, Visible: ${visibleButtons.length}`);
+                
+                resolve({
+                    found: skipIntroButtons.length > 0,
+                    count: skipIntroButtons.length,
+                    buttons: skipIntroButtons,
+                    visibleCount: visibleButtons.length,
+                    reason: skipIntroButtons.length > 0 ? "success" : "no_valid_buttons"
+                });
+                
+            } catch(e) { 
+                console.error("❌ [GAME PLAYER] Error searching for Skip Intro buttons:", e);
+                resolve({ found: false, count: 0, buttons: [], reason: "error", error: e.toString() }); 
+            }
+        });
+        '''
+
         # Setup GUI
         self.setup_gui()
 
@@ -956,22 +1071,90 @@ class SprunkiGamePlayer:
             return False
 
     def intro_skip_via_cdp(self):
-        """Skip game intros using CDP clicks"""
+        """ENHANCED: Multi-target Skip intro using CDP with smart detection + blind clicks"""
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("⚠️ Could not get WebSocket URL for intro skipping, using pyautogui fallback")
+                print("⚠️ Could not get WebSocket URL for enhanced intro skipping, using pyautogui fallback")
                 return self.intro_skip_via_pyautogui()
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            print(f"🖱️ Skipping intros via CDP ({self.intro_skip_clicks} clicks)...")
+            print(f"🔍 ENHANCED CDP SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} blind clicks...")
+            
+            # Phase 1: Smart detection and clicks
+            print("📍 Phase 1: Searching for ALL Skip Intro buttons via CDP...")
+            
+            smart_clicks_performed = 0
+            all_buttons = []
+            
+            try:
+                # Execute JavaScript to find ALL Skip Intro buttons
+                response = self._send_cdp_command(ws, {
+                    "method": "Runtime.evaluate", 
+                    "params": {"expression": self.js_find_skip_intro, "awaitPromise": True, "returnByValue": True}
+                })
+                
+                if response and 'result' in response:
+                    skip_result = response.get('result', {}).get('result', {}).get('value')
+                    
+                    if skip_result and skip_result.get('found'):
+                        all_buttons = skip_result.get('buttons', [])
+                        button_count = skip_result.get('count', 0)
+                        visible_count = skip_result.get('visibleCount', 0)
+                        
+                        print(f"✅ Found {button_count} Skip Intro buttons (Visible: {visible_count})")
+                        
+                        # Click ALL buttons found
+                        for i, button in enumerate(all_buttons):
+                            button_num = i + 1
+                            x, y = button['x'], button['y']
+                            visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
+                            costume_name = button.get('currentCostumeName', 'Unknown')
+                            
+                            print(f"🎯 CDP clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
+                            
+                            # Click this specific button via CDP
+                            self._simulate_click_via_cdp(ws, x, y)
+                            time.sleep(0.8)  # Wait between clicks
+                            
+                            smart_clicks_performed += 1
+                        
+                        print(f"✅ Smart CDP clicks completed: {smart_clicks_performed} buttons clicked!")
+                    else:
+                        reason = skip_result.get('reason', 'unknown') if skip_result else 'no_result'
+                        print(f"ℹ️ No Skip Intro buttons found via CDP - Reason: {reason}")
+                
+            except Exception as e:
+                print(f"⚠️ Smart detection failed: {e}, proceeding with blind clicks...")
+            
+            # Phase 2: ALWAYS perform blind clicks for additional assurance
+            if smart_clicks_performed > 0:
+                print("🔄 Phase 2: Performing ADDITIONAL blind CDP clicks for protection...")
+                print("   → Ensures intro skipping even if smart clicks had edge cases")
+            else:
+                print("🖱️ Phase 2: Performing STANDARD blind CDP clicks (no smart buttons found)...")
+            
+            # Perform blind clicks via CDP
             for i in range(self.intro_skip_clicks):
                 self._simulate_click_via_cdp(ws, 960, 540)
                 time.sleep(0.5)
             
             ws.close()
-            print("✅ Intro skipping via CDP completed")
+            
+            # Summary
+            if smart_clicks_performed > 0:
+                print("🎉 ENHANCED CDP SKIP INTRO COMPLETED:")
+                print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons via CDP")
+                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} additional CDP clicks")
+                print("   🛡️ Dual protection ensures maximum success rate")
+            else:
+                print("🎉 STANDARD CDP SKIP INTRO COMPLETED:")
+                print("   ⚠️ Smart clicks: N/A (No buttons found)")
+                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} CDP clicks")
+                print("   🔄 Standard method used as fallback")
+            
+            print("✅ CDP intro skipping completed")
             return True
             
         except Exception as e:
@@ -979,8 +1162,69 @@ class SprunkiGamePlayer:
             return self.intro_skip_via_pyautogui()
 
     def intro_skip_via_pyautogui(self):
-        """Fallback intro skipping using pyautogui"""
+        """ENHANCED: Multi-target Skip intro using PyAutoGUI with smart detection + blind drags"""
         try:
+            print(f"🔍 ENHANCED PYAUTOGUI SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} wake-up drags...")
+            
+            # Phase 1: Try smart detection via WebSocket if available
+            print("📍 Phase 1: Attempting smart detection via WebSocket...")
+            
+            smart_clicks_performed = 0
+            
+            try:
+                ws_url = self._get_websocket_url()
+                if ws_url:
+                    ws = websocket.create_connection(ws_url, timeout=10)
+                    
+                    # Execute JavaScript to find Skip Intro buttons
+                    response = self._send_cdp_command(ws, {
+                        "method": "Runtime.evaluate", 
+                        "params": {"expression": self.js_find_skip_intro, "awaitPromise": True, "returnByValue": True}
+                    })
+                    
+                    if response and 'result' in response:
+                        skip_result = response.get('result', {}).get('result', {}).get('value')
+                        
+                        if skip_result and skip_result.get('found'):
+                            all_buttons = skip_result.get('buttons', [])
+                            button_count = skip_result.get('count', 0)
+                            
+                            print(f"✅ Found {button_count} Skip Intro buttons via WebSocket")
+                            
+                            # Click ALL buttons found using PyAutoGUI
+                            for i, button in enumerate(all_buttons):
+                                button_num = i + 1
+                                x, y = button['x'], button['y']
+                                visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
+                                
+                                print(f"🎯 PyAutoGUI clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status}")
+                                
+                                # Click this specific button via PyAutoGUI
+                                pyautogui.moveTo(x, y, duration=0.2)
+                                pyautogui.click(button='left')
+                                time.sleep(0.8)  # Wait between clicks
+                                
+                                smart_clicks_performed += 1
+                            
+                            print(f"✅ Smart PyAutoGUI clicks completed: {smart_clicks_performed} buttons clicked!")
+                        else:
+                            print("ℹ️ No Skip Intro buttons found via WebSocket")
+                    
+                    ws.close()
+                else:
+                    print("⚠️ WebSocket not available for smart detection")
+                    
+            except Exception as e:
+                print(f"⚠️ Smart detection via WebSocket failed: {e}")
+            
+            # Phase 2: ALWAYS perform aggressive wake-up drags
+            if smart_clicks_performed > 0:
+                print("🔄 Phase 2: Performing ADDITIONAL wake-up drags for protection...")
+                print("   → Ensures intro skipping even if smart clicks had edge cases")
+            else:
+                print("⚡ Phase 2: Performing AGGRESSIVE wake-up drags (no smart buttons found)...")
+            
+            # Aggressive wake-up drags using existing logic
             print(f"⚡ AGGRESSIVE INTRO SKIPPING: Performing {self.intro_skip_clicks} 'wake-up drags' over 5 seconds...")
             screen_width, screen_height = pyautogui.size()
             center_x, center_y = screen_width // 2, screen_height // 2
@@ -1002,11 +1246,23 @@ class SprunkiGamePlayer:
                 pyautogui.dragTo(end_x, end_y, duration=0.15, button='left')
                 time.sleep(sleep_between_drags - 0.20)
             
+            # Summary
+            if smart_clicks_performed > 0:
+                print("🎉 ENHANCED PYAUTOGUI SKIP INTRO COMPLETED:")
+                print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons via PyAutoGUI")
+                print(f"   ✅ Wake-up drags: {self.intro_skip_clicks} aggressive drags")
+                print("   🛡️ Dual protection ensures maximum success rate")
+            else:
+                print("🎉 AGGRESSIVE PYAUTOGUI SKIP INTRO COMPLETED:")
+                print("   ⚠️ Smart clicks: N/A (No buttons found)")
+                print(f"   ✅ Wake-up drags: {self.intro_skip_clicks} aggressive drags")
+                print("   ⚡ Aggressive method used as fallback")
+            
             print("✅ Aggressive intro skipping sequence completed.")
             return True
             
         except Exception as e:
-            print(f"❌ Pyautogui intro skipping failed: {e}")
+            print(f"❌ PyAutoGUI intro skipping failed: {e}")
             return False
 
     def close_game_window(self):
