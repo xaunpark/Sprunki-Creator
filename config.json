@@ -15,6 +15,7 @@
   },
   "output": {
     "base_directory": "C:\\Users\\dinht\\Videos\\SPRUNKI",
+    "json_output_directory": "I:\\VS-Project\\Sprunki\\JSON",
     "create_project_folders": true,
     "video_format": "mp4",
     "video_quality": "high",

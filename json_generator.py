@@ -2249,7 +2249,8 @@ class SprunkiJSONGenerator:
 
     def save_json_file(self, json_data, output_path=None, custom_title=None):
         try:
-            json_output_dir = r"I:\VS-Project\Sprunki\JSON"
+            # Lấy json_output_directory từ config
+            json_output_dir = self.config.get('output', {}).get('json_output_directory', r"I:\VS-Project\Sprunki\JSON")
             os.makedirs(json_output_dir, exist_ok=True)
 
             if not output_path:
