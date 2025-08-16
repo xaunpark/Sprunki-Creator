@@ -678,6 +678,26 @@ class SprunkiGamePlayer:
         
         return coordinates
 
+    def generate_return_coordinates(self, center_x, center_y, offset=60):
+        """
+        ADDED: Generate 5 coordinates for return click attempts
+        Returns list of (x, y) tuples: center, top, bottom, left, right
+        """
+        coordinates = [
+            (center_x, center_y),                    # 0: Center (original)
+            (center_x, center_y - offset),           # 1: Top
+            (center_x, center_y + offset),           # 2: Bottom
+            (center_x - offset, center_y),           # 3: Left
+            (center_x + offset, center_y)            # 4: Right
+        ]
+        
+        print(f"🔄 Generated 5 coordinates for return at slot ({center_x}, {center_y}):")
+        for i, (x, y) in enumerate(coordinates):
+            coord_names = ["Center", "Top", "Bottom", "Left", "Right"]
+            print(f"   {i+1}. {coord_names[i]}: ({x}, {y})")
+        
+        return coordinates
+
     def verify_drag_success(self, before_value, after_value):
         """
         ADDED: Verify drag success by checking if Putted characters increased by 1
@@ -700,6 +720,74 @@ class SprunkiGamePlayer:
                 print(f"   Reason: Decrease detected ({after_value - before_value}) - game state changed?")
         
         return success
+
+    def verify_return_success(self, before_value, after_value):
+        """
+        ADDED: Verify return success by checking if Putted characters decreased by 1
+        """
+        if before_value is None or after_value is None:
+            print("⚠️ Cannot verify return - missing Putted characters values, assuming success")
+            return True  # Fallback to assume success if verification not available
+        
+        expected_value = before_value - 1
+        success = (after_value == expected_value)
+        
+        print(f"📊 Return verification: {before_value} → {after_value} (expected: {expected_value}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
+        
+        if not success:
+            if after_value == before_value:
+                print("   Reason: No change in Putted characters (icon not returned)")
+            elif after_value < expected_value:
+                print(f"   Reason: Too much decrease ({before_value - after_value}) - multiple icons returned?")
+            elif after_value > before_value:
+                print(f"   Reason: Increase detected (+{after_value - before_value}) - new icon placed?")
+        
+        return success
+
+    def _execute_single_return_click(self, click_x, click_y, use_cdp, domain_adj):
+        """
+        ADDED: Execute a single return click at specific coordinates
+        Returns True if click was executed, False if execution failed
+        """
+        try:
+            if use_cdp:
+                # Try CDP click first
+                success = self._execute_cdp_single_click(click_x, click_y)
+                if not success:
+                    print("⚠️ CDP click failed, falling back to PyAutoGUI")
+                    success = self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
+                return success
+            else:
+                # Use PyAutoGUI click
+                return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
+                
+        except Exception as e:
+            print(f"❌ Single return click execution error: {e}")
+            return False
+
+    def _execute_cdp_single_click(self, click_x, click_y):
+        """ADDED: Execute single click using CDP"""
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return False
+            
+            ws = websocket.create_connection(ws_url, timeout=30)
+            
+            print(f"🖱️ Executing CDP single click at ({click_x}, {click_y})")
+            
+            # Move and click
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": click_x, "y": click_y}})
+            time.sleep(0.1)
+            self._simulate_click_via_cdp(ws, click_x, click_y)
+            
+            ws.close()
+            print("✅ CDP single click completed")
+            return True
+            
+        except Exception as e:
+            print(f"❌ CDP single click failed: {e}")
+            return False
 
     def attempt_icon_return(self, target_slot):
         """
@@ -1191,28 +1279,107 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        HYBRID: Return icon with option for CDP or PyAutoGUI
+        ENHANCED: Return icon with click-and-verify mechanism
+        Uses 5-coordinate retry with real-time verification
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             domain_adj = self.get_domain_adjustments()
             
-            print(f"🔄 HYBRID RETURN: {'CDP' if use_cdp else 'PyAutoGUI'} click at slot ({center_x}, {center_y})")
+            print(f"🔄 ENHANCED RETURN: Click-and-verify at slot ({center_x}, {center_y})")
             
-            if use_cdp:
-                # Try CDP click
-                success = self._execute_cdp_return(center_x, center_y, domain_adj)
-                if not success:
-                    print("⚠️ CDP return failed, falling back to PyAutoGUI")
-                    success = self._execute_pyautogui_return(center_x, center_y, domain_adj)
+            # Check if verification is available
+            verification_enabled = self.verification_available
+            if verification_enabled:
+                print("🔍 Return verification ENABLED - will check Putted characters")
             else:
-                # Use PyAutoGUI click
-                success = self._execute_pyautogui_return(center_x, center_y, domain_adj)
+                print("⚠️ Return verification DISABLED - using fallback logic")
             
-            return success
+            # Generate 5 coordinates to try for return
+            coordinates = self.generate_return_coordinates(center_x, center_y)
             
+            success = False
+            coord_used = 0
+            max_retry_sets = 2  # Try 2 sets of coordinates if first set fails
+            
+            for retry_set in range(max_retry_sets):
+                if success:
+                    break
+                    
+                print(f"\n🎯 RETURN ATTEMPT SET {retry_set + 1}/{max_retry_sets}")
+                
+                # If this is retry set 2, generate new coordinates with different offset
+                if retry_set == 1:
+                    print("🔄 Generating new coordinate set with different offset...")
+                    coordinates = self.generate_return_coordinates(center_x, center_y, offset=90)
+                
+                # Try each coordinate until success
+                for coord_index, (click_x, click_y) in enumerate(coordinates):
+                    if self.should_stop or success:
+                        break
+                        
+                    coord_used = coord_index + 1
+                    coord_names = ["Center", "Top", "Bottom", "Left", "Right"]
+                    print(f"\n🎯 Trying return coordinate {coord_used}/5: {coord_names[coord_index]} ({click_x}, {click_y})")
+                    
+                    # Get Putted characters value BEFORE click (if verification available)
+                    putted_before = None
+                    if verification_enabled:
+                        putted_before = self.get_putted_chars_value()
+                        print(f"📊 Putted characters BEFORE return: {putted_before}")
+                    
+                    # Execute single click attempt
+                    click_executed = self._execute_single_return_click(
+                        click_x, click_y, use_cdp, domain_adj
+                    )
+                    
+                    if not click_executed:
+                        print(f"❌ Click execution failed at coordinate {coord_used}")
+                        if coord_index < len(coordinates) - 1:
+                            print("   Trying next coordinate...")
+                            time.sleep(0.3)
+                        continue
+                    
+                    # Wait for game state to update
+                    verification_wait = 1.2 if verification_enabled else 0.5
+                    print(f"⏳ Waiting {verification_wait}s for return animation...")
+                    time.sleep(verification_wait)
+                    
+                    # Get Putted characters value AFTER click (if verification available)
+                    if verification_enabled:
+                        putted_after = self.get_putted_chars_value()
+                        print(f"📊 Putted characters AFTER return: {putted_after}")
+                        
+                        # Verify return success
+                        if self.verify_return_success(putted_before, putted_after):
+                            print(f"🎉 VERIFIED RETURN SUCCESS at coordinate {coord_used}!")
+                            success = True
+                            break
+                        else:
+                            print(f"❌ VERIFICATION FAILED at coordinate {coord_used}")
+                            # Short delay before next coordinate
+                            if coord_index < len(coordinates) - 1:
+                                print("   Trying next coordinate...")
+                                time.sleep(0.3)
+                    else:
+                        # No verification available - assume success if click executed
+                        print(f"✅ ASSUMED RETURN SUCCESS at coordinate {coord_used} (no verification)")
+                        success = True
+                        break
+            
+            # Final result
+            if success:
+                print(f"🎉 ENHANCED RETURN COMPLETED SUCCESSFULLY!")
+                print(f"   Coordinate used: {coord_used}/5")
+                print(f"   Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print(f"   Retry set: {retry_set + 1}")
+                return True
+            else:
+                print(f"💥 ENHANCED RETURN FAILED - All coordinates in {max_retry_sets} sets attempted")
+                return False
+                
         except Exception as e:
-            print("❌ Return failed: " + str(e))
+            print(f"❌ Enhanced return error: {e}")
             return False
 
     def _execute_cdp_return(self, center_x, center_y, domain_adj):
@@ -1245,35 +1412,32 @@ class SprunkiGamePlayer:
             print(f"❌ CDP return failed: {e}")
             return False
 
-    def _execute_pyautogui_return(self, center_x, center_y, domain_adj):
-        """Execute return using PyAutoGUI with triple click"""
-        try:
-            print("🔄 Executing triple-click return from safe position...")
-            
-            # Triple click positions: top, center, bottom
-            click_offset = 90
-            click_points = [
-                (center_x, center_y - click_offset),  # Top
-                (center_x, center_y),                 # Center  
-                (center_x, center_y + click_offset)   # Bottom
-            ]
-            
-            # Execute triple click
-            for i, (click_x, click_y) in enumerate(click_points):
-                print(f"   Click {i+1}/3 at ({click_x}, {click_y})")
-                pyautogui.moveTo(click_x, click_y, duration=0.1)
-                pyautogui.click(button='left')
-                time.sleep(0.05)
-            
-            # Wait for return animation
-            return_wait = 0.4 * domain_adj['stability_factor']
-            time.sleep(return_wait)
+    def _execute_pyautogui_return(self, click_x, click_y, domain_adj):
+        """Execute single return click using PyAutoGUI"""
+        return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
 
-            print("✅ Triple-click return completed, ready for next icon")
+    def _execute_pyautogui_single_click(self, click_x, click_y, domain_adj):
+        """ADDED: Execute single click using PyAutoGUI"""
+        try:
+            print(f"🖱️ Executing PyAutoGUI single click at ({click_x}, {click_y})")
+            
+            # Move to position with slight variation
+            varied_x, varied_y = self.add_position_variation(click_x, click_y, 3)
+            pyautogui.moveTo(varied_x, varied_y, duration=0.15)
+            time.sleep(0.1)
+            
+            # Single click
+            pyautogui.click(button='left')
+            
+            # Wait for click to register
+            click_wait = 0.2 * domain_adj['stability_factor']
+            time.sleep(click_wait)
+            
+            print("✅ PyAutoGUI single click completed")
             return True
             
         except Exception as e:
-            print(f"❌ Triple-click return failed: {e}")
+            print(f"❌ PyAutoGUI single click failed: {e}")
             return False
 
     # ================================================================
