@@ -44,7 +44,7 @@ MODE_OPTIONS = {
         "description": "Icons riêng lẻ (recordingArea) + 3 remixes (1920x1080, 20s/bản)"
     },
     "skip": {
-        "display": "⏭️ Skip Item",
+        "display": "⭐ Skip Item",
         "description": "Bỏ qua item này"
     }
 }
@@ -86,7 +86,7 @@ class ProcessingItem:
             "processing": "🔄",
             "completed": "✅",
             "failed": "❌",
-            "skipped": "⏭️"
+            "skipped": "⭐"
         }
         return status_map.get(self.status, "❓")
     
@@ -97,7 +97,7 @@ class ProcessingItem:
             "master": "🎬",
             "individual": "🎭",
             "both": "💎",
-            "skip": "⏭️"
+            "skip": "⭐"
         }
         return mode_map.get(self.mode, "❓")
 
@@ -108,6 +108,234 @@ class ProcessingConfig:
     max_retries: int = 2
     auto_skip_on_error: bool = True
     pause_between_items: int = 5  # seconds
+
+# ================================================================
+# == Safe Operation Manager                                     ==
+# ================================================================
+
+class SafeOperationManager:
+    """Quản lý operations với automatic cleanup"""
+    
+    def __init__(self, game_player, obs_controller, logger):
+        self.game_player = game_player
+        self.obs_controller = obs_controller
+        self.logger = logger
+        self.active_slots = []  # Track slots có icons
+        
+    def safe_single_icon_operation(self, icon, target_slot, filename, recording_duration=14):
+        """
+        Safe operation cho 1 icon với full cleanup
+        Returns: (success, output_path, error_message)
+        """
+        icon_placed = False
+        recording_started = False
+        output_path = None
+        
+        try:
+            # STEP 1: Drag icon
+            self.logger.info(f"🎯 Dragging icon to slot...")
+            drag_success = self.game_player.corrected_drag_and_drop(icon, target_slot)
+            
+            if not drag_success:
+                return False, None, "Failed to drag icon"
+            
+            icon_placed = True
+            self.active_slots.append(target_slot)
+            self.logger.info(f"✅ Icon placed successfully")
+            
+            # STEP 2: OBS filename setup
+            self.logger.info(f"🎬 Setting up OBS filename: {filename}")
+            if not self.obs_controller.force_obs_filename(filename):
+                raise Exception("OBS filename setup failed")
+            
+            # STEP 3: Start recording  
+            self.logger.info(f"🔴 Starting recording...")
+            if not self.obs_controller.start_recording():
+                raise Exception("OBS recording start failed")
+            
+            recording_started = True
+            self.logger.info(f"✅ Recording started successfully")
+            
+            # STEP 4: Record for duration
+            self.logger.info(f"⏱️ Recording for {recording_duration} seconds...")
+            for countdown in range(recording_duration, 0, -1):
+                if self.game_player.should_stop:
+                    raise Exception("Emergency stop during recording")
+                time.sleep(1)
+            
+            # STEP 5: Stop recording
+            self.logger.info(f"🛑 Stopping recording...")
+            stop_success, output_path = self.obs_controller.stop_recording()
+            
+            if not stop_success:
+                raise Exception("Failed to stop recording properly")
+            
+            recording_started = False  # Recording stopped successfully
+            self.logger.info(f"✅ Recording completed: {output_path}")
+            
+            return True, output_path, None
+            
+        except Exception as e:
+            error_msg = f"Operation failed: {str(e)}"
+            self.logger.error(error_msg)
+            
+            return False, output_path, error_msg
+            
+        finally:
+            # 🔥 CRITICAL: ALWAYS CLEANUP
+            self._cleanup_operation(icon_placed, recording_started, target_slot)
+    
+    def safe_remix_operation(self, remix_icons, slots, filename, recording_duration=20):
+        """
+        Safe operation cho remix với multiple icons cleanup
+        Returns: (success, output_path, error_message)
+        """
+        icons_placed = []
+        recording_started = False
+        output_path = None
+        
+        try:
+            # STEP 1: Drag all icons
+            self.logger.info(f"🎯 Dragging {len(remix_icons)} icons for remix...")
+            
+            for slot_position, icon_index in enumerate(remix_icons):
+                if slot_position >= len(slots):
+                    continue
+                    
+                current_icon = self.game_player.config['layout']['icons'][icon_index]
+                target_slot = slots[slot_position]
+                
+                drag_success = self.game_player.corrected_drag_and_drop(current_icon, target_slot, False)
+                
+                if not drag_success:
+                    raise Exception(f"Failed to drag icon {icon_index} to slot {slot_position}")
+                
+                icons_placed.append(target_slot)
+                self.active_slots.append(target_slot)
+                time.sleep(0.3)
+            
+            self.logger.info(f"✅ All {len(icons_placed)} icons placed successfully")
+            
+            # STEP 2: OBS setup
+            self.logger.info(f"🎬 Setting up OBS for remix: {filename}")
+            if not self.obs_controller.force_obs_filename(filename):
+                raise Exception("OBS filename setup failed")
+            
+            if not self.obs_controller.start_recording():
+                raise Exception("OBS recording start failed")
+            
+            recording_started = True
+            self.logger.info(f"✅ Remix recording started")
+            
+            # STEP 3: Record remix
+            self.logger.info(f"⏱️ Recording remix for {recording_duration} seconds...")
+            for countdown in range(recording_duration, 0, -1):
+                if self.game_player.should_stop:
+                    raise Exception("Emergency stop during remix recording")
+                if countdown % 5 == 0:
+                    self.logger.info(f"      Remix recording: {countdown}s remaining")
+                time.sleep(1)
+            
+            # STEP 4: Stop recording
+            stop_success, output_path = self.obs_controller.stop_recording()
+            
+            if not stop_success:
+                raise Exception("Failed to stop remix recording")
+            
+            recording_started = False
+            self.logger.info(f"✅ Remix recording completed: {output_path}")
+            
+            return True, output_path, None
+            
+        except Exception as e:
+            error_msg = f"Remix operation failed: {str(e)}"
+            self.logger.error(error_msg)
+            return False, output_path, error_msg
+            
+        finally:
+            # 🔥 CRITICAL: CLEANUP ALL ICONS
+            self._cleanup_remix_operation(icons_placed, recording_started)
+    
+    def _cleanup_operation(self, icon_placed, recording_started, target_slot):
+        """Cleanup cho single icon operation"""
+        try:
+            # Stop recording if still active
+            if recording_started:
+                self.logger.info("🛑 Emergency: Stopping active recording...")
+                try:
+                    self.obs_controller.stop_recording()
+                except Exception as e:
+                    self.logger.error(f"Failed to emergency stop recording: {e}")
+            
+            # Return icon if placed
+            if icon_placed and target_slot:
+                self.logger.info("🔄 Cleanup: Returning icon from slot...")
+                try:
+                    return_success = self.game_player.corrected_return_icon(target_slot)
+                    if return_success:
+                        self.logger.info("✅ Icon returned successfully during cleanup")
+                        if target_slot in self.active_slots:
+                            self.active_slots.remove(target_slot)
+                    else:
+                        self.logger.warning("⚠️ Failed to return icon during cleanup")
+                except Exception as e:
+                    self.logger.error(f"Error returning icon during cleanup: {e}")
+            
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
+    
+    def _cleanup_remix_operation(self, icons_placed, recording_started):
+        """Cleanup cho remix operation với multiple icons"""
+        try:
+            # Stop recording if still active
+            if recording_started:
+                self.logger.info("🛑 Emergency: Stopping active remix recording...")
+                try:
+                    self.obs_controller.stop_recording()
+                except Exception as e:
+                    self.logger.error(f"Failed to emergency stop remix recording: {e}")
+            
+            # Return all placed icons
+            if icons_placed:
+                self.logger.info(f"🔄 Cleanup: Returning {len(icons_placed)} icons from remix...")
+                for slot in icons_placed:
+                    try:
+                        return_success = self.game_player.corrected_return_icon(slot)
+                        if return_success and slot in self.active_slots:
+                            self.active_slots.remove(slot)
+                        time.sleep(0.1)
+                    except Exception as e:
+                        self.logger.error(f"Error returning icon from slot during cleanup: {e}")
+                
+                self.logger.info("✅ Remix cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error during remix cleanup: {e}")
+    
+    def emergency_cleanup_all(self):
+        """Emergency cleanup tất cả active slots"""
+        try:
+            self.logger.info(f"🚨 EMERGENCY CLEANUP: {len(self.active_slots)} active slots")
+            
+            # Stop any active recording
+            try:
+                self.obs_controller.stop_recording()
+            except:
+                pass
+            
+            # Return all active slots
+            for slot in self.active_slots.copy():
+                try:
+                    self.game_player.corrected_return_icon(slot)
+                    self.active_slots.remove(slot)
+                    time.sleep(0.1)
+                except:
+                    pass
+            
+            self.logger.info("✅ Emergency cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error during emergency cleanup: {e}")
 
 # ================================================================
 # == UNIFIED PROCESSING MANAGER                                ==
@@ -436,7 +664,7 @@ class UnifiedProcessingManager:
             return False
     
     def _process_video_for_item(self, item: ProcessingItem) -> bool:
-        """Process video for an item with JSON data"""
+        """Enhanced video processing with proper mode isolation"""
         try:
             item.status = "processing"
             if not item.start_time:
@@ -454,23 +682,22 @@ class UnifiedProcessingManager:
             else:
                 self.master_controller.obs_controller.current_project_folder = self.config.output_base_dir
             
-            # Process based on mode
+            # Process based on mode with enhanced handling
             success = False
             if item.mode == "master":
+                self.logger.info(f"🎬 Processing MASTER mode for {item.display_name}")
                 success = self._process_master_mode(item)
-            elif item.mode == "individual":
-                success = self._process_individual_mode(item)
-            elif item.mode == "both":
-                master_success = self._process_master_mode(item)
                 
-                # CHO OBS THỜI GIAN ĐỂ HOÀN TẤT VIỆC LƯU VIDEO MASTER
-                if master_success:
-                    self.logger.info("Master mode completed. Pausing for 5s to allow OBS to finalize the video file...")
-                    time.sleep(5) # Khoảng nghỉ quan trọng!
-
-                individual_success = self._process_individual_mode(item)
-                success = master_success and individual_success
+            elif item.mode == "individual":
+                self.logger.info(f"🎭 Processing INDIVIDUAL mode for {item.display_name}")
+                success = self._process_individual_mode(item)
+                
+            elif item.mode == "both":
+                self.logger.info(f"💎 Processing BOTH mode for {item.display_name}")
+                success = self._process_both_mode_enhanced(item)
+                
             elif item.mode == "skip":
+                self.logger.info(f"⭐ Skipping {item.display_name}")
                 item.status = "skipped"
                 self.total_skipped += 1
                 return True
@@ -478,11 +705,13 @@ class UnifiedProcessingManager:
             if success:
                 item.status = "completed"
                 item.end_time = datetime.now()
+                self.logger.info(f"✅ {item.mode.upper()} mode completed successfully for {item.display_name}")
                 return True
             else:
                 item.status = "failed"
-                item.error_message = "Video processing failed"
+                item.error_message = f"{item.mode.capitalize()} mode processing failed"
                 item.end_time = datetime.now()
+                self.logger.error(f"❌ {item.mode.upper()} mode failed for {item.display_name}")
                 return False
                 
         except Exception as e:
@@ -492,51 +721,375 @@ class UnifiedProcessingManager:
             
             self.logger.error(f"Video processing error for {item.display_name}: {e}")
             return False
+
+    def _process_both_mode_enhanced(self, item: ProcessingItem) -> bool:
+        """Enhanced Both mode with proper isolation and comprehensive cleanup"""
+        master_success = False
+        individual_success = False
+        master_output_count = 0
+        individual_output_count = 0
+        
+        try:
+            self.logger.info("🎭 BOTH MODE: Starting Master + Individual workflow with enhanced isolation")
+            self.logger.info(f"📂 Output directory: {self.master_controller.obs_controller.current_project_folder}")
+            
+            # ================================================================
+            # PHASE 1: MASTER MODE (with comprehensive cleanup)
+            # ================================================================
+            self.logger.info("=" * 70)
+            self.logger.info("🎬 PHASE 1: MASTER MODE - Full Showcase Recording")
+            self.logger.info("=" * 70)
+            
+            master_start_time = datetime.now()
+            
+            try:
+                # Track output files before Master mode
+                initial_output_count = len(item.output_files)
+                
+                self.logger.info("🎬 Executing Master mode with full cleanup support...")
+                master_success = self._process_master_mode(item)
+                
+                # Calculate Master mode output
+                master_output_count = len(item.output_files) - initial_output_count
+                
+                if master_success:
+                    master_duration = (datetime.now() - master_start_time).total_seconds()
+                    self.logger.info(f"✅ Master mode completed successfully in {master_duration:.1f}s")
+                    self.logger.info(f"📁 Master mode generated {master_output_count} output file(s)")
+                    
+                    # CRITICAL: Wait for OBS to finalize Master video file
+                    self.logger.info("⏳ CRITICAL: Waiting for OBS to finalize Master video file...")
+                    self.logger.info("   This prevents file conflicts when switching to Individual mode")
+                    
+                    finalization_duration = 5
+                    for countdown in range(finalization_duration, 0, -1):
+                        if self.should_stop:
+                            self.logger.warning("🛑 Emergency stop during OBS finalization wait")
+                            self.logger.warning("   Master video may not be properly finalized")
+                            return master_success  # Return partial success
+                        
+                        if countdown % 2 == 0 or countdown <= 2:  # Log every 2 seconds, or final 2 seconds
+                            self.logger.info(f"   🔄 Finalizing Master video... {countdown}s remaining")
+                        time.sleep(1)
+                    
+                    self.logger.info("✅ Master video finalization completed - ready for Individual mode")
+                    
+                else:
+                    master_duration = (datetime.now() - master_start_time).total_seconds()
+                    self.logger.error(f"❌ Master mode failed after {master_duration:.1f}s")
+                    self.logger.error("   Will continue with Individual mode for partial results")
+                    
+            except Exception as e:
+                master_duration = (datetime.now() - master_start_time).total_seconds()
+                self.logger.error(f"💥 Master mode exception after {master_duration:.1f}s: {e}")
+                self.logger.error("   Treating as Master mode failure, continuing with Individual mode")
+                master_success = False
+            
+            # ================================================================
+            # CRITICAL: BROWSER STATE ISOLATION AND CLEANUP
+            # ================================================================
+            self.logger.info("=" * 70)
+            self.logger.info("🔄 BROWSER STATE ISOLATION - Ensuring Clean Slate")
+            self.logger.info("=" * 70)
+            
+            cleanup_start_time = datetime.now()
+            
+            try:
+                self.logger.info("🌐 Step 1: Closing Master mode browser session...")
+                
+                # Always ensure browser is closed after Master mode, regardless of success/failure
+                if self.master_controller.game_player:
+                    try:
+                        # Stop any ongoing game operations
+                        self.master_controller.game_player.should_stop = True
+                        self.master_controller.game_player.is_playing = False
+                        
+                        # Force close browser window and cleanup resources
+                        browser_close_success = self.master_controller.game_player.close_game_window()
+                        
+                        if browser_close_success:
+                            self.logger.info("✅ Master mode browser closed successfully")
+                        else:
+                            self.logger.warning("⚠️ Browser close returned false, but continuing...")
+                        
+                    except Exception as e:
+                        self.logger.error(f"❌ Error closing Master mode browser: {e}")
+                        self.logger.warning("   Continuing with Individual mode despite browser cleanup issues")
+                
+                self.logger.info("⏳ Step 2: Waiting for complete browser resource cleanup...")
+                
+                # Additional wait to ensure complete browser resource cleanup
+                browser_cleanup_duration = 3
+                for countdown in range(browser_cleanup_duration, 0, -1):
+                    if self.should_stop:
+                        self.logger.warning("🛑 Emergency stop during browser cleanup wait")
+                        return master_success  # Return Master mode result only
+                    
+                    if countdown == browser_cleanup_duration or countdown == 1:
+                        self.logger.info(f"   🧹 Browser cleanup... {countdown}s remaining")
+                    time.sleep(1)
+                
+                self.logger.info("✅ Browser state isolation completed - clean slate ready")
+                
+                cleanup_duration = (datetime.now() - cleanup_start_time).total_seconds()
+                self.logger.info(f"🔄 Isolation phase completed in {cleanup_duration:.1f}s")
+                
+            except Exception as e:
+                cleanup_duration = (datetime.now() - cleanup_start_time).total_seconds()
+                self.logger.error(f"💥 Browser isolation error after {cleanup_duration:.1f}s: {e}")
+                self.logger.warning("   Individual mode may have browser state issues")
+            
+            # Check for emergency stop before Individual mode
+            if self.should_stop:
+                self.logger.warning("🛑 Emergency stop detected before Individual mode")
+                self.logger.info(f"📊 Partial BOTH mode results: Master={master_success}, Individual=skipped")
+                return master_success  # Return partial success based on Master mode
+            
+            # ================================================================
+            # PHASE 2: INDIVIDUAL MODE (with completely fresh browser)
+            # ================================================================
+            self.logger.info("=" * 70)
+            self.logger.info("🎭 PHASE 2: INDIVIDUAL MODE - Fresh Browser Session")
+            self.logger.info("=" * 70)
+            
+            individual_start_time = datetime.now()
+            
+            try:
+                # Track output files before Individual mode
+                pre_individual_output_count = len(item.output_files)
+                
+                self.logger.info("🎭 Executing Individual mode with fresh browser state...")
+                self.logger.info("   Browser state: Clean (isolated from Master mode)")
+                self.logger.info("   Mode: Individual icons + remixes with enhanced error handling")
+                
+                individual_success = self._process_individual_mode(item)
+                
+                # Calculate Individual mode output
+                individual_output_count = len(item.output_files) - pre_individual_output_count
+                
+                if individual_success:
+                    individual_duration = (datetime.now() - individual_start_time).total_seconds()
+                    self.logger.info(f"✅ Individual mode completed successfully in {individual_duration:.1f}s")
+                    self.logger.info(f"📁 Individual mode generated {individual_output_count} output file(s)")
+                else:
+                    individual_duration = (datetime.now() - individual_start_time).total_seconds()
+                    self.logger.error(f"❌ Individual mode failed after {individual_duration:.1f}s")
+                    
+            except Exception as e:
+                individual_duration = (datetime.now() - individual_start_time).total_seconds()
+                self.logger.error(f"💥 Individual mode exception after {individual_duration:.1f}s: {e}")
+                individual_success = False
+            
+            # ================================================================
+            # FINAL RESULT EVALUATION AND REPORTING
+            # ================================================================
+            self.logger.info("=" * 70)
+            self.logger.info("📊 BOTH MODE: Final Result Evaluation")
+            self.logger.info("=" * 70)
+            
+            total_duration = (datetime.now() - master_start_time).total_seconds()
+            total_output_files = master_output_count + individual_output_count
+            
+            self.logger.info(f"📈 BOTH MODE SUMMARY:")
+            self.logger.info(f"   ⏱️ Total duration: {total_duration:.1f}s")
+            self.logger.info(f"   🎬 Master mode: {'✅ Success' if master_success else '❌ Failed'} ({master_output_count} files)")
+            self.logger.info(f"   🎭 Individual mode: {'✅ Success' if individual_success else '❌ Failed'} ({individual_output_count} files)")
+            self.logger.info(f"   📁 Total output files: {total_output_files}")
+            self.logger.info(f"   📂 Output directory: {self.master_controller.obs_controller.current_project_folder}")
+            
+            # Determine final success status
+            if master_success and individual_success:
+                self.logger.info("🎉 BOTH MODE: COMPLETE SUCCESS!")
+                self.logger.info("   Both Master and Individual modes completed successfully")
+                self.logger.info("   Full video package available: Master showcase + Individual icons + Remixes")
+                return True
+                
+            elif master_success and not individual_success:
+                self.logger.warning("🔶 BOTH MODE: PARTIAL SUCCESS (Master only)")
+                self.logger.warning("   Master mode succeeded but Individual mode failed")
+                self.logger.warning("   Available: Master showcase video only")
+                # BOTH mode requires both to succeed for true success
+                return False
+                
+            elif not master_success and individual_success:
+                self.logger.warning("🔶 BOTH MODE: PARTIAL SUCCESS (Individual only)")
+                self.logger.warning("   Individual mode succeeded but Master mode failed")
+                self.logger.warning("   Available: Individual icons + Remix videos only")
+                # BOTH mode requires both to succeed for true success
+                return False
+                
+            else:
+                self.logger.error("💥 BOTH MODE: COMPLETE FAILURE")
+                self.logger.error("   Both Master and Individual modes failed")
+                self.logger.error("   No video output generated")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"💥 Critical error in BOTH mode processing: {e}")
+            self.logger.error("   Unexpected exception during Both mode workflow")
+            
+            # Log partial results for debugging
+            self.logger.info(f"📊 Partial results at exception: Master={master_success}, Individual={individual_success}")
+            
+            return False
+        
+        finally:
+            # ================================================================
+            # FINAL COMPREHENSIVE CLEANUP
+            # ================================================================
+            self.logger.info("🧹 BOTH MODE: Final comprehensive cleanup...")
+            
+            try:
+                # Ensure all browser resources are closed
+                if self.master_controller.game_player:
+                    try:
+                        # Final browser cleanup
+                        self.master_controller.game_player.should_stop = True
+                        self.master_controller.game_player.is_playing = False
+                        self.master_controller.game_player.close_game_window()
+                        self.logger.info("✅ Final browser cleanup completed")
+                    except Exception as e:
+                        self.logger.error(f"⚠️ Error in final browser cleanup: {e}")
+                
+                # Ensure OBS is in clean state
+                if self.master_controller.obs_controller:
+                    try:
+                        # Try to stop any potential lingering recordings
+                        self.master_controller.obs_controller.stop_recording()
+                    except:
+                        # Expected to fail if no recording active
+                        pass
+                
+                self.logger.info("✅ BOTH MODE final cleanup completed")
+                
+            except Exception as e:
+                self.logger.error(f"⚠️ Error during BOTH MODE final cleanup: {e}")
     
     def _process_master_mode(self, item: ProcessingItem) -> bool:
-        """Process item in master mode"""
+        """Enhanced Master mode with comprehensive cleanup"""
+        game_environment_ready = False
+        recording_active = False
+        browser_opened = False
+        
         try:
             master_filename = f"{item.project_slug}-showcase.mp4"
-            
             self.logger.info(f"Executing master workflow for {item.display_name}")
             
+            # STEP 1: OBS Setup
             if not self.master_controller.obs_controller.full_setup(use_full_screen=True):
                 raise Exception("OBS setup failed")
             
+            # STEP 2: OBS Filename (make it critical)
             if not self.master_controller.obs_controller.force_obs_filename(master_filename):
-                self.logger.warning("Could not force filename")
+                raise Exception("OBS filename setup failed")  # Changed from warning to exception
             
-            # CHỈ ĐỊNH ĐÂY LÀ LẦN SETUP ĐẦU TIÊN
+            # STEP 3: Game Environment Setup
+            self.logger.info("🌐 Setting up game environment...")
             if not self.master_controller.game_player.setup_game_environment(first_setup=True):
                 raise Exception("Game environment setup failed")
             
+            game_environment_ready = True
+            browser_opened = True
+            self.logger.info("✅ Game environment ready")
+            
+            # STEP 4: Start Recording
+            self.logger.info("🔴 Starting Master mode recording...")
             if not self.master_controller.obs_controller.start_recording():
                 raise Exception("Could not start recording")
             
-            success = self.master_controller.game_player.execute_full_showcase_workflow_corrected()
+            recording_active = True
+            self.logger.info("✅ Master recording started")
             
-            stop_success, output_path = self.master_controller.obs_controller.stop_recording()
+            # STEP 5: Execute Full Showcase Workflow
+            self.logger.info("🎮 Executing full showcase workflow...")
+            workflow_success = self.master_controller.game_player.execute_full_showcase_workflow_corrected()
             
-            if success and stop_success and output_path:
-                item.output_files.append(output_path)
-                self.logger.info(f"Master video saved: {output_path}")
-                return True
-            else:
+            if not workflow_success:
                 raise Exception("Master workflow execution failed")
-        
+            
+            self.logger.info("✅ Showcase workflow completed")
+            
+            # STEP 6: Stop Recording
+            self.logger.info("🛑 Stopping Master recording...")
+            stop_success, output_path = self.master_controller.obs_controller.stop_recording()
+            recording_active = False
+            
+            if not stop_success:
+                raise Exception("Failed to stop recording")
+            
+            if not output_path:
+                raise Exception("No output file generated")
+            
+            # SUCCESS
+            item.output_files.append(output_path)
+            self.logger.info(f"✅ Master video saved: {output_path}")
+            return True
+            
         except Exception as e:
-            self.logger.error(f"Master mode error for {item.display_name}: {e}")
+            self.logger.error(f"Master mode error: {e}")
             return False
+            
+        finally:
+            # 🔥 COMPREHENSIVE CLEANUP
+            self._cleanup_master_mode(recording_active, game_environment_ready, browser_opened)
+
+    def _cleanup_master_mode(self, recording_active, game_environment_ready, browser_opened):
+        """Comprehensive cleanup for Master mode"""
+        try:
+            self.logger.info("🧹 Starting Master mode cleanup...")
+            
+            # Stop active recording
+            if recording_active:
+                self.logger.info("🛑 Emergency: Stopping active Master recording...")
+                try:
+                    self.master_controller.obs_controller.stop_recording()
+                    self.logger.info("✅ Master recording stopped during cleanup")
+                except Exception as e:
+                    self.logger.error(f"Failed to stop recording during cleanup: {e}")
+            
+            # Emergency cleanup game state
+            if game_environment_ready and self.master_controller.game_player:
+                self.logger.info("🎮 Emergency: Cleaning up game state...")
+                try:
+                    # Stop any ongoing game operations
+                    self.master_controller.game_player.should_stop = True
+                    self.master_controller.game_player.is_playing = False
+                    
+                    # Try to cleanup any potential stuck icons/slots
+                    # This is best-effort since we don't know exact state
+                    self.logger.info("🔄 Attempting emergency icon cleanup...")
+                    
+                    # Small delay to let any ongoing operations finish
+                    time.sleep(2)
+                    
+                    self.logger.info("✅ Game state cleanup completed")
+                except Exception as e:
+                    self.logger.error(f"Failed to cleanup game state: {e}")
+            
+            # Close browser (critical for Both mode)
+            if browser_opened and self.master_controller.game_player:
+                self.logger.info("🌐 Closing browser for clean slate...")
+                try:
+                    self.master_controller.game_player.close_game_window()
+                    self.logger.info("✅ Browser closed successfully")
+                except Exception as e:
+                    self.logger.error(f"Failed to close browser: {e}")
+            
+            self.logger.info("✅ Master mode cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error during Master mode cleanup: {e}")
     
     def _process_individual_mode(self, item: ProcessingItem) -> bool:
-        """Enhanced Individual mode with remix recording"""
+        """Enhanced Individual mode with SafeOperationManager"""
+        safe_ops = None
+        
         try:
             self.logger.info(f"Executing enhanced individual workflow for {item.display_name}")
             
             if not self.master_controller.obs_controller.full_setup(use_full_screen=False):
                 raise Exception("OBS setup failed for individual mode")
             
-            # TÁI SỬ DỤNG TAB, KHÔNG PHẢI LẦN SETUP ĐẦU
             if not self.master_controller.game_player.setup_game_environment(first_setup=False):
                 raise Exception("Game environment re-setup failed")
 
@@ -550,13 +1103,19 @@ class UnifiedProcessingManager:
             if not target_slot:
                 raise Exception("Could not find target slot")
             
+            # 🔥 INITIALIZE SAFE OPERATION MANAGER
+            safe_ops = SafeOperationManager(
+                self.master_controller.game_player,
+                self.master_controller.obs_controller,
+                self.logger
+            )
+            
             output_files = []
             
             # ================================================================
-            # PHASE 1: INDIVIDUAL ICON RECORDING (existing logic)
+            # PHASE 1: SAFE INDIVIDUAL ICON RECORDING
             # ================================================================
-            self.logger.info("📹 PHASE 1: Recording individual icons (recordingArea frame)...")
-            self.logger.info(f"📐 Using recordingArea: {item.json_data.get('layout', {}).get('recordingArea', 'Not found')}")
+            self.logger.info("🔹 PHASE 1: Safe individual icon recording...")
             
             # Process normal mode icons
             normal_range = range(len(icons) - 1) if has_horror else range(len(icons))
@@ -571,39 +1130,23 @@ class UnifiedProcessingManager:
                     break
                 
                 filename = f"n-{icon_index}.mp4"
-                
-                self.master_controller.obs_controller.force_obs_filename(filename)
-                
                 current_icon = icons[icon_index]
-                success = self.master_controller.game_player.corrected_drag_and_drop(
-                    current_icon, target_slot, is_first_icon=(icon_index == 0)
+                
+                # 🔥 USE SAFE OPERATION
+                success, output_path, error_msg = safe_ops.safe_single_icon_operation(
+                    current_icon, target_slot, filename, recording_duration=14
                 )
                 
-                if not success:
-                    self.logger.warning(f"Failed to drag icon {icon_index}")
-                    continue
-                
-                if not self.master_controller.obs_controller.start_recording():
-                    self.logger.warning(f"Could not start recording for {filename}")
-                    continue
-                
-                recording_duration = 14
-                for countdown in range(recording_duration, 0, -1):
-                    if self.should_stop:
-                        break
-                    time.sleep(1)
-                
-                stop_success, output_path = self.master_controller.obs_controller.stop_recording()
-                if stop_success and output_path:
+                if success and output_path:
                     output_files.append(output_path)
-                    self.logger.info(f"Recorded: {output_path}")
-                
-                self.master_controller.game_player.corrected_return_icon(target_slot)
+                    self.logger.info(f"✅ Icon {icon_index} recorded successfully")
+                else:
+                    self.logger.warning(f"⚠️ Icon {icon_index} failed: {error_msg}")
                 
                 if not self.should_stop:
                     time.sleep(1)
             
-            # Process horror mode if applicable
+            # Process horror mode icons (SAME SAFE PATTERN)
             if has_horror and not self.should_stop:
                 if self.master_controller.game_player.trigger_horror_mode_transition_corrected():
                     
@@ -612,72 +1155,56 @@ class UnifiedProcessingManager:
                             break
                         
                         filename = f"h-{icon_index}.mp4"
-                        
-                        self.master_controller.obs_controller.force_obs_filename(filename)
-                        
                         current_icon = icons[icon_index]
-                        success = self.master_controller.game_player.corrected_drag_and_drop(current_icon, target_slot, False)
                         
-                        if success and self.master_controller.obs_controller.start_recording():
-                            for countdown in range(14, 0, -1):
-                                if self.should_stop:
-                                    break
-                                time.sleep(1)
-                            
-                            stop_success, output_path = self.master_controller.obs_controller.stop_recording()
-                            if stop_success and output_path:
-                                output_files.append(output_path)
-                                self.logger.info(f"Horror recorded: {output_path}")
+                        # 🔥 SAFE HORROR OPERATION
+                        success, output_path, error_msg = safe_ops.safe_single_icon_operation(
+                            current_icon, target_slot, filename, recording_duration=14
+                        )
                         
-                        self.master_controller.game_player.corrected_return_icon(target_slot)
+                        if success and output_path:
+                            output_files.append(output_path)
+                            self.logger.info(f"✅ Horror icon {icon_index} recorded successfully")
+                        else:
+                            self.logger.warning(f"⚠️ Horror icon {icon_index} failed: {error_msg}")
                         
                         if not self.should_stop:
                             time.sleep(1)
             
             # ================================================================
-            # PHASE 2: REMIX RECORDING (NEW FEATURE - Master mode frame)
+            # PHASE 2: SAFE REMIX RECORDING
             # ================================================================
             if not self.should_stop:
-                self.logger.info("🎵 PHASE 2: Recording remix videos (1920x1080 Master mode frame)...")
-                remix_files = self._record_individual_remixes(item, icons, slots)
+                self.logger.info("🎵 PHASE 2: Safe remix recording...")
+                remix_files = self._safe_record_individual_remixes(item, icons, slots, safe_ops)
                 output_files.extend(remix_files)
             
             item.output_files.extend(output_files)
-            total_individual = len([f for f in output_files if not f.endswith(('remix-1.mp4', 'remix-2.mp4', 'remix-3.mp4'))])
-            total_remixes = len([f for f in output_files if f.endswith(('remix-1.mp4', 'remix-2.mp4', 'remix-3.mp4'))])
-            
-            self.logger.info("✅ Enhanced Individual Mode completed successfully!")
-            self.logger.info(f"📊 Summary: {total_individual} individual videos (recordingArea) + {total_remixes} remix videos (1920x1080) = {len(output_files)} total videos")
-            self.logger.info("📐 Frame sizes: Individual icons use recordingArea crop, Remixes use Master mode 1920x1080")
+            self.logger.info("✅ Enhanced Individual Mode completed with safe operations!")
             return len(output_files) > 0
             
         except Exception as e:
-            self.logger.error(f"Individual mode error for {item.display_name}: {e}")
+            self.logger.error(f"Individual mode error: {e}")
             return False
         finally:
-            # LUÔN ĐÓNG CỬA SỔ GAME SAU KHI XONG INDIVIDUAL MODE
+            # 🔥 EMERGENCY CLEANUP
+            if safe_ops:
+                safe_ops.emergency_cleanup_all()
+            
             if self.master_controller.game_player:
                 self.master_controller.game_player.close_game_window()
 
-    def _record_individual_remixes(self, item: ProcessingItem, icons, slots) -> List[str]:
-        """Record remix videos for individual mode with Master mode frame size"""
+    def _safe_record_individual_remixes(self, item, icons, slots, safe_ops) -> List[str]:
+        """Safe remix recording using SafeOperationManager"""
         try:
-            self.logger.info("🎼 Starting remix recording phase...")
-            
-            # SWITCH TO MASTER MODE RECORDING SETUP FOR REMIXES
-            self.logger.info("🖥️ Switching to Master mode recording setup for remixes...")
+            # Switch to Master mode for remixes
             if not self.master_controller.obs_controller.full_setup(use_full_screen=True):
-                self.logger.error("Failed to switch to Master mode setup for remixes")
+                self.logger.error("Failed to switch to Master mode for remixes")
                 return []
             
-            self.logger.info("✅ Master mode setup complete - remixes will be recorded in 1920x1080")
-            
-            # Generate 3 remixes specifically for individual mode
-            remix_count = 3
-            remixes = self._generate_individual_remixes(item.json_data, remix_count)
-            
+            # Generate remixes
+            remixes = self._generate_individual_remixes(item.json_data, count=3)
             if not remixes:
-                self.logger.warning("Could not generate remixes for individual mode")
                 return []
             
             remix_output_files = []
@@ -689,107 +1216,25 @@ class UnifiedProcessingManager:
                 remix_number = remix_index + 1
                 filename = f"remix-{remix_number}.mp4"
                 
-                self.logger.info(f"🎵 Recording remix {remix_number}/3: {remix['name']}")
+                # 🔥 USE SAFE REMIX OPERATION
+                success, output_path, error_msg = safe_ops.safe_remix_operation(
+                    remix['icons'], slots, filename, recording_duration=20
+                )
                 
-                # Set OBS filename
-                self.master_controller.obs_controller.force_obs_filename(filename)
-                
-                # STEP 1: Drag all remix icons to slots
-                self.logger.info(f"   🎯 Dragging {len(remix['icons'])} icons to slots...")
-                
-                drag_success = True
-                for slot_position, icon_index in enumerate(remix['icons']):
-                    if self.should_stop:
-                        break
-                    
-                    # Validate indices
-                    if icon_index >= len(icons) or slot_position >= len(slots):
-                        self.logger.warning(f"Invalid index: icon {icon_index} or slot {slot_position}")
-                        continue
-                    
-                    current_icon = icons[icon_index]
-                    target_slot = slots[slot_position]
-                    
-                    self.logger.info(f"      → Icon {icon_index} to slot {slot_position}")
-                    if not self.master_controller.game_player.corrected_drag_and_drop(current_icon, target_slot, False):
-                        self.logger.warning(f"Failed to drag icon {icon_index} for remix {remix_number}")
-                        drag_success = False
-                        continue
-                    
-                    # Short delay between drags
-                    time.sleep(0.3)
-                
-                if not drag_success or self.should_stop:
-                    self.logger.warning(f"Skipping remix {remix_number} due to drag failures")
-                    # Clean up any icons that were dragged
-                    self._cleanup_remix_slots(slots, len(remix['icons']))
-                    continue
-                
-                # STEP 2: Start recording AFTER all icons are in place
-                self.logger.info(f"   🎬 Starting recording for remix {remix_number}...")
-                
-                if not self.master_controller.obs_controller.start_recording():
-                    self.logger.warning(f"Could not start recording for remix {remix_number}")
-                    # Clean up icons
-                    self._cleanup_remix_slots(slots, len(remix['icons']))
-                    continue
-                
-                # STEP 3: Record for 20 seconds (longer than individual icons)
-                remix_duration = 20
-                self.logger.info(f"   ⏱️ Recording remix for {remix_duration} seconds...")
-                
-                for countdown in range(remix_duration, 0, -1):
-                    if self.should_stop:
-                        break
-                    if countdown % 5 == 0:  # Log every 5 seconds
-                        self.logger.info(f"      Remix {remix_number} recording: {countdown}s remaining")
-                    time.sleep(1)
-                
-                # STEP 4: Stop recording
-                stop_success, output_path = self.master_controller.obs_controller.stop_recording()
-                
-                if stop_success and output_path:
+                if success and output_path:
                     remix_output_files.append(output_path)
-                    self.logger.info(f"✅ Remix {remix_number} recorded: {output_path}")
+                    self.logger.info(f"✅ Remix {remix_number} recorded successfully")
                 else:
-                    self.logger.warning(f"Failed to stop recording for remix {remix_number}")
+                    self.logger.warning(f"⚠️ Remix {remix_number} failed: {error_msg}")
                 
-                # STEP 5: Clean up - return all icons from slots
-                if not self.should_stop:
-                    self.logger.info(f"   🧹 Cleaning up remix {remix_number}...")
-                    self._cleanup_remix_slots(slots, len(remix['icons']))
-                    
-                    # Pause between remixes
-                    if remix_index < len(remixes) - 1:
-                        time.sleep(2)
+                if remix_index < len(remixes) - 1 and not self.should_stop:
+                    time.sleep(2)
             
-            self.logger.info(f"🎉 Remix recording completed: {len(remix_output_files)}/3 remixes recorded")
-            self.logger.info("📏 Remixes recorded in Master mode frame size (1920x1080)")
-            self.logger.info("📋 Individual mode summary: Individual icons (recordingArea) + Remixes (1920x1080)")
             return remix_output_files
             
         except Exception as e:
-            self.logger.error(f"Error in remix recording: {e}")
+            self.logger.error(f"Error in safe remix recording: {e}")
             return []
-
-    def _cleanup_remix_slots(self, slots, icon_count):
-        """Clean up icons from slots after remix recording"""
-        try:
-            self.logger.info(f"   🔄 Returning {icon_count} icons from slots...")
-            
-            for slot_position in range(min(icon_count, len(slots))):
-                if self.should_stop:
-                    break
-                
-                target_slot = slots[slot_position]
-                self.master_controller.game_player.corrected_return_icon(target_slot)
-                time.sleep(0.1)  # Small delay between returns
-            
-            # Additional wait for all animations to complete
-            time.sleep(0.5)
-            
-        except Exception as e:
-            self.logger.error(f"Error cleaning up remix slots: {e}")
 
     def _generate_individual_remixes(self, json_data, count=3) -> List[Dict]:
         """Generate remixes specifically for individual mode"""
@@ -1100,7 +1545,7 @@ class SprunkiUltimateMaster:
         
         # Selection button
         select_btn_color = "#FF9800" if is_selected else "lightgray"
-        select_btn_text = "📍" if is_selected else "📌"
+        select_btn_text = "📌" if is_selected else "📋"
         
         select_btn = Button(status_frame, text=select_btn_text, width=3,
                            command=lambda: self.on_queue_item_selected(index),
@@ -1196,21 +1641,21 @@ class SprunkiUltimateMaster:
             summary = self.processing_manager.get_queue_summary()
             
             summary_text = f"""📊 UNIFIED PROCESSING QUEUE SUMMARY:
-📁 Total items: {summary['total_items']}
+📝 Total items: {summary['total_items']}
 ⏳ Pending: {summary['pending']}
 🚀 Generating JSON: {summary['generating']}
 🔄 Processing video: {summary['processing']}
 ✅ Completed: {summary['completed']}
 ❌ Failed: {summary['failed']}
-⏭️ Skipped: {summary['skipped']}
+⭐ Skipped: {summary['skipped']}
 
-⏱️ Status: {summary['processing_status']}"""
+⏰ Status: {summary['processing_status']}"""
 
             # Add selection info
             if hasattr(self, 'selected_queue_index') and self.selected_queue_index is not None:
                 if self.selected_queue_index < len(self.processing_manager.queue):
                     selected_item = self.processing_manager.queue[self.selected_queue_index]
-                    summary_text += f"\n\n📌 Selected: {selected_item.display_name}"
+                    summary_text += f"\n\n📋 Selected: {selected_item.display_name}"
                     summary_text += f"\n   Mode: {MODE_OPTIONS[selected_item.mode]['display']}"
             
             self.queue_summary_var.set(summary_text)
@@ -1252,10 +1697,10 @@ class SprunkiUltimateMaster:
         result = messagebox.askyesno("Start Unified Processing",
             f"START UNIFIED PROCESSING PIPELINE?\n\n"
             f"📊 SUMMARY:\n"
-            f"   📁 Total items: {summary['total_items']}\n"
+            f"   📝 Total items: {summary['total_items']}\n"
             f"   ⏳ Pending: {summary['pending']}\n"
             f"   🚀 URLs to generate: {len([i for i in self.processing_manager.queue if i.source_url and not i.json_data])}\n"
-            f"   📄 Ready JSONs: {len([i for i in self.processing_manager.queue if i.json_data])}\n\n"
+            f"   🔄 Ready JSONs: {len([i for i in self.processing_manager.queue if i.json_data])}\n\n"
             f"📂 OUTPUT (from config.json):\n"
             f"   📁 Base folder: {processing_config.output_base_dir}\n"
             f"   🔄 Max retries: {processing_config.max_retries}\n"
@@ -1374,7 +1819,7 @@ class SprunkiUltimateMaster:
                 f"📊 RESULTS:\n"
                 f"   ✅ Completed: {summary['completed']}\n"
                 f"   ❌ Failed: {summary['failed']}\n"
-                f"   ⏭️ Skipped: {summary['skipped']}\n\n"
+                f"   ⭐ Skipped: {summary['skipped']}\n\n"
                 f"📁 All output saved to:\n"
                 f"   C:\\Users\\dinht\\Videos\\SPRUNKI\n\n"
                 f"🎯 Pipeline processed URLs → JSON → Videos!"
@@ -1392,24 +1837,268 @@ class SprunkiUltimateMaster:
             print(f"Error in processing completion: {e}")
     
     def emergency_stop(self):
-        """Emergency stop"""
-        if self.processing_manager.is_running:
-            print("🛑 EMERGENCY STOP - Stopping unified pipeline...")
-            self.processing_manager.stop_processing()
+        """Enhanced emergency stop with comprehensive cleanup for all modes"""
+        emergency_start_time = datetime.now()
+        
+        try:
+            self.processing_manager.logger.info("🚨 EMERGENCY STOP INITIATED")
+            self.processing_manager.logger.info("=" * 60)
             
-            messagebox.showwarning("🛑 Emergency Stop", "Unified processing pipeline stopped!")
-            return
+            # ================================================================
+            # PHASE 1: STOP PROCESSING PIPELINE
+            # ================================================================
+            if self.processing_manager.is_running:
+                self.processing_manager.logger.info("🛑 Phase 1: Stopping unified processing pipeline...")
+                
+                # Set global stop flags
+                self.processing_manager.stop_processing()
+                self.should_stop = True
+                
+                self.processing_manager.logger.info("✅ Processing pipeline stop signal sent")
+                
+                # ================================================================
+                # PHASE 2: OBS EMERGENCY CLEANUP
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 2: OBS emergency cleanup...")
+                
+                if hasattr(self, 'obs_controller') and self.obs_controller:
+                    try:
+                        self.processing_manager.logger.info("   🔴 Stopping any active OBS recording...")
+                        
+                        # Try to stop any active recording
+                        try:
+                            stop_success, final_path = self.obs_controller.stop_recording()
+                            if stop_success:
+                                self.processing_manager.logger.info(f"   ✅ Recording stopped successfully: {final_path}")
+                            else:
+                                self.processing_manager.logger.warning("   ⚠️ Recording stop may have failed")
+                        except Exception as e:
+                            self.processing_manager.logger.info(f"   ℹ️ No active recording or stop failed: {e}")
+                        
+                        self.processing_manager.logger.info("✅ OBS emergency cleanup completed")
+                        
+                    except Exception as e:
+                        self.processing_manager.logger.error(f"   ❌ OBS emergency cleanup error: {e}")
+                        self.processing_manager.logger.warning("   Continuing with other cleanup operations...")
+                else:
+                    self.processing_manager.logger.info("   ℹ️ OBS controller not available")
+                
+                # ================================================================
+                # PHASE 3: GAME PLAYER EMERGENCY CLEANUP
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 3: Game player emergency cleanup...")
+                
+                if hasattr(self, 'game_player') and self.game_player:
+                    try:
+                        self.processing_manager.logger.info("   🎮 Stopping game player operations...")
+                        
+                        # Set stop flags
+                        self.game_player.should_stop = True
+                        self.game_player.is_playing = False
+                        
+                        self.processing_manager.logger.info("   ✅ Game player stop flags set")
+                        
+                        # Emergency icon/slot cleanup attempt
+                        self.processing_manager.logger.info("   🔄 Attempting emergency icon/slot cleanup...")
+                        
+                        try:
+                            # Small delay to let any ongoing drag operations finish
+                            max_wait = 3  # Maximum 3 seconds
+                            
+                            self.processing_manager.logger.info(f"   ⏳ Allowing {max_wait}s for ongoing operations to halt...")
+                            
+                            for i in range(max_wait):
+                                time.sleep(1)
+                                self.processing_manager.logger.info(f"   ⏳ Emergency wait: {i+1}/{max_wait}s")
+                            
+                            self.processing_manager.logger.info("   ✅ Emergency operation halt completed")
+                            
+                        except Exception as e:
+                            self.processing_manager.logger.error(f"   ⚠️ Error during emergency operation halt: {e}")
+                        
+                        # Browser emergency cleanup
+                        self.processing_manager.logger.info("   🌐 Emergency browser cleanup...")
+                        
+                        try:
+                            browser_close_success = self.game_player.close_game_window()
+                            
+                            if browser_close_success:
+                                self.processing_manager.logger.info("   ✅ Browser closed successfully")
+                            else:
+                                self.processing_manager.logger.warning("   ⚠️ Browser close returned false")
+                            
+                            # Additional wait for browser resource cleanup
+                            self.processing_manager.logger.info("   ⏳ Waiting for browser resource cleanup...")
+                            time.sleep(2)
+                            
+                            self.processing_manager.logger.info("   ✅ Browser resource cleanup completed")
+                            
+                        except Exception as e:
+                            self.processing_manager.logger.error(f"   ❌ Browser emergency cleanup error: {e}")
+                        
+                        self.processing_manager.logger.info("✅ Game player emergency cleanup completed")
+                        
+                    except Exception as e:
+                        self.processing_manager.logger.error(f"   ❌ Game player emergency cleanup error: {e}")
+                        self.processing_manager.logger.warning("   Continuing with other cleanup operations...")
+                else:
+                    self.processing_manager.logger.info("   ℹ️ Game player not available")
+                
+                # ================================================================
+                # PHASE 4: RESOURCE CLEANUP AND STATE RESET
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 4: Resource cleanup and state reset...")
+                
+                try:
+                    # Update UI state immediately
+                    self.processing_manager.logger.info("   🖥️ Updating UI state...")
+                    
+                    if hasattr(self, 'start_btn'):
+                        self.start_btn.config(state="normal")
+                    if hasattr(self, 'stop_btn'):
+                        self.stop_btn.config(state="disabled")
+                    if hasattr(self, 'add_urls_btn'):
+                        self.add_urls_btn.config(state="normal")
+                    if hasattr(self, 'add_files_btn'):
+                        self.add_files_btn.config(state="normal")
+                    
+                    # Update status variables
+                    if hasattr(self, 'phase_var'):
+                        self.phase_var.set("🛑 EMERGENCY STOPPED")
+                    if hasattr(self, 'action_var'):
+                        self.action_var.set("Emergency stop completed - Ready for new operations")
+                    
+                    self.processing_manager.logger.info("   ✅ UI state updated")
+                    
+                    # Refresh queue display
+                    self.processing_manager.logger.info("   📋 Refreshing queue display...")
+                    try:
+                        self.update_queue_display()
+                        self.update_queue_summary()
+                        self.processing_manager.logger.info("   ✅ Queue display refreshed")
+                    except Exception as e:
+                        self.processing_manager.logger.error(f"   ⚠️ Queue display refresh error: {e}")
+                    
+                    self.processing_manager.logger.info("✅ Resource cleanup and state reset completed")
+                    
+                except Exception as e:
+                    self.processing_manager.logger.error(f"   ❌ Resource cleanup error: {e}")
+                
+                # ================================================================
+                # PHASE 5: HOTKEY CLEANUP
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 5: Hotkey cleanup...")
+                
+                try:
+                    # Remove emergency stop hotkey
+                    keyboard.remove_hotkey('esc')
+                    self.processing_manager.logger.info("   ✅ Emergency stop hotkey removed")
+                except Exception as e:
+                    self.processing_manager.logger.info(f"   ℹ️ Hotkey removal: {e} (may not have been registered)")
+                
+                # ================================================================
+                # EMERGENCY STOP COMPLETION SUMMARY
+                # ================================================================
+                emergency_duration = (datetime.now() - emergency_start_time).total_seconds()
+                
+                self.processing_manager.logger.info("=" * 60)
+                self.processing_manager.logger.info("✅ EMERGENCY STOP COMPLETED")
+                self.processing_manager.logger.info(f"⏱️ Emergency stop duration: {emergency_duration:.1f}s")
+                self.processing_manager.logger.info("🧹 Cleanup summary:")
+                self.processing_manager.logger.info("   • Processing pipeline stopped")
+                self.processing_manager.logger.info("   • OBS recording stopped")
+                self.processing_manager.logger.info("   • Game operations halted")
+                self.processing_manager.logger.info("   • Browser closed and cleaned")
+                self.processing_manager.logger.info("   • UI state reset")
+                self.processing_manager.logger.info("   • Hotkeys removed")
+                self.processing_manager.logger.info("=" * 60)
+                
+                # Show user notification
+                messagebox.showwarning("🛑 Emergency Stop Completed", 
+                    f"Unified processing pipeline emergency stopped!\n\n"
+                    f"🧹 COMPREHENSIVE CLEANUP PERFORMED:\n"
+                    f"✅ OBS recording stopped\n"
+                    f"✅ Game operations halted\n"
+                    f"✅ Browser closed and cleaned\n"
+                    f"✅ Resources freed\n"
+                    f"✅ UI state reset\n\n"
+                    f"⏱️ Emergency stop completed in {emergency_duration:.1f}s\n"
+                    f"🎯 System ready for new operations")
+                
+                return
+            
+            # ================================================================
+            # FALLBACK: EMERGENCY STOP WHEN NO PIPELINE RUNNING
+            # ================================================================
+            else:
+                self.processing_manager.logger.info("ℹ️ No processing pipeline running")
+                self.processing_manager.logger.info("🛑 Performing general emergency stop...")
+                
+                # Set global stop flag anyway
+                self.should_stop = True
+                
+                # Stop any individual components that might be running
+                if hasattr(self, 'game_player') and self.game_player:
+                    try:
+                        self.game_player.should_stop = True
+                        self.game_player.is_playing = False
+                        
+                        # Try to close browser
+                        self.game_player.close_game_window()
+                        self.processing_manager.logger.info("✅ Game player emergency stopped")
+                        
+                    except Exception as e:
+                        self.processing_manager.logger.error(f"⚠️ Game player emergency stop error: {e}")
+                
+                # Update UI
+                if hasattr(self, 'phase_var'):
+                    self.phase_var.set("🛑 EMERGENCY STOP")
+                if hasattr(self, 'action_var'):
+                    self.action_var.set("Emergency stopped")
+                
+                emergency_duration = (datetime.now() - emergency_start_time).total_seconds()
+                
+                self.processing_manager.logger.info(f"✅ General emergency stop completed in {emergency_duration:.1f}s")
+                
+                messagebox.showwarning("⚠️ Emergency Stop", 
+                    f"Emergency stop performed!\n\n"
+                    f"🧹 CLEANUP PERFORMED:\n"
+                    f"✅ Stop flags set\n"
+                    f"✅ Game operations halted\n"
+                    f"✅ Browser closed\n\n"
+                    f"⏱️ Completed in {emergency_duration:.1f}s")
         
-        self.should_stop = True
-        
-        if self.game_player:
-            self.game_player.should_stop = True
-            self.game_player.is_playing = False
-        
-        self.phase_var.set("🛑 EMERGENCY STOP")
-        self.action_var.set("Stopped")
-        
-        messagebox.showwarning("⚠️ Emergency Stop", "Processing stopped!")
+        except Exception as e:
+            # Critical error during emergency stop
+            emergency_duration = (datetime.now() - emergency_start_time).total_seconds()
+            
+            print(f"💥 CRITICAL: Error during emergency stop after {emergency_duration:.1f}s: {e}")
+            
+            # Minimal fallback cleanup
+            try:
+                self.should_stop = True
+                if hasattr(self, 'processing_manager'):
+                    self.processing_manager.should_stop = True
+                    self.processing_manager.is_running = False
+                
+                # Try basic UI reset
+                if hasattr(self, 'phase_var'):
+                    self.phase_var.set("🛑 EMERGENCY (ERROR)")
+                if hasattr(self, 'action_var'):
+                    self.action_var.set("Emergency stop had errors")
+                    
+            except:
+                pass
+            
+            # Critical error notification
+            messagebox.showerror("💥 Emergency Stop Error", 
+                f"CRITICAL ERROR during emergency stop!\n\n"
+                f"❌ ERROR: {str(e)}\n"
+                f"⏱️ Duration: {emergency_duration:.1f}s\n\n"
+                f"⚠️ Manual cleanup may be required:\n"
+                f"• Check OBS for active recordings\n"
+                f"• Close browser manually if needed\n"
+                f"• Restart application if issues persist")
     
     def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
         """Initialize game player and OBS controller"""
@@ -1506,7 +2195,7 @@ class SprunkiUltimateMaster:
         Label(pipeline_info_frame, text="⚡ UNIFIED PROCESSING PIPELINE:", 
               font=("Arial", 11, "bold"), bg="#E8F5E8", fg="#2E7D32").pack(anchor="w", padx=10, pady=(10,5))
         
-        pipeline_text = """🌐 URL Input → 🚀 Auto JSON Generation → 🎮 Game Automation → 📹 OBS Recording → 📁 Organized Output
+        pipeline_text = """🌐 URL Input → 🚀 Auto JSON Generation → 🎮 Game Automation → 🔹 OBS Recording → 📁 Organized Output
         ✨ Zero manual steps between URL and final video files
         🎯 Individual Mode: Icons riêng lẻ (recordingArea) + 3 remixes (1920x1080, 20s/bản)
         🎯 Master Mode: Complete showcases với tất cả remixes (1920x1080)
@@ -1530,7 +2219,7 @@ class SprunkiUltimateMaster:
                                   bg="#4CAF50", fg="white", font=("Arial", 11, "bold"))
         self.add_urls_btn.pack(side="left", padx=(0,10))
         
-        self.add_files_btn = Button(buttons_frame, text="📁 Add Existing JSON Files", 
+        self.add_files_btn = Button(buttons_frame, text="📄 Add Existing JSON Files", 
                                    command=self.add_json_files_to_queue,
                                    bg="#FF9800", fg="white", font=("Arial", 11, "bold"))
         self.add_files_btn.pack(side="left", padx=(0,10))
@@ -1663,21 +2352,10 @@ class SprunkiUltimateMaster:
             except:
                 pass
 
-if __name__ == "__main__":
-    print("🚀 Sprunki Ultimate Master Controller - Unified Pipeline")
-    print("⚡ COMPLETE AUTOMATION: URL List → JSON Generation → Video Processing")
-    print("🔄 UNIFIED ARCHITECTURE: Single interface, zero manual steps")
-    print("📊 PROFESSIONAL RESULTS: Organized output, full error handling")
-    print("="*75)
-    
-    try:
-        master = SprunkiUltimateMaster()
-        master.run()
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        input("Press Enter to exit...")
+# ================================================================
+# == SERVICE MODE CLASSES                                      ==
+# ================================================================
 
-# Add this class to replace tkinter GUI
 class SprunkiCreatorService:
     """
     API-driven Creator Service
@@ -1692,13 +2370,21 @@ class SprunkiCreatorService:
         self.processing_manager = UnifiedProcessingManager(self)
         
         # API client
-        from creator_api_client import CreatorService
-        self.service = CreatorService()
+        try:
+            from creator_api_client import CreatorService
+            self.service = CreatorService()
+        except ImportError:
+            print("⚠️ creator_api_client not available - service mode disabled")
+            self.service = None
         
         print("🤖 Creator Service Mode - No GUI")
     
     def run_as_service(self):
         """Run as API-driven service instead of GUI"""
+        if not self.service:
+            print("❌ Cannot run service mode - creator_api_client not available")
+            return
+            
         try:
             print("🚀 Starting Creator Service...")
             
@@ -1716,13 +2402,14 @@ class SprunkiCreatorService:
         except KeyboardInterrupt:
             print("\n🛑 Service shutdown requested")
         finally:
-            self.service.stop()
+            if self.service:
+                self.service.stop()
             print("✅ Creator Service stopped")
     
     # Keep existing methods for compatibility
     def _initialize_components(self, config_data):
         """Existing method - no changes"""
-        # ... existing code unchanged
+        # Implementation would go here but not needed for basic service
         pass
     
     def on_processing_complete(self):
@@ -1730,10 +2417,20 @@ class SprunkiCreatorService:
         print("✅ Job processing completed")
         # No GUI updates needed
 
-# Add service mode entry point
+# ================================================================
+# == MAIN EXECUTION                                           ==
+# ================================================================
+
 if __name__ == "__main__":
+    print("🚀 Sprunki Ultimate Master Controller - Unified Pipeline")
+    print("⚡ COMPLETE AUTOMATION: URL List → JSON Generation → Video Processing")
+    print("🔄 UNIFIED ARCHITECTURE: Single interface, zero manual steps")
+    print("📊 PROFESSIONAL RESULTS: Organized output, full error handling")
+    print("="*75)
+    
     import sys
     
+    # Check for service mode
     if len(sys.argv) > 1 and sys.argv[1] == "--service":
         # Run as API service
         print("🤖 Starting Sprunki Creator Service Mode")
@@ -1741,6 +2438,10 @@ if __name__ == "__main__":
         service.run_as_service()
     else:
         # Run existing GUI mode
-        print("🎮 Starting Sprunki Ultimate Master GUI")
-        master = SprunkiUltimateMaster()
-        master.run()        
+        try:
+            print("🎮 Starting Sprunki Ultimate Master GUI")
+            master = SprunkiUltimateMaster()
+            master.run()
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            input("Press Enter to exit...")

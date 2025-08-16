@@ -5,6 +5,8 @@ Mở Chrome Debug - Đăng nhập conanghaimuoi@ - mail khôi phục xaunpark@
 
 & "C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="I:\VS-Project\Sprunki\chrome_debug_profile"
 
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="C:\Sprunki Studio\Sprunki-Creator\chrome_debug_profile"
+
 ----
 2. RDP
 
@@ -33,11 +35,44 @@ Match Title chọn cái cuối cùng
 
 ---
 
+# Navigate to your project directory
+cd "I:\VS-Project\Sprunki Tracker"
 
-https://www.cocrea.world/@Catt/SprunkeTheDefinitivePhase5
-https://www.cocrea.world/@Catt/SprunkeTheDefinitivePhase7
-https://www.cocrea.world/@Catt/SprunkeTheDefinitivePhase8
-https://www.cocrea.world/@Catt/SprunkeTheDefinitivePhase6
-https://www.cocrea.world/@frazzledazzle/Incredibox-SprunkiBRUDTREATMENTEDITION
-https://www.cocrea.world/@GabsTheCreator/SprunkiPhase6DefinitiveFanmade
-https://www.cocrea.world/@Reese_360_fs/SprunkeDX
+# Create a virtual environment named 'venv'
+python -m venv venv
+
+# Activate the virtual environment
+.\venv\Scripts\Activate
+
+----
+
+Access settings:
+
+Your VPS name is: vps-551a2bde.vps.ovh.net
+
+  - IPv4 address: 57.129.74.201
+  - IPv6 address: 2001:41d0:701:1100::7434
+  - Username:  ubuntu
+
+I123!@#
+
+---
+databasemart
+administrator
+a@df243as
+
+--GitHub
+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
+
+---
+ĐỌC  CHO THÔNG NÃO
+
+1. Trên PC cá nhân
+I:\VS-Project
+
+Folder 'Sprunki' chính là 'Sprunki Creator' trên GitHub
+Folder 'Sprunki Studio' là 'Sprunki Tracker' trên GitHub
+
+folder 'Sprunki Tracker' là bản cũ, bỏ đi cũng được. Sprunki Studio lấy code của nó them file để kết nối với Sprunki Creator.
+
+

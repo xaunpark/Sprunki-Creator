@@ -553,10 +553,10 @@ class UnifiedProcessingManager:
             output_files = []
             
             # ================================================================
-            # PHASE 1: INDIVIDUAL ICON RECORDING (existing logic)
+            # PHASE 1: INDIVIDUAL ICON RECORDING (ENHANCED with cleanup)
             # ================================================================
-            self.logger.info("📹 PHASE 1: Recording individual icons (recordingArea frame)...")
-            self.logger.info(f"📐 Using recordingArea: {item.json_data.get('layout', {}).get('recordingArea', 'Not found')}")
+            self.logger.info("🔹 PHASE 1: Recording individual icons (recordingArea frame)...")
+            self.logger.info(f"📍 Using recordingArea: {item.json_data.get('layout', {}).get('recordingArea', 'Not found')}")
             
             # Process normal mode icons
             normal_range = range(len(icons) - 1) if has_horror else range(len(icons))
@@ -572,38 +572,74 @@ class UnifiedProcessingManager:
                 
                 filename = f"n-{icon_index}.mp4"
                 
-                self.master_controller.obs_controller.force_obs_filename(filename)
-                
+                # 🔥 BƯỚC 1: DRAG ICON
                 current_icon = icons[icon_index]
-                success = self.master_controller.game_player.corrected_drag_and_drop(
+                drag_success = self.master_controller.game_player.corrected_drag_and_drop(
                     current_icon, target_slot, is_first_icon=(icon_index == 0)
                 )
                 
-                if not success:
+                if not drag_success:
                     self.logger.warning(f"Failed to drag icon {icon_index}")
-                    continue
+                    continue  # Drag thất bại -> không cần cleanup
                 
-                if not self.master_controller.obs_controller.start_recording():
-                    self.logger.warning(f"Could not start recording for {filename}")
-                    continue
+                # 🔥 BƯỚC 2: OBS SETUP - THÊM ERROR HANDLING
+                icon_placed_successfully = True  # Flag để track trạng thái
                 
-                recording_duration = 14
-                for countdown in range(recording_duration, 0, -1):
-                    if self.should_stop:
-                        break
-                    time.sleep(1)
+                try:
+                    # Force OBS filename
+                    if not self.master_controller.obs_controller.force_obs_filename(filename):
+                        self.logger.warning(f"Could not force OBS filename for {filename}")
+                        raise Exception("OBS filename setup failed")
+                    
+                    # Start recording
+                    if not self.master_controller.obs_controller.start_recording():
+                        self.logger.warning(f"Could not start recording for {filename}")
+                        raise Exception("OBS recording start failed")
+                    
+                    # 🔥 BƯỚC 3: RECORDING THÀNH CÔNG
+                    recording_duration = 14
+                    for countdown in range(recording_duration, 0, -1):
+                        if self.should_stop:
+                            break
+                        time.sleep(1)
+                    
+                    # Stop recording
+                    stop_success, output_path = self.master_controller.obs_controller.stop_recording()
+                    if stop_success and output_path:
+                        output_files.append(output_path)
+                        self.logger.info(f"Recorded: {output_path}")
+                    else:
+                        self.logger.warning(f"Failed to stop recording properly for {filename}")
+                    
+                except Exception as e:
+                    # 🔥 QUAN TRỌNG: CLEANUP KHI OBS THẤT BẠI
+                    self.logger.error(f"OBS error for icon {icon_index}: {e}")
+                    self.logger.info(f"🔄 Cleaning up icon {icon_index} due to OBS failure...")
+                    
+                    # Return icon về vị trí ban đầu
+                    cleanup_success = self.master_controller.game_player.corrected_return_icon(target_slot)
+                    if cleanup_success:
+                        self.logger.info(f"✅ Icon {icon_index} returned successfully after OBS failure")
+                    else:
+                        self.logger.warning(f"⚠️ Failed to return icon {icon_index} - slot may be occupied!")
+                    
+                    icon_placed_successfully = False
+                    
+                    # Try to stop any ongoing recording
+                    try:
+                        self.master_controller.obs_controller.stop_recording()
+                    except:
+                        pass
                 
-                stop_success, output_path = self.master_controller.obs_controller.stop_recording()
-                if stop_success and output_path:
-                    output_files.append(output_path)
-                    self.logger.info(f"Recorded: {output_path}")
-                
-                self.master_controller.game_player.corrected_return_icon(target_slot)
+                # 🔥 BƯỚC 4: RETURN ICON (chỉ khi icon vẫn đang ở slot)
+                if icon_placed_successfully:
+                    self.master_controller.game_player.corrected_return_icon(target_slot)
+                    self.logger.info(f"🔄 Icon {icon_index} returned after successful recording")
                 
                 if not self.should_stop:
                     time.sleep(1)
             
-            # Process horror mode if applicable
+            # Process horror mode if applicable (SAME PATTERN)
             if has_horror and not self.should_stop:
                 if self.master_controller.game_player.trigger_horror_mode_transition_corrected():
                     
@@ -612,13 +648,24 @@ class UnifiedProcessingManager:
                             break
                         
                         filename = f"h-{icon_index}.mp4"
-                        
-                        self.master_controller.obs_controller.force_obs_filename(filename)
-                        
                         current_icon = icons[icon_index]
-                        success = self.master_controller.game_player.corrected_drag_and_drop(current_icon, target_slot, False)
                         
-                        if success and self.master_controller.obs_controller.start_recording():
+                        # 🔥 SAME ENHANCED PATTERN FOR HORROR ICONS
+                        drag_success = self.master_controller.game_player.corrected_drag_and_drop(current_icon, target_slot, False)
+                        
+                        if not drag_success:
+                            self.logger.warning(f"Failed to drag horror icon {icon_index}")
+                            continue
+                        
+                        icon_placed_successfully = True
+                        
+                        try:
+                            if not self.master_controller.obs_controller.force_obs_filename(filename):
+                                raise Exception("OBS filename setup failed")
+                            
+                            if not self.master_controller.obs_controller.start_recording():
+                                raise Exception("OBS recording start failed")
+                            
                             for countdown in range(14, 0, -1):
                                 if self.should_stop:
                                     break
@@ -628,14 +675,34 @@ class UnifiedProcessingManager:
                             if stop_success and output_path:
                                 output_files.append(output_path)
                                 self.logger.info(f"Horror recorded: {output_path}")
+                            
+                        except Exception as e:
+                            # 🔥 CLEANUP FOR HORROR ICONS TOO
+                            self.logger.error(f"OBS error for horror icon {icon_index}: {e}")
+                            self.logger.info(f"🔄 Cleaning up horror icon {icon_index} due to OBS failure...")
+                            
+                            cleanup_success = self.master_controller.game_player.corrected_return_icon(target_slot)
+                            if cleanup_success:
+                                self.logger.info(f"✅ Horror icon {icon_index} returned successfully after OBS failure")
+                            else:
+                                self.logger.warning(f"⚠️ Failed to return horror icon {icon_index}")
+                            
+                            icon_placed_successfully = False
+                            
+                            try:
+                                self.master_controller.obs_controller.stop_recording()
+                            except:
+                                pass
                         
-                        self.master_controller.game_player.corrected_return_icon(target_slot)
+                        # Return icon if still placed
+                        if icon_placed_successfully:
+                            self.master_controller.game_player.corrected_return_icon(target_slot)
                         
                         if not self.should_stop:
                             time.sleep(1)
             
             # ================================================================
-            # PHASE 2: REMIX RECORDING (NEW FEATURE - Master mode frame)
+            # PHASE 2: REMIX RECORDING (giữ nguyên)
             # ================================================================
             if not self.should_stop:
                 self.logger.info("🎵 PHASE 2: Recording remix videos (1920x1080 Master mode frame)...")
@@ -648,7 +715,7 @@ class UnifiedProcessingManager:
             
             self.logger.info("✅ Enhanced Individual Mode completed successfully!")
             self.logger.info(f"📊 Summary: {total_individual} individual videos (recordingArea) + {total_remixes} remix videos (1920x1080) = {len(output_files)} total videos")
-            self.logger.info("📐 Frame sizes: Individual icons use recordingArea crop, Remixes use Master mode 1920x1080")
+            self.logger.info("📍 Frame sizes: Individual icons use recordingArea crop, Remixes use Master mode 1920x1080")
             return len(output_files) > 0
             
         except Exception as e:
