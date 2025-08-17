@@ -774,6 +774,693 @@ class SprunkiGamePlayer:
             print(f"❌ Error getting Putted characters value: {e}")
             return None
 
+    def get_polos_array(self):
+        """
+        🎯 NEW: Get Polos array from Stage variables 
+        Returns: list of strings ["0","1","0"...] or None if error
+        """
+        try:
+            if not self.verification_available:
+                return None
+                
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return None
+            
+            ws = websocket.create_connection(ws_url, timeout=10)
+            
+            # JavaScript to get Polos array from Stage variables
+            js_get_polos = '''
+            (() => {
+                try {
+                    if (!window.__sprunki_vm) {
+                        console.error("VM not found for Polos array");
+                        return null;
+                    }
+                    
+                    const stage = window.__sprunki_vm.runtime.getTargetForStage();
+                    if (!stage) {
+                        console.error("Stage not found for Polos array");
+                        return null;
+                    }
+                    
+                    // Find Polos variable in Stage variables
+                    const polosVariable = Object.values(stage.variables).find(v => v.name === 'Polos');
+                    
+                    if (!polosVariable) {
+                        console.error("Polos variable not found in Stage");
+                        return null;
+                    }
+                    
+                    console.log("✅ Found Polos array:", polosVariable.value);
+                    return polosVariable.value;
+                    
+                } catch (e) {
+                    console.error("Error getting Polos array:", e);
+                    return null;
+                }
+            })();
+            '''
+            
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": js_get_polos, "returnByValue": True}
+            })
+            
+            ws.close()
+            
+            if response and 'result' in response:
+                polos_value = response.get('result', {}).get('result', {}).get('value')
+                
+                if isinstance(polos_value, list):
+                    print(f"🎯 Polos array retrieved: {polos_value}")
+                    return polos_value
+                else:
+                    print(f"⚠️ Unexpected Polos value type: {type(polos_value)} = {polos_value}")
+                    return None
+            else:
+                print("⚠️ No response when getting Polos array")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error getting Polos array: {e}")
+            return None
+
+    def get_enabled_list_array(self):
+        """
+        🔍 NEW: Get Enabled List array for cross-validation
+        Returns: list of strings ["0","1","0"...] or None if error
+        """
+        try:
+            if not self.verification_available:
+                return None
+                
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return None
+            
+            ws = websocket.create_connection(ws_url, timeout=10)
+            
+            # JavaScript to get Enabled List array from Stage variables
+            js_get_enabled = '''
+            (() => {
+                try {
+                    if (!window.__sprunki_vm) {
+                        console.error("VM not found for Enabled List");
+                        return null;
+                    }
+                    
+                    const stage = window.__sprunki_vm.runtime.getTargetForStage();
+                    if (!stage) {
+                        console.error("Stage not found for Enabled List");
+                        return null;
+                    }
+                    
+                    // Find Enabled List variable in Stage variables
+                    const enabledVariable = Object.values(stage.variables).find(v => v.name === 'Enabled List');
+                    
+                    if (!enabledVariable) {
+                        console.error("Enabled List variable not found in Stage");
+                        return null;
+                    }
+                    
+                    console.log("✅ Found Enabled List array:", enabledVariable.value);
+                    return enabledVariable.value;
+                    
+                } catch (e) {
+                    console.error("Error getting Enabled List array:", e);
+                    return null;
+                }
+            })();
+            '''
+            
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": js_get_enabled, "returnByValue": True}
+            })
+            
+            ws.close()
+            
+            if response and 'result' in response:
+                enabled_value = response.get('result', {}).get('result', {}).get('value')
+                
+                if isinstance(enabled_value, list):
+                    print(f"🔍 Enabled List retrieved: {enabled_value}")
+                    return enabled_value
+                else:
+                    print(f"⚠️ Unexpected Enabled List type: {type(enabled_value)} = {enabled_value}")
+                    return None
+            else:
+                print("⚠️ No response when getting Enabled List")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error getting Enabled List: {e}")
+            return None
+
+    def get_comprehensive_slot_state(self):
+        """
+        📊 NEW: Get comprehensive slot state for verification
+        Returns: dict with all slot tracking data or None if error
+        """
+        try:
+            putted_chars = self.get_putted_chars_value()
+            polos_array = self.get_polos_array()
+            enabled_list = self.get_enabled_list_array()
+            
+            if putted_chars is None:
+                print("⚠️ Could not get Putted characters")
+                return None
+            
+            # Build comprehensive state
+            state = {
+                'putted_characters': putted_chars,
+                'polos_array': polos_array,
+                'enabled_list': enabled_list,
+                'timestamp': time.time()
+            }
+            
+            # Cross-validation if arrays available
+            if polos_array:
+                polos_count = sum(1 for x in polos_array if x == "1")
+                state['polos_count'] = polos_count
+                state['putted_polos_match'] = (polos_count == putted_chars)
+                
+                if not state['putted_polos_match']:
+                    print(f"⚠️ INCONSISTENCY: Putted chars ({putted_chars}) ≠ Polos count ({polos_count})")
+            
+            # Enabled List validation
+            if enabled_list and polos_array:
+                arrays_match = (polos_array == enabled_list)
+                state['polos_enabled_match'] = arrays_match
+                
+                if not arrays_match:
+                    print(f"⚠️ INCONSISTENCY: Polos {polos_array} ≠ Enabled {enabled_list}")
+            
+            print(f"📊 Comprehensive slot state captured:")
+            print(f"   Putted characters: {putted_chars}")
+            if polos_array:
+                print(f"   Polos array: {polos_array} (count: {state.get('polos_count', 'N/A')})")
+            if enabled_list:
+                print(f"   Enabled List: {enabled_list}")
+            
+            return state
+            
+        except Exception as e:
+            print(f"❌ Error getting comprehensive slot state: {e}")
+            return None
+
+    def verify_slot_specific_return_enhanced(self, target_slot_index, state_before, state_after):
+        """
+        🔍 ENHANCED: Slot-specific verification with Polos array validation
+        Returns: (success, reason, details)
+        """
+        try:
+            if not state_before or not state_after:
+                return False, "missing_state_data", {}
+            
+            putted_before = state_before.get('putted_characters')
+            putted_after = state_after.get('putted_characters')
+            polos_before = state_before.get('polos_array')
+            polos_after = state_after.get('polos_array')
+            
+            print(f"\n🔍 ENHANCED SLOT VERIFICATION for Slot {target_slot_index}")
+            print("-" * 50)
+            
+            # Basic putted characters check
+            expected_putted = putted_before - 1 if putted_before is not None else None
+            putted_success = (putted_after == expected_putted)
+            
+            print(f"   📊 Putted chars: {putted_before} → {putted_after} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+            
+            # Advanced Polos array verification
+            polos_success = False
+            cross_contamination = []
+            target_slot_cleared = False
+            
+            if polos_before and polos_after and len(polos_before) == len(polos_after):
+                print(f"   🎯 Polos BEFORE: {polos_before}")
+                print(f"   🎯 Polos AFTER:  {polos_after}")
+                
+                # Check if target slot was cleared
+                if target_slot_index < len(polos_before):
+                    slot_before = polos_before[target_slot_index]
+                    slot_after = polos_after[target_slot_index]
+                    target_slot_cleared = (slot_before == "1" and slot_after == "0")
+                    
+                    print(f"   🎯 Target slot {target_slot_index}: '{slot_before}' → '{slot_after}' = {'✅ CLEARED' if target_slot_cleared else '❌ NOT CLEARED'}")
+                
+                # Check for unintended changes (cross-contamination)
+                for i, (before, after) in enumerate(zip(polos_before, polos_after)):
+                    if i == target_slot_index:
+                        continue  # Skip target slot
+                        
+                    if before != after:
+                        cross_contamination.append({
+                            'slot_index': i,
+                            'before': before,
+                            'after': after,
+                            'type': 'unexpected_clear' if before == "1" and after == "0" else 'unexpected_fill'
+                        })
+                
+                if cross_contamination:
+                    print(f"   🚨 CROSS-CONTAMINATION DETECTED:")
+                    for contamination in cross_contamination:
+                        slot_idx = contamination['slot_index']
+                        change_type = contamination['type']
+                        print(f"      Slot {slot_idx}: {contamination['before']} → {contamination['after']} ({change_type})")
+                else:
+                    print(f"   🛡️ No cross-contamination detected")
+                
+                polos_success = target_slot_cleared and len(cross_contamination) == 0
+            else:
+                print(f"   ⚠️ Cannot verify Polos array (missing or invalid data)")
+            
+            # Combined verification result
+            overall_success = putted_success and (polos_success if polos_before and polos_after else True)
+            
+            # Determine reason and build details
+            if overall_success:
+                reason = "verified_success"
+                details = {
+                    'target_slot_cleared': target_slot_cleared,
+                    'cross_contamination': cross_contamination,
+                    'putted_change': f"{putted_before} → {putted_after}",
+                    'verification_method': 'enhanced_polos_array'
+                }
+            else:
+                if not putted_success:
+                    reason = "putted_characters_mismatch"
+                elif cross_contamination:
+                    reason = "cross_contamination_detected"
+                elif not target_slot_cleared:
+                    reason = "target_slot_not_cleared"
+                else:
+                    reason = "unknown_failure"
+                
+                details = {
+                    'target_slot_cleared': target_slot_cleared,
+                    'cross_contamination': cross_contamination,
+                    'putted_change': f"{putted_before} → {putted_after}",
+                    'expected_putted': expected_putted,
+                    'verification_method': 'enhanced_polos_array'
+                }
+            
+            print(f"   🎯 FINAL RESULT: {'✅ SUCCESS' if overall_success else '❌ FAILED'} ({reason})")
+            print("-" * 50)
+            
+            return overall_success, reason, details
+            
+        except Exception as e:
+            print(f"❌ Enhanced slot verification error: {e}")
+            return False, f"verification_error: {e}", {}
+
+    def check_slot_needs_return(self, target_slot_index):
+        """
+        🔍 NEW: Pre-flight check if slot actually needs return
+        Returns: (needs_return, current_state, reason)
+        """
+        try:
+            print(f"\n🔍 PRE-FLIGHT CHECK: Slot {target_slot_index}")
+            
+            state = self.get_comprehensive_slot_state()
+            if not state:
+                return True, None, "cannot_verify_state"  # Assume needs return if can't check
+            
+            polos_array = state.get('polos_array')
+            
+            if polos_array and target_slot_index < len(polos_array):
+                slot_status = polos_array[target_slot_index]
+                
+                if slot_status == "0":
+                    print(f"   ✅ Slot {target_slot_index} already empty ('{slot_status}') - SKIPPING")
+                    return False, state, "already_empty"
+                elif slot_status == "1":
+                    print(f"   🎯 Slot {target_slot_index} has icon ('{slot_status}') - NEEDS RETURN")
+                    return True, state, "has_icon"
+                else:
+                    print(f"   ⚠️ Slot {target_slot_index} unknown status ('{slot_status}') - ASSUME NEEDS RETURN")
+                    return True, state, "unknown_status"
+            else:
+                print(f"   ⚠️ Cannot check slot {target_slot_index} status - ASSUME NEEDS RETURN")
+                return True, state, "polos_unavailable"
+                
+        except Exception as e:
+            print(f"❌ Pre-flight check error: {e}")
+            return True, None, f"error: {e}"  # Assume needs return on error
+
+    def get_active_slots_queue(self):
+        """
+        📋 NEW: Get smart-ordered queue of active slots that need return
+        Returns: list of slot indices in optimal return order
+        """
+        try:
+            print(f"\n📋 BUILDING SMART RETURN QUEUE")
+            print("-" * 40)
+            
+            state = self.get_comprehensive_slot_state()
+            if not state:
+                print("⚠️ Cannot get slot state, using fallback")
+                return []
+            
+            polos_array = state.get('polos_array')
+            if not polos_array:
+                print("⚠️ No Polos array available, using fallback")
+                return []
+            
+            # Find all active slots (status "1")
+            active_slots = []
+            for i, status in enumerate(polos_array):
+                if status == "1":
+                    active_slots.append(i)
+            
+            print(f"   🎯 Found {len(active_slots)} active slots: {active_slots}")
+            
+            # Smart ordering: Return from highest index to lowest
+            # This prevents index shifting issues during batch operations
+            active_slots_ordered = sorted(active_slots, reverse=True)
+            
+            print(f"   📋 Optimal return order: {active_slots_ordered} (high → low)")
+            print(f"   💡 Reason: Prevents index shifting during batch return")
+            
+            return active_slots_ordered
+            
+        except Exception as e:
+            print(f"❌ Error building return queue: {e}")
+            return []
+
+    def smart_batch_return_all_slots(self, use_cdp=False):
+        """
+        🔄 NEW: Smart batch return all active slots with error recovery
+        Returns: (success_count, total_attempted, error_log)
+        """
+        try:
+            print(f"\n🔄 SMART BATCH RETURN: All Active Slots")
+            print("="*70)
+            
+            # Get slots configuration
+            if not hasattr(self, 'config') or not self.config:
+                print("❌ No config available for batch return")
+                return 0, 0, ["No config available"]
+            
+            all_slots = self.config.get('layout', {}).get('slots', [])
+            if not all_slots:
+                print("❌ No slots configuration found")
+                return 0, 0, ["No slots configuration"]
+            
+            # Get active slots queue
+            active_slot_indices = self.get_active_slots_queue()
+            if not active_slot_indices:
+                print("✅ No active slots found - all slots already empty")
+                return 0, 0, []
+            
+            print(f"🎯 Will process {len(active_slot_indices)} active slots")
+            
+            # Initialize tracking
+            success_count = 0
+            error_log = []
+            recovery_attempts = 0
+            
+            # Process each slot in smart order
+            for slot_index in active_slot_indices:
+                if self.should_stop:
+                    error_log.append(f"Slot {slot_index}: Emergency stop requested")
+                    break
+                
+                print(f"\n{'='*50}")
+                print(f"🎯 PROCESSING SLOT {slot_index} ({success_count + 1}/{len(active_slot_indices)})")
+                print(f"{'='*50}")
+                
+                # Validate slot index
+                if slot_index >= len(all_slots):
+                    error_msg = f"Slot {slot_index}: Invalid slot index (max: {len(all_slots)-1})"
+                    print(f"❌ {error_msg}")
+                    error_log.append(error_msg)
+                    continue
+                
+                target_slot = all_slots[slot_index]
+                
+                # Pre-return state validation
+                needs_return, current_state, reason = self.check_slot_needs_return(slot_index)
+                
+                if not needs_return:
+                    if reason == "already_empty":
+                        print(f"✅ Slot {slot_index} already empty - skipping")
+                        success_count += 1  # Count as success since goal achieved
+                    else:
+                        error_msg = f"Slot {slot_index}: Cannot verify if return needed ({reason})"
+                        print(f"⚠️ {error_msg}")
+                        error_log.append(error_msg)
+                    continue
+                
+                # Attempt return with error recovery
+                return_success = False
+                max_retries = 2
+                
+                for retry in range(max_retries):
+                    if self.should_stop:
+                        break
+                    
+                    if retry > 0:
+                        print(f"🔄 RETRY {retry}/{max_retries-1} for Slot {slot_index}")
+                        recovery_attempts += 1
+                        time.sleep(1.0)  # Brief pause before retry
+                    
+                    try:
+                        return_success = self.corrected_return_icon(target_slot, use_cdp)
+                        
+                        if return_success:
+                            print(f"✅ Slot {slot_index} returned successfully")
+                            success_count += 1
+                            break
+                        else:
+                            error_msg = f"Slot {slot_index}: Return failed on attempt {retry + 1}"
+                            print(f"❌ {error_msg}")
+                            if retry == max_retries - 1:  # Last retry
+                                error_log.append(error_msg)
+                            
+                    except Exception as e:
+                        error_msg = f"Slot {slot_index}: Exception on attempt {retry + 1}: {str(e)}"
+                        print(f"💥 {error_msg}")
+                        if retry == max_retries - 1:  # Last retry
+                            error_log.append(error_msg)
+                
+                # Post-return validation and recovery
+                if return_success:
+                    # Verify the return actually worked
+                    time.sleep(0.5)
+                    post_return_state = self.get_comprehensive_slot_state()
+                    
+                    if post_return_state and post_return_state.get('polos_array'):
+                        post_polos = post_return_state['polos_array']
+                        if slot_index < len(post_polos) and post_polos[slot_index] == "1":
+                            # Return failed verification!
+                            print(f"🚨 POST-RETURN VERIFICATION FAILED: Slot {slot_index} still shows '1'")
+                            error_msg = f"Slot {slot_index}: Post-return verification failed"
+                            error_log.append(error_msg)
+                            success_count -= 1  # Adjust success count
+                            
+                            # Attempt emergency recovery
+                            print(f"🚨 EMERGENCY RECOVERY for Slot {slot_index}")
+                            emergency_success = self._emergency_slot_recovery(slot_index, target_slot, use_cdp)
+                            if emergency_success:
+                                print(f"✅ Emergency recovery successful for Slot {slot_index}")
+                                success_count += 1
+                            else:
+                                print(f"💥 Emergency recovery failed for Slot {slot_index}")
+                
+                # Brief pause between slots to allow game state stabilization
+                if slot_index != active_slot_indices[-1]:  # Not the last slot
+                    print(f"⏳ Stabilization pause before next slot...")
+                    time.sleep(0.8)
+            
+            # ================================================================
+            # FINAL BATCH VALIDATION
+            # ================================================================
+            print(f"\n{'='*70}")
+            print(f"📊 SMART BATCH RETURN COMPLETED")
+            print(f"{'='*70}")
+            
+            # Get final state for validation
+            final_state = self.get_comprehensive_slot_state()
+            final_polos = final_state.get('polos_array') if final_state else None
+            final_putted = final_state.get('putted_characters') if final_state else None
+            
+            print(f"✅ Successfully returned: {success_count}/{len(active_slot_indices)} slots")
+            print(f"🔄 Recovery attempts: {recovery_attempts}")
+            print(f"❌ Errors encountered: {len(error_log)}")
+            
+            if final_state:
+                print(f"📊 Final state:")
+                print(f"   Putted characters: {final_putted}")
+                if final_polos:
+                    print(f"   Polos array: {final_polos}")
+                    remaining_active = sum(1 for x in final_polos if x == "1")
+                    print(f"   Remaining active slots: {remaining_active}")
+            
+            if error_log:
+                print(f"📋 Error summary:")
+                for i, error in enumerate(error_log, 1):
+                    print(f"   {i}. {error}")
+            
+            return success_count, len(active_slot_indices), error_log
+            
+        except Exception as e:
+            print(f"💥 Critical error in smart batch return: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0, 0, [f"Critical error: {str(e)}"]
+
+    def _emergency_slot_recovery(self, slot_index, target_slot, use_cdp):
+        """
+        🚨 NEW: Emergency recovery for stuck slots
+        Last resort methods when normal return fails
+        """
+        try:
+            print(f"🚨 EMERGENCY RECOVERY: Slot {slot_index}")
+            print("-" * 30)
+            
+            center_x, center_y = target_slot['x'], target_slot['y']
+            domain_adj = self.get_domain_adjustments()
+            
+            # Method 1: Rapid-fire center clicks
+            print("   🔥 Method 1: Rapid-fire center clicks")
+            center_coords = [(center_x, center_y)]
+            
+            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            
+            for _ in range(5):  # 5 rapid clicks
+                self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
+                time.sleep(0.1)
+            
+            time.sleep(1.0)
+            if self.verification_available and state_before:
+                state_after = self.get_comprehensive_slot_state()
+                if state_after:
+                    is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                        slot_index, state_before, state_after
+                    )
+                    if is_success:
+                        print("   ✅ Rapid-fire method successful!")
+                        return True
+            
+            # Method 2: Hold clicks on expanded area
+            print("   🔥 Method 2: Hold clicks on expanded area")
+            expanded_coords = self.generate_circle_pattern_coordinates(center_x, center_y, radius=40, num_points=8)
+            
+            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            
+            self.execute_multi_method_clicks(expanded_coords, use_cdp, domain_adj, method="hold")
+            
+            time.sleep(1.5)
+            if self.verification_available and state_before:
+                state_after = self.get_comprehensive_slot_state()
+                if state_after:
+                    is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                        slot_index, state_before, state_after
+                    )
+                    if is_success:
+                        print("   ✅ Hold clicks method successful!")
+                        return True
+            
+            # Method 3: Mixed method barrage
+            print("   🔥 Method 3: Mixed method barrage")
+            
+            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            
+            methods = ["single", "double", "triple"]
+            for method in methods:
+                self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method=method)
+                time.sleep(0.3)
+            
+            time.sleep(1.5)
+            if self.verification_available and state_before:
+                state_after = self.get_comprehensive_slot_state()
+                if state_after:
+                    is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                        slot_index, state_before, state_after
+                    )
+                    if is_success:
+                        print("   ✅ Mixed method barrage successful!")
+                        return True
+            
+            print("   💥 All emergency methods failed")
+            return False
+            
+        except Exception as e:
+            print(f"💥 Emergency recovery error: {e}")
+            return False
+
+    def validate_workflow_completion(self):
+        """
+        ✅ NEW: Validate that workflow completed successfully
+        Returns: (is_complete, remaining_issues, recommendations)
+        """
+        try:
+            print(f"\n✅ WORKFLOW COMPLETION VALIDATION")
+            print("="*50)
+            
+            state = self.get_comprehensive_slot_state()
+            if not state:
+                return False, ["Cannot get final state"], ["Manual verification needed"]
+            
+            putted_chars = state.get('putted_characters', 0)
+            polos_array = state.get('polos_array')
+            enabled_list = state.get('enabled_list')
+            
+            issues = []
+            recommendations = []
+            
+            # Check 1: Putted characters should be 0
+            if putted_chars != 0:
+                issues.append(f"Putted characters = {putted_chars} (expected: 0)")
+                recommendations.append("Run additional return operations")
+            else:
+                print("✅ Putted characters = 0 (perfect)")
+            
+            # Check 2: All Polos should be "0"
+            if polos_array:
+                active_polos = [i for i, status in enumerate(polos_array) if status == "1"]
+                if active_polos:
+                    issues.append(f"Active slots remaining: {active_polos}")
+                    recommendations.append(f"Target slots {active_polos} for additional return")
+                else:
+                    print("✅ All Polos slots = '0' (perfect)")
+            
+            # Check 3: Cross-validation
+            if polos_array and enabled_list:
+                if polos_array != enabled_list:
+                    issues.append("Polos and Enabled List mismatch")
+                    recommendations.append("Investigate state inconsistency")
+                else:
+                    print("✅ Polos and Enabled List match (perfect)")
+            
+            # Check 4: Consistency
+            if polos_array:
+                polos_count = sum(1 for x in polos_array if x == "1")
+                if polos_count != putted_chars:
+                    issues.append(f"Count mismatch: Polos count ({polos_count}) ≠ Putted chars ({putted_chars})")
+                    recommendations.append("State synchronization needed")
+                else:
+                    print("✅ Counts are consistent (perfect)")
+            
+            is_complete = len(issues) == 0
+            
+            print(f"\n📊 VALIDATION RESULT: {'✅ COMPLETE' if is_complete else '⚠️ ISSUES FOUND'}")
+            if issues:
+                print("❌ Issues found:")
+                for issue in issues:
+                    print(f"   - {issue}")
+                print("💡 Recommendations:")
+                for rec in recommendations:
+                    print(f"   - {rec}")
+            
+            return is_complete, issues, recommendations
+            
+        except Exception as e:
+            print(f"❌ Validation error: {e}")
+            return False, [f"Validation error: {str(e)}"], ["Manual check required"]    
+
     def generate_icon_coordinates(self, base_x, base_y, offset=35):
         """
         ADDED: Generate 5 coordinates for icon drag attempts
@@ -1769,26 +2456,46 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        🛡️ ENHANCED: Slot-Isolated Circle Pattern + Boundary Protection
-        Prevents cross-slot contamination with safe zone calculation
+        🛡️ SMART SLOT STATE TRACKING: Pre-flight + Enhanced Verification + Cross-contamination Prevention
+        Uses Polos array for bulletproof slot-specific verification
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             target_slot_index = target_slot.get('index', -1)
             domain_adj = self.get_domain_adjustments()
             
-            print(f"\n🛡️ SLOT-ISOLATED RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
-            print("="*70)
+            print(f"\n🛡️ SMART SLOT RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
+            print("="*80)
             
             # Check if verification is available
             verification_enabled = self.verification_available
             if verification_enabled:
-                print("🔍 Return verification ENABLED with slot isolation")
+                print("🔍 Enhanced verification ENABLED with Polos array tracking")
             else:
-                print("⚠️ Return verification DISABLED - using safe fallback")
+                print("⚠️ Enhanced verification DISABLED - using basic fallback")
             
             # ================================================================
-            # CRITICAL: CALCULATE SAFE ZONE TO AVOID CROSS-SLOT CONTAMINATION
+            # PHASE 0: PRE-FLIGHT CHECK (Skip if already empty)
+            # ================================================================
+            print("\n🔍 PHASE 0: PRE-FLIGHT CHECK")
+            print("-" * 40)
+            
+            if verification_enabled:
+                needs_return, initial_state, reason = self.check_slot_needs_return(target_slot_index)
+                
+                if not needs_return:
+                    print(f"✅ PHASE 0 RESULT: Slot {target_slot_index} doesn't need return ({reason})")
+                    print("🚀 EARLY EXIT: Return operation skipped successfully")
+                    print("="*80)
+                    return True  # Successfully skipped unnecessary operation
+                else:
+                    print(f"🎯 PHASE 0 RESULT: Slot {target_slot_index} needs return ({reason})")
+            else:
+                print("⚠️ Pre-flight check skipped (verification disabled)")
+                initial_state = None
+            
+            # ================================================================
+            # SAFE ZONE CALCULATION
             # ================================================================
             print("\n🛡️ SAFE ZONE CALCULATION")
             print("-" * 40)
@@ -1804,7 +2511,7 @@ class SprunkiGamePlayer:
             
             if not safe_coordinates:
                 print("❌ Could not generate safe coordinates, using minimal fallback")
-                safe_coordinates = [(center_x, center_y)]  # Only center point
+                safe_coordinates = [(center_x, center_y)]
             
             success = False
             phase_used = "none"
@@ -1817,67 +2524,94 @@ class SprunkiGamePlayer:
             
             center_coords = [(center_x, center_y)]
             
-            # Get initial state
-            putted_before = None
+            # Get initial state for this phase
+            state_before = None
             if verification_enabled:
-                putted_before = self.get_putted_chars_value()
-                print(f"📊 Putted BEFORE Phase 1: {putted_before}")
+                state_before = self.get_comprehensive_slot_state()
+                if state_before:
+                    print(f"📊 State BEFORE Phase 1: Putted={state_before.get('putted_characters')}")
+                    if state_before.get('polos_array'):
+                        print(f"   🎯 Polos: {state_before['polos_array']}")
             
             # Try single click on center
             print("   🔹 Method: Precision single click")
             self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
             
-            # Wait and verify
+            # Wait and verify with enhanced verification
             time.sleep(0.8)
-            if verification_enabled:
-                putted_after = self.get_putted_chars_value()
-                is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
-                
-                if is_success:
-                    print("🎉 PHASE 1 SUCCESS: Precision center click worked!")
-                    success = True
-                    phase_used = "phase_1_precision_center"
+            if verification_enabled and state_before:
+                state_after = self.get_comprehensive_slot_state()
+                if state_after:
+                    is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                        target_slot_index, state_before, state_after
+                    )
+                    
+                    if is_success:
+                        print("🎉 PHASE 1 SUCCESS: Precision center click worked!")
+                        success = True
+                        phase_used = "phase_1_precision_center"
+                    else:
+                        print(f"❌ Phase 1 failed: {reason}")
+                        if details.get('cross_contamination'):
+                            print("🚨 Cross-contamination detected in Phase 1!")
             
             # Try double click if single failed
             if not success and not self.should_stop:
                 print("   🔹 Method: Precision double click")
+                
+                # Get state before double click
+                if verification_enabled:
+                    state_before = self.get_comprehensive_slot_state()
+                
                 self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="double")
                 
                 time.sleep(0.8)
-                if verification_enabled:
-                    putted_after = self.get_putted_chars_value()
-                    is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
-                    
-                    if is_success:
-                        print("🎉 PHASE 1 SUCCESS: Precision double click worked!")
-                        success = True
-                        phase_used = "phase_1_precision_double"
+                if verification_enabled and state_before:
+                    state_after = self.get_comprehensive_slot_state()
+                    if state_after:
+                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                            target_slot_index, state_before, state_after
+                        )
+                        
+                        if is_success:
+                            print("🎉 PHASE 1 SUCCESS: Precision double click worked!")
+                            success = True
+                            phase_used = "phase_1_precision_double"
             
             # ================================================================
-            # PHASE 2: SAFE BOUNDARY PATTERN (WITHIN SAFE ZONE ONLY)
+            # PHASE 2: SAFE BOUNDARY PATTERN
             # ================================================================
             if not success and not self.should_stop and len(safe_coordinates) > 1:
                 print(f"\n🛡️ PHASE 2: SAFE BOUNDARY PATTERN ({len(safe_coordinates)} coords)")
                 print("-" * 40)
                 
                 # Get state before phase 2
+                state_before = None
                 if verification_enabled:
-                    putted_before = self.get_putted_chars_value()
-                    print(f"📊 Putted BEFORE Phase 2: {putted_before}")
+                    state_before = self.get_comprehensive_slot_state()
+                    if state_before:
+                        print(f"📊 State BEFORE Phase 2: Putted={state_before.get('putted_characters')}")
                 
                 # Execute all clicks within safe boundary
                 self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method="single")
                 
                 # Wait and verify after entire phase
                 time.sleep(1.2)
-                if verification_enabled:
-                    putted_after = self.get_putted_chars_value()
-                    is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
-                    
-                    if is_success:
-                        print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked!")
-                        success = True
-                        phase_used = "phase_2_safe_boundary"
+                if verification_enabled and state_before:
+                    state_after = self.get_comprehensive_slot_state()
+                    if state_after:
+                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                            target_slot_index, state_before, state_after
+                        )
+                        
+                        if is_success:
+                            print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked!")
+                            success = True
+                            phase_used = "phase_2_safe_boundary"
+                        else:
+                            print(f"❌ Phase 2 failed: {reason}")
+                            if details.get('cross_contamination'):
+                                print("🚨 Cross-contamination detected in Phase 2!")
             
             # ================================================================
             # PHASE 3: MULTI-METHOD ON SAFE COORDS
@@ -1885,11 +2619,6 @@ class SprunkiGamePlayer:
             if not success and not self.should_stop and len(safe_coordinates) > 1:
                 print(f"\n💥 PHASE 3: MULTI-METHOD ON SAFE COORDINATES")
                 print("-" * 40)
-                
-                # Get state before phase 3
-                if verification_enabled:
-                    putted_before = self.get_putted_chars_value()
-                    print(f"📊 Putted BEFORE Phase 3: {putted_before}")
                 
                 # Try different methods on safe coordinates
                 methods = ["double", "triple", "hold"]
@@ -1899,19 +2628,30 @@ class SprunkiGamePlayer:
                         break
                         
                     print(f"   🔥 Method: {method} on safe coordinates")
+                    
+                    # Get state before this method
+                    state_before = None
+                    if verification_enabled:
+                        state_before = self.get_comprehensive_slot_state()
+                    
                     self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method=method)
                     
                     # Check after each method
                     time.sleep(1.0)
-                    if verification_enabled:
-                        putted_after = self.get_putted_chars_value()
-                        is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
-                        
-                        if is_success:
-                            print(f"🎉 PHASE 3 SUCCESS: {method} method worked!")
-                            success = True
-                            phase_used = f"phase_3_{method}_safe"
-                            break
+                    if verification_enabled and state_before:
+                        state_after = self.get_comprehensive_slot_state()
+                        if state_after:
+                            is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                                target_slot_index, state_before, state_after
+                            )
+                            
+                            if is_success:
+                                print(f"🎉 PHASE 3 SUCCESS: {method} method worked!")
+                                success = True
+                                phase_used = f"phase_3_{method}_safe"
+                                break
+                            else:
+                                print(f"❌ Method {method} failed: {reason}")
             
             # ================================================================
             # PHASE 4: EMERGENCY MICRO-EXPANSION (VERY LIMITED)
@@ -1927,49 +2667,60 @@ class SprunkiGamePlayer:
                 )
                 
                 # Get state before emergency
+                state_before = None
                 if verification_enabled:
-                    putted_before = self.get_putted_chars_value()
-                    print(f"📊 Putted BEFORE Emergency: {putted_before}")
+                    state_before = self.get_comprehensive_slot_state()
+                    if state_before:
+                        print(f"📊 State BEFORE Emergency: Putted={state_before.get('putted_characters')}")
                 
                 print(f"   🚨 Micro-expansion: {len(emergency_coords)} points at {emergency_radius}px")
                 self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
                 
                 # Final check
                 time.sleep(1.5)
-                if verification_enabled:
-                    putted_after = self.get_putted_chars_value()
-                    is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
-                    
-                    if is_success:
-                        print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked!")
-                        success = True
-                        phase_used = "phase_4_emergency_micro"
+                if verification_enabled and state_before:
+                    state_after = self.get_comprehensive_slot_state()
+                    if state_after:
+                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
+                            target_slot_index, state_before, state_after
+                        )
+                        
+                        if is_success:
+                            print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked!")
+                            success = True
+                            phase_used = "phase_4_emergency_micro"
+                        else:
+                            print(f"❌ Emergency phase failed: {reason}")
+                            if details.get('cross_contamination'):
+                                print("🚨 Cross-contamination even in emergency phase!")
             
             # ================================================================
-            # FINAL RESULT WITH SAFETY REPORT
+            # FINAL RESULT WITH COMPREHENSIVE REPORT
             # ================================================================
-            print("\n" + "="*70)
+            print("\n" + "="*80)
             if success:
-                print(f"🎉 SLOT-ISOLATED RETURN COMPLETED SUCCESSFULLY!")
+                print(f"🎉 SMART SLOT RETURN COMPLETED SUCCESSFULLY!")
                 print(f"   ✅ Target slot: {target_slot_index}")
                 print(f"   ✅ Success method: {phase_used}")
                 print(f"   🛡️ Max safe radius used: {max_safe_radius}px")
-                print(f"   🔍 Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print(f"   🔍 Enhanced verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
                 print(f"   🛡️ Cross-slot contamination: PREVENTED")
-                print("="*70)
+                print(f"   📊 Polos array tracking: {'✅ Active' if verification_enabled else '⚠️ N/A'}")
+                print("="*80)
                 return True
             else:
-                print(f"💥 SLOT-ISOLATED RETURN FAILED")
+                print(f"💥 SMART SLOT RETURN FAILED")
                 print(f"   ❌ Target slot: {target_slot_index}")
                 print(f"   ❌ All phases attempted within safe boundary")
                 print(f"   🛡️ Max safe radius: {max_safe_radius}px")
-                print(f"   🔍 Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
-                print(f"   🛡️ No cross-slot contamination occurred")
-                print("="*70)
+                print(f"   🔍 Enhanced verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print(f"   🛡️ Cross-contamination protection: ACTIVE")
+                print(f"   📊 Detailed slot state: TRACKED")
+                print("="*80)
                 return False
                 
         except Exception as e:
-            print(f"❌ Slot-isolated return error: {e}")
+            print(f"❌ Smart slot return error: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -2093,17 +2844,43 @@ class SprunkiGamePlayer:
             if self.should_stop:
                 return False
             
-            # PHASE 3: RETURN ICON
-            print("🔄 PHASE 3: Returning icon...")
+            # PHASE 3: SMART RETURN ICON WITH VALIDATION
+            print("🔄 PHASE 3: Smart returning icon with validation...")
             if progress_callback:
-                progress_callback(f"↺ Returning {mode} icon {icon_index + 1}")
-            
+                progress_callback(f"↺ Smart returning {mode} icon {icon_index + 1}")
+
+            # Enhanced return with validation
             return_success = self.corrected_return_icon(target_slot, use_cdp)
-            if not return_success:
+
+            if return_success:
+                # Post-return validation for single icon
+                time.sleep(0.3)
+                validation_state = self.get_comprehensive_slot_state()
+                
+                if validation_state and self.verification_available:
+                    polos_array = validation_state.get('polos_array', [])
+                    target_index = target_slot.get('index', -1)
+                    
+                    if target_index < len(polos_array) and polos_array[target_index] == "0":
+                        print(f"✅ Icon {icon_index + 1} return validated: Slot {target_index} clean")
+                    else:
+                        print(f"⚠️ Icon {icon_index + 1} return validation warning: May need cleanup")
+                else:
+                    print(f"✅ Icon {icon_index + 1} returned (basic validation)")
+            else:
                 print(f"⚠️ Warning: Failed to return icon {icon_index}")
-            
-            # Ready for next icon
-            time.sleep(0.2)
+                
+                # Emergency cleanup attempt for failed return
+                if self.verification_available:
+                    print(f"🚨 Emergency cleanup attempt for icon {icon_index}")
+                    emergency_success = self._emergency_slot_recovery(target_slot.get('index', -1), target_slot, use_cdp)
+                    if emergency_success:
+                        print(f"✅ Emergency cleanup successful for icon {icon_index}")
+                    else:
+                        print(f"💥 Emergency cleanup failed for icon {icon_index}")
+
+            # Brief stabilization before next icon
+            time.sleep(0.3)
             
             print(f"✅ COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
             print("="*60)
@@ -2349,25 +3126,26 @@ class SprunkiGamePlayer:
             if self.should_stop:
                 return False
             
-            # Phase 3: Return all icons
-            print("🔄 PHASE 3: Returning all icons...")
+            # Phase 3: Smart batch return all icons
+            print("🔄 PHASE 3: Smart batch returning all icons...")
             if progress_callback:
-                progress_callback(f"🧹 Cleaning up {remix_name}")
-            
-            for slot_position in range(len(remix_icons)):
-                if self.should_stop:
-                    break
-                
-                if slot_position >= len(slots):
-                    continue
-                
-                target_slot = slots[slot_position]
-                print(f"  🔄 Returning icon from slot {slot_position}...")
-                
-                # Use return method
-                use_cdp = False  # Can be customized
-                self.corrected_return_icon(target_slot, use_cdp)
-                time.sleep(0.1)
+                progress_callback(f"🧹 Smart cleanup {remix_name}")
+
+            print(f"  🔄 Using smart batch return for {len(remix_icons)} icons...")
+
+            # Use smart batch return instead of individual returns
+            success_count, total_attempted, error_log = self.smart_batch_return_all_slots(use_cdp=False)
+
+            if success_count == total_attempted:
+                print(f"  ✅ Smart batch return: {success_count}/{total_attempted} icons returned successfully")
+            else:
+                print(f"  ⚠️ Smart batch return: {success_count}/{total_attempted} icons returned")
+                if error_log:
+                    print(f"  📋 Errors: {len(error_log)} issues encountered")
+                    # Continue anyway, don't fail the entire remix
+
+            # Brief stabilization pause
+            time.sleep(0.5)
             
             print(f"✅ COMPLETED ENHANCED REMIX: {remix_name}")
             print("="*60)
@@ -2432,11 +3210,63 @@ class SprunkiGamePlayer:
             
             if progress_callback:
                 progress_callback("🎉 Enhanced full showcase workflow completed!")
-            
+
             print("\n🎉 ENHANCED FULL SHOWCASE WORKFLOW COMPLETED!")
             print(self.get_drag_statistics())
-            print("="*60)
-            
+
+            # ================================================================
+            # 🧹 FINAL SMART CLEANUP & VALIDATION
+            # ================================================================
+            print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
+            print("="*70)
+
+            try:
+                # Smart batch cleanup validation - ensure all slots are clean
+                print("🔄 Phase 1: Smart batch cleanup validation...")
+                cleanup_success_count, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
+                
+                if cleanup_total == 0:
+                    print("✅ No cleanup needed - all slots already clean")
+                elif cleanup_success_count == cleanup_total:
+                    print(f"✅ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned perfectly")
+                else:
+                    print(f"⚠️ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned")
+                    if cleanup_errors:
+                        print(f"   📋 Cleanup issues: {len(cleanup_errors)} errors")
+                        for error in cleanup_errors[:2]:  # Show first 2 errors
+                            print(f"      - {error}")
+                
+                # Comprehensive workflow validation
+                print("\n🔍 Phase 2: Comprehensive workflow validation...")
+                is_complete, remaining_issues, recommendations = self.validate_workflow_completion()
+                
+                if is_complete:
+                    print("✅ WORKFLOW VALIDATION: PERFECT COMPLETION! 🎉")
+                    print("   🛡️ All slots clean")
+                    print("   📊 State consistency verified")
+                    print("   🎯 Cross-contamination: NONE")
+                else:
+                    print(f"⚠️ WORKFLOW VALIDATION: {len(remaining_issues)} issues detected")
+                    print("📋 Issues found:")
+                    for issue in remaining_issues[:3]:  # Show first 3 issues
+                        print(f"   ❌ {issue}")
+                    
+                    if recommendations:
+                        print("💡 Recommendations:")
+                        for rec in recommendations[:2]:  # Show first 2 recommendations
+                            print(f"   💡 {rec}")
+                
+                # Enhanced summary
+                print("\n📊 ENHANCED WORKFLOW SUMMARY:")
+                summary = self.get_enhanced_workflow_summary()
+                print(summary)
+                
+            except Exception as e:
+                print(f"⚠️ Error during final validation: {e}")
+                print("📊 Basic statistics:")
+                print(self.get_drag_statistics())
+
+            print("="*70)
             return True
             
         except Exception as e:
@@ -2610,9 +3440,39 @@ class SprunkiGamePlayer:
                 if progress_callback:
                     progress_callback("👻 Horror Mode activated with verification!")
                 print("✅ ENHANCED HORROR MODE TRANSITION COMPLETED!")
-                print("="*60)
+                
+                # ================================================================
+                # 👻 HORROR MODE STATE VALIDATION
+                # ================================================================
+                print("\n👻 HORROR MODE STATE VALIDATION")
+                print("="*50)
+                
+                try:
+                    # Validate horror mode activation state
+                    horror_state = self.get_comprehensive_slot_state()
+                    
+                    if horror_state and self.verification_available:
+                        putted_chars = horror_state.get('putted_characters', 0)
+                        polos_array = horror_state.get('polos_array', [])
+                        
+                        print(f"📊 Horror mode state:")
+                        print(f"   Putted characters: {putted_chars}")
+                        print(f"   Active slots: {sum(1 for x in polos_array if x == '1') if polos_array else 'N/A'}")
+                        
+                        # Expect at least 1 active slot (the horror icon we just placed)
+                        if putted_chars >= 1:
+                            print("✅ Horror mode properly activated - icon placed")
+                        else:
+                            print("⚠️ Horror mode state unclear - may need verification")
+                    else:
+                        print("⚠️ Cannot validate horror mode state (verification disabled)")
+                    
+                except Exception as e:
+                    print(f"⚠️ Error validating horror mode state: {e}")
+                
+                print("="*50)
                 time.sleep(1.0)
-            
+
             return True
             
         except Exception as e:
@@ -2638,9 +3498,47 @@ class SprunkiGamePlayer:
                 if progress_callback:
                     progress_callback("🎉 Enhanced remix-only workflow completed!")
                 print("\n🎉 ENHANCED REMIX-ONLY WORKFLOW COMPLETED!")
-                print(self.get_drag_statistics())
+                
+                # ================================================================
+                # 🧹 REMIX-ONLY SMART CLEANUP & VALIDATION
+                # ================================================================
+                print("\n🧹 REMIX-ONLY SMART CLEANUP & VALIDATION")
                 print("="*60)
-            
+                
+                try:
+                    # Smart cleanup for remix-only mode
+                    print("🔄 Smart batch cleanup for remix-only mode...")
+                    cleanup_success_count, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
+                    
+                    if cleanup_total == 0:
+                        print("✅ No remix cleanup needed - all slots clean")
+                    elif cleanup_success_count == cleanup_total:
+                        print(f"✅ Remix cleanup: {cleanup_success_count}/{cleanup_total} perfect")
+                    else:
+                        print(f"⚠️ Remix cleanup: {cleanup_success_count}/{cleanup_total} with issues")
+                    
+                    # Remix-specific validation
+                    is_complete, remaining_issues, recommendations = self.validate_workflow_completion()
+                    
+                    if is_complete:
+                        print("✅ REMIX VALIDATION: PERFECT! All remixes cleaned properly")
+                    else:
+                        print(f"⚠️ REMIX VALIDATION: {len(remaining_issues)} cleanup issues")
+                        for issue in remaining_issues[:2]:
+                            print(f"   - {issue}")
+                    
+                    # Enhanced remix summary
+                    print("\n📊 ENHANCED REMIX WORKFLOW STATS:")
+                    summary = self.get_enhanced_workflow_summary()
+                    print(summary)
+                    
+                except Exception as e:
+                    print(f"⚠️ Error during remix validation: {e}")
+                    print("📊 Basic remix statistics:")
+                    print(self.get_drag_statistics())
+                
+                print("="*60)
+
             return success
             
         except Exception as e:
@@ -3097,6 +3995,9 @@ class SprunkiGamePlayer:
         avg_coord_retries = sum(stats.coordinate_retries) / len(stats.coordinate_retries) if stats.coordinate_retries else 0
         
         self.action_var.set("🎉 ENHANCED Auto completed!")
+        # Generate final comprehensive report
+        print("\n📋 GENERATING FINAL SUCCESS REPORT...")
+        self.cleanup_and_report("Successful_Completion")        
         messagebox.showinfo("🎉 ENHANCED Auto Completed", 
             f"ENHANCED {mode_text} workflow completed!\n\n"
             f"📊 ENHANCED DRAG STATISTICS:\n"
@@ -3131,7 +4032,10 @@ class SprunkiGamePlayer:
             print("📊 FINAL ENHANCED AUTO STATISTICS:")
             print(self.get_drag_statistics())
             print("="*50)
-        
+            
+            # Enhanced cleanup and reporting on stop
+            self.cleanup_and_report("Manual_Stop")
+
         try:
             keyboard.remove_hotkey('esc')
         except:
@@ -3155,6 +4059,177 @@ class SprunkiGamePlayer:
                 pass
             # Cleanup on exit
             self.cleanup_chrome_complete()
+
+    def get_enhanced_workflow_summary(self):
+        """
+        📊 NEW: Get comprehensive workflow summary with smart features
+        """
+        try:
+            stats = self.drag_stats
+            current_state = self.get_comprehensive_slot_state()
+            
+            # Basic stats
+            success_rate = (stats.successful_drags / stats.total_attempts * 100) if stats.total_attempts > 0 else 0
+            verification_rate = (stats.verification_enabled / stats.total_attempts * 100) if stats.total_attempts > 0 else 0
+            
+            summary = f"""
+    📊 ENHANCED WORKFLOW SUMMARY:
+    {'='*60}
+    🎯 DRAG OPERATIONS:
+    • Total attempts: {stats.total_attempts}
+    • Success rate: {success_rate:.1f}%
+    • Verification enabled: {verification_rate:.1f}%
+    • Average coordinate retries: {sum(stats.coordinate_retries) / len(stats.coordinate_retries) if stats.coordinate_retries else 0:.1f}/5
+
+    🛡️ SMART FEATURES ACTIVE:
+    • ✅ Polos array tracking
+    • ✅ Cross-contamination prevention  
+    • ✅ Pre-flight slot checking
+    • ✅ Smart batch return sequencing
+    • ✅ Emergency recovery protocols
+    • ✅ Real-time state validation
+
+    🔍 CURRENT SLOT STATE:"""
+
+            if current_state:
+                putted = current_state.get('putted_characters', 'N/A')
+                polos = current_state.get('polos_array', [])
+                summary += f"""
+    • Putted characters: {putted}
+    • Active slots: {sum(1 for x in polos if x == "1") if polos else 'N/A'}
+    • State consistency: {'✅ Good' if current_state.get('putted_polos_match', True) else '⚠️ Issues'}"""
+            else:
+                summary += "\n   • ⚠️ Current state unavailable"
+
+            summary += f"""
+
+    ⚡ SYSTEM STATUS:
+    • Verification system: {'✅ ACTIVE' if self.verification_available else '⚠️ DISABLED'}
+    • WebSocket connection: {'✅ Ready' if self._get_websocket_url() else '❌ Failed'}
+    • Configuration: {'✅ Loaded' if hasattr(self, 'config') and self.config else '❌ Missing'}
+
+    {'='*60}
+    🎉 ENHANCED SPRUNKI GAME PLAYER READY!
+    """
+            
+            return summary
+            
+        except Exception as e:
+            return f"❌ Error generating workflow summary: {e}"
+
+    def log_comprehensive_session_report(self, session_type="Unknown"):
+        """
+        📋 NEW: Generate comprehensive session report for debugging
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            report = f"""
+    {'='*80}
+    📋 COMPREHENSIVE SESSION REPORT
+    {'='*80}
+    ⏰ Session: {session_type} at {timestamp}
+
+    🎯 DRAG OPERATIONS SUMMARY:
+    {self.get_drag_statistics()}
+
+    🔍 CURRENT SYSTEM STATE:
+    {self.get_enhanced_workflow_summary()}
+
+    🛡️ SMART FEATURES STATUS:
+    • Pre-flight slot checking: {'✅ Active' if self.verification_available else '❌ Disabled'}
+    • Cross-contamination prevention: {'✅ Active' if self.verification_available else '❌ Disabled'}
+    • Smart batch return: ✅ Available
+    • Emergency recovery: ✅ Available
+    • Real-time validation: {'✅ Active' if self.verification_available else '❌ Disabled'}
+
+    📊 FINAL STATE VALIDATION:
+    """
+            
+            # Get final validation
+            is_complete, issues, recommendations = self.validate_workflow_completion()
+            
+            if is_complete:
+                report += "   ✅ PERFECT COMPLETION - No issues detected\n"
+            else:
+                report += f"   ⚠️ {len(issues)} ISSUES DETECTED:\n"
+                for i, issue in enumerate(issues, 1):
+                    report += f"      {i}. {issue}\n"
+                
+                report += f"   💡 RECOMMENDATIONS:\n"
+                for i, rec in enumerate(recommendations, 1):
+                    report += f"      {i}. {rec}\n"
+            
+            report += f"""
+    🔧 SYSTEM DIAGNOSTICS:
+    • Configuration: {'✅ Loaded' if hasattr(self, 'config') and self.config else '❌ Missing'}
+    • WebSocket: {'✅ Ready' if self._get_websocket_url() else '❌ Failed'}
+    • Verification Setup: {'✅ Done' if self.putted_chars_setup_done else '❌ Missing'}
+    • Browser State: {'✅ Active' if hasattr(self, 'chrome_process') and self.chrome_process else '❌ Closed'}
+
+    {'='*80}
+    🎉 ENHANCED SPRUNKI AUTOMATION SYSTEM REPORT COMPLETE
+    {'='*80}
+    """
+            
+            print(report)
+            
+            # Save to file for debugging
+            try:
+                import os
+                reports_dir = "session_reports"
+                os.makedirs(reports_dir, exist_ok=True)
+                
+                safe_session_type = session_type.replace(" ", "_").replace(":", "-")
+                filename = f"session_{safe_session_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                filepath = os.path.join(reports_dir, filename)
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(report)
+                
+                print(f"📄 Session report saved: {filepath}")
+                
+            except Exception as e:
+                print(f"⚠️ Could not save session report: {e}")
+            
+            return report
+            
+        except Exception as e:
+            error_report = f"❌ Error generating session report: {e}"
+            print(error_report)
+            return error_report
+
+    def cleanup_and_report(self, session_type="Workflow"):
+        """
+        🧹 NEW: Enhanced cleanup with comprehensive reporting
+        """
+        try:
+            print(f"\n🧹 ENHANCED CLEANUP & REPORTING: {session_type}")
+            print("="*60)
+            
+            # Final smart cleanup
+            if self.verification_available:
+                print("🔄 Final smart batch cleanup...")
+                cleanup_success, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
+                
+                if cleanup_total > 0:
+                    print(f"   ✅ Cleaned {cleanup_success}/{cleanup_total} slots")
+                    if cleanup_errors:
+                        print(f"   ⚠️ {len(cleanup_errors)} cleanup issues")
+            
+            # Generate comprehensive report
+            print("\n📋 Generating comprehensive session report...")
+            session_report = self.log_comprehensive_session_report(session_type)
+            
+            # Close browser if needed
+            if hasattr(self, 'chrome_process') and self.chrome_process:
+                print("\n🌐 Closing browser...")
+                self.close_game_window()
+            
+            print(f"✅ Enhanced cleanup completed for: {session_type}")
+            
+        except Exception as e:
+            print(f"❌ Error during enhanced cleanup: {e}")
 
 if __name__ == "__main__":
     print("🚀 Starting ENHANCED Sprunki Game Player...")
