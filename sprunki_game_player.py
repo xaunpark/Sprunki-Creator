@@ -19,6 +19,7 @@ from image_detector import ImageDetector
 import pygetwindow as gw
 from pathlib import Path
 from datetime import datetime
+import math
 
 class DragOperationStats:
     """Class để tracking drag operation statistics"""
@@ -813,6 +814,134 @@ class SprunkiGamePlayer:
         
         return coordinates
 
+    def generate_circle_pattern_coordinates(self, center_x, center_y, radius=50, num_points=8):
+        """
+        🔥 NEW: Generate circle pattern coordinates around slot center
+        Returns list of (x, y) tuples in circular pattern
+        """
+        import math
+        
+        coordinates = []
+        
+        # Add center point first
+        coordinates.append((center_x, center_y))
+        
+        # Generate circle points
+        for i in range(num_points):
+            angle = (2 * math.pi * i) / num_points  # Divide circle into equal parts
+            x = center_x + int(radius * math.cos(angle))
+            y = center_y + int(radius * math.sin(angle))
+            coordinates.append((x, y))
+        
+        print(f"🔄 Generated circle pattern: center + {num_points} points at {radius}px radius")
+        for i, (x, y) in enumerate(coordinates):
+            if i == 0:
+                print(f"   CENTER: ({x}, {y})")
+            else:
+                angle_deg = (360 * (i-1)) / num_points
+                print(f"   Point {i}: ({x}, {y}) - {angle_deg:.0f}°")
+        
+        return coordinates
+
+    def execute_multi_method_clicks(self, coordinates, use_cdp, domain_adj, method="single"):
+        """
+        🔥 NEW: Execute clicks using different methods on coordinate list
+        Returns True if any click was executed successfully
+        """
+        successful_clicks = 0
+        
+        print(f"🎯 Executing {method} method on {len(coordinates)} coordinates...")
+        
+        for i, (click_x, click_y) in enumerate(coordinates):
+            if self.should_stop:
+                break
+                
+            try:
+                # Add small jitter for precision
+                jitter_x = click_x + random.randint(-2, 2)
+                jitter_y = click_y + random.randint(-2, 2)
+                
+                if method == "single":
+                    success = self._execute_single_return_click(jitter_x, jitter_y, use_cdp, domain_adj)
+                elif method == "double":
+                    success = self._execute_double_return_click(jitter_x, jitter_y, use_cdp, domain_adj)
+                elif method == "triple":
+                    success = self._execute_triple_return_click(jitter_x, jitter_y, use_cdp, domain_adj)
+                elif method == "hold":
+                    success = self._execute_hold_return_click(jitter_x, jitter_y, use_cdp, domain_adj)
+                else:
+                    success = self._execute_single_return_click(jitter_x, jitter_y, use_cdp, domain_adj)
+                
+                if success:
+                    successful_clicks += 1
+                    
+                # Small delay between clicks in same method
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"   ⚠️ Click {i+1} failed: {e}")
+        
+        print(f"   ✅ Executed {successful_clicks}/{len(coordinates)} clicks successfully")
+        return successful_clicks > 0
+
+    def _execute_double_return_click(self, click_x, click_y, use_cdp, domain_adj):
+        """🔥 NEW: Execute double click"""
+        try:
+            if use_cdp:
+                success1 = self._execute_cdp_single_click(click_x, click_y)
+                time.sleep(0.1)
+                success2 = self._execute_cdp_single_click(click_x, click_y)
+                return success1 and success2
+            else:
+                success1 = self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
+                time.sleep(0.1) 
+                success2 = self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
+                return success1 and success2
+        except:
+            return False
+
+    def _execute_triple_return_click(self, click_x, click_y, use_cdp, domain_adj):
+        """🔥 NEW: Execute triple click"""
+        try:
+            success_count = 0
+            for _ in range(3):
+                if use_cdp:
+                    if self._execute_cdp_single_click(click_x, click_y):
+                        success_count += 1
+                else:
+                    if self._execute_pyautogui_single_click(click_x, click_y, domain_adj):
+                        success_count += 1
+                time.sleep(0.08)
+            return success_count >= 2  # At least 2/3 clicks successful
+        except:
+            return False
+
+    def _execute_hold_return_click(self, click_x, click_y, use_cdp, domain_adj):
+        """🔥 NEW: Execute hold-and-release click"""
+        try:
+            if use_cdp:
+                ws_url = self._get_websocket_url()
+                if ws_url:
+                    ws = websocket.create_connection(ws_url, timeout=10)
+                    # Move and press
+                    self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": click_x, "y": click_y}})
+                    time.sleep(0.1)
+                    self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed", "x": click_x, "y": click_y, "button": "left", "clickCount": 1}})
+                    time.sleep(0.5)  # Hold for 500ms
+                    self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseReleased", "x": click_x, "y": click_y, "button": "left", "clickCount": 1}})
+                    ws.close()
+                    return True
+                return False
+            else:
+                # PyAutoGUI hold click
+                pyautogui.moveTo(click_x, click_y, duration=0.1)
+                pyautogui.mouseDown(button='left')
+                time.sleep(0.5)  # Hold for 500ms
+                pyautogui.mouseUp(button='left')
+                return True
+        except:
+            return False
+
     def verify_drag_success(self, before_value, after_value):
         """
         ADDED: Verify drag success by checking if Putted characters increased by 1
@@ -1535,107 +1664,210 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        ENHANCED: Return icon with click-and-verify mechanism
-        Uses 5-coordinate retry with real-time verification
+        🔥 ENHANCED: Circle Pattern + Multi-Method Click Strategy
+        Phase-based approach with verification after each coordinate set
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             domain_adj = self.get_domain_adjustments()
             
-            print(f"🔄 ENHANCED RETURN: Click-and-verify at slot ({center_x}, {center_y})")
+            print(f"\n🔄 CIRCLE PATTERN RETURN: Multi-method at slot ({center_x}, {center_y})")
+            print("="*60)
             
             # Check if verification is available
             verification_enabled = self.verification_available
             if verification_enabled:
-                print("🔍 Return verification ENABLED - will check Putted characters")
+                print("🔍 Return verification ENABLED - will check after each phase")
             else:
                 print("⚠️ Return verification DISABLED - using fallback logic")
             
-            # Generate 5 coordinates to try for return
-            coordinates = self.generate_return_coordinates(center_x, center_y)
-            
             success = False
-            coord_used = 0
-            max_retry_sets = 2  # Try 2 sets of coordinates if first set fails
+            phase_used = "none"
             
-            for retry_set in range(max_retry_sets):
-                if success:
-                    break
-                    
-                print(f"\n🎯 RETURN ATTEMPT SET {retry_set + 1}/{max_retry_sets}")
+            # ================================================================
+            # PHASE 1: CENTER ATTACK (Single + Double Click)
+            # ================================================================
+            print("\n🎯 PHASE 1: CENTER ATTACK")
+            print("-" * 30)
+            
+            center_coords = [(center_x, center_y)]
+            
+            # Get initial state
+            putted_before = None
+            if verification_enabled:
+                putted_before = self.get_putted_chars_value()
+                print(f"📊 Putted characters BEFORE Phase 1: {putted_before}")
+            
+            # Try single click first
+            print("   🔹 Method: Single click")
+            self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
+            
+            # Wait and check
+            time.sleep(0.8)
+            if verification_enabled:
+                putted_after = self.get_putted_chars_value()
+                print(f"📊 Putted characters AFTER single: {putted_after}")
+                if self.verify_return_success(putted_before, putted_after):
+                    print("🎉 PHASE 1 SUCCESS: Single click worked!")
+                    success = True
+                    phase_used = "phase_1_single"
+            
+            # Try double click if single failed
+            if not success and not self.should_stop:
+                print("   🔹 Method: Double click")
+                self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="double")
                 
-                # If this is retry set 2, generate new coordinates with different offset
-                if retry_set == 1:
-                    print("🔄 Generating new coordinate set with different offset...")
-                    coordinates = self.generate_return_coordinates(center_x, center_y, offset=90)
+                time.sleep(0.8)
+                if verification_enabled:
+                    putted_after = self.get_putted_chars_value()
+                    print(f"📊 Putted characters AFTER double: {putted_after}")
+                    if self.verify_return_success(putted_before, putted_after):
+                        print("🎉 PHASE 1 SUCCESS: Double click worked!")
+                        success = True
+                        phase_used = "phase_1_double"
+            
+            # ================================================================
+            # PHASE 2: CIRCLE 50PX (8 Points)
+            # ================================================================
+            if not success and not self.should_stop:
+                print("\n🔄 PHASE 2: CIRCLE 50PX PATTERN")
+                print("-" * 30)
                 
-                # Try each coordinate until success
-                for coord_index, (click_x, click_y) in enumerate(coordinates):
-                    if self.should_stop or success:
+                circle_50px = self.generate_circle_pattern_coordinates(center_x, center_y, radius=50, num_points=8)
+                
+                # Get state before phase 2
+                if verification_enabled:
+                    putted_before = self.get_putted_chars_value()
+                    print(f"📊 Putted characters BEFORE Phase 2: {putted_before}")
+                
+                # Execute all clicks in circle pattern
+                self.execute_multi_method_clicks(circle_50px, use_cdp, domain_adj, method="single")
+                
+                # Wait and check after entire phase
+                time.sleep(1.2)
+                if verification_enabled:
+                    putted_after = self.get_putted_chars_value()
+                    print(f"📊 Putted characters AFTER Phase 2: {putted_after}")
+                    if self.verify_return_success(putted_before, putted_after):
+                        print("🎉 PHASE 2 SUCCESS: Circle 50px worked!")
+                        success = True
+                        phase_used = "phase_2_circle_50px"
+            
+            # ================================================================
+            # PHASE 3: CIRCLE 90PX (8 Points)
+            # ================================================================
+            if not success and not self.should_stop:
+                print("\n🔄 PHASE 3: CIRCLE 90PX PATTERN")
+                print("-" * 30)
+                
+                circle_90px = self.generate_circle_pattern_coordinates(center_x, center_y, radius=90, num_points=8)
+                
+                # Get state before phase 3
+                if verification_enabled:
+                    putted_before = self.get_putted_chars_value()
+                    print(f"📊 Putted characters BEFORE Phase 3: {putted_before}")
+                
+                # Execute all clicks in circle pattern
+                self.execute_multi_method_clicks(circle_90px, use_cdp, domain_adj, method="single")
+                
+                # Wait and check after entire phase
+                time.sleep(1.2)
+                if verification_enabled:
+                    putted_after = self.get_putted_chars_value()
+                    print(f"📊 Putted characters AFTER Phase 3: {putted_after}")
+                    if self.verify_return_success(putted_before, putted_after):
+                        print("🎉 PHASE 3 SUCCESS: Circle 90px worked!")
+                        success = True
+                        phase_used = "phase_3_circle_90px"
+            
+            # ================================================================
+            # PHASE 4: CIRCLE 150PX + MULTI-METHOD (8 Points)
+            # ================================================================
+            if not success and not self.should_stop:
+                print("\n💥 PHASE 4: CIRCLE 150PX + MULTI-METHOD")
+                print("-" * 30)
+                
+                circle_150px = self.generate_circle_pattern_coordinates(center_x, center_y, radius=150, num_points=8)
+                
+                # Get state before phase 4
+                if verification_enabled:
+                    putted_before = self.get_putted_chars_value()
+                    print(f"📊 Putted characters BEFORE Phase 4: {putted_before}")
+                
+                # Try different methods on same coordinates
+                methods = ["single", "double", "triple", "hold"]
+                
+                for method in methods:
+                    if success or self.should_stop:
                         break
                         
-                    coord_used = coord_index + 1
-                    coord_names = ["Center", "Top", "Bottom", "Left", "Right"]
-                    print(f"\n🎯 Trying return coordinate {coord_used}/5: {coord_names[coord_index]} ({click_x}, {click_y})")
+                    print(f"   🔥 Method: {method}")
+                    self.execute_multi_method_clicks(circle_150px, use_cdp, domain_adj, method=method)
                     
-                    # Get Putted characters value BEFORE click (if verification available)
-                    putted_before = None
-                    if verification_enabled:
-                        putted_before = self.get_putted_chars_value()
-                        print(f"📊 Putted characters BEFORE return: {putted_before}")
-                    
-                    # Execute single click attempt
-                    click_executed = self._execute_single_return_click(
-                        click_x, click_y, use_cdp, domain_adj
-                    )
-                    
-                    if not click_executed:
-                        print(f"❌ Click execution failed at coordinate {coord_used}")
-                        if coord_index < len(coordinates) - 1:
-                            print("   Trying next coordinate...")
-                            time.sleep(0.3)
-                        continue
-                    
-                    # Wait for game state to update
-                    verification_wait = 1.2 if verification_enabled else 0.5
-                    print(f"⏳ Waiting {verification_wait}s for return animation...")
-                    time.sleep(verification_wait)
-                    
-                    # Get Putted characters value AFTER click (if verification available)
+                    # Check after each method
+                    time.sleep(1.0)
                     if verification_enabled:
                         putted_after = self.get_putted_chars_value()
-                        print(f"📊 Putted characters AFTER return: {putted_after}")
-                        
-                        # Verify return success
+                        print(f"📊 Putted characters AFTER {method}: {putted_after}")
                         if self.verify_return_success(putted_before, putted_after):
-                            print(f"🎉 VERIFIED RETURN SUCCESS at coordinate {coord_used}!")
+                            print(f"🎉 PHASE 4 SUCCESS: {method} method worked!")
                             success = True
+                            phase_used = f"phase_4_{method}_150px"
                             break
-                        else:
-                            print(f"❌ VERIFICATION FAILED at coordinate {coord_used}")
-                            # Short delay before next coordinate
-                            if coord_index < len(coordinates) - 1:
-                                print("   Trying next coordinate...")
-                                time.sleep(0.3)
-                    else:
-                        # No verification available - assume success if click executed
-                        print(f"✅ ASSUMED RETURN SUCCESS at coordinate {coord_used} (no verification)")
-                        success = True
-                        break
             
-            # Final result
+            # ================================================================
+            # PHASE 5: EMERGENCY CARPET BOMBING
+            # ================================================================
+            if not success and not self.should_stop:
+                print("\n🚨 PHASE 5: EMERGENCY CARPET BOMBING")
+                print("-" * 30)
+                
+                # Generate random points in large area around slot
+                emergency_coords = []
+                for _ in range(20):
+                    random_x = center_x + random.randint(-200, 200)
+                    random_y = center_y + random.randint(-200, 200)
+                    emergency_coords.append((random_x, random_y))
+                
+                # Get state before emergency
+                if verification_enabled:
+                    putted_before = self.get_putted_chars_value()
+                    print(f"📊 Putted characters BEFORE Emergency: {putted_before}")
+                
+                print(f"   💣 Carpet bombing: {len(emergency_coords)} random points")
+                self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
+                
+                # Final check
+                time.sleep(1.5)
+                if verification_enabled:
+                    putted_after = self.get_putted_chars_value()
+                    print(f"📊 Putted characters AFTER Emergency: {putted_after}")
+                    if self.verify_return_success(putted_before, putted_after):
+                        print("🎉 PHASE 5 SUCCESS: Emergency bombing worked!")
+                        success = True
+                        phase_used = "phase_5_emergency"
+            
+            # ================================================================
+            # FINAL RESULT
+            # ================================================================
+            print("\n" + "="*60)
             if success:
-                print(f"🎉 ENHANCED RETURN COMPLETED SUCCESSFULLY!")
-                print(f"   Coordinate used: {coord_used}/5")
-                print(f"   Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
-                print(f"   Retry set: {retry_set + 1}")
+                print(f"🎉 CIRCLE PATTERN RETURN COMPLETED SUCCESSFULLY!")
+                print(f"   ✅ Success method: {phase_used}")
+                print(f"   🔍 Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print("="*60)
                 return True
             else:
-                print(f"💥 ENHANCED RETURN FAILED - All coordinates in {max_retry_sets} sets attempted")
+                print(f"💥 CIRCLE PATTERN RETURN FAILED")
+                print(f"   ❌ All 5 phases attempted")
+                print(f"   🔍 Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print("="*60)
                 return False
                 
         except Exception as e:
-            print(f"❌ Enhanced return error: {e}")
+            print(f"❌ Circle pattern return error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def _execute_cdp_return(self, center_x, center_y, domain_adj):
