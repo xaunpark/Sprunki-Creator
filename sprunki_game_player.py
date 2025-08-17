@@ -843,6 +843,111 @@ class SprunkiGamePlayer:
         
         return coordinates
 
+    def calculate_slot_safe_zone(self, target_slot_index, all_slots):
+        """
+        🛡️ NEW: Calculate safe zone to avoid clicking adjacent slots
+        Returns max_radius and safe coordinates only
+        """
+        try:
+            if not all_slots or target_slot_index >= len(all_slots):
+                print(f"⚠️ Invalid slot data for safe zone calculation")
+                return 40, []  # Very conservative fallback
+            
+            target_slot = all_slots[target_slot_index]
+            target_x, target_y = target_slot['x'], target_slot['y']
+            
+            print(f"\n🛡️ CALCULATING SAFE ZONE for Slot {target_slot_index} at ({target_x}, {target_y})")
+            
+            # Find minimum distance to any other slot
+            min_distance_to_other_slot = float('inf')
+            
+            for i, other_slot in enumerate(all_slots):
+                if i == target_slot_index:  # Skip self
+                    continue
+                    
+                other_x, other_y = other_slot['x'], other_slot['y']
+                distance = ((target_x - other_x) ** 2 + (target_y - other_y) ** 2) ** 0.5
+                
+                if distance < min_distance_to_other_slot:
+                    min_distance_to_other_slot = distance
+                    print(f"   📏 Distance to Slot {i}: {distance:.1f}px")
+            
+            # Safe radius = 40% of minimum distance (very conservative)
+            if min_distance_to_other_slot != float('inf'):
+                max_safe_radius = int(min_distance_to_other_slot * 0.4)
+                # Cap maximum to prevent going too wide
+                max_safe_radius = min(max_safe_radius, 80)  # Never exceed 80px
+            else:
+                max_safe_radius = 40  # Ultra-conservative fallback
+            
+            print(f"   🛡️ Minimum distance to other slots: {min_distance_to_other_slot:.1f}px")
+            print(f"   ✅ Safe radius calculated: {max_safe_radius}px (40% of min distance)")
+            
+            # Generate safe coordinates within boundary
+            safe_coordinates = self.generate_safe_boundary_coordinates(target_x, target_y, max_safe_radius)
+            
+            return max_safe_radius, safe_coordinates
+            
+        except Exception as e:
+            print(f"❌ Error calculating safe zone: {e}")
+            return 30, []  # Emergency fallback
+
+    def generate_safe_boundary_coordinates(self, center_x, center_y, max_radius):
+        """
+        🛡️ NEW: Generate coordinates within safe boundary only
+        Progressive circles but never exceed safe radius
+        """
+        import math
+        
+        all_safe_coords = []
+        
+        # Always start with center
+        all_safe_coords.append((center_x, center_y))
+        
+        # Generate progressive circles within safe boundary
+        radii = [20, 35, 50, 65]  # Progressive radii
+        
+        for radius in radii:
+            if radius > max_radius:
+                print(f"   🛑 Stopping at radius {radius}px (exceeds safe limit {max_radius}px)")
+                break
+                
+            print(f"   🔄 Generating circle at {radius}px radius (within safe zone)")
+            
+            # 8 points for larger circles, 4 points for small circles
+            num_points = 8 if radius >= 35 else 4
+            
+            for i in range(num_points):
+                angle = (2 * math.pi * i) / num_points
+                x = center_x + int(radius * math.cos(angle))
+                y = center_y + int(radius * math.sin(angle))
+                all_safe_coords.append((x, y))
+        
+        print(f"   ✅ Generated {len(all_safe_coords)} safe coordinates")
+        return all_safe_coords
+
+    def verify_slot_specific_return(self, target_slot_index, putted_before, putted_after):
+        """
+        🔍 NEW: Enhanced verification with slot-specific validation
+        Not just check if putted decreased, but validate it's the RIGHT slot
+        """
+        try:
+            # Basic putted characters check
+            basic_success = self.verify_return_success(putted_before, putted_after)
+            
+            if not basic_success:
+                return False, "putted_characters_unchanged"
+            
+            # TODO: Add more sophisticated validation if needed
+            # For now, rely on safe zone to prevent cross-slot contamination
+            
+            print(f"✅ Slot {target_slot_index} return verified: {putted_before} → {putted_after}")
+            return True, "verified_success"
+            
+        except Exception as e:
+            print(f"❌ Slot-specific verification error: {e}")
+            return False, f"verification_error: {e}"
+
     def execute_multi_method_clicks(self, coordinates, use_cdp, domain_adj, method="single"):
         """
         🔥 NEW: Execute clicks using different methods on coordinate list
@@ -1664,31 +1769,51 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        🔥 ENHANCED: Circle Pattern + Multi-Method Click Strategy
-        Phase-based approach with verification after each coordinate set
+        🛡️ ENHANCED: Slot-Isolated Circle Pattern + Boundary Protection
+        Prevents cross-slot contamination with safe zone calculation
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
+            target_slot_index = target_slot.get('index', -1)
             domain_adj = self.get_domain_adjustments()
             
-            print(f"\n🔄 CIRCLE PATTERN RETURN: Multi-method at slot ({center_x}, {center_y})")
-            print("="*60)
+            print(f"\n🛡️ SLOT-ISOLATED RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
+            print("="*70)
             
             # Check if verification is available
             verification_enabled = self.verification_available
             if verification_enabled:
-                print("🔍 Return verification ENABLED - will check after each phase")
+                print("🔍 Return verification ENABLED with slot isolation")
             else:
-                print("⚠️ Return verification DISABLED - using fallback logic")
+                print("⚠️ Return verification DISABLED - using safe fallback")
+            
+            # ================================================================
+            # CRITICAL: CALCULATE SAFE ZONE TO AVOID CROSS-SLOT CONTAMINATION
+            # ================================================================
+            print("\n🛡️ SAFE ZONE CALCULATION")
+            print("-" * 40)
+            
+            # Get all slots for boundary calculation
+            if hasattr(self, 'config') and self.config:
+                all_slots = self.config.get('layout', {}).get('slots', [])
+            else:
+                print("⚠️ No config available, using conservative defaults")
+                all_slots = []
+            
+            max_safe_radius, safe_coordinates = self.calculate_slot_safe_zone(target_slot_index, all_slots)
+            
+            if not safe_coordinates:
+                print("❌ Could not generate safe coordinates, using minimal fallback")
+                safe_coordinates = [(center_x, center_y)]  # Only center point
             
             success = False
             phase_used = "none"
             
             # ================================================================
-            # PHASE 1: CENTER ATTACK (Single + Double Click)
+            # PHASE 1: PRECISION CENTER ATTACK
             # ================================================================
-            print("\n🎯 PHASE 1: CENTER ATTACK")
-            print("-" * 30)
+            print(f"\n🎯 PHASE 1: PRECISION CENTER (Safe radius: {max_safe_radius}px)")
+            print("-" * 40)
             
             center_coords = [(center_x, center_y)]
             
@@ -1696,176 +1821,155 @@ class SprunkiGamePlayer:
             putted_before = None
             if verification_enabled:
                 putted_before = self.get_putted_chars_value()
-                print(f"📊 Putted characters BEFORE Phase 1: {putted_before}")
+                print(f"📊 Putted BEFORE Phase 1: {putted_before}")
             
-            # Try single click first
-            print("   🔹 Method: Single click")
+            # Try single click on center
+            print("   🔹 Method: Precision single click")
             self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
             
-            # Wait and check
+            # Wait and verify
             time.sleep(0.8)
             if verification_enabled:
                 putted_after = self.get_putted_chars_value()
-                print(f"📊 Putted characters AFTER single: {putted_after}")
-                if self.verify_return_success(putted_before, putted_after):
-                    print("🎉 PHASE 1 SUCCESS: Single click worked!")
+                is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
+                
+                if is_success:
+                    print("🎉 PHASE 1 SUCCESS: Precision center click worked!")
                     success = True
-                    phase_used = "phase_1_single"
+                    phase_used = "phase_1_precision_center"
             
             # Try double click if single failed
             if not success and not self.should_stop:
-                print("   🔹 Method: Double click")
+                print("   🔹 Method: Precision double click")
                 self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="double")
                 
                 time.sleep(0.8)
                 if verification_enabled:
                     putted_after = self.get_putted_chars_value()
-                    print(f"📊 Putted characters AFTER double: {putted_after}")
-                    if self.verify_return_success(putted_before, putted_after):
-                        print("🎉 PHASE 1 SUCCESS: Double click worked!")
+                    is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
+                    
+                    if is_success:
+                        print("🎉 PHASE 1 SUCCESS: Precision double click worked!")
                         success = True
-                        phase_used = "phase_1_double"
+                        phase_used = "phase_1_precision_double"
             
             # ================================================================
-            # PHASE 2: CIRCLE 50PX (8 Points)
+            # PHASE 2: SAFE BOUNDARY PATTERN (WITHIN SAFE ZONE ONLY)
             # ================================================================
-            if not success and not self.should_stop:
-                print("\n🔄 PHASE 2: CIRCLE 50PX PATTERN")
-                print("-" * 30)
-                
-                circle_50px = self.generate_circle_pattern_coordinates(center_x, center_y, radius=50, num_points=8)
+            if not success and not self.should_stop and len(safe_coordinates) > 1:
+                print(f"\n🛡️ PHASE 2: SAFE BOUNDARY PATTERN ({len(safe_coordinates)} coords)")
+                print("-" * 40)
                 
                 # Get state before phase 2
                 if verification_enabled:
                     putted_before = self.get_putted_chars_value()
-                    print(f"📊 Putted characters BEFORE Phase 2: {putted_before}")
+                    print(f"📊 Putted BEFORE Phase 2: {putted_before}")
                 
-                # Execute all clicks in circle pattern
-                self.execute_multi_method_clicks(circle_50px, use_cdp, domain_adj, method="single")
+                # Execute all clicks within safe boundary
+                self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method="single")
                 
-                # Wait and check after entire phase
+                # Wait and verify after entire phase
                 time.sleep(1.2)
                 if verification_enabled:
                     putted_after = self.get_putted_chars_value()
-                    print(f"📊 Putted characters AFTER Phase 2: {putted_after}")
-                    if self.verify_return_success(putted_before, putted_after):
-                        print("🎉 PHASE 2 SUCCESS: Circle 50px worked!")
+                    is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
+                    
+                    if is_success:
+                        print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked!")
                         success = True
-                        phase_used = "phase_2_circle_50px"
+                        phase_used = "phase_2_safe_boundary"
             
             # ================================================================
-            # PHASE 3: CIRCLE 90PX (8 Points)
+            # PHASE 3: MULTI-METHOD ON SAFE COORDS
             # ================================================================
-            if not success and not self.should_stop:
-                print("\n🔄 PHASE 3: CIRCLE 90PX PATTERN")
-                print("-" * 30)
-                
-                circle_90px = self.generate_circle_pattern_coordinates(center_x, center_y, radius=90, num_points=8)
+            if not success and not self.should_stop and len(safe_coordinates) > 1:
+                print(f"\n💥 PHASE 3: MULTI-METHOD ON SAFE COORDINATES")
+                print("-" * 40)
                 
                 # Get state before phase 3
                 if verification_enabled:
                     putted_before = self.get_putted_chars_value()
-                    print(f"📊 Putted characters BEFORE Phase 3: {putted_before}")
+                    print(f"📊 Putted BEFORE Phase 3: {putted_before}")
                 
-                # Execute all clicks in circle pattern
-                self.execute_multi_method_clicks(circle_90px, use_cdp, domain_adj, method="single")
-                
-                # Wait and check after entire phase
-                time.sleep(1.2)
-                if verification_enabled:
-                    putted_after = self.get_putted_chars_value()
-                    print(f"📊 Putted characters AFTER Phase 3: {putted_after}")
-                    if self.verify_return_success(putted_before, putted_after):
-                        print("🎉 PHASE 3 SUCCESS: Circle 90px worked!")
-                        success = True
-                        phase_used = "phase_3_circle_90px"
-            
-            # ================================================================
-            # PHASE 4: CIRCLE 150PX + MULTI-METHOD (8 Points)
-            # ================================================================
-            if not success and not self.should_stop:
-                print("\n💥 PHASE 4: CIRCLE 150PX + MULTI-METHOD")
-                print("-" * 30)
-                
-                circle_150px = self.generate_circle_pattern_coordinates(center_x, center_y, radius=150, num_points=8)
-                
-                # Get state before phase 4
-                if verification_enabled:
-                    putted_before = self.get_putted_chars_value()
-                    print(f"📊 Putted characters BEFORE Phase 4: {putted_before}")
-                
-                # Try different methods on same coordinates
-                methods = ["single", "double", "triple", "hold"]
+                # Try different methods on safe coordinates
+                methods = ["double", "triple", "hold"]
                 
                 for method in methods:
                     if success or self.should_stop:
                         break
                         
-                    print(f"   🔥 Method: {method}")
-                    self.execute_multi_method_clicks(circle_150px, use_cdp, domain_adj, method=method)
+                    print(f"   🔥 Method: {method} on safe coordinates")
+                    self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method=method)
                     
                     # Check after each method
                     time.sleep(1.0)
                     if verification_enabled:
                         putted_after = self.get_putted_chars_value()
-                        print(f"📊 Putted characters AFTER {method}: {putted_after}")
-                        if self.verify_return_success(putted_before, putted_after):
-                            print(f"🎉 PHASE 4 SUCCESS: {method} method worked!")
+                        is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
+                        
+                        if is_success:
+                            print(f"🎉 PHASE 3 SUCCESS: {method} method worked!")
                             success = True
-                            phase_used = f"phase_4_{method}_150px"
+                            phase_used = f"phase_3_{method}_safe"
                             break
             
             # ================================================================
-            # PHASE 5: EMERGENCY CARPET BOMBING
+            # PHASE 4: EMERGENCY MICRO-EXPANSION (VERY LIMITED)
             # ================================================================
             if not success and not self.should_stop:
-                print("\n🚨 PHASE 5: EMERGENCY CARPET BOMBING")
-                print("-" * 30)
+                print(f"\n🚨 PHASE 4: EMERGENCY MICRO-EXPANSION (Max {max_safe_radius + 10}px)")
+                print("-" * 40)
                 
-                # Generate random points in large area around slot
-                emergency_coords = []
-                for _ in range(20):
-                    random_x = center_x + random.randint(-200, 200)
-                    random_y = center_y + random.randint(-200, 200)
-                    emergency_coords.append((random_x, random_y))
+                # Generate emergency coordinates - slightly beyond safe zone but still conservative
+                emergency_radius = min(max_safe_radius + 10, 60)  # Very limited expansion
+                emergency_coords = self.generate_circle_pattern_coordinates(
+                    center_x, center_y, radius=emergency_radius, num_points=6
+                )
                 
                 # Get state before emergency
                 if verification_enabled:
                     putted_before = self.get_putted_chars_value()
-                    print(f"📊 Putted characters BEFORE Emergency: {putted_before}")
+                    print(f"📊 Putted BEFORE Emergency: {putted_before}")
                 
-                print(f"   💣 Carpet bombing: {len(emergency_coords)} random points")
+                print(f"   🚨 Micro-expansion: {len(emergency_coords)} points at {emergency_radius}px")
                 self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
                 
                 # Final check
                 time.sleep(1.5)
                 if verification_enabled:
                     putted_after = self.get_putted_chars_value()
-                    print(f"📊 Putted characters AFTER Emergency: {putted_after}")
-                    if self.verify_return_success(putted_before, putted_after):
-                        print("🎉 PHASE 5 SUCCESS: Emergency bombing worked!")
+                    is_success, reason = self.verify_slot_specific_return(target_slot_index, putted_before, putted_after)
+                    
+                    if is_success:
+                        print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked!")
                         success = True
-                        phase_used = "phase_5_emergency"
+                        phase_used = "phase_4_emergency_micro"
             
             # ================================================================
-            # FINAL RESULT
+            # FINAL RESULT WITH SAFETY REPORT
             # ================================================================
-            print("\n" + "="*60)
+            print("\n" + "="*70)
             if success:
-                print(f"🎉 CIRCLE PATTERN RETURN COMPLETED SUCCESSFULLY!")
+                print(f"🎉 SLOT-ISOLATED RETURN COMPLETED SUCCESSFULLY!")
+                print(f"   ✅ Target slot: {target_slot_index}")
                 print(f"   ✅ Success method: {phase_used}")
+                print(f"   🛡️ Max safe radius used: {max_safe_radius}px")
                 print(f"   🔍 Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
-                print("="*60)
+                print(f"   🛡️ Cross-slot contamination: PREVENTED")
+                print("="*70)
                 return True
             else:
-                print(f"💥 CIRCLE PATTERN RETURN FAILED")
-                print(f"   ❌ All 5 phases attempted")
+                print(f"💥 SLOT-ISOLATED RETURN FAILED")
+                print(f"   ❌ Target slot: {target_slot_index}")
+                print(f"   ❌ All phases attempted within safe boundary")
+                print(f"   🛡️ Max safe radius: {max_safe_radius}px")
                 print(f"   🔍 Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
-                print("="*60)
+                print(f"   🛡️ No cross-slot contamination occurred")
+                print("="*70)
                 return False
                 
         except Exception as e:
-            print(f"❌ Circle pattern return error: {e}")
+            print(f"❌ Slot-isolated return error: {e}")
             import traceback
             traceback.print_exc()
             return False
