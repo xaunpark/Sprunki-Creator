@@ -14,6 +14,7 @@ import random
 import websocket
 from image_detector import ImageDetector
 import numpy as np
+from page_load_verifier import PageLoadVerifier
 
 # Try to import optional dependencies with fallbacks
 try:

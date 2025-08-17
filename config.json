@@ -36,18 +36,26 @@
     "user_data_dir": "chrome_debug_profile",
     "window_size": "1280,720",
     "headless": false,
-    "load_extensions": true
+    "load_extensions": true,
+    "extra_args": [
+      "--disable-dev-shm-usage",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-background-timer-throttling"
+    ]
   },
   "game": {
     "supported_domains": [
       "cocrea.world"
     ],
     "default_timeout": 30,
-    "page_load_wait": 20,
+    "page_load_wait": 8,
     "game_load_wait": 10,
     "max_pagedown_attempts": 5,
     "fullscreen_wait": 8,
-    "intro_skip_clicks": 10
+    "intro_skip_clicks": 10,
+    "run_button_max_retries": 2,
+    "enhanced_verification": true
   },
   "automation": {
     "pyautogui": {
@@ -191,5 +199,21 @@
     "error_notification": true,
     "sound_enabled": false,
     "sound_file": "notification.wav"
+  },
+  "vps_optimization": {
+    "enabled": true,
+    "enhanced_page_verification": true,
+    "max_page_load_wait": 120,
+    "verification_check_interval": 2,
+    "auto_refresh_on_timeout": true,
+    "max_refresh_attempts": 3,
+    "page_ready_criteria": {
+      "min_pass_rate": 0.7,
+      "critical_checks": [
+        "documentState",
+        "gameElements",
+        "noLoadingSpinners"
+      ]
+    }
   }
 }
