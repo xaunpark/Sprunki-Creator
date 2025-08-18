@@ -22,21 +22,21 @@ try:
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
-    print("⚠️ OpenCV not available - using basic image comparison")
+    print("âš ï¸ OpenCV not available - using basic image comparison")
 
 try:
     from skimage.metrics import structural_similarity as ssim
     HAS_SSIM = True
 except ImportError:
     HAS_SSIM = False
-    print("⚠️ scikit-image not available - using custom SSIM implementation")
+    print("âš ï¸ scikit-image not available - using custom SSIM implementation")
 
 try:
     from PIL import Image
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
-    print("⚠️ PIL not available - using pyautogui screenshots only")
+    print("âš ï¸ PIL not available - using pyautogui screenshots only")
 
 class SprunkiJSONGenerator:
     """
@@ -86,6 +86,10 @@ class SprunkiJSONGenerator:
         print(f"   Debug port: {self.debugging_port}")
         print(f"   Page load wait: {self.page_load_wait}s")
         print(f"   Game load wait: {self.game_load_wait}s")
+        print(f"   Intro skip clicks: {self.intro_skip_clicks}")
+
+        # Load verification settings for JSON Generator
+        self.load_verification_config()        
         # === END OF CONFIG SECTION ===
         
         # JavaScript for comprehensive state capture (coordinates + game data)
@@ -185,57 +189,57 @@ class SprunkiJSONGenerator:
                 });
                 
                 // =====================================================
-                // UPDATED: Hybrid Logic cho Icons (Logic Mới)
+                // UPDATED: Hybrid Logic cho Icons (Logic Má»›i)
                 // =====================================================
-                console.log("🚀 Bắt đầu quá trình lấy icons (Logic Hybrid - Chính xác nhất)...");
+                console.log("ðŸš€ Báº¯t Ä‘áº§u quÃ¡ trÃ¬nh láº¥y icons (Logic Hybrid - ChÃ­nh xÃ¡c nháº¥t)...");
 
-                // BƯỚC 1: LẤY CÁC ICON ĐANG HIỂN THỊ
-                console.log("▶️ Bước 1: Tìm các sprite 'Icons' đang hiển thị...");
+                // BÆ¯á»šC 1: Láº¤Y CÃC ICON ÄANG HIá»‚N THá»Š
+                console.log("â–¶ï¸ BÆ°á»›c 1: TÃ¬m cÃ¡c sprite 'Icons' Ä‘ang hiá»ƒn thá»‹...");
                 const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
-                console.log(`✅ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
+                console.log(`âœ… TÃ¬m tháº¥y ${visibleIcons.length} icons trÃªn mÃ n hÃ¬nh.`);
 
-                // BƯỚC 2: TẠO "DANH BẠ" SPRITE (chỉ loại bỏ Stage)
-                console.log("▶️ Bước 2: Tạo 'danh bạ' gồm tất cả các sprite (trừ Stage) để tra cứu...");
+                // BÆ¯á»šC 2: Táº O "DANH Báº " SPRITE (chá»‰ loáº¡i bá» Stage)
+                console.log("â–¶ï¸ BÆ°á»›c 2: Táº¡o 'danh báº¡' gá»“m táº¥t cáº£ cÃ¡c sprite (trá»« Stage) Ä‘á»ƒ tra cá»©u...");
                 const allSprites = allTargets.filter(t => !t.isStage);
-                console.log(`✅ 'Danh bạ' có ${allSprites.length} sprite.`);
+                console.log(`âœ… 'Danh báº¡' cÃ³ ${allSprites.length} sprite.`);
 
-                // BƯỚC 3: SẮP XẾP ICONS DỰA TRÊN INDEX CỦA SPRITE TƯƠNG ỨNG
-                console.log("▶️ Bước 3: Sắp xếp icons bằng cách liên kết ngược lại với sprite gốc...");
+                // BÆ¯á»šC 3: Sáº®P Xáº¾P ICONS Dá»°A TRÃŠN INDEX Cá»¦A SPRITE TÆ¯Æ NG á»¨NG
+                console.log("â–¶ï¸ BÆ°á»›c 3: Sáº¯p xáº¿p icons báº±ng cÃ¡ch liÃªn káº¿t ngÆ°á»£c láº¡i vá»›i sprite gá»‘c...");
                 visibleIcons.sort((iconA, iconB) => {
-                    // Lấy 'chìa khóa' từ mỗi icon
+                    // Láº¥y 'chÃ¬a khÃ³a' tá»« má»—i icon
                     const charIndexA = Math.floor(iconA.currentCostume / 3);
                     const charIndexB = Math.floor(iconB.currentCostume / 3);
 
-                    // Dùng 'chìa khóa' để tra cứu trong 'danh bạ'
+                    // DÃ¹ng 'chÃ¬a khÃ³a' Ä‘á»ƒ tra cá»©u trong 'danh báº¡'
                     const linkedSpriteA = allSprites[charIndexA];
                     const linkedSpriteB = allSprites[charIndexB];
 
-                    // Nếu vì lý do nào đó không tìm thấy sprite, không sắp xếp
+                    // Náº¿u vÃ¬ lÃ½ do nÃ o Ä‘Ã³ khÃ´ng tÃ¬m tháº¥y sprite, khÃ´ng sáº¯p xáº¿p
                     if (!linkedSpriteA || !linkedSpriteB) {
-                        console.warn(`Không thể tìm thấy sprite liên kết cho index ${charIndexA} hoặc ${charIndexB}`);
+                        console.warn(`KhÃ´ng thá»ƒ tÃ¬m tháº¥y sprite liÃªn káº¿t cho index ${charIndexA} hoáº·c ${charIndexB}`);
                         return 0;
                     }
 
-                    // Lấy 'số báo danh' (runtime index) của sprite đã liên kết
+                    // Láº¥y 'sá»‘ bÃ¡o danh' (runtime index) cá»§a sprite Ä‘Ã£ liÃªn káº¿t
                     const runtimeIndexA = allTargets.indexOf(linkedSpriteA);
                     const runtimeIndexB = allTargets.indexOf(linkedSpriteB);
 
-                    // So sánh 'số báo danh' để sắp xếp
+                    // So sÃ¡nh 'sá»‘ bÃ¡o danh' Ä‘á»ƒ sáº¯p xáº¿p
                     return runtimeIndexA - runtimeIndexB;
                 });
 
-                // BƯỚC 4: TẠO MẢNG KẾT QUẢ CUỐI CÙNG
-                console.log("▶️ Bước 4: Chuyển đổi tọa độ và gán index tuần tự mới...");
+                // BÆ¯á»šC 4: Táº O Máº¢NG Káº¾T QUáº¢ CUá»I CÃ™NG
+                console.log("â–¶ï¸ BÆ°á»›c 4: Chuyá»ƒn Ä‘á»•i tá»a Ä‘á»™ vÃ  gÃ¡n index tuáº§n tá»± má»›i...");
                 const icons = visibleIcons.map((icon, index) => {
                     const pixelCoords = toPixelWithMenu(icon.x, icon.y);
                     return {
                         x: pixelCoords.x,
                         y: pixelCoords.y,
-                        index: index // Gán index tuần tự 0, 1, 2... sau khi đã sắp xếp
+                        index: index // GÃ¡n index tuáº§n tá»± 0, 1, 2... sau khi Ä‘Ã£ sáº¯p xáº¿p
                     };
                 });
 
-                console.log("✅ HOÀN THÀNH! Icons được tạo theo logic Hybrid mới:");
+                console.log("âœ… HOÃ€N THÃ€NH! Icons Ä‘Æ°á»£c táº¡o theo logic Hybrid má»›i:");
                 console.table(icons);
                 // =====================================================
                 // END: UPDATED Hybrid Logic cho Icons
@@ -269,7 +273,7 @@ class SprunkiJSONGenerator:
         self.js_find_skip_intro = '''
         new Promise(async (resolve, reject) => {
             try {
-                console.log("🔍 Searching for ALL Skip Intro buttons (multiple detection)...");
+                console.log("ðŸ” Searching for ALL Skip Intro buttons (multiple detection)...");
                 
                 function findVM() {
                     if (window.__vm && window.__vm.runtime) return window.__vm;
@@ -304,13 +308,13 @@ class SprunkiJSONGenerator:
                 
                 const vm = findVM();
                 if (!vm) {
-                    console.log("❌ VM not found - cannot search for Skip Intro buttons");
+                    console.log("âŒ VM not found - cannot search for Skip Intro buttons");
                     resolve({ found: false, count: 0, buttons: [], reason: "vm_not_found" });
                     return;
                 }
                 
                 const allTargets = vm.runtime.targets.map(t => t);
-                console.log(`🎯 Total targets found: ${allTargets.length}`);
+                console.log(`ðŸŽ¯ Total targets found: ${allTargets.length}`);
                 
                 // Find ALL targets with name "Intro" and costume "Skip"
                 const introTargets = allTargets.filter(target => {
@@ -325,10 +329,10 @@ class SprunkiJSONGenerator:
                     return hasSkipCostume;
                 });
                 
-                console.log(`🔍 Found ${introTargets.length} 'Intro' targets with 'Skip' costume`);
+                console.log(`ðŸ” Found ${introTargets.length} 'Intro' targets with 'Skip' costume`);
                 
                 if (introTargets.length === 0) {
-                    console.log("ℹ️ No Skip Intro buttons found");
+                    console.log("â„¹ï¸ No Skip Intro buttons found");
                     
                     // DEBUG: Check for alternative patterns
                     const skipCostumeTargets = allTargets.filter(target => 
@@ -336,7 +340,7 @@ class SprunkiJSONGenerator:
                     );
                     
                     if (skipCostumeTargets.length > 0) {
-                        console.log(`🔍 Found ${skipCostumeTargets.length} targets with 'Skip' costume but different names:`);
+                        console.log(`ðŸ” Found ${skipCostumeTargets.length} targets with 'Skip' costume but different names:`);
                         skipCostumeTargets.forEach((target, index) => {
                             console.log(`   Target ${index + 1}: '${target.sprite.name}' - Position: (${target.x}, ${target.y}) - Visible: ${target.visible}`);
                         });
@@ -350,7 +354,7 @@ class SprunkiJSONGenerator:
                 const skipIntroButtons = [];
                 
                 introTargets.forEach((target, index) => {
-                    console.log(`\\n🎯 Processing Intro Target ${index + 1}/${introTargets.length}:`);
+                    console.log(`\\nðŸŽ¯ Processing Intro Target ${index + 1}/${introTargets.length}:`);
                     console.log(`   - Logic Position: (${target.x}, ${target.y})`);
                     console.log(`   - Visible: ${target.visible}`);
                     console.log(`   - Current Costume: ${target.sprite.costumes[target.currentCostume]?.name || 'Unknown'}`);
@@ -374,10 +378,10 @@ class SprunkiJSONGenerator:
                         
                         skipIntroButtons.push(buttonInfo);
                         
-                        console.log(`   ✅ Converted to pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
-                        console.log(`   📋 Added to click list (${target.visible ? 'VISIBLE' : 'HIDDEN'})`);
+                        console.log(`   âœ… Converted to pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
+                        console.log(`   ðŸ“‹ Added to click list (${target.visible ? 'VISIBLE' : 'HIDDEN'})`);
                     } else {
-                        console.log(`   ❌ Coordinate conversion failed for target ${index + 1}`);
+                        console.log(`   âŒ Coordinate conversion failed for target ${index + 1}`);
                     }
                 });
                 
@@ -385,13 +389,13 @@ class SprunkiJSONGenerator:
                 const visibleButtons = skipIntroButtons.filter(btn => btn.visible);
                 const hiddenButtons = skipIntroButtons.filter(btn => !btn.visible);
                 
-                console.log(`\\n📊 SKIP INTRO BUTTONS SUMMARY:`);
+                console.log(`\\nðŸ“Š SKIP INTRO BUTTONS SUMMARY:`);
                 console.log(`   - Total found: ${skipIntroButtons.length}`);
                 console.log(`   - Visible: ${visibleButtons.length}`);
                 console.log(`   - Hidden: ${hiddenButtons.length}`);
                 
                 if (skipIntroButtons.length > 0) {
-                    console.log(`\\n🎯 Will click ALL ${skipIntroButtons.length} buttons to ensure success:`);
+                    console.log(`\\nðŸŽ¯ Will click ALL ${skipIntroButtons.length} buttons to ensure success:`);
                     skipIntroButtons.forEach((btn, index) => {
                         console.log(`   ${index + 1}. (${btn.x}, ${btn.y}) - ${btn.visible ? 'VISIBLE' : 'HIDDEN'} - Costume: ${btn.currentCostumeName}`);
                     });
@@ -407,7 +411,7 @@ class SprunkiJSONGenerator:
                 });
                 
             } catch(e) { 
-                console.error("❌ Error searching for Skip Intro buttons:", e);
+                console.error("âŒ Error searching for Skip Intro buttons:", e);
                 resolve({ found: false, count: 0, buttons: [], reason: "error", error: e.toString() }); 
             }
         });
@@ -498,58 +502,58 @@ class SprunkiJSONGenerator:
                 }
 
                 // =====================================================
-                // UPDATED: Function getIconsWithHybridLogic (Logic Mới)
+                // UPDATED: Function getIconsWithHybridLogic (Logic Má»›i)
                 // =====================================================
                 function getIconsWithHybridLogic(allTargets) {
-                    console.log("🚀 Bắt đầu quá trình lấy icons (Logic Hybrid - Chính xác nhất)...");
+                    console.log("ðŸš€ Báº¯t Ä‘áº§u quÃ¡ trÃ¬nh láº¥y icons (Logic Hybrid - ChÃ­nh xÃ¡c nháº¥t)...");
 
-                    // BƯỚC 1: LẤY CÁC ICON ĐANG HIỂN THỊ
-                    console.log("▶️ Bước 1: Tìm các sprite 'Icons' đang hiển thị...");
+                    // BÆ¯á»šC 1: Láº¤Y CÃC ICON ÄANG HIá»‚N THá»Š
+                    console.log("â–¶ï¸ BÆ°á»›c 1: TÃ¬m cÃ¡c sprite 'Icons' Ä‘ang hiá»ƒn thá»‹...");
                     const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
-                    console.log(`✅ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
+                    console.log(`âœ… TÃ¬m tháº¥y ${visibleIcons.length} icons trÃªn mÃ n hÃ¬nh.`);
 
-                    // BƯỚC 2: TẠO "DANH BẠ" SPRITE (chỉ loại bỏ Stage)
-                    console.log("▶️ Bước 2: Tạo 'danh bạ' gồm tất cả các sprite (trừ Stage) để tra cứu...");
+                    // BÆ¯á»šC 2: Táº O "DANH Báº " SPRITE (chá»‰ loáº¡i bá» Stage)
+                    console.log("â–¶ï¸ BÆ°á»›c 2: Táº¡o 'danh báº¡' gá»“m táº¥t cáº£ cÃ¡c sprite (trá»« Stage) Ä‘á»ƒ tra cá»©u...");
                     const allSprites = allTargets.filter(t => !t.isStage);
-                    console.log(`✅ 'Danh bạ' có ${allSprites.length} sprite.`);
+                    console.log(`âœ… 'Danh báº¡' cÃ³ ${allSprites.length} sprite.`);
 
-                    // BƯỚC 3: SẮP XẾP ICONS DỰA TRÊN INDEX CỦA SPRITE TƯƠNG ỨNG
-                    console.log("▶️ Bước 3: Sắp xếp icons bằng cách liên kết ngược lại với sprite gốc...");
+                    // BÆ¯á»šC 3: Sáº®P Xáº¾P ICONS Dá»°A TRÃŠN INDEX Cá»¦A SPRITE TÆ¯Æ NG á»¨NG
+                    console.log("â–¶ï¸ BÆ°á»›c 3: Sáº¯p xáº¿p icons báº±ng cÃ¡ch liÃªn káº¿t ngÆ°á»£c láº¡i vá»›i sprite gá»‘c...");
                     visibleIcons.sort((iconA, iconB) => {
-                        // Lấy 'chìa khóa' từ mỗi icon
+                        // Láº¥y 'chÃ¬a khÃ³a' tá»« má»—i icon
                         const charIndexA = Math.floor(iconA.currentCostume / 3);
                         const charIndexB = Math.floor(iconB.currentCostume / 3);
 
-                        // Dùng 'chìa khóa' để tra cứu trong 'danh bạ'
+                        // DÃ¹ng 'chÃ¬a khÃ³a' Ä‘á»ƒ tra cá»©u trong 'danh báº¡'
                         const linkedSpriteA = allSprites[charIndexA];
                         const linkedSpriteB = allSprites[charIndexB];
 
-                        // Nếu vì lý do nào đó không tìm thấy sprite, không sắp xếp
+                        // Náº¿u vÃ¬ lÃ½ do nÃ o Ä‘Ã³ khÃ´ng tÃ¬m tháº¥y sprite, khÃ´ng sáº¯p xáº¿p
                         if (!linkedSpriteA || !linkedSpriteB) {
-                            console.warn(`Không thể tìm thấy sprite liên kết cho index ${charIndexA} hoặc ${charIndexB}`);
+                            console.warn(`KhÃ´ng thá»ƒ tÃ¬m tháº¥y sprite liÃªn káº¿t cho index ${charIndexA} hoáº·c ${charIndexB}`);
                             return 0;
                         }
 
-                        // Lấy 'số báo danh' (runtime index) của sprite đã liên kết
+                        // Láº¥y 'sá»‘ bÃ¡o danh' (runtime index) cá»§a sprite Ä‘Ã£ liÃªn káº¿t
                         const runtimeIndexA = allTargets.indexOf(linkedSpriteA);
                         const runtimeIndexB = allTargets.indexOf(linkedSpriteB);
 
-                        // So sánh 'số báo danh' để sắp xếp
+                        // So sÃ¡nh 'sá»‘ bÃ¡o danh' Ä‘á»ƒ sáº¯p xáº¿p
                         return runtimeIndexA - runtimeIndexB;
                     });
 
-                    // BƯỚC 4: TẠO MẢNG KẾT QUẢ CUỐI CÙNG
-                    console.log("▶️ Bước 4: Chuyển đổi tọa độ và gán index tuần tự mới...");
+                    // BÆ¯á»šC 4: Táº O Máº¢NG Káº¾T QUáº¢ CUá»I CÃ™NG
+                    console.log("â–¶ï¸ BÆ°á»›c 4: Chuyá»ƒn Ä‘á»•i tá»a Ä‘á»™ vÃ  gÃ¡n index tuáº§n tá»± má»›i...");
                     const finalLayoutIcons = visibleIcons.map((icon, index) => {
                         const pixelCoords = toPixelWithMenu(icon.x, icon.y);
                         return {
                             x: pixelCoords.x,
                             y: pixelCoords.y,
-                            index: index // Gán index tuần tự 0, 1, 2... sau khi đã sắp xếp
+                            index: index // GÃ¡n index tuáº§n tá»± 0, 1, 2... sau khi Ä‘Ã£ sáº¯p xáº¿p
                         };
                     });
 
-                    console.log("✅ HOÀN THÀNH! Icons được tạo theo logic Hybrid mới:");
+                    console.log("âœ… HOÃ€N THÃ€NH! Icons Ä‘Æ°á»£c táº¡o theo logic Hybrid má»›i:");
                     console.table(finalLayoutIcons);
                     
                     return finalLayoutIcons;
@@ -583,7 +587,7 @@ class SprunkiJSONGenerator:
                 // NEW: Find Skip Intro Button Logic
                 // =====================================================
                 function findSkipIntroButton(allTargets) {
-                    console.log("🔍 Searching for Skip Intro button...");
+                    console.log("ðŸ” Searching for Skip Intro button...");
                     
                     try {
                         // Search for target with name "Intro" and costume "Skip"
@@ -599,7 +603,7 @@ class SprunkiJSONGenerator:
                             );
                             
                             if (hasSkipCostume) {
-                                console.log(`✅ Found Skip Intro target: ${target.sprite.name}`);
+                                console.log(`âœ… Found Skip Intro target: ${target.sprite.name}`);
                                 console.log(`   - Position: (${target.x}, ${target.y})`);
                                 console.log(`   - Visible: ${target.visible}`);
                                 console.log(`   - Costumes: ${target.sprite.costumes.map(c => c.name).join(', ')}`);
@@ -614,7 +618,7 @@ class SprunkiJSONGenerator:
                             const pixelCoords = toPixelWithMenu(introTarget.x, introTarget.y);
                             
                             if (pixelCoords.x !== null && pixelCoords.y !== null) {
-                                console.log(`✅ Skip Intro button found at pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
+                                console.log(`âœ… Skip Intro button found at pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
                                 return {
                                     x: pixelCoords.x,
                                     y: pixelCoords.y,
@@ -624,16 +628,16 @@ class SprunkiJSONGenerator:
                                     costumes: introTarget.sprite.costumes.map(c => c.name)
                                 };
                             } else {
-                                console.warn("⚠️ Skip Intro target found but coordinates conversion failed");
+                                console.warn("âš ï¸ Skip Intro target found but coordinates conversion failed");
                                 return null;
                             }
                         } else {
-                            console.log("ℹ️ Skip Intro button not found (no target with name 'Intro' and costume 'Skip')");
+                            console.log("â„¹ï¸ Skip Intro button not found (no target with name 'Intro' and costume 'Skip')");
                             return null;
                         }
                         
                     } catch (error) {
-                        console.error("❌ Error while searching for Skip Intro button:", error);
+                        console.error("âŒ Error while searching for Skip Intro button:", error);
                         return null;
                     }
                 }
@@ -643,14 +647,14 @@ class SprunkiJSONGenerator:
 
                 // Log the result for debugging
                 if (skipIntroButton) {
-                    console.log("🎯 Skip Intro Button Detection Result:");
+                    console.log("ðŸŽ¯ Skip Intro Button Detection Result:");
                     console.log(`   - Found: YES`);
                     console.log(`   - Coordinates: (${skipIntroButton.x}, ${skipIntroButton.y})`);
                     console.log(`   - Visible: ${skipIntroButton.visible}`);
                     console.log(`   - Target Name: ${skipIntroButton.targetName}`);
                     console.log(`   - Available Costumes: ${skipIntroButton.costumes.join(', ')}`);
                 } else {
-                    console.log("🎯 Skip Intro Button Detection Result:");
+                    console.log("ðŸŽ¯ Skip Intro Button Detection Result:");
                     console.log(`   - Found: NO`);
                     console.log(`   - Reason: Target 'Intro' with costume 'Skip' not found in allTargets`);
                 }
@@ -681,10 +685,411 @@ class SprunkiJSONGenerator:
         });
         '''
 
+    def load_verification_config(self):
+            """Load verification configuration from config.json"""
+            try:
+                # Page verification settings
+                self.page_verification = self.config.get('page_verification', {})
+                self.page_verification_enabled = self.page_verification.get('enabled', True)
+                self.page_verification_timeout = self.page_verification.get('timeout_ms', 120000) / 1000  # Convert to seconds
+                self.page_verification_interval = self.page_verification.get('check_interval_ms', 2000) / 1000
+                self.page_verification_criteria = self.page_verification.get('criteria', {})
+                self.page_verification_retries = self.page_verification.get('max_retries', 3)
+                self.stabilization_wait = self.page_verification.get('stabilization_wait_seconds', 3)
+                
+                # Game load verification settings
+                self.game_verification = self.config.get('game_load_verification', {})
+                self.game_verification_enabled = self.game_verification.get('enabled', True)
+                self.game_verification_timeout = self.game_verification.get('timeout_ms', 90000) / 1000
+                self.game_verification_interval = self.game_verification.get('check_interval_ms', 2000) / 1000
+                self.game_container_selectors = self.game_verification.get('game_container_selectors', [])
+                self.min_containers_required = self.game_verification.get('min_containers_required', 1)
+                self.check_react_components = self.game_verification.get('check_react_components', True)
+                self.check_run_button_dom = self.game_verification.get('check_run_button_dom', True)
+                
+                print(f"✅ JSON Generator verification config loaded:")
+                print(f"   Page verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}")
+                print(f"   Game verification: {'✅ Enabled' if self.game_verification_enabled else '❌ Disabled'}")
+                print(f"   Page timeout: {self.page_verification_timeout}s")
+                print(f"   Game timeout: {self.game_verification_timeout}s")
+                print(f"   Stabilization wait: {self.stabilization_wait}s")
+                
+            except Exception as e:
+                print(f"⚠️ Could not load verification config, using defaults: {e}")
+                # Set defaults if config loading fails
+                self.page_verification_enabled = True
+                self.game_verification_enabled = True
+                self.page_verification_timeout = 120
+                self.game_verification_timeout = 90
+                self.page_verification_interval = 2
+                self.game_verification_interval = 2
+                self.stabilization_wait = 3
+                self.game_container_selectors = [".ccw-stage-wrapper", "#stage-canvas-wrapper", "canvas"]
+                self.min_containers_required = 1
+                self.check_react_components = True
+                self.check_run_button_dom = True
+
+    def _execute_verification_js(self, js_code):
+        """Execute JavaScript for verification via WebSocket/CDP"""
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                print("⚠️ WebSocket not available for verification, skipping JS check")
+                return None
+            
+            ws = websocket.create_connection(ws_url, timeout=10)
+            
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": js_code, "returnByValue": True}
+            })
+            
+            ws.close()
+            
+            if response and 'result' in response:
+                result = response.get('result', {}).get('result', {}).get('value')
+                return result
+            else:
+                print("⚠️ No response from verification JavaScript")
+                return None
+                
+        except Exception as e:
+            print(f"⚠️ Error executing verification JavaScript: {e}")
+            return None
+
+    def verify_page_fully_loaded(self, target_url):
+        """
+        🔍 Smart Page Load Verification System for JSON Generator
+        Checks if page is fully loaded before proceeding with Run button detection
+        """
+        try:
+            if not self.page_verification_enabled:
+                print("🔍 Page verification disabled, assuming page ready")
+                return True
+            
+            print(f"\n🔍 JSON GENERATOR - SMART PAGE VERIFICATION: {target_url}")
+            print("="*70)
+            
+            # JavaScript for comprehensive page verification
+            verification_js = """
+            (() => {
+                const results = {
+                    documentState: document.readyState,
+                    basicElements: {
+                        hasBody: !!document.body,
+                        hasHead: !!document.head,
+                        bodyChildren: document.body ? document.body.children.length : 0
+                    },
+                    loadingSpinners: {
+                        count: 0,
+                        types: []
+                    },
+                    networkActivity: {
+                        pendingRequests: 0,
+                        estimatedIdle: true
+                    },
+                    currentUrl: window.location.href,
+                    timestamp: Date.now()
+                };
+                
+                // Check for common loading spinner patterns
+                const spinnerSelectors = [
+                    '.loading', '.spinner', '.loader', 
+                    '[class*="loading"]', '[class*="spinner"]', '[class*="loader"]',
+                    '.fa-spinner', '.fa-circle-o-notch'
+                ];
+                
+                spinnerSelectors.forEach(selector => {
+                    const elements = document.querySelectorAll(selector);
+                    if (elements.length > 0) {
+                        const visibleSpinners = Array.from(elements).filter(el => {
+                            const style = window.getComputedStyle(el);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                        });
+                        if (visibleSpinners.length > 0) {
+                            results.loadingSpinners.count += visibleSpinners.length;
+                            results.loadingSpinners.types.push(selector);
+                        }
+                    }
+                });
+                
+                // Estimate network activity
+                try {
+                    if (window.performance && window.performance.getEntriesByType) {
+                        const navigationEntries = window.performance.getEntriesByType('navigation');
+                        if (navigationEntries.length > 0) {
+                            const nav = navigationEntries[0];
+                            results.networkActivity.loadComplete = nav.loadEventEnd > 0;
+                            results.networkActivity.domComplete = nav.domComplete > 0;
+                        }
+                    }
+                } catch (e) {
+                    console.log('Network activity check failed:', e);
+                }
+                
+                // Overall readiness assessment
+                results.readyScore = 0;
+                if (results.documentState === 'complete') results.readyScore += 30;
+                if (results.basicElements.hasBody && results.basicElements.hasHead) results.readyScore += 25;
+                if (results.basicElements.bodyChildren > 0) results.readyScore += 20;
+                if (results.loadingSpinners.count === 0) results.readyScore += 25;
+                
+                results.isReady = results.readyScore >= 75;
+                
+                return results;
+            })();
+            """
+            
+            start_time = time.time()
+            max_retries = self.page_verification_retries
+            
+            for attempt in range(1, max_retries + 1):
+                print(f"🔍 JSON Generator page verification attempt {attempt}/{max_retries}")
+                
+                # Execute verification JavaScript
+                verification_result = self._execute_verification_js(verification_js)
+                
+                if verification_result:
+                    document_state = verification_result.get('documentState', 'unknown')
+                    basic_elements = verification_result.get('basicElements', {})
+                    loading_spinners = verification_result.get('loadingSpinners', {})
+                    ready_score = verification_result.get('readyScore', 0)
+                    is_ready = verification_result.get('isReady', False)
+                    
+                    print(f"   📊 Document state: {document_state}")
+                    print(f"   📊 Basic elements: Body={basic_elements.get('hasBody')}, Head={basic_elements.get('hasHead')}, Children={basic_elements.get('bodyChildren', 0)}")
+                    print(f"   📊 Loading spinners: {loading_spinners.get('count', 0)} active")
+                    print(f"   📊 Ready score: {ready_score}/100")
+                    print(f"   📊 Overall assessment: {'✅ READY' if is_ready else '⏳ NOT READY'}")
+                    
+                    if is_ready:
+                        elapsed = time.time() - start_time
+                        print(f"✅ JSON GENERATOR PAGE VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
+                        print("="*70)
+                        return True
+                    else:
+                        if loading_spinners.get('count', 0) > 0:
+                            spinner_types = ', '.join(loading_spinners.get('types', []))
+                            print(f"   ⏳ Waiting for loading spinners to disappear: {spinner_types}")
+                        if document_state != 'complete':
+                            print(f"   ⏳ Waiting for document to complete loading...")
+                        if basic_elements.get('bodyChildren', 0) == 0:
+                            print(f"   ⏳ Waiting for page content to render...")
+                
+                else:
+                    print(f"   ⚠️ Verification JavaScript failed, using fallback check")
+                    # Fallback: Simple document ready check
+                    simple_check = self._execute_verification_js("document.readyState")
+                    if simple_check == 'complete':
+                        print(f"   ✅ Fallback check passed: document.readyState = complete")
+                        return True
+                
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > self.page_verification_timeout:
+                    print(f"⚠️ JSON Generator page verification timeout ({self.page_verification_timeout}s exceeded)")
+                    print("   Proceeding anyway with Run button detection...")
+                    return True  # Don't fail completely, proceed with detection
+                
+                # Wait before next attempt
+                if attempt < max_retries:
+                    print(f"   ⏳ Waiting {self.page_verification_interval}s before next check...")
+                    time.sleep(self.page_verification_interval)
+            
+            # All attempts failed, but don't block the workflow
+            print(f"⚠️ JSON Generator page verification failed after {max_retries} attempts")
+            print("   Proceeding anyway with Run button detection...")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Error in JSON Generator page verification: {e}")
+            print("   Proceeding anyway with Run button detection...")
+            return True  # Don't block workflow on verification errors
+
+    def verify_game_components_ready(self):
+        """
+        🎮 Smart Game Load Verification System for JSON Generator
+        Checks if game components are ready before proceeding with Run button detection
+        """
+        try:
+            if not self.game_verification_enabled:
+                print("🎮 Game verification disabled, assuming game ready")
+                return True
+            
+            print(f"\n🎮 JSON GENERATOR - SMART GAME VERIFICATION")
+            print("="*70)
+            
+            # JavaScript for game component verification
+            game_verification_js = f"""
+            (() => {{
+                const selectors = {self.game_container_selectors};
+                const results = {{
+                    gameContainers: [],
+                    reactComponents: {{
+                        found: false,
+                        details: []
+                    }},
+                    runButtonInDOM: false,
+                    overallReady: false,
+                    timestamp: Date.now()
+                }};
+                
+                // Check game container elements
+                selectors.forEach(selector => {{
+                    const elements = document.querySelectorAll(selector);
+                    if (elements.length > 0) {{
+                        elements.forEach((el, index) => {{
+                            const rect = el.getBoundingClientRect();
+                            results.gameContainers.push({{
+                                selector: selector,
+                                index: index,
+                                id: el.id || 'no-id',
+                                className: el.className || 'no-class',
+                                visible: rect.width > 0 && rect.height > 0,
+                                hasChildren: el.children.length > 0
+                            }});
+                        }});
+                    }}
+                }});
+                
+                // Check for React components
+                const checkReactComponents = () => {{
+                    const elements = document.querySelectorAll('*');
+                    let reactFound = false;
+                    for (let el of elements) {{
+                        const keys = Object.keys(el);
+                        const reactKey = keys.find(key => key.startsWith('__react'));
+                        if (reactKey) {{
+                            reactFound = true;
+                            results.reactComponents.details.push({{
+                                element: el.tagName,
+                                reactKey: reactKey.substring(0, 20) + '...'
+                            }});
+                            if (results.reactComponents.details.length >= 3) break;
+                        }}
+                    }}
+                    results.reactComponents.found = reactFound;
+                }};
+                
+                if ({str(self.check_react_components).lower()}) {{
+                    checkReactComponents();
+                }}
+                
+                // Check if Run button exists in DOM
+                if ({str(self.check_run_button_dom).lower()}) {{
+                    const runButtonSelectors = [
+                        'button[type="submit"]',
+                        'button:contains("Run")',
+                        '.run-button',
+                        '#run-button',
+                        '[class*="run"]',
+                        '[class*="play"]',
+                        '[class*="start"]',
+                        'button',
+                        'input[type="submit"]'
+                    ];
+                    
+                    for (let selector of runButtonSelectors) {{
+                        try {{
+                            const buttons = document.querySelectorAll(selector);
+                            for (let button of buttons) {{
+                                const text = button.textContent || button.value || button.alt || '';
+                                if (text.toLowerCase().includes('run') || 
+                                    text.toLowerCase().includes('play') || 
+                                    text.toLowerCase().includes('start')) {{
+                                    results.runButtonInDOM = true;
+                                    break;
+                                }}
+                            }}
+                            if (results.runButtonInDOM) break;
+                        }} catch (e) {{
+                            // Skip invalid selectors
+                        }}
+                    }}
+                }}
+                
+                // Assessment
+                const gameContainersFound = results.gameContainers.length >= {self.min_containers_required};
+                const reactReady = !{str(self.check_react_components).lower()} || results.reactComponents.found;
+                const runButtonReady = !{str(self.check_run_button_dom).lower()} || results.runButtonInDOM;
+                
+                results.overallReady = gameContainersFound && reactReady && runButtonReady;
+                
+                return results;
+            }})();
+            """
+            
+            start_time = time.time()
+            max_attempts = 3
+            
+            for attempt in range(1, max_attempts + 1):
+                print(f"🎮 JSON Generator game verification attempt {attempt}/{max_attempts}")
+                
+                # Execute game verification JavaScript
+                game_result = self._execute_verification_js(game_verification_js)
+                
+                if game_result:
+                    game_containers = game_result.get('gameContainers', [])
+                    react_components = game_result.get('reactComponents', {})
+                    run_button_in_dom = game_result.get('runButtonInDOM', False)
+                    overall_ready = game_result.get('overallReady', False)
+                    
+                    print(f"   🎯 Game containers found: {len(game_containers)}")
+                    for container in game_containers[:3]:  # Show first 3
+                        print(f"      - {container['selector']}: visible={container['visible']}, children={container['hasChildren']}")
+                    
+                    if self.check_react_components:
+                        react_found = react_components.get('found', False)
+                        react_count = len(react_components.get('details', []))
+                        print(f"   ⚛️ React components: {'✅ Found' if react_found else '❌ Not found'} ({react_count} detected)")
+                    
+                    if self.check_run_button_dom:
+                        print(f"   🔘 Run button in DOM: {'✅ Found' if run_button_in_dom else '❌ Not found'}")
+                    
+                    print(f"   🎯 Overall game ready: {'✅ YES' if overall_ready else '❌ NO'}")
+                    
+                    if overall_ready:
+                        elapsed = time.time() - start_time
+                        print(f"✅ JSON GENERATOR GAME VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
+                        print("="*70)
+                        return True
+                    else:
+                        if len(game_containers) < self.min_containers_required:
+                            print(f"   ⏳ Waiting for game containers to load ({len(game_containers)}/{self.min_containers_required})")
+                        if self.check_react_components and not react_components.get('found'):
+                            print(f"   ⏳ Waiting for React components to initialize")
+                        if self.check_run_button_dom and not run_button_in_dom:
+                            print(f"   ⏳ Waiting for Run button to appear in DOM")
+                
+                else:
+                    print(f"   ⚠️ Game verification JavaScript failed")
+                
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > self.game_verification_timeout:
+                    print(f"⚠️ JSON Generator game verification timeout ({self.game_verification_timeout}s exceeded)")
+                    print("   Proceeding anyway with Run button detection...")
+                    return True
+                
+                # Wait before next attempt
+                if attempt < max_attempts:
+                    print(f"   ⏳ Waiting {self.game_verification_interval}s before next check...")
+                    time.sleep(self.game_verification_interval)
+            
+            # All attempts failed, but don't block the workflow
+            print(f"⚠️ JSON Generator game verification failed after {max_attempts} attempts")
+            print("   Proceeding anyway with Run button detection...")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Error in JSON Generator game verification: {e}")
+            print("   Proceeding anyway with Run button detection...")
+            return True
+
     def find_phase_variable(self, state_data):
         """Find phase variable in state data"""
         try:
-            print("🔍 Searching for phase variable in state data...")
+            print("ðŸ” Searching for phase variable in state data...")
             
             # Search in global variables first
             variables = state_data.get('variables', {})
@@ -692,7 +1097,7 @@ class SprunkiJSONGenerator:
             # Look for phase variable by name
             for var_key, var_data in variables.items():
                 if isinstance(var_data, dict) and var_data.get('name') == 'phase':
-                    print(f"✅ Found phase variable in global variables: {var_data}")
+                    print(f"âœ… Found phase variable in global variables: {var_data}")
                     return var_data.get('value')
             
             # Search in allTargets variables
@@ -701,35 +1106,35 @@ class SprunkiJSONGenerator:
                 target_vars = target.get('variables', {})
                 for var_key, var_data in target_vars.items():
                     if isinstance(var_data, dict) and var_data.get('name') == 'phase':
-                        print(f"✅ Found phase variable in target '{target.get('name', 'Unknown')}': {var_data}")
+                        print(f"âœ… Found phase variable in target '{target.get('name', 'Unknown')}': {var_data}")
                         return var_data.get('value')
             
-            print("⚠️ Phase variable not found in state data")
+            print("âš ï¸ Phase variable not found in state data")
             return None
             
         except Exception as e:
-            print(f"❌ Error finding phase variable: {e}")
+            print(f"âŒ Error finding phase variable: {e}")
             return None
 
     def detect_horror_by_phase_comparison(self, before_state, after_state):
         """Detect horror by comparing phase value before and after drag"""
         try:
-            print("\n🔍 PHASE COMPARISON HORROR DETECTION")
+            print("\nðŸ” PHASE COMPARISON HORROR DETECTION")
             print("="*60)
             
             # Find phase values
             phase_before = self.find_phase_variable(before_state)
             phase_after = self.find_phase_variable(after_state)
             
-            print(f"📊 Phase value BEFORE drag: {phase_before}")
-            print(f"📊 Phase value AFTER drag: {phase_after}")
+            print(f"ðŸ“Š Phase value BEFORE drag: {phase_before}")
+            print(f"ðŸ“Š Phase value AFTER drag: {phase_after}")
             
             # Convert to string for comparison (handle both string and numeric values)
             phase_before_str = str(phase_before) if phase_before is not None else None
             phase_after_str = str(phase_after) if phase_after is not None else None
             
             if phase_before_str is None or phase_after_str is None:
-                print("❌ Cannot find phase variable - will use screenshot fallback")
+                print("âŒ Cannot find phase variable - will use screenshot fallback")
                 return {
                     'has_horror': None,  # Signal to use fallback
                     'method': 'phase_not_found',
@@ -760,7 +1165,7 @@ class SprunkiJSONGenerator:
                 'confidence': confidence
             }
             
-            print(f"\n🎯 PHASE COMPARISON RESULT:")
+            print(f"\nðŸŽ¯ PHASE COMPARISON RESULT:")
             print(f"   Phase transition: {phase_before_str} -> {phase_after_str}")
             print(f"   Has Horror: {has_horror} (only 1->2 counts as horror)")
             print(f"   Method: {method}")
@@ -770,7 +1175,7 @@ class SprunkiJSONGenerator:
             return result
             
         except Exception as e:
-            print(f"❌ Error in phase comparison: {e}")
+            print(f"âŒ Error in phase comparison: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -785,7 +1190,7 @@ class SprunkiJSONGenerator:
     def calculate_icons_area_from_coordinates(self, state_data):
         """Calculate bounding box for icons 0-18 area from state data"""
         try:
-            print("📐 Calculating icons area from state data...")
+            print("ðŸ“ Calculating icons area from state data...")
             
             # Check if state_data has icons directly or needs to be extracted
             icons = None
@@ -794,28 +1199,28 @@ class SprunkiJSONGenerator:
             elif 'layout' in state_data and 'icons' in state_data['layout']:
                 icons = state_data['layout']['icons']
             else:
-                print("❌ No icons data found in state")
+                print("âŒ No icons data found in state")
                 return None
             
             if not icons:
-                print("❌ Icons list is empty")
+                print("âŒ Icons list is empty")
                 return None
                 
             # Filter icons 0-18 (exclude icon 19 if exists)
             target_icons = [icon for icon in icons if icon.get('index', 0) <= 18]
             
             if len(target_icons) < 5:
-                print(f"❌ Only {len(target_icons)} target icons available, need at least 5")
+                print(f"âŒ Only {len(target_icons)} target icons available, need at least 5")
                 return None
             
             # Find valid coordinates
             valid_icons = [icon for icon in target_icons if icon.get('x') is not None and icon.get('y') is not None]
             
             if len(valid_icons) == 0:
-                print("❌ No icons with valid coordinates found")
+                print("âŒ No icons with valid coordinates found")
                 return None
                 
-            print(f"📊 Found {len(valid_icons)} icons with valid coordinates (0-18)")
+            print(f"ðŸ“Š Found {len(valid_icons)} icons with valid coordinates (0-18)")
             
             x_coords = [icon['x'] for icon in valid_icons]
             y_coords = [icon['y'] for icon in valid_icons]
@@ -832,11 +1237,11 @@ class SprunkiJSONGenerator:
                 'icons_count': len(valid_icons)
             }
             
-            print(f"📐 Icons area (0-18): {area['x']}, {area['y']}, {area['width']}x{area['height']}")
+            print(f"ðŸ“ Icons area (0-18): {area['x']}, {area['y']}, {area['width']}x{area['height']}")
             return area
             
         except Exception as e:
-            print(f"❌ Error calculating icons area: {e}")
+            print(f"âŒ Error calculating icons area: {e}")
             return None
 
     def capture_icons_area_screenshot(self, area_coords):
@@ -856,11 +1261,11 @@ class SprunkiJSONGenerator:
             
             # Convert to numpy array
             screenshot_np = np.array(screenshot)
-            print(f"📸 Screenshot captured: {screenshot_np.shape}")
+            print(f"ðŸ“¸ Screenshot captured: {screenshot_np.shape}")
             return screenshot_np
             
         except Exception as e:
-            print(f"❌ Error capturing screenshot: {e}")
+            print(f"âŒ Error capturing screenshot: {e}")
             return None
 
     def calculate_color_histogram(self, img):
@@ -895,13 +1300,13 @@ class SprunkiJSONGenerator:
             }
             
         except Exception as e:
-            print(f"❌ Error calculating histogram: {e}")
+            print(f"âŒ Error calculating histogram: {e}")
             return {'red': 0, 'green': 0, 'blue': 0, 'brightness': 0, 'saturation': 0}
 
     def compare_icons_histogram(self, before_img, after_img):
         """Histogram comparison for horror detection"""
         try:
-            print("🎨 Analyzing color histogram changes...")
+            print("ðŸŽ¨ Analyzing color histogram changes...")
             
             # Calculate histograms
             before_hist = self.calculate_color_histogram(before_img)
@@ -937,7 +1342,7 @@ class SprunkiJSONGenerator:
             return result
             
         except Exception as e:
-            print(f"❌ Error in histogram comparison: {e}")
+            print(f"âŒ Error in histogram comparison: {e}")
             return {'has_horror': False, 'horror_score': 0, 'red_shift': 0, 'brightness_change': 0, 'saturation_change': 0}
 
     def rgb_to_grayscale(self, img):
@@ -950,7 +1355,7 @@ class SprunkiJSONGenerator:
     def compare_icons_ssim(self, before_img, after_img):
         """SSIM comparison for horror detection"""
         try:
-            print("🔍 Analyzing structural similarity (SSIM)...")
+            print("ðŸ” Analyzing structural similarity (SSIM)...")
             
             # Convert to grayscale for structure comparison
             before_gray = self.rgb_to_grayscale(before_img)
@@ -988,7 +1393,7 @@ class SprunkiJSONGenerator:
             return result
             
         except Exception as e:
-            print(f"❌ Error in SSIM comparison: {e}")
+            print(f"âŒ Error in SSIM comparison: {e}")
             return {'has_horror': False, 'similarity_score': 1.0, 'difference_score': 0.0}
 
     def simple_ssim_fallback(self, img1, img2):
@@ -1015,17 +1420,17 @@ class SprunkiJSONGenerator:
             return max(0, min(1, ssim_value))
             
         except Exception as e:
-            print(f"❌ Error in simple SSIM: {e}")
+            print(f"âŒ Error in simple SSIM: {e}")
             return 0.5
 
     def detect_horror_icons_area(self, before_img, after_img):
         """Histogram + SSIM Combo for horror detection"""
         try:
-            print("\n🔍 VISUAL HORROR DETECTION - Histogram + SSIM Combo")
+            print("\nðŸ” VISUAL HORROR DETECTION - Histogram + SSIM Combo")
             print("="*60)
             
             if before_img is None or after_img is None:
-                print("❌ Missing screenshot data")
+                print("âŒ Missing screenshot data")
                 return {'has_horror': False, 'confidence': 0, 'method': 'failed', 'reason': 'Missing images'}
             
             # Method 1: Color analysis (for horror color shifts)
@@ -1063,7 +1468,7 @@ class SprunkiJSONGenerator:
                 'structural_details': structural_result
             }
             
-            print(f"\n🎯 HISTOGRAM + SSIM COMBO RESULT:")
+            print(f"\nðŸŽ¯ HISTOGRAM + SSIM COMBO RESULT:")
             print(f"   Color Horror Score: {color_result['horror_score']:.3f} (threshold: 0.25)")
             print(f"   Structural Change: {structural_result['difference_score']:.3f} (threshold: 0.30)")  
             print(f"   Has Horror: {has_horror} (method: {method})")
@@ -1073,7 +1478,7 @@ class SprunkiJSONGenerator:
             return result
             
         except Exception as e:
-            print(f"❌ Error in horror detection: {e}")
+            print(f"âŒ Error in horror detection: {e}")
             import traceback
             traceback.print_exc()
             return {'has_horror': False, 'confidence': 0, 'method': 'error', 'reason': str(e)}
@@ -1081,7 +1486,7 @@ class SprunkiJSONGenerator:
     def calculate_extended_screenshot_area(self, state_data):
         """Calculate extended area from (0,0) to icon index 18 coordinates"""
         try:
-            print("📐 Calculating extended screenshot area from (0,0) to icon 18...")
+            print("ðŸ“ Calculating extended screenshot area from (0,0) to icon 18...")
             
             # Check if state_data has icons directly or needs to be extracted
             icons = None
@@ -1090,11 +1495,11 @@ class SprunkiJSONGenerator:
             elif 'layout' in state_data and 'icons' in state_data['layout']:
                 icons = state_data['layout']['icons']
             else:
-                print("❌ No icons data found in state")
+                print("âŒ No icons data found in state")
                 return None
             
             if not icons:
-                print("❌ Icons list is empty")
+                print("âŒ Icons list is empty")
                 return None
                 
             # Find icon index 18 (highest icon before icon 19)
@@ -1105,10 +1510,10 @@ class SprunkiJSONGenerator:
                     break
             
             if not icon_18 or icon_18.get('x') is None or icon_18.get('y') is None:
-                print("❌ Icon index 18 not found or has invalid coordinates")
+                print("âŒ Icon index 18 not found or has invalid coordinates")
                 return None
             
-            print(f"📊 Found icon 18 at coordinates: ({icon_18['x']}, {icon_18['y']})")
+            print(f"ðŸ“Š Found icon 18 at coordinates: ({icon_18['x']}, {icon_18['y']})")
             
             # Calculate extended area from (0,0) to icon 18 position
             icon_size = 100  # Estimated icon size
@@ -1127,18 +1532,18 @@ class SprunkiJSONGenerator:
             area['width'] = max(area['width'], 800)
             area['height'] = max(area['height'], 600)
             
-            print(f"📐 Extended screenshot area: {area['x']}, {area['y']}, {area['width']}x{area['height']}")
+            print(f"ðŸ“ Extended screenshot area: {area['x']}, {area['y']}, {area['width']}x{area['height']}")
             print(f"   Coverage: (0,0) to icon 18 at ({icon_18['x']}, {icon_18['y']})")
             return area
             
         except Exception as e:
-            print(f"❌ Error calculating extended screenshot area: {e}")
+            print(f"âŒ Error calculating extended screenshot area: {e}")
             return None
 
     def compare_icons_histogram_extended(self, before_img, after_img):
         """Enhanced histogram comparison for extended area with dynamic background tolerance"""
         try:
-            print("🎨 Analyzing color histogram changes (Extended Area)...")
+            print("ðŸŽ¨ Analyzing color histogram changes (Extended Area)...")
             
             # Calculate histograms
             before_hist = self.calculate_color_histogram(before_img)
@@ -1177,13 +1582,13 @@ class SprunkiJSONGenerator:
             return result
             
         except Exception as e:
-            print(f"❌ Error in extended histogram comparison: {e}")
+            print(f"âŒ Error in extended histogram comparison: {e}")
             return {'has_horror': False, 'horror_score': 0, 'red_shift': 0, 'brightness_change': 0, 'saturation_change': 0, 'threshold_used': 0.40}
 
     def compare_icons_ssim_extended(self, before_img, after_img):
         """Enhanced SSIM comparison for extended area with dynamic background tolerance"""
         try:
-            print("🔍 Analyzing structural similarity (SSIM - Extended Area)...")
+            print("ðŸ” Analyzing structural similarity (SSIM - Extended Area)...")
             
             # Convert to grayscale for structure comparison
             before_gray = self.rgb_to_grayscale(before_img)
@@ -1224,19 +1629,19 @@ class SprunkiJSONGenerator:
             return result
             
         except Exception as e:
-            print(f"❌ Error in extended SSIM comparison: {e}")
+            print(f"âŒ Error in extended SSIM comparison: {e}")
             return {'has_horror': False, 'similarity_score': 1.0, 'difference_score': 0.0, 'threshold_used': 0.45}
 
     def detect_horror_extended_area(self, before_img, after_img):
         """Enhanced horror detection for extended area (0,0) to icon 18 with background tolerance"""
         try:
-            print("\n🔍 EXTENDED AREA HORROR DETECTION - Enhanced for Dynamic Background")
+            print("\nðŸ” EXTENDED AREA HORROR DETECTION - Enhanced for Dynamic Background")
             print("="*70)
             print("Coverage: (0,0) to icon 18 - Adjusted thresholds for background movement")
             print("="*70)
             
             if before_img is None or after_img is None:
-                print("❌ Missing screenshot data")
+                print("âŒ Missing screenshot data")
                 return {'has_horror': False, 'confidence': 0, 'method': 'failed', 'reason': 'Missing images'}
             
             # Method 1: Enhanced color analysis for extended area
@@ -1289,7 +1694,7 @@ class SprunkiJSONGenerator:
                 'area_type': 'extended_0_0_to_icon18'
             }
             
-            print(f"\n🎯 EXTENDED AREA DETECTION RESULT:")
+            print(f"\nðŸŽ¯ EXTENDED AREA DETECTION RESULT:")
             print(f"   Color Horror Score: {color_result['horror_score']:.3f} (threshold: {color_result['threshold_used']})")
             print(f"   Structural Change: {structural_result['difference_score']:.3f} (threshold: {structural_result['threshold_used']})")  
             print(f"   Has Horror: {has_horror} (method: {method})")
@@ -1301,7 +1706,7 @@ class SprunkiJSONGenerator:
             return result
             
         except Exception as e:
-            print(f"❌ Error in extended area horror detection: {e}")
+            print(f"âŒ Error in extended area horror detection: {e}")
             import traceback
             traceback.print_exc()
             return {'has_horror': False, 'confidence': 0, 'method': 'error', 'reason': str(e), 'area_type': 'extended_0_0_to_icon18'}
@@ -1358,13 +1763,13 @@ class SprunkiJSONGenerator:
     def cleanup_chrome_complete(self):
         """Complete cleanup: Close Chrome debug entirely and clean all resources"""
         try:
-            print("🧹 Complete cleanup: Closing Chrome debug and cleaning resources...")
+            print("ðŸ§¹ Complete cleanup: Closing Chrome debug and cleaning resources...")
             
             for title_part in ['cocrea.world', 'Chrome']:
                 windows = gw.getWindowsWithTitle(title_part)
                 for window in windows:
                     try:
-                        print(f"   🗂️ Closing window: {window.title}")
+                        print(f"   ðŸ—‚ï¸ Closing window: {window.title}")
                         window.close()
                     except:
                         pass
@@ -1373,7 +1778,7 @@ class SprunkiJSONGenerator:
             
             if hasattr(self, 'chrome_process') and self.chrome_process:
                 try:
-                    print("   🔄 Terminating Chrome process...")
+                    print("   ðŸ”„ Terminating Chrome process...")
                     self.chrome_process.terminate()
                     self.chrome_process.wait(timeout=5)
                 except:
@@ -1390,150 +1795,200 @@ class SprunkiJSONGenerator:
                         if proc.info['name'] and 'chrome' in proc.info['name'].lower():
                             cmdline = proc.info.get('cmdline', [])
                             if cmdline and '--remote-debugging-port=9222' in ' '.join(cmdline):
-                                print(f"   ⚔️ Killing leftover Chrome debug process: {proc.info['pid']}")
+                                print(f"   âš”ï¸ Killing leftover Chrome debug process: {proc.info['pid']}")
                                 proc.kill()
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
             except ImportError:
-                print("   ⚠️ psutil not available for process cleanup")
+                print("   âš ï¸ psutil not available for process cleanup")
             
             self.ws_url = None
             
-            print("✅ Complete cleanup finished - Chrome debug fully closed")
+            print("âœ… Complete cleanup finished - Chrome debug fully closed")
             time.sleep(1)
             return True
             
         except Exception as e:
-            print(f"❌ Complete cleanup error: {e}")
+            print(f"âŒ Complete cleanup error: {e}")
             return False
 
     def navigate_and_prepare_game(self, url):
-        try:
-            print(f"🌐 Opening game URL with fresh Chrome debug session: {url}")
-            
-            self.cleanup_chrome_complete()
-            time.sleep(2)
-            
-            self.game_url = url
-            
-            extensions_dir = os.path.join(os.getcwd(), 'extensions')
-            ublock_path = None
-            if os.path.exists(extensions_dir):
-                subdirs = [d for d in os.listdir(extensions_dir) if os.path.isdir(os.path.join(extensions_dir, d))]
-                if subdirs: 
-                    ublock_path = os.path.join(extensions_dir, subdirs[0])
-            
-            if not ublock_path:
-                messagebox.showerror("Extension Not Found", "uBlock Origin not found in 'extensions' folder.")
-                return False
-            
-            print(f"✅ Found AdBlocker: {ublock_path}")
-            
-            chrome_exe = None
-            chrome_paths = [
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe", 
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-            ]
-            for path in chrome_paths:
-                if os.path.exists(path): 
-                    chrome_exe = path
-                    break
-                    
-            if not chrome_exe: 
-                messagebox.showerror("Error", "Google Chrome not found.")
-                return False
+            """Navigate to game URL using Chrome debug mode with Smart Verification for JSON Generator"""
+            try:
+                print(f"🌐 JSON Generator: Opening game URL with fresh Chrome debug session: {url}")
                 
-            chrome_cmd = [
-                chrome_exe, 
-                f"--remote-debugging-port=9222", 
-                f"--user-data-dir={os.path.join(os.getcwd(), 'chrome_debug_profile')}",
-                "--no-first-run", 
-                "--window-size=1280,720", 
-                "--remote-allow-origins=*",
-                f"--load-extension={ublock_path}", 
-                url
-            ]
-            
-            print("🔧 Launching fresh Chrome with AdBlocker and DevTools...")
-            self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            print("⏳ Waiting 20s for fresh Chrome and AdBlocker to initialize...")
-            time.sleep(20)
-            
-            game_window = None
-            for _ in range(10): 
-                possible_windows = gw.getWindowsWithTitle('cocrea.world')
-                if not possible_windows: 
-                    possible_windows = gw.getWindowsWithTitle('Chrome')
-                if possible_windows: 
-                    game_window = possible_windows[0]
-                    break
-                time.sleep(1)
-                
-            if not game_window: 
-                messagebox.showerror("Setup Error", "Could not find the game window.")
-                return False
-                
-            print(f"🎯 Found fresh game window: '{game_window.title}'. Activating...")
-            game_window.activate()
-            time.sleep(0.5)
-            game_window.maximize()
-            time.sleep(2)
-            
-            detector = ImageDetector("cocrea.world")
-            run_button_clicked = False
-            max_retries = 3
-            
-            for attempt in range(1, max_retries + 1):
-                print(f"\n--- 🚀 Finding 'Run' Button - Attempt {attempt}/{max_retries} ---")
-                
-                if attempt > 1:
-                    print("   -> Action: Reloading page to clear potential issues...")
-                    pyautogui.hotkey('ctrl', 'r')
-                    time.sleep(2)
-                    
-                wait_duration = 40
-                print(f"   -> Waiting {wait_duration}s for page content to load...")
-                time.sleep(wait_duration)
-                
-                print("   -> Searching for 'Run' button on screen...")
-                if detector.click_run_button(max_pagedown_attempts=5):
-                    print(f"✅ SUCCESS: 'Run' button found and clicked on attempt {attempt}.")
-                    run_button_clicked = True
-                    break
-                else:
-                    print(f"⚠️ FAILED: 'Run' button not found on attempt {attempt}.")
-                    if attempt < max_retries:
-                        print("   -> Preparing for next attempt...")
-                    else:
-                        messagebox.showerror("Setup Error", f"Could not find 'Run' button after {max_retries} attempts.")
-                        return False
-                        
-            if not run_button_clicked: 
-                return False
-                
-            game_load_wait = 10
-            print(f"\n⏳ Waiting {game_load_wait}s for game to load after clicking Run...")
-            time.sleep(game_load_wait)
-            
-            if detector.click_fullscreen_button(wait_time=8):
-                print("✅ Clicked game's own fullscreen button.")
+                self.cleanup_chrome_complete()
                 time.sleep(2)
-            else:
-                print("⚠️ Fullscreen button not found, continuing anyway.")
                 
-            print("⌨️ Pressing F11 for true fullscreen mode...")
-            pyautogui.press('f11')
-            time.sleep(3)
-            
-            print("✅ Fresh game setup completed. Ready for HYBRID JSON generation.")
-            return True
-            
-        except Exception as e:
-            messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
-            print(f"❌ Failed to navigate and prepare game: {e}")
-            self.cleanup_chrome_complete()
-            return False
+                self.game_url = url
+                
+                extensions_dir = os.path.join(os.getcwd(), 'extensions')
+                ublock_path = None
+                if os.path.exists(extensions_dir):
+                    subdirs = [d for d in os.listdir(extensions_dir) if os.path.isdir(os.path.join(extensions_dir, d))]
+                    if subdirs: 
+                        ublock_path = os.path.join(extensions_dir, subdirs[0])
+                
+                if not ublock_path:
+                    messagebox.showerror("Extension Not Found", "uBlock Origin not found in 'extensions' folder.")
+                    return False
+                
+                print(f"✅ Found AdBlocker: {ublock_path}")
+                
+                # Find Chrome executable using config paths
+                chrome_exe = None
+                for path in self.chrome_paths:
+                    if os.path.exists(path): 
+                        chrome_exe = path
+                        break
+                        
+                if not chrome_exe: 
+                    messagebox.showerror("Error", "Google Chrome not found.")
+                    return False
+                    
+                chrome_cmd = [
+                    chrome_exe, 
+                    f"--remote-debugging-port={self.debugging_port}", 
+                    f"--user-data-dir={os.path.join(os.getcwd(), self.user_data_dir)}",
+                    "--no-first-run", 
+                    "--window-size=1280,720", 
+                    "--remote-allow-origins=*",
+                    f"--load-extension={ublock_path}", 
+                    url
+                ]
+                
+                print("🔧 JSON Generator: Launching fresh Chrome with AdBlocker and DevTools...")
+                self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                print(f"⏳ JSON Generator: Waiting {self.page_load_wait}s for fresh Chrome and AdBlocker to initialize...")
+                time.sleep(self.page_load_wait)
+                
+                game_window = None
+                for _ in range(10): 
+                    possible_windows = gw.getWindowsWithTitle('cocrea.world')
+                    if not possible_windows: 
+                        possible_windows = gw.getWindowsWithTitle('Chrome')
+                    if possible_windows: 
+                        game_window = possible_windows[0]
+                        break
+                    time.sleep(1)
+                    
+                if not game_window: 
+                    messagebox.showerror("Setup Error", "Could not find the game window.")
+                    return False
+                    
+                print(f"🎯 JSON Generator: Found fresh game window: '{game_window.title}'. Activating...")
+                game_window.activate()
+                time.sleep(0.5)
+                game_window.maximize()
+                time.sleep(2)
+                
+                # ================================================================
+                # 🔍 SMART VERIFICATION SYSTEM (EXACT COPY FROM sprunki_game_player.py)
+                # ================================================================
+                print(f"\n🔍 JSON GENERATOR - STARTING SMART VERIFICATION SYSTEM")
+                print("="*70)
+                
+                # Phase 1: Page Load Verification - CHỜ CHO ĐẾN KHI ready hoặc timeout
+                print("🔍 Phase 1: Smart Page Load Verification for JSON Generator...")
+                page_verification_success = self.verify_page_fully_loaded(url)
+                
+                if not page_verification_success:
+                    print("⚠️ JSON Generator page verification failed, but continuing with workflow...")
+                
+                # Phase 2: Game Components Verification - CHỜ CHO ĐẾN KHI ready hoặc timeout
+                print("🎮 Phase 2: Smart Game Components Verification for JSON Generator...")
+                game_verification_success = self.verify_game_components_ready()
+                
+                if not game_verification_success:
+                    print("⚠️ JSON Generator game verification failed, but continuing with workflow...")
+                
+                # Phase 3: Stabilization wait (EXACT LOGIC FROM sprunki_game_player.py)
+                if page_verification_success and game_verification_success:
+                    print(f"✅ JSON GENERATOR VERIFICATION SUCCESSFUL: Page and game fully loaded!")
+                    print(f"⏳ JSON Generator stabilization wait: {self.stabilization_wait}s for optimal Run button detection...")
+                    time.sleep(self.stabilization_wait)
+                else:
+                    print(f"⚠️ JSON Generator verification had issues, using fallback stabilization...")
+                    time.sleep(5)  # Fallback wait if verification failed
+                
+                print("🎯 JSON Generator smart verification completed - starting enhanced Run button detection...")
+                print("="*70)
+                
+                # ================================================================
+                # 🚀 ENHANCED RUN BUTTON DETECTION (ORIGINAL LOGIC PRESERVED)
+                # ================================================================
+                
+                detector = ImageDetector("cocrea.world")
+                run_button_clicked = False
+                max_retries = 3
+                
+                for attempt in range(1, max_retries + 1):
+                    print(f"\n--- 🚀 JSON Generator Finding 'Run' Button - Attempt {attempt}/{max_retries} ---")
+                    
+                    if attempt > 1:
+                        print("   -> JSON Generator Action: Reloading page to clear potential issues...")
+                        pyautogui.hotkey('ctrl', 'r')
+                        
+                        # Quick re-verification after reload
+                        print("   -> JSON Generator Quick re-verification after reload...")
+                        time.sleep(3)  # Brief wait for reload
+                        quick_verification = self._execute_verification_js("document.readyState")
+                        if quick_verification == 'complete':
+                            print("   -> ✅ JSON Generator Page reloaded successfully")
+                            time.sleep(self.stabilization_wait)  # Smart stabilization
+                        else:
+                            print("   -> ⚠️ JSON Generator Page reload uncertain, using fallback wait...")
+                            time.sleep(8)  # Fallback wait
+                    else:
+                        # First attempt - verification already done above
+                        print("   -> JSON Generator Using smart verification results (no additional wait needed)")
+                    
+                    print("   -> 🔍 JSON Generator Searching for 'Run' button on screen...")
+                    
+                    # KEEP ORIGINAL IMAGE DETECTION LOGIC EXACTLY AS-IS
+                    if detector.click_run_button(max_pagedown_attempts=self.max_pagedown_attempts):
+                        print(f"✅ JSON Generator SUCCESS: 'Run' button found and clicked on attempt {attempt}.")
+                        run_button_clicked = True
+                        break
+                    else:
+                        print(f"⚠️ JSON Generator FAILED: 'Run' button not found on attempt {attempt}.")
+                        if attempt < max_retries:
+                            print("   -> Preparing for next attempt...")
+                        else:
+                            messagebox.showerror("Setup Error", f"Could not find 'Run' button after {max_retries} attempts.")
+                            return False
+                            
+                if not run_button_clicked: 
+                    return False
+                    
+                print(f"\n⏳ JSON Generator: Waiting {self.game_load_wait}s for game to load after clicking Run...")
+                time.sleep(self.game_load_wait)
+                
+                # ================================================================
+                # 📺 FULLSCREEN BUTTON DETECTION (ORIGINAL LOGIC PRESERVED)
+                # ================================================================
+                
+                # Click fullscreen button - KEEP ORIGINAL LOGIC EXACTLY AS-IS
+                if detector.click_fullscreen_button(wait_time=self.fullscreen_wait):
+                    print("✅ JSON Generator: Clicked game's own fullscreen button.")
+                    time.sleep(2)
+                else:
+                    print("⚠️ JSON Generator: Fullscreen button not found, continuing anyway.")
+                    
+                # Press F11 for true fullscreen
+                print("⌨️ JSON Generator: Pressing F11 for true fullscreen mode...")
+                pyautogui.press('f11')
+                time.sleep(3)
+                
+                print("✅ JSON Generator: Game setup completed with Smart Verification System. Ready for HYBRID JSON generation.")
+                return True
+                
+            except Exception as e:
+                messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
+                print(f"⌚ JSON Generator failed to navigate and prepare game: {e}")
+                self.cleanup_chrome_complete()
+                return False
 
     def _get_websocket_url(self):
         if self.ws_url: return self.ws_url
@@ -1547,7 +2002,7 @@ class SprunkiJSONGenerator:
             self.ws_url = target_tab['webSocketDebuggerUrl']
             return self.ws_url
         except Exception as e:
-            print(f"❌ Could not get WebSocket URL: {e}")
+            print(f"âŒ Could not get WebSocket URL: {e}")
             return None
 
     def generate_complete_json(self, url, output_path=None):
@@ -1555,18 +2010,18 @@ class SprunkiJSONGenerator:
         Simplified Complete Logic: A vs B vs C
         
         1. Capture A (screenshot + phase) - INITIAL STATE
-        2. Drag icon 19 → Capture B (screenshot + phase) - AFTER ICON 19
-           - Compare phase A vs B → if hasHorror = True → STOP
-           - Compare screenshot A vs B → if hasHorror = True → STOP
-        3. Find highest index icon → Drag → Capture C (screenshot + phase) - AFTER HIGHEST INDEX
-           - Compare phase A vs C → if hasHorror = True → STOP  
-           - Compare screenshot A vs C → if hasHorror = True → STOP
+        2. Drag icon 19 â†’ Capture B (screenshot + phase) - AFTER ICON 19
+           - Compare phase A vs B â†’ if hasHorror = True â†’ STOP
+           - Compare screenshot A vs B â†’ if hasHorror = True â†’ STOP
+        3. Find highest index icon â†’ Drag â†’ Capture C (screenshot + phase) - AFTER HIGHEST INDEX
+           - Compare phase A vs C â†’ if hasHorror = True â†’ STOP  
+           - Compare screenshot A vs C â†’ if hasHorror = True â†’ STOP
         4. Final result = False
         
         STOP immediately when hasHorror = True is detected
         """
         try:
-            print("\n🚀 Starting SIMPLIFIED COMPLETE LOGIC (A vs B vs C)")
+            print("\nðŸš€ Starting SIMPLIFIED COMPLETE LOGIC (A vs B vs C)")
             print("="*70)
             print("Logic: A(initial) vs B(icon19) vs C(highest) - Stop when hasHorror=True")
             print("="*70)
@@ -1581,26 +2036,26 @@ class SprunkiJSONGenerator:
                 
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            print("🧪 Testing JavaScript environment...")
+            print("ðŸ§ª Testing JavaScript environment...")
             test_response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate", 
                 "params": {"expression": "window.location.href", "returnByValue": True}
             })
             if test_response is None or 'result' not in test_response:
-                print("❌ JavaScript environment test failed")
+                print("âŒ JavaScript environment test failed")
                 ws.close()
                 self.cleanup_chrome_complete()
                 return False, None, None
-            print("✅ JavaScript environment ready")
+            print("âœ… JavaScript environment ready")
             
-            print("🖱️ Skipping intros via CDP...")
+            print("ðŸ–±ï¸ Skipping intros via CDP...")
             # ============================
             # MULTI-TARGET SKIP INTRO: Click ALL Skip Intro buttons + Blind Clicks
             # ============================
-            print("\n🔍 MULTI-TARGET SKIP INTRO: Finding and clicking ALL Skip Intro buttons...")
+            print("\nðŸ” MULTI-TARGET SKIP INTRO: Finding and clicking ALL Skip Intro buttons...")
 
             # Phase 1: Find ALL Skip Intro buttons
-            print("📍 Phase 1: Searching for ALL Skip Intro buttons...")
+            print("ðŸ“ Phase 1: Searching for ALL Skip Intro buttons...")
 
             skip_intro_response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate", 
@@ -1619,8 +2074,8 @@ class SprunkiJSONGenerator:
                     visible_count = skip_result.get('visibleCount', 0)
                     hidden_count = skip_result.get('hiddenCount', 0)
                     
-                    print(f"✅ Found {button_count} Skip Intro buttons:")
-                    print(f"   📊 Visible: {visible_count}, Hidden: {hidden_count}")
+                    print(f"âœ… Found {button_count} Skip Intro buttons:")
+                    print(f"   ðŸ“Š Visible: {visible_count}, Hidden: {hidden_count}")
                     
                     # Click ALL buttons found
                     for i, button in enumerate(all_buttons):
@@ -1629,7 +2084,7 @@ class SprunkiJSONGenerator:
                         visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
                         costume_name = button.get('currentCostumeName', 'Unknown')
                         
-                        print(f"🎯 Clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
+                        print(f"ðŸŽ¯ Clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
                         
                         # Click this specific button
                         self._simulate_click_via_cdp(ws, x, y)
@@ -1637,19 +2092,19 @@ class SprunkiJSONGenerator:
                         
                         smart_clicks_performed += 1
                     
-                    print(f"✅ Smart clicks completed: {smart_clicks_performed} buttons clicked!")
+                    print(f"âœ… Smart clicks completed: {smart_clicks_performed} buttons clicked!")
                     
                 else:
                     reason = skip_result.get('reason', 'unknown') if skip_result else 'no_result'
-                    print(f"ℹ️ No Skip Intro buttons found - Reason: {reason}")
-                    print("🔄 Will use blind click method only...")
+                    print(f"â„¹ï¸ No Skip Intro buttons found - Reason: {reason}")
+                    print("ðŸ”„ Will use blind click method only...")
 
             # Phase 2: ALWAYS perform blind clicks for additional assurance
             if smart_clicks_performed > 0:
-                print("🔄 Phase 2: Performing ADDITIONAL blind clicks for triple protection...")
-                print("   → This ensures intro skipping even if smart clicks had edge cases")
+                print("ðŸ”„ Phase 2: Performing ADDITIONAL blind clicks for triple protection...")
+                print("   â†’ This ensures intro skipping even if smart clicks had edge cases")
             else:
-                print("🖱️ Phase 2: Performing STANDARD blind clicks (no smart buttons found)...")
+                print("ðŸ–±ï¸ Phase 2: Performing STANDARD blind clicks (no smart buttons found)...")
 
             # Perform blind clicks regardless of smart click success
             for i in range(self.intro_skip_clicks):  # Use config value
@@ -1658,21 +2113,21 @@ class SprunkiJSONGenerator:
 
             # Summary
             if smart_clicks_performed > 0:
-                print("🎉 MULTI-TARGET SKIP INTRO COMPLETED:")
-                print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons clicked successfully")
-                print(f"   ✅ Button details: {len(all_buttons)} total found")
+                print("ðŸŽ‰ MULTI-TARGET SKIP INTRO COMPLETED:")
+                print(f"   âœ… Smart clicks: {smart_clicks_performed} buttons clicked successfully")
+                print(f"   âœ… Button details: {len(all_buttons)} total found")
                 for i, button in enumerate(all_buttons):
                     visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
                     print(f"      {i+1}. ({button['x']}, {button['y']}) - {visible_status}")
-                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} additional clicks performed")
-                print("   🛡️ Triple protection ensures maximum skip success rate")
+                print(f"   âœ… Blind clicks: {self.intro_skip_clicks} additional clicks performed")
+                print("   ðŸ›¡ï¸ Triple protection ensures maximum skip success rate")
             else:
-                print("🎉 STANDARD SKIP INTRO COMPLETED:")
-                print("   ⚠️ Smart clicks: N/A (No Skip Intro buttons found)")
-                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} clicks performed")
-                print("   🔄 Standard method used as fallback")
+                print("ðŸŽ‰ STANDARD SKIP INTRO COMPLETED:")
+                print("   âš ï¸ Smart clicks: N/A (No Skip Intro buttons found)")
+                print(f"   âœ… Blind clicks: {self.intro_skip_clicks} clicks performed")
+                print("   ðŸ”„ Standard method used as fallback")
 
-            print("🎮 Skip intro phase finished - Game should be ready for interaction")
+            print("ðŸŽ® Skip intro phase finished - Game should be ready for interaction")
             
             # Initialize final result variables
             final_has_horror = False
@@ -1684,43 +2139,43 @@ class SprunkiJSONGenerator:
             # CAPTURE A: Initial State (Screenshot + Phase)
             # ============================
             print("\n" + "="*70)
-            print("📸 CAPTURE A: Initial State (Screenshot + Phase)")
+            print("ðŸ“¸ CAPTURE A: Initial State (Screenshot + Phase)")
             print("="*70)
             
-            print("📊 Extracting initial state A + coordinates...")
+            print("ðŸ“Š Extracting initial state A + coordinates...")
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate", 
                 "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
             })
             
             if response is None or 'result' not in response:
-                print("❌ Failed to get initial state A")
+                print("âŒ Failed to get initial state A")
                 ws.close()
                 self.cleanup_chrome_complete()
                 return False, None, None
                 
             state_A = response.get('result', {}).get('result', {}).get('value')
             if not state_A or "error" in state_A: 
-                print(f"❌ Failed to get initial state A: {state_A.get('error', 'Unknown') if state_A else 'None'}")
+                print(f"âŒ Failed to get initial state A: {state_A.get('error', 'Unknown') if state_A else 'None'}")
                 ws.close()
                 self.cleanup_chrome_complete()
                 return False, None, None
             
             phase_A = self.find_phase_variable(state_A)
-            print(f"✅ State A captured - Phase A: {phase_A}")
+            print(f"âœ… State A captured - Phase A: {phase_A}")
             
             # ============================
             # CRITICAL CHECK: Verify icon count before proceeding
             # ============================
             icons_count = len(state_A.get('icons', []))
-            print(f"\n📊 ICON COUNT VERIFICATION: Found {icons_count} icons")
+            print(f"\nðŸ“Š ICON COUNT VERIFICATION: Found {icons_count} icons")
             
             if icons_count < 20:
-                print(f"⚠️ INSUFFICIENT ICONS: Only {icons_count} icons found (need 20+ for icon index 19)")
-                print("🔚 EARLY EXIT: Setting hasHorror = False due to insufficient icons")
+                print(f"âš ï¸ INSUFFICIENT ICONS: Only {icons_count} icons found (need 20+ for icon index 19)")
+                print("ðŸ”š EARLY EXIT: Setting hasHorror = False due to insufficient icons")
                 
                 # Get final layout for JSON generation
-                print("📊 Extracting final full layout...")
+                print("ðŸ“Š Extracting final full layout...")
                 response = self._send_cdp_command(ws, {
                     "method": "Runtime.evaluate", 
                     "params": {"expression": self.js_full_layout, "awaitPromise": True, "returnByValue": True}
@@ -1729,7 +2184,7 @@ class SprunkiJSONGenerator:
                 if response and 'result' in response:
                     layout_state = response.get('result', {}).get('result', {}).get('value')
                     if layout_state and "error" not in layout_state:
-                        print("✅ Final full layout captured successfully")
+                        print("âœ… Final full layout captured successfully")
                         
                         ws.close()
                         
@@ -1759,36 +2214,36 @@ class SprunkiJSONGenerator:
                             }
                         }
                         
-                        print("💾 Saving JSON file...")
+                        print("ðŸ’¾ Saving JSON file...")
                         json_file_path = self.save_json_file(final_json, output_path, custom_title=page_title)
                         
                         if json_file_path:
-                            print(f"\n🎉 EARLY EXIT COMPLETED - INSUFFICIENT ICONS!")
+                            print(f"\nðŸŽ‰ EARLY EXIT COMPLETED - INSUFFICIENT ICONS!")
                             print("="*70)
-                            print(f"✅ hasHorror Detection: False (insufficient icons)")
-                            print(f"✅ Icons Found: {icons_count}/20")
-                            print(f"✅ Reason: Need icon index 19 for horror detection")
+                            print(f"âœ… hasHorror Detection: False (insufficient icons)")
+                            print(f"âœ… Icons Found: {icons_count}/20")
+                            print(f"âœ… Reason: Need icon index 19 for horror detection")
                             print("="*70)
                             
                             self.cleanup_chrome_complete()
                             return True, json_file_path, final_json
                         else:
-                            print("❌ Failed to save JSON file")
+                            print("âŒ Failed to save JSON file")
                             ws.close()
                             self.cleanup_chrome_complete()
                             return False, None, None
                     else:
-                        print("❌ Failed to get final layout for insufficient icons case")
+                        print("âŒ Failed to get final layout for insufficient icons case")
                         ws.close()
                         self.cleanup_chrome_complete()
                         return False, None, None
                 else:
-                    print("❌ Failed to execute JS for final layout")
+                    print("âŒ Failed to execute JS for final layout")
                     ws.close()
                     self.cleanup_chrome_complete()
                     return False, None, None
             else:
-                print(f"✅ SUFFICIENT ICONS: {icons_count} icons found - proceeding with horror detection")
+                print(f"âœ… SUFFICIENT ICONS: {icons_count} icons found - proceeding with horror detection")
             
             # Capture screenshot A
             extended_area = self.calculate_extended_screenshot_area(state_A)
@@ -1796,17 +2251,17 @@ class SprunkiJSONGenerator:
             if extended_area:
                 screenshot_A = self.capture_icons_area_screenshot(extended_area)
                 if screenshot_A is not None:
-                    print(f"✅ Screenshot A captured - Size: {screenshot_A.shape}")
+                    print(f"âœ… Screenshot A captured - Size: {screenshot_A.shape}")
                 else:
-                    print("⚠️ Failed to capture screenshot A")
+                    print("âš ï¸ Failed to capture screenshot A")
             else:
-                print("⚠️ Could not calculate extended area for screenshot A")
+                print("âš ï¸ Could not calculate extended area for screenshot A")
             
             # ============================
             # DRAG ICON 19 & CAPTURE B: After Icon 19 (Screenshot + Phase)
             # ============================
             print("\n" + "="*70)
-            print("🖱️ DRAG ICON 19 & CAPTURE B: After Icon 19 (Screenshot + Phase)")
+            print("ðŸ–±ï¸ DRAG ICON 19 & CAPTURE B: After Icon 19 (Screenshot + Phase)")
             print("="*70)
             
             drag_coords = state_A.get('dragCoordinates', {})
@@ -1815,7 +2270,7 @@ class SprunkiJSONGenerator:
             
             # --- ENHANCED DEBUG LOGGING FOR DRAG COORDINATES ---
             # Log the retrieved coordinates for inspection
-            print("\n🔬 DEBUG: Checking Drag Coordinates from State A...")
+            print("\nðŸ”¬ DEBUG: Checking Drag Coordinates from State A...")
             print(f"   - Raw icon_coords (icon 19): {icon_coords}")
             print(f"   - Raw slot_coords (slot 3): {slot_coords}")
 
@@ -1824,7 +2279,7 @@ class SprunkiJSONGenerator:
             is_slot_valid = slot_coords and slot_coords.get('x') is not None and slot_coords.get('y') is not None
             
             if not is_icon_valid or not is_slot_valid:
-                print("❌ FATAL: Missing or invalid drag coordinates. Cannot proceed with horror detection.")
+                print("âŒ FATAL: Missing or invalid drag coordinates. Cannot proceed with horror detection.")
                 if not is_icon_valid:
                     print("   - REASON: Horror Icon (index 19) coordinates are missing or invalid.")
                     if not icon_coords:
@@ -1846,52 +2301,52 @@ class SprunkiJSONGenerator:
                 return False, None, None
             # --- END OF ENHANCED DEBUG LOGGING ---
 
-            print(f"🎯 Dragging icon 19 from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
+            print(f"ðŸŽ¯ Dragging icon 19 from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
             self._simulate_drag_via_cdp(ws, icon_coords['x'], icon_coords['y'], slot_coords['x'], slot_coords['y'])
             
             wait_time = 25
-            print(f"⏳ Waiting {wait_time} seconds for transition...")
+            print(f"â³ Waiting {wait_time} seconds for transition...")
             time.sleep(wait_time)
             
-            print("📊 Extracting state B after icon 19...")
+            print("ðŸ“Š Extracting state B after icon 19...")
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate", 
                 "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
             })
             
             if response is None or 'result' not in response:
-                print("❌ Failed to get state B")
+                print("âŒ Failed to get state B")
                 ws.close()
                 self.cleanup_chrome_complete()
                 return False, None, None
                 
             state_B = response.get('result', {}).get('result', {}).get('value')
             if not state_B or "error" in state_B: 
-                print(f"❌ Failed to get state B: {state_B.get('error', 'Unknown') if state_B else 'None'}")
+                print(f"âŒ Failed to get state B: {state_B.get('error', 'Unknown') if state_B else 'None'}")
                 ws.close()
                 self.cleanup_chrome_complete()
                 return False, None, None
             
             phase_B = self.find_phase_variable(state_B)
-            print(f"✅ State B captured - Phase B: {phase_B}")
+            print(f"âœ… State B captured - Phase B: {phase_B}")
             
             # Capture screenshot B
             screenshot_B = None
             if extended_area:
                 screenshot_B = self.capture_icons_area_screenshot(extended_area)
                 if screenshot_B is not None:
-                    print(f"✅ Screenshot B captured - Size: {screenshot_B.shape}")
+                    print(f"âœ… Screenshot B captured - Size: {screenshot_B.shape}")
                 else:
-                    print("⚠️ Failed to capture screenshot B")
+                    print("âš ï¸ Failed to capture screenshot B")
             
             # ============================
             # COMPARE A vs B: Phase Comparison
             # ============================
             print("\n" + "="*70)
-            print("🔍 COMPARE A vs B: Phase Comparison")
+            print("ðŸ” COMPARE A vs B: Phase Comparison")
             print("="*70)
             
-            print(f"📊 Comparing Phase A ({phase_A}) vs Phase B ({phase_B})")
+            print(f"ðŸ“Š Comparing Phase A ({phase_A}) vs Phase B ({phase_B})")
             
             # Phase comparison logic
             phase_A_str = str(phase_A) if phase_A is not None else None
@@ -1904,7 +2359,7 @@ class SprunkiJSONGenerator:
                 has_horror_phase_AB = (phase_A_str == "1" and phase_B_str == "2")
                 
                 if has_horror_phase_AB:
-                    print(f"🎉 SUCCESS! Phase A vs B: {phase_A_str} → {phase_B_str} = hasHorror TRUE")
+                    print(f"ðŸŽ‰ SUCCESS! Phase A vs B: {phase_A_str} â†’ {phase_B_str} = hasHorror TRUE")
                     final_has_horror = True
                     final_confidence = 1.0
                     final_detection_method = "phase_A_vs_B_icon_19"
@@ -1917,27 +2372,27 @@ class SprunkiJSONGenerator:
                     }
                     horror_detected_phase_AB = True
                     # STOP - Horror detected!
-                    print("🛑 STOP: Horror detected via phase A vs B")
+                    print("ðŸ›‘ STOP: Horror detected via phase A vs B")
                 else:
-                    print(f"ℹ️ No horror in phase A vs B: {phase_A_str} → {phase_B_str}")
+                    print(f"â„¹ï¸ No horror in phase A vs B: {phase_A_str} â†’ {phase_B_str}")
             else:
-                print("⚠️ Cannot compare phases A vs B (missing phase data)")
-                print("ℹ️ Will proceed to screenshot comparison")
+                print("âš ï¸ Cannot compare phases A vs B (missing phase data)")
+                print("â„¹ï¸ Will proceed to screenshot comparison")
             
             # ============================
             # COMPARE A vs B: Screenshot Comparison (ALWAYS TRY)
             # ============================
             if not horror_detected_phase_AB:  # Only if phase didn't detect horror
                 print("\n" + "="*50)
-                print("📸 COMPARE A vs B: Screenshot Comparison")
+                print("ðŸ“¸ COMPARE A vs B: Screenshot Comparison")
                 print("="*50)
                 
                 if screenshot_A is not None and screenshot_B is not None:
-                    print("🔍 Comparing Screenshot A vs Screenshot B...")
+                    print("ðŸ” Comparing Screenshot A vs Screenshot B...")
                     visual_result_AB = self.detect_horror_extended_area(screenshot_A, screenshot_B)
                     
                     if visual_result_AB and visual_result_AB['has_horror']:
-                        print(f"🎉 SUCCESS! Screenshot A vs B detected hasHorror TRUE")
+                        print(f"ðŸŽ‰ SUCCESS! Screenshot A vs B detected hasHorror TRUE")
                         final_has_horror = True
                         final_confidence = visual_result_AB['confidence']
                         final_detection_method = f"screenshot_A_vs_B_{visual_result_AB['method']}_icon_19"
@@ -1945,18 +2400,18 @@ class SprunkiJSONGenerator:
                         final_visual_result['horror_icon_index'] = 19
                         final_visual_result['comparison'] = 'A_vs_B'
                         # STOP - Horror detected!
-                        print("🛑 STOP: Horror detected via screenshot A vs B")
+                        print("ðŸ›‘ STOP: Horror detected via screenshot A vs B")
                     else:
-                        print("ℹ️ No horror in screenshot A vs B")
+                        print("â„¹ï¸ No horror in screenshot A vs B")
                 else:
-                    print("⚠️ Cannot compare screenshots A vs B (missing screenshot data)")
+                    print("âš ï¸ Cannot compare screenshots A vs B (missing screenshot data)")
             
             # ============================
             # IF NO HORROR YET: Try Highest Index Icon
             # ============================
             if not final_has_horror:
                 print("\n" + "="*70)
-                print("🔍 NO HORROR YET: Try Highest Index Icon")
+                print("ðŸ” NO HORROR YET: Try Highest Index Icon")
                 print("="*70)
                 
                 # Get current layout to find highest index icon
@@ -1977,7 +2432,7 @@ class SprunkiJSONGenerator:
                             highest_index_icon = max(high_index_icons, key=lambda x: x.get('index', 0))
                             highest_index = highest_index_icon.get('index', 0)
                             
-                            print(f"🎯 Found highest index icon: {highest_index}")
+                            print(f"ðŸŽ¯ Found highest index icon: {highest_index}")
                             
                             available_slots = current_layout_data.get('layout', {}).get('slots', [])
                             slot_4_coords = next((slot for slot in available_slots if slot.get('index') == 4), None)
@@ -1987,10 +2442,10 @@ class SprunkiJSONGenerator:
                                 # DRAG HIGHEST INDEX & CAPTURE C: After Highest Index (Screenshot + Phase)
                                 # ============================
                                 print("\n" + "="*70)
-                                print(f"🖱️ DRAG ICON {highest_index} & CAPTURE C: After Highest Index (Screenshot + Phase)")
+                                print(f"ðŸ–±ï¸ DRAG ICON {highest_index} & CAPTURE C: After Highest Index (Screenshot + Phase)")
                                 print("="*70)
                                 
-                                print(f"🎯 Dragging icon {highest_index} from ({highest_index_icon['x']}, {highest_index_icon['y']}) to ({slot_4_coords['x']}, {slot_4_coords['y']})")
+                                print(f"ðŸŽ¯ Dragging icon {highest_index} from ({highest_index_icon['x']}, {highest_index_icon['y']}) to ({slot_4_coords['x']}, {slot_4_coords['y']})")
                                 self._simulate_drag_via_cdp(
                                     ws, 
                                     highest_index_icon['x'], 
@@ -2000,10 +2455,10 @@ class SprunkiJSONGenerator:
                                 )
                                 
                                 wait_time = 25
-                                print(f"⏳ Waiting {wait_time}s for transition...")
+                                print(f"â³ Waiting {wait_time}s for transition...")
                                 time.sleep(wait_time)
                                 
-                                print("📊 Extracting state C after highest index...")
+                                print("ðŸ“Š Extracting state C after highest index...")
                                 response = self._send_cdp_command(ws, {
                                     "method": "Runtime.evaluate", 
                                     "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
@@ -2014,16 +2469,16 @@ class SprunkiJSONGenerator:
                                     
                                     if state_C:
                                         phase_C = self.find_phase_variable(state_C)
-                                        print(f"✅ State C captured - Phase C: {phase_C}")
+                                        print(f"âœ… State C captured - Phase C: {phase_C}")
                                         
                                         # Capture screenshot C
                                         screenshot_C = None
                                         if extended_area:
                                             screenshot_C = self.capture_icons_area_screenshot(extended_area)
                                             if screenshot_C is not None:
-                                                print(f"✅ Screenshot C captured - Size: {screenshot_C.shape}")
+                                                print(f"âœ… Screenshot C captured - Size: {screenshot_C.shape}")
                                             else:
-                                                print("⚠️ Failed to capture screenshot C")
+                                                print("âš ï¸ Failed to capture screenshot C")
                                         
                                         # Initialize flags for A vs C comparison
                                         horror_detected_phase_AC = False
@@ -2032,10 +2487,10 @@ class SprunkiJSONGenerator:
                                         # COMPARE A vs C: Phase Comparison
                                         # ============================
                                         print("\n" + "="*70)
-                                        print("🔍 COMPARE A vs C: Phase Comparison")
+                                        print("ðŸ” COMPARE A vs C: Phase Comparison")
                                         print("="*70)
                                         
-                                        print(f"📊 Comparing Phase A ({phase_A}) vs Phase C ({phase_C})")
+                                        print(f"ðŸ“Š Comparing Phase A ({phase_A}) vs Phase C ({phase_C})")
                                         
                                         phase_C_str = str(phase_C) if phase_C is not None else None
                                         
@@ -2043,7 +2498,7 @@ class SprunkiJSONGenerator:
                                             has_horror_phase_AC = (phase_A_str == "1" and phase_C_str == "2")
                                             
                                             if has_horror_phase_AC:
-                                                print(f"🎉 SUCCESS! Phase A vs C: {phase_A_str} → {phase_C_str} = hasHorror TRUE")
+                                                print(f"ðŸŽ‰ SUCCESS! Phase A vs C: {phase_A_str} â†’ {phase_C_str} = hasHorror TRUE")
                                                 final_has_horror = True
                                                 final_confidence = 1.0
                                                 final_detection_method = f"phase_A_vs_C_icon_{highest_index}"
@@ -2056,27 +2511,27 @@ class SprunkiJSONGenerator:
                                                 }
                                                 horror_detected_phase_AC = True
                                                 # STOP - Horror detected!
-                                                print("🛑 STOP: Horror detected via phase A vs C")
+                                                print("ðŸ›‘ STOP: Horror detected via phase A vs C")
                                             else:
-                                                print(f"ℹ️ No horror in phase A vs C: {phase_A_str} → {phase_C_str}")
+                                                print(f"â„¹ï¸ No horror in phase A vs C: {phase_A_str} â†’ {phase_C_str}")
                                         else:
-                                            print("⚠️ Cannot compare phases A vs C (missing phase data)")
-                                            print("ℹ️ Will proceed to screenshot comparison")
+                                            print("âš ï¸ Cannot compare phases A vs C (missing phase data)")
+                                            print("â„¹ï¸ Will proceed to screenshot comparison")
                                         
                                         # ============================
                                         # COMPARE A vs C: Screenshot Comparison (ALWAYS TRY)
                                         # ============================
                                         if not horror_detected_phase_AC:  # Only if phase didn't detect horror
                                             print("\n" + "="*50)
-                                            print("📸 COMPARE A vs C: Screenshot Comparison")
+                                            print("ðŸ“¸ COMPARE A vs C: Screenshot Comparison")
                                             print("="*50)
                                             
                                             if screenshot_A is not None and screenshot_C is not None:
-                                                print("🔍 Comparing Screenshot A vs Screenshot C...")
+                                                print("ðŸ” Comparing Screenshot A vs Screenshot C...")
                                                 visual_result_AC = self.detect_horror_extended_area(screenshot_A, screenshot_C)
                                                 
                                                 if visual_result_AC and visual_result_AC['has_horror']:
-                                                    print(f"🎉 SUCCESS! Screenshot A vs C detected hasHorror TRUE")
+                                                    print(f"ðŸŽ‰ SUCCESS! Screenshot A vs C detected hasHorror TRUE")
                                                     final_has_horror = True
                                                     final_confidence = visual_result_AC['confidence']
                                                     final_detection_method = f"screenshot_A_vs_C_{visual_result_AC['method']}_icon_{highest_index}"
@@ -2084,45 +2539,45 @@ class SprunkiJSONGenerator:
                                                     final_visual_result['horror_icon_index'] = highest_index
                                                     final_visual_result['comparison'] = 'A_vs_C'
                                                     # STOP - Horror detected!
-                                                    print("🛑 STOP: Horror detected via screenshot A vs C")
+                                                    print("ðŸ›‘ STOP: Horror detected via screenshot A vs C")
                                                 else:
-                                                    print("ℹ️ No horror in screenshot A vs C")
-                                                    print("🔚 FINAL RESULT: hasHorror = False (all methods exhausted)")
+                                                    print("â„¹ï¸ No horror in screenshot A vs C")
+                                                    print("ðŸ”š FINAL RESULT: hasHorror = False (all methods exhausted)")
                                                     final_detection_method = "all_methods_exhausted"
                                             else:
-                                                print("⚠️ Cannot compare screenshots A vs C (missing screenshot data)")
-                                                print("🔚 FINAL RESULT: hasHorror = False (screenshot A vs C unavailable)")
+                                                print("âš ï¸ Cannot compare screenshots A vs C (missing screenshot data)")
+                                                print("ðŸ”š FINAL RESULT: hasHorror = False (screenshot A vs C unavailable)")
                                                 final_detection_method = "screenshot_A_vs_C_unavailable"
                                     else:
-                                        print("❌ Failed to get state C")
-                                        print("🔚 FINAL RESULT: hasHorror = False (failed to capture state C)")
+                                        print("âŒ Failed to get state C")
+                                        print("ðŸ”š FINAL RESULT: hasHorror = False (failed to capture state C)")
                                         final_detection_method = "failed_state_C"
                                 else:
-                                    print("❌ Failed to execute JS for state C")
-                                    print("🔚 FINAL RESULT: hasHorror = False (JS execution failed)")
+                                    print("âŒ Failed to execute JS for state C")
+                                    print("ðŸ”š FINAL RESULT: hasHorror = False (JS execution failed)")
                                     final_detection_method = "js_execution_failed"
                             else:
-                                print("❌ Slot 4 coordinates not found")
-                                print("🔚 FINAL RESULT: hasHorror = False (slot 4 unavailable)")
+                                print("âŒ Slot 4 coordinates not found")
+                                print("ðŸ”š FINAL RESULT: hasHorror = False (slot 4 unavailable)")
                                 final_detection_method = "slot_4_unavailable"
                         else:
-                            print("ℹ️ No icons with index > 19 available")
-                            print("🔚 FINAL RESULT: hasHorror = False (no high index icons)")
+                            print("â„¹ï¸ No icons with index > 19 available")
+                            print("ðŸ”š FINAL RESULT: hasHorror = False (no high index icons)")
                             final_detection_method = "no_high_index_icons"
                     else:
-                        print("❌ Failed to get current layout data")
-                        print("🔚 FINAL RESULT: hasHorror = False (layout data unavailable)")
+                        print("âŒ Failed to get current layout data")
+                        print("ðŸ”š FINAL RESULT: hasHorror = False (layout data unavailable)")
                         final_detection_method = "layout_data_unavailable"
                 else:
-                    print("❌ Failed to fetch current layout")
-                    print("🔚 FINAL RESULT: hasHorror = False (layout fetch failed)")
+                    print("âŒ Failed to fetch current layout")
+                    print("ðŸ”š FINAL RESULT: hasHorror = False (layout fetch failed)")
                     final_detection_method = "layout_fetch_failed"
             
             # ============================
             # FINAL RESULT SUMMARY
             # ============================
             print("\n" + "="*70)
-            print("🎯 FINAL DETECTION RESULT SUMMARY")
+            print("ðŸŽ¯ FINAL DETECTION RESULT SUMMARY")
             print("="*70)
             print(f"hasHorror: {final_has_horror}")
             print(f"Method: {final_detection_method}")
@@ -2132,36 +2587,36 @@ class SprunkiJSONGenerator:
             if 'comparison' in final_visual_result:
                 print(f"Comparison: {final_visual_result['comparison']}")
             if 'phase_before' in final_visual_result and 'phase_after' in final_visual_result:
-                print(f"Phase Transition: {final_visual_result['phase_before']} → {final_visual_result['phase_after']}")
+                print(f"Phase Transition: {final_visual_result['phase_before']} â†’ {final_visual_result['phase_after']}")
             print("="*70)
             
             # ============================
             # Full Layout Capture
             # ============================
             print("\n" + "="*70)
-            print("📊 Full Layout Capture")
+            print("ðŸ“Š Full Layout Capture")
             print("="*70)
             
-            print("📊 Extracting final full layout...")
+            print("ðŸ“Š Extracting final full layout...")
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate", 
                 "params": {"expression": self.js_full_layout, "awaitPromise": True, "returnByValue": True}
             })
             
             if response is None or 'result' not in response:
-                print("❌ Failed to get final full layout")
+                print("âŒ Failed to get final full layout")
                 ws.close()
                 self.cleanup_chrome_complete()
                 return False, None, None
                 
             layout_state = response.get('result', {}).get('result', {}).get('value')
             if not layout_state or "error" in layout_state: 
-                print(f"❌ Failed to get final layout: {layout_state.get('error', 'Unknown') if layout_state else 'None'}")
+                print(f"âŒ Failed to get final layout: {layout_state.get('error', 'Unknown') if layout_state else 'None'}")
                 ws.close()
                 self.cleanup_chrome_complete()
                 return False, None, None
                 
-            print("✅ Final full layout captured successfully")
+            print("âœ… Final full layout captured successfully")
             
             ws.close()
             
@@ -2169,7 +2624,7 @@ class SprunkiJSONGenerator:
             # Generate Final JSON
             # ============================
             print("\n" + "="*70)
-            print("📝 Generate Final JSON")
+            print("ðŸ“ Generate Final JSON")
             print("="*70)
             
             page_title = layout_state.get('pageTitle', 'Unknown')
@@ -2192,7 +2647,7 @@ class SprunkiJSONGenerator:
                         "structural_score": final_visual_result.get('structural_change', 0),
                         "horror_icon_index": final_visual_result.get('horror_icon_index', 19),
                         "comparison_type": final_visual_result.get('comparison', 'none'),
-                        "logic_flow": "A(initial) → B(icon19) → C(highest) with early stop"
+                        "logic_flow": "A(initial) â†’ B(icon19) â†’ C(highest) with early stop"
                     }
                 },
                 "layout": layout_state.get('layout', {}),
@@ -2201,28 +2656,28 @@ class SprunkiJSONGenerator:
                 }
             }
             
-            print("💾 Saving JSON file...")
+            print("ðŸ’¾ Saving JSON file...")
             json_file_path = self.save_json_file(final_json, output_path, custom_title=page_title)
             if not json_file_path: 
                 self.cleanup_chrome_complete()
                 return False, None, None
                 
-            print("\n🎉 SIMPLIFIED COMPLETE LOGIC COMPLETED!")
+            print("\nðŸŽ‰ SIMPLIFIED COMPLETE LOGIC COMPLETED!")
             print("="*70)
-            print(f"✅ hasHorror Detection: {final_has_horror}")
-            print(f"✅ Detection Method: {final_detection_method}")
-            print(f"✅ Logic Flow: A(initial) vs B(icon19) vs C(highest) with early stop")
+            print(f"âœ… hasHorror Detection: {final_has_horror}")
+            print(f"âœ… Detection Method: {final_detection_method}")
+            print(f"âœ… Logic Flow: A(initial) vs B(icon19) vs C(highest) with early stop")
             if 'comparison' in final_visual_result:
-                print(f"✅ Successful Comparison: {final_visual_result['comparison']}")
+                print(f"âœ… Successful Comparison: {final_visual_result['comparison']}")
             print("="*70)
             
-            print("🧹 Performing complete cleanup...")
+            print("ðŸ§¹ Performing complete cleanup...")
             self.cleanup_chrome_complete()
                 
             return True, json_file_path, final_json
             
         except Exception as e:
-            print(f"❌ Simplified complete logic error: {e}")
+            print(f"âŒ Simplified complete logic error: {e}")
             import traceback
             traceback.print_exc()
             
@@ -2250,7 +2705,7 @@ class SprunkiJSONGenerator:
 
     def save_json_file(self, json_data, output_path=None, custom_title=None):
         try:
-            # Lấy json_output_directory từ config
+            # Láº¥y json_output_directory tá»« config
             json_output_dir = self.config.get('output', {}).get('json_output_directory', r"I:\VS-Project\Sprunki\JSON")
             os.makedirs(json_output_dir, exist_ok=True)
 
@@ -2259,14 +2714,14 @@ class SprunkiJSONGenerator:
                 
                 if custom_title and custom_title.strip():
                     base_name = custom_title.strip()
-                    print(f"🏷️ Using custom title for filename: '{base_name}'")
+                    print(f"ðŸ·ï¸ Using custom title for filename: '{base_name}'")
                 else:
                     from urllib.parse import urlparse
                     slug_base = urlparse(self.game_url).path.split('/')[-1]
                     if not slug_base: 
                         slug_base = urlparse(self.game_url).netloc.replace('www.','')
                     base_name = slug_base
-                    print(f"🏷️ Using URL slug for filename: '{base_name}'")
+                    print(f"ðŸ·ï¸ Using URL slug for filename: '{base_name}'")
                 
                 clean_name = re.sub(r'[^\w\s\-]', '', base_name)
                 clean_name = re.sub(r'\s+', '-', clean_name)
@@ -2284,10 +2739,10 @@ class SprunkiJSONGenerator:
             
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(serializable_data, f, indent=2, ensure_ascii=False)
-            print(f"💾 JSON saved: {output_path}")
+            print(f"ðŸ’¾ JSON saved: {output_path}")
             return output_path
         except Exception as e:
-            print(f"❌ Save JSON error: {e}")
+            print(f"âŒ Save JSON error: {e}")
             import traceback
             traceback.print_exc()
             return None

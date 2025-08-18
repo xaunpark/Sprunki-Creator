@@ -57,6 +57,33 @@
     "run_button_max_retries": 2,
     "enhanced_verification": true
   },
+  "page_verification": {
+    "enabled": true,
+    "timeout_ms": 120000,
+    "check_interval_ms": 2000,
+    "criteria": {
+      "document_ready": true,
+      "network_idle": true,
+      "no_loading_spinners": true,
+      "basic_elements": true
+    },
+    "max_retries": 3,
+    "stabilization_wait_seconds": 3
+  },
+  "game_load_verification": {
+    "enabled": true,
+    "timeout_ms": 90000,
+    "check_interval_ms": 2000,
+    "game_container_selectors": [
+      ".ccw-stage-wrapper",
+      "#stage-canvas-wrapper", 
+      ".gandi_stage_stage_1fD7k",
+      "canvas"
+    ],
+    "min_containers_required": 1,
+    "check_react_components": true,
+    "check_run_button_dom": true
+  },
   "automation": {
     "pyautogui": {
       "pause": 0.08,
