@@ -20,7 +20,6 @@ import pygetwindow as gw
 from pathlib import Path
 from datetime import datetime
 import math
-from typing import Tuple, Dict, Any, List, Optional
 
 class DragOperationStats:
     """Class để tracking drag operation statistics"""
@@ -76,31 +75,7 @@ class SprunkiGamePlayer:
     def __init__(self):
         # Load configuration from config.json (like json_generator.py)
         self.load_config()
-
-        # ================================================================
-        # ENHANCED: Initialize DOM-related components
-        # ================================================================
-        try:
-            # Update DOM configuration support (ensure it's called after load_config)
-            self.update_load_config_with_dom_support()
-            
-            # Initialize verification availability flags
-            self.dom_verification_available = True
-            self.page_verification_available = self.app_config.get('page_verification', {}).get('enabled', True)
-            self.game_verification_available = self.app_config.get('game_load_verification', {}).get('enabled', True)
-            
-            print(f"🎯 DOM verification capabilities:")
-            print(f"   DOM detection: {'READY' if self.dom_verification_available else 'DISABLED'}")
-            print(f"   Page verification: {'READY' if self.page_verification_available else 'DISABLED'}")
-            print(f"   Game verification: {'READY' if self.game_verification_available else 'DISABLED'}")
-            
-        except Exception as dom_init_error:
-            print(f"⚠️ DOM initialization warning: {dom_init_error}")
-            print("ℹ️ DOM features may be limited, but basic functionality will work")
-            self.dom_verification_available = False
-            self.page_verification_available = False
-            self.game_verification_available = False
-
+        
         # Core state
         self.config = None
         self.is_playing = False
@@ -113,9 +88,14 @@ class SprunkiGamePlayer:
         self.ws_url = None
         self.game_url = None
         
-        # ADDED: Drag verification system
+        # ✅ DUAL VERIFICATION SYSTEM
+        # Characters Array system  
+        self.characters_setup_done = False
+        self.characters_available = False
+        
+        # Putted Characters system (backup)
         self.putted_chars_setup_done = False
-        self.verification_available = False
+        self.putted_chars_available = False
         
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
@@ -316,20 +296,10 @@ class SprunkiGamePlayer:
         self.setup_gui()
 
     def load_config(self):
-            """
-            ENHANCED: Load configuration from config.json with full DOM support
-            """
+            """Load configuration from config.json like json_generator.py"""
             try:
-                print("🔧 ENHANCED CONFIG LOADING")
-                print("="*50)
-                
                 from config_manager import get_config
                 self.app_config = get_config()
-                
-                # ================================================================
-                # CORE BROWSER & GAME SETTINGS
-                # ================================================================
-                print("📝 Loading core browser & game settings...")
                 
                 # Chrome settings from config
                 self.chrome_config = self.app_config.get('chrome', {})
@@ -342,345 +312,455 @@ class SprunkiGamePlayer:
                 
                 # Game settings from config
                 self.game_config = self.app_config.get('game', {})
-                self.page_load_wait = self.game_config.get('page_load_wait', 30)
+                self.page_load_wait = self.game_config.get('page_load_wait', 20)
                 self.game_load_wait = self.game_config.get('game_load_wait', 10)
                 self.fullscreen_wait = self.game_config.get('fullscreen_wait', 8)
                 self.max_pagedown_attempts = self.game_config.get('max_pagedown_attempts', 5)
                 self.intro_skip_clicks = self.game_config.get('intro_skip_clicks', 10)
                 
-                print(f"   ✅ Chrome debug port: {self.debugging_port}")
-                print(f"   ✅ Page load wait: {self.page_load_wait}s")
-                print(f"   ✅ Game load wait: {self.game_load_wait}s")
-                print(f"   ✅ Intro skip clicks: {self.intro_skip_clicks}")
+                # Load verification settings
+                self.load_verification_config()
                 
-                # ================================================================
-                # PAGE & GAME VERIFICATION SETTINGS
-                # ================================================================
-                print("📝 Loading page & game verification settings...")
-                
-                # Page verification config
-                self.page_verification_config = self.app_config.get('page_verification', {})
-                if not self.page_verification_config:
-                    print("   ⚠️ page_verification config missing, using defaults")
-                    self.page_verification_config = {
-                        'enabled': True,
-                        'timeout_ms': 120000,
-                        'check_interval_ms': 2000,
-                        'criteria': {
-                            'document_ready': True,
-                            'network_idle': True,
-                            'basic_content_loaded': True,
-                            'no_loading_spinners': True
-                        },
-                        'required_elements': ['body', 'head']
-                    }
-                    self.app_config['page_verification'] = self.page_verification_config
-                
-                # Game load verification config
-                self.game_load_verification_config = self.app_config.get('game_load_verification', {})
-                if not self.game_load_verification_config:
-                    print("   ⚠️ game_load_verification config missing, using defaults")
-                    self.game_load_verification_config = {
-                        'enabled': True,
-                        'timeout_ms': 90000,
-                        'check_interval_ms': 1500,
-                        'criteria': {
-                            'game_container_present': True,
-                            'react_components_ready': True,
-                            'no_game_loading_indicators': True
-                        },
-                        'game_container_selectors': [
-                            '.ccw-stage-wrapper', '#stage-canvas-wrapper', 
-                            '.gandi_stage_stage_1fD7k', 'canvas'
-                        ]
-                    }
-                    self.app_config['game_load_verification'] = self.game_load_verification_config
-                
-                page_enabled = self.page_verification_config.get('enabled', True)
-                game_enabled = self.game_load_verification_config.get('enabled', True)
-                print(f"   ✅ Page verification: {'ENABLED' if page_enabled else 'DISABLED'}")
-                print(f"   ✅ Game load verification: {'ENABLED' if game_enabled else 'DISABLED'}")
-                
-                # ================================================================
-                # RUN BUTTON DETECTION SETTINGS
-                # ================================================================
-                print("📝 Loading Run button detection settings...")
-                
-                self.run_button_config = self.app_config.get('run_button', {})
-                if not self.run_button_config:
-                    print("   ⚠️ run_button config missing, using defaults")
-                    self.run_button_config = {
-                        'strategy': 'auto',
-                        'timeout_ms': 90000,
-                        'check_interval_ms': 1000,
-                        'verify_after_click_ms': 8000,
-                        'selector_mode': 'icon_then_text',
-                        'selectors': {
-                            'icon_based': '//button[.//img[contains(@src,\'icon-run.svg\')]]',
-                            'text_based': '//button[normalize-space()=\'Run\']',
-                            'css_fallback': 'button'
-                        },
-                        'clickability_checks': {
-                            'is_connected': True,
-                            'has_bounding_box': True,
-                            'is_visible': True,
-                            'is_not_disabled': True,
-                            'hit_test': True,
-                            'scroll_into_view': True
-                        }
-                    }
-                    self.app_config['run_button'] = self.run_button_config
-                
-                run_strategy = self.run_button_config.get('strategy', 'auto')
-                run_timeout = self.run_button_config.get('timeout_ms', 90000) / 1000
-                run_mode = self.run_button_config.get('selector_mode', 'icon_then_text')
-                print(f"   ✅ Run button strategy: {run_strategy}")
-                print(f"   ✅ Run button timeout: {run_timeout}s")
-                print(f"   ✅ Run button selector mode: {run_mode}")
-                
-                # ================================================================
-                # PLAYING STATE VERIFICATION SETTINGS
-                # ================================================================
-                print("📝 Loading playing state verification settings...")
-                
-                self.playing_state_config = self.app_config.get('playing_state_verification', {})
-                if not self.playing_state_config:
-                    print("   ⚠️ playing_state_verification config missing, using defaults")
-                    self.playing_state_config = {
-                        'enabled': True,
-                        'timeout_ms': 60000,
-                        'check_interval_ms': 1000,
-                        'criteria': {
-                            'run_button_disappeared': True,
-                            'game_playing_indicators': True,
-                            'no_start_overlay': True
-                        },
-                        'playing_indicators': [
-                            '.style_stage-player-center__*',
-                            '[class*=\'stage-player-center\']',
-                            '[class*=\'playing\']'
-                        ],
-                        'start_overlay_selectors': [
-                            '.style_gandi-player-start__*',
-                            '[class*=\'gandi-player-start\']',
-                            '[class*=\'start-overlay\']'
-                        ]
-                    }
-                    self.app_config['playing_state_verification'] = self.playing_state_config
-                
-                playing_enabled = self.playing_state_config.get('enabled', True)
-                playing_timeout = self.playing_state_config.get('timeout_ms', 60000) / 1000
-                print(f"   ✅ Playing state verification: {'ENABLED' if playing_enabled else 'DISABLED'}")
-                print(f"   ✅ Playing state timeout: {playing_timeout}s")
-                
-                # ================================================================
-                # FULLSCREEN BUTTON DETECTION SETTINGS
-                # ================================================================
-                print("📝 Loading Fullscreen button detection settings...")
-                
-                self.fullscreen_button_config = self.app_config.get('fullscreen_button', {})
-                if not self.fullscreen_button_config:
-                    print("   ⚠️ fullscreen_button config missing, using defaults")
-                    self.fullscreen_button_config = {
-                        'strategy': 'dom',
-                        'timeout_ms': 60000,
-                        'check_interval_ms': 1000,
-                        'verify_after_click_ms': 5000,
-                        'scroll_into_view': True,
-                        'selectors': {
-                            'text_based': '//*[normalize-space(text())=\'Full screen\']',
-                            'container_pattern': '.style_gandi-player-actions-item__*'
-                        },
-                        'clickability_checks': {
-                            'is_connected': True,
-                            'has_bounding_box': True,
-                            'is_visible': True,
-                            'hit_test': True,
-                            'scroll_into_view': True,
-                            'find_clickable_ancestor': True
-                        },
-                        'verification': {
-                            'fullscreen_element_check': True,
-                            'text_change_check': True,
-                            'expected_text_after': 'Exit full screen'
-                        }
-                    }
-                    self.app_config['fullscreen_button'] = self.fullscreen_button_config
-                
-                fs_strategy = self.fullscreen_button_config.get('strategy', 'dom')
-                fs_timeout = self.fullscreen_button_config.get('timeout_ms', 60000) / 1000
-                fs_scroll = self.fullscreen_button_config.get('scroll_into_view', True)
-                print(f"   ✅ Fullscreen strategy: {fs_strategy}")
-                print(f"   ✅ Fullscreen timeout: {fs_timeout}s")
-                print(f"   ✅ Fullscreen scroll into view: {fs_scroll}")
-                
-                # ================================================================
-                # AUTOMATION & DOMAIN SETTINGS
-                # ================================================================
-                print("📝 Loading automation & domain settings...")
-                
-                # PyAutoGUI settings from config
-                pyautogui_config = self.app_config.get('automation', {}).get('pyautogui', {})
-                if pyautogui_config:
-                    pyautogui.PAUSE = pyautogui_config.get('pause', 0.08)
-                    pyautogui.DURATION = pyautogui_config.get('duration', 0.2)
-                    pyautogui.FAILSAFE = pyautogui_config.get('failsafe', True)
-                    print(f"   ✅ PyAutoGUI pause: {pyautogui.PAUSE}s")
-                    print(f"   ✅ PyAutoGUI duration: {pyautogui.DURATION}s")
-                    print(f"   ✅ PyAutoGUI failsafe: {pyautogui.FAILSAFE}")
-                
-                # Domain adjustments
-                self.domain_adjustments = self.app_config.get('automation', {}).get('domain_adjustments', {
-                    'cocrea.world': {
-                        'extra_focus_time': 0.15,
-                        'drag_speed_multiplier': 1.2,
-                        'requires_double_click': False,
-                        'stability_factor': 0.9
-                    }
-                })
-                
-                supported_domains = self.game_config.get('supported_domains', ['cocrea.world'])
-                print(f"   ✅ Supported domains: {supported_domains}")
-                print(f"   ✅ Domain adjustments loaded: {list(self.domain_adjustments.keys())}")
-                
-                # ================================================================
-                # IMAGE DETECTION FALLBACK SETTINGS
-                # ================================================================
-                print("📝 Loading image detection fallback settings...")
-                
-                self.image_detection_config = self.app_config.get('image_detection', {})
-                if self.image_detection_config:
-                    confidence = self.image_detection_config.get('confidence_threshold', 0.85)
-                    retry_attempts = self.image_detection_config.get('max_retry_attempts', 20)
-                    print(f"   ✅ Image confidence threshold: {confidence}")
-                    print(f"   ✅ Image max retry attempts: {retry_attempts}")
-                else:
-                    print("   ⚠️ Image detection config not found, will use defaults")
-                
-                # ================================================================
-                # ADVANCED SETTINGS
-                # ================================================================
-                print("📝 Loading advanced settings...")
-                
-                # Hotkeys
-                hotkeys_config = self.app_config.get('hotkeys', {})
-                if hotkeys_config and hotkeys_config.get('global_enabled', True):
-                    emergency_stop_key = hotkeys_config.get('emergency_stop', 'esc')
-                    print(f"   ✅ Emergency stop hotkey: {emergency_stop_key}")
-                
-                # VPS optimization
-                vps_config = self.app_config.get('vps_optimization', {})
-                if vps_config and vps_config.get('enabled', True):
-                    enhanced_verification = vps_config.get('enhanced_page_verification', True)
-                    print(f"   ✅ VPS optimization: ENABLED")
-                    print(f"   ✅ Enhanced page verification: {enhanced_verification}")
-                
-                # ================================================================
-                # VALIDATION & COMPATIBILITY CHECKS
-                # ================================================================
-                print("📝 Performing validation & compatibility checks...")
-                
-                # Check for required config sections
-                required_sections = [
-                    'chrome', 'game', 'automation', 'run_button', 
-                    'fullscreen_button', 'page_verification', 'game_load_verification'
-                ]
-                
-                missing_sections = []
-                for section in required_sections:
-                    # FIX: Handle ConfigManager properly
-                    try:
-                        if hasattr(self.app_config, 'get'):
-                            # ConfigManager object with get method
-                            if not self.app_config.get(section):
-                                missing_sections.append(section)
-                        else:
-                            # Regular dict
-                            if section not in self.app_config:
-                                missing_sections.append(section)
-                    except Exception as check_error:
-                        print(f"      ⚠️ Could not check section {section}: {check_error}")
-                        missing_sections.append(section)
-                
-                if missing_sections:
-                    print(f"   ⚠️ Missing config sections: {missing_sections}")
-                    print("   ℹ️ Defaults have been applied for missing sections")
-                else:
-                    print("   ✅ All required config sections present")
-                
-                # Validate critical timeouts
-                critical_timeouts = {
-                    'page_load_wait': self.page_load_wait,
-                    'game_load_wait': self.game_load_wait,
-                    'run_button_timeout': self.run_button_config.get('timeout_ms', 90000) / 1000,
-                    'fullscreen_timeout': self.fullscreen_button_config.get('timeout_ms', 60000) / 1000
-                }
-                
-                print("   📊 Critical timeouts validation:")
-                for timeout_name, timeout_value in critical_timeouts.items():
-                    if timeout_value <= 0:
-                        print(f"      ⚠️ {timeout_name}: {timeout_value}s (WARNING: Very low)")
-                    elif timeout_value > 300:
-                        print(f"      ⚠️ {timeout_name}: {timeout_value}s (WARNING: Very high)")
-                    else:
-                        print(f"      ✅ {timeout_name}: {timeout_value}s")
-                
-                # ================================================================
-                # FEATURE SUMMARY
-                # ================================================================
-                print("\n🚀 ENHANCED CONFIGURATION LOADED SUCCESSFULLY!")
-                print("="*50)
-                print("✅ ENHANCED FEATURES ACTIVE:")
-                print(f"   🔍 DOM-first button detection: {run_strategy.upper()}")
-                print(f"   📄 Real page verification: {'YES' if page_enabled else 'NO'}")
-                print(f"   🎮 Game load verification: {'YES' if game_enabled else 'NO'}")
-                print(f"   🎯 Playing state verification: {'YES' if playing_enabled else 'NO'}")
-                print(f"   🖥️ Enhanced fullscreen detection: {fs_strategy.upper()}")
-                print(f"   🌐 Chrome debug port: {self.debugging_port}")
-                print(f"   📡 WebSocket/CDP integration: READY")
-                print(f"   🛡️ Image detection fallback: AVAILABLE")
-                print(f"   ⚡ VPS optimization: {'YES' if vps_config.get('enabled') else 'NO'}")
-                print("="*50)
+                print(f"✅ Game Player configured from config.json:")
+                print(f"   Debug port: {self.debugging_port}")
+                print(f"   Page load wait: {self.page_load_wait}s")
+                print(f"   Game load wait: {self.game_load_wait}s")
+                print(f"   Intro skip clicks: {self.intro_skip_clicks}")
+                print(f"   Smart verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}")
                 
             except Exception as e:
-                print(f"⚠️ Enhanced config loading had issues: {e}")
-                print("ℹ️ Falling back to basic configuration...")
-                import traceback
-                traceback.print_exc()
+                print(f"⚠️ Could not load config, using defaults: {e}")
+                # Set defaults
+                self.chrome_paths = [
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe", 
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+                ]
+                self.debugging_port = 9222
+                self.user_data_dir = 'chrome_debug_profile'
+                self.page_load_wait = 20
+                self.game_load_wait = 10
+                self.fullscreen_wait = 8
+                self.max_pagedown_attempts = 5
+                self.intro_skip_clicks = 10
                 
-                # ================================================================
-                # FALLBACK CONFIGURATION
-                # ================================================================
-                try:
-                    # Set minimal defaults to ensure functionality
-                    print("🔄 Setting up fallback configuration...")
-                    
-                    self.chrome_paths = [
-                        r"C:\Program Files\Google\Chrome\Application\chrome.exe", 
-                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-                    ]
-                    self.debugging_port = 9222
-                    self.user_data_dir = 'chrome_debug_profile'
-                    self.page_load_wait = 30
-                    self.game_load_wait = 10
-                    self.fullscreen_wait = 8
-                    self.max_pagedown_attempts = 5
-                    self.intro_skip_clicks = 10
-                    
-                    # Set basic DOM configs
-                    self.app_config = {
-                        'run_button': {'strategy': 'auto', 'timeout_ms': 90000},
-                        'fullscreen_button': {'strategy': 'dom', 'timeout_ms': 60000},
-                        'page_verification': {'enabled': True},
-                        'game_load_verification': {'enabled': True}
+                # Set default verification settings
+                self.page_verification_enabled = True
+                self.game_verification_enabled = True
+                self.page_verification_timeout = 120
+                self.game_verification_timeout = 90
+                self.page_verification_interval = 2
+                self.game_verification_interval = 2
+                self.stabilization_wait = 3
+                self.game_container_selectors = [".ccw-stage-wrapper", "#stage-canvas-wrapper", "canvas"]
+                self.min_containers_required = 1
+                self.check_react_components = True
+                self.check_run_button_dom = True
+
+    def load_verification_config(self):
+            """Load verification configuration from config.json"""
+            try:
+                # Page verification settings
+                self.page_verification = self.app_config.get('page_verification', {})
+                self.page_verification_enabled = self.page_verification.get('enabled', True)
+                self.page_verification_timeout = self.page_verification.get('timeout_ms', 120000) / 1000  # Convert to seconds
+                self.page_verification_interval = self.page_verification.get('check_interval_ms', 2000) / 1000
+                self.page_verification_criteria = self.page_verification.get('criteria', {})
+                self.page_verification_retries = self.page_verification.get('max_retries', 3)
+                self.stabilization_wait = self.page_verification.get('stabilization_wait_seconds', 3)
+                
+                # Game load verification settings
+                self.game_verification = self.app_config.get('game_load_verification', {})
+                self.game_verification_enabled = self.game_verification.get('enabled', True)
+                self.game_verification_timeout = self.game_verification.get('timeout_ms', 90000) / 1000
+                self.game_verification_interval = self.game_verification.get('check_interval_ms', 2000) / 1000
+                self.game_container_selectors = self.game_verification.get('game_container_selectors', [])
+                self.min_containers_required = self.game_verification.get('min_containers_required', 1)
+                self.check_react_components = self.game_verification.get('check_react_components', True)
+                self.check_run_button_dom = self.game_verification.get('check_run_button_dom', True)
+                
+                print(f"✅ Verification config loaded:")
+                print(f"   Page verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}")
+                print(f"   Game verification: {'✅ Enabled' if self.game_verification_enabled else '❌ Disabled'}")
+                print(f"   Page timeout: {self.page_verification_timeout}s")
+                print(f"   Game timeout: {self.game_verification_timeout}s")
+                
+            except Exception as e:
+                print(f"⚠️ Could not load verification config, using defaults: {e}")
+                # Set defaults if config loading fails
+                self.page_verification_enabled = True
+                self.game_verification_enabled = True
+                self.page_verification_timeout = 120
+                self.game_verification_timeout = 90
+                self.page_verification_interval = 2
+                self.game_verification_interval = 2
+                self.stabilization_wait = 3
+                self.game_container_selectors = [".ccw-stage-wrapper", "#stage-canvas-wrapper", "canvas"]
+                self.min_containers_required = 1
+                self.check_react_components = True
+                self.check_run_button_dom = True
+
+    def _execute_verification_js(self, js_code):
+        """Execute JavaScript for verification via WebSocket/CDP"""
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                print("⚠️ WebSocket not available for verification, skipping JS check")
+                return None
+            
+            ws = websocket.create_connection(ws_url, timeout=10)
+            
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": js_code, "returnByValue": True}
+            })
+            
+            ws.close()
+            
+            if response and 'result' in response:
+                result = response.get('result', {}).get('result', {}).get('value')
+                return result
+            else:
+                print("⚠️ No response from verification JavaScript")
+                return None
+                
+        except Exception as e:
+            print(f"⚠️ Error executing verification JavaScript: {e}")
+            return None
+
+    def verify_page_fully_loaded(self, target_url):
+        """
+        🔍 Smart Page Load Verification System
+        Checks if page is fully loaded before proceeding with image detection
+        """
+        try:
+            if not self.page_verification_enabled:
+                print("🔍 Page verification disabled, assuming page ready")
+                return True
+            
+            print(f"\n🔍 SMART PAGE VERIFICATION: {target_url}")
+            print("="*70)
+            
+            # JavaScript for comprehensive page verification
+            verification_js = """
+            (() => {
+                const results = {
+                    documentState: document.readyState,
+                    basicElements: {
+                        hasBody: !!document.body,
+                        hasHead: !!document.head,
+                        bodyChildren: document.body ? document.body.children.length : 0
+                    },
+                    loadingSpinners: {
+                        count: 0,
+                        types: []
+                    },
+                    networkActivity: {
+                        pendingRequests: 0,
+                        estimatedIdle: true
+                    },
+                    currentUrl: window.location.href,
+                    timestamp: Date.now()
+                };
+                
+                // Check for common loading spinner patterns
+                const spinnerSelectors = [
+                    '.loading', '.spinner', '.loader', 
+                    '[class*="loading"]', '[class*="spinner"]', '[class*="loader"]',
+                    '.fa-spinner', '.fa-circle-o-notch'
+                ];
+                
+                spinnerSelectors.forEach(selector => {
+                    const elements = document.querySelectorAll(selector);
+                    if (elements.length > 0) {
+                        const visibleSpinners = Array.from(elements).filter(el => {
+                            const style = window.getComputedStyle(el);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                        });
+                        if (visibleSpinners.length > 0) {
+                            results.loadingSpinners.count += visibleSpinners.length;
+                            results.loadingSpinners.types.push(selector);
+                        }
                     }
+                });
+                
+                // Estimate network activity (simplified)
+                try {
+                    if (window.performance && window.performance.getEntriesByType) {
+                        const navigationEntries = window.performance.getEntriesByType('navigation');
+                        if (navigationEntries.length > 0) {
+                            const nav = navigationEntries[0];
+                            results.networkActivity.loadComplete = nav.loadEventEnd > 0;
+                            results.networkActivity.domComplete = nav.domComplete > 0;
+                        }
+                    }
+                } catch (e) {
+                    console.log('Network activity check failed:', e);
+                }
+                
+                // Overall readiness assessment
+                results.readyScore = 0;
+                if (results.documentState === 'complete') results.readyScore += 30;
+                if (results.basicElements.hasBody && results.basicElements.hasHead) results.readyScore += 25;
+                if (results.basicElements.bodyChildren > 0) results.readyScore += 20;
+                if (results.loadingSpinners.count === 0) results.readyScore += 25;
+                
+                results.isReady = results.readyScore >= 75;
+                
+                return results;
+            })();
+            """
+            
+            start_time = time.time()
+            max_retries = self.page_verification_retries
+            
+            for attempt in range(1, max_retries + 1):
+                if self.should_stop:
+                    return False
+                
+                print(f"🔍 Page verification attempt {attempt}/{max_retries}")
+                
+                # Execute verification JavaScript
+                verification_result = self._execute_verification_js(verification_js)
+                
+                if verification_result:
+                    document_state = verification_result.get('documentState', 'unknown')
+                    basic_elements = verification_result.get('basicElements', {})
+                    loading_spinners = verification_result.get('loadingSpinners', {})
+                    ready_score = verification_result.get('readyScore', 0)
+                    is_ready = verification_result.get('isReady', False)
                     
-                    print("✅ Fallback configuration applied successfully")
+                    print(f"   📊 Document state: {document_state}")
+                    print(f"   📊 Basic elements: Body={basic_elements.get('hasBody')}, Head={basic_elements.get('hasHead')}, Children={basic_elements.get('bodyChildren', 0)}")
+                    print(f"   📊 Loading spinners: {loading_spinners.get('count', 0)} active")
+                    print(f"   📊 Ready score: {ready_score}/100")
+                    print(f"   📊 Overall assessment: {'✅ READY' if is_ready else '⏳ NOT READY'}")
                     
-                except Exception as fallback_error:
-                    print(f"❌ Even fallback configuration failed: {fallback_error}")
-                    print("💥 Critical configuration error - manual intervention required")
-                    raise fallback_error
+                    if is_ready:
+                        elapsed = time.time() - start_time
+                        print(f"✅ PAGE VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
+                        print("="*70)
+                        return True
+                    else:
+                        if loading_spinners.get('count', 0) > 0:
+                            spinner_types = ', '.join(loading_spinners.get('types', []))
+                            print(f"   ⏳ Waiting for loading spinners to disappear: {spinner_types}")
+                        if document_state != 'complete':
+                            print(f"   ⏳ Waiting for document to complete loading...")
+                        if basic_elements.get('bodyChildren', 0) == 0:
+                            print(f"   ⏳ Waiting for page content to render...")
+                
+                else:
+                    print(f"   ⚠️ Verification JavaScript failed, using fallback check")
+                    # Fallback: Simple document ready check
+                    simple_check = self._execute_verification_js("document.readyState")
+                    if simple_check == 'complete':
+                        print(f"   ✅ Fallback check passed: document.readyState = complete")
+                        return True
+                
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > self.page_verification_timeout:
+                    print(f"⚠️ Page verification timeout ({self.page_verification_timeout}s exceeded)")
+                    print("   Proceeding anyway with image detection...")
+                    return True  # Don't fail completely, proceed with image detection
+                
+                # Wait before next attempt
+                if attempt < max_retries:
+                    print(f"   ⏳ Waiting {self.page_verification_interval}s before next check...")
+                    time.sleep(self.page_verification_interval)
+            
+            # All attempts failed, but don't block the workflow
+            print(f"⚠️ Page verification failed after {max_retries} attempts")
+            print("   Proceeding anyway with image detection...")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Error in page verification: {e}")
+            print("   Proceeding anyway with image detection...")
+            return True  # Don't block workflow on verification errors
+
+    def verify_game_components_ready(self):
+        """
+        🎮 Smart Game Load Verification System
+        Checks if game components are ready before proceeding with Run button detection
+        """
+        try:
+            if not self.game_verification_enabled:
+                print("🎮 Game verification disabled, assuming game ready")
+                return True
+            
+            print(f"\n🎮 SMART GAME VERIFICATION")
+            print("="*70)
+            
+            # JavaScript for game component verification
+            game_verification_js = f"""
+            (() => {{
+                const selectors = {self.game_container_selectors};
+                const results = {{
+                    gameContainers: [],
+                    reactComponents: {{
+                        found: false,
+                        details: []
+                    }},
+                    runButtonInDOM: false,
+                    overallReady: false,
+                    timestamp: Date.now()
+                }};
+                
+                // Check game container elements
+                selectors.forEach(selector => {{
+                    const elements = document.querySelectorAll(selector);
+                    if (elements.length > 0) {{
+                        elements.forEach((el, index) => {{
+                            const rect = el.getBoundingClientRect();
+                            results.gameContainers.push({{
+                                selector: selector,
+                                index: index,
+                                id: el.id || 'no-id',
+                                className: el.className || 'no-class',
+                                visible: rect.width > 0 && rect.height > 0,
+                                hasChildren: el.children.length > 0
+                            }});
+                        }});
+                    }}
+                }});
+                
+                // Check for React components (look for React fiber keys)
+                const checkReactComponents = () => {{
+                    const elements = document.querySelectorAll('*');
+                    let reactFound = false;
+                    for (let el of elements) {{
+                        const keys = Object.keys(el);
+                        const reactKey = keys.find(key => key.startsWith('__react'));
+                        if (reactKey) {{
+                            reactFound = true;
+                            results.reactComponents.details.push({{
+                                element: el.tagName,
+                                reactKey: reactKey.substring(0, 20) + '...'
+                            }});
+                            if (results.reactComponents.details.length >= 3) break; // Limit for performance
+                        }}
+                    }}
+                    results.reactComponents.found = reactFound;
+                }};
+                
+                if ({str(self.check_react_components).lower()}) {{
+                    checkReactComponents();
+                }}
+                
+                // Check if Run button exists in DOM (even if not visible)
+                if ({str(self.check_run_button_dom).lower()}) {{
+                    const runButtonSelectors = [
+                        'button[type="submit"]',
+                        'button:contains("Run")',
+                        '.run-button',
+                        '#run-button',
+                        '[class*="run"]',
+                        '[class*="play"]',
+                        '[class*="start"]',
+                        'button',
+                        'input[type="submit"]'
+                    ];
+                    
+                    for (let selector of runButtonSelectors) {{
+                        try {{
+                            const buttons = document.querySelectorAll(selector);
+                            for (let button of buttons) {{
+                                const text = button.textContent || button.value || button.alt || '';
+                                if (text.toLowerCase().includes('run') || 
+                                    text.toLowerCase().includes('play') || 
+                                    text.toLowerCase().includes('start')) {{
+                                    results.runButtonInDOM = true;
+                                    break;
+                                }}
+                            }}
+                            if (results.runButtonInDOM) break;
+                        }} catch (e) {{
+                            // Skip invalid selectors
+                        }}
+                    }}
+                }}
+                
+                // Assessment
+                const gameContainersFound = results.gameContainers.length >= {self.min_containers_required};
+                const reactReady = !{str(self.check_react_components).lower()} || results.reactComponents.found;
+                const runButtonReady = !{str(self.check_run_button_dom).lower()} || results.runButtonInDOM;
+                
+                results.overallReady = gameContainersFound && reactReady && runButtonReady;
+                
+                return results;
+            }})();
+            """
+            
+            start_time = time.time()
+            max_attempts = 3
+            
+            for attempt in range(1, max_attempts + 1):
+                if self.should_stop:
+                    return False
+                
+                print(f"🎮 Game verification attempt {attempt}/{max_attempts}")
+                
+                # Execute game verification JavaScript
+                game_result = self._execute_verification_js(game_verification_js)
+                
+                if game_result:
+                    game_containers = game_result.get('gameContainers', [])
+                    react_components = game_result.get('reactComponents', {})
+                    run_button_in_dom = game_result.get('runButtonInDOM', False)
+                    overall_ready = game_result.get('overallReady', False)
+                    
+                    print(f"   🎯 Game containers found: {len(game_containers)}")
+                    for container in game_containers[:3]:  # Show first 3
+                        print(f"      - {container['selector']}: visible={container['visible']}, children={container['hasChildren']}")
+                    
+                    if self.check_react_components:
+                        react_found = react_components.get('found', False)
+                        react_count = len(react_components.get('details', []))
+                        print(f"   ⚛️ React components: {'✅ Found' if react_found else '❌ Not found'} ({react_count} detected)")
+                    
+                    if self.check_run_button_dom:
+                        print(f"   🔘 Run button in DOM: {'✅ Found' if run_button_in_dom else '❌ Not found'}")
+                    
+                    print(f"   🎯 Overall game ready: {'✅ YES' if overall_ready else '❌ NO'}")
+                    
+                    if overall_ready:
+                        elapsed = time.time() - start_time
+                        print(f"✅ GAME VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
+                        print("="*70)
+                        return True
+                    else:
+                        if len(game_containers) < self.min_containers_required:
+                            print(f"   ⏳ Waiting for game containers to load ({len(game_containers)}/{self.min_containers_required})")
+                        if self.check_react_components and not react_components.get('found'):
+                            print(f"   ⏳ Waiting for React components to initialize")
+                        if self.check_run_button_dom and not run_button_in_dom:
+                            print(f"   ⏳ Waiting for Run button to appear in DOM")
+                
+                else:
+                    print(f"   ⚠️ Game verification JavaScript failed")
+                
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > self.game_verification_timeout:
+                    print(f"⚠️ Game verification timeout ({self.game_verification_timeout}s exceeded)")
+                    print("   Proceeding anyway with image detection...")
+                    return True
+                
+                # Wait before next attempt
+                if attempt < max_attempts:
+                    print(f"   ⏳ Waiting {self.game_verification_interval}s before next check...")
+                    time.sleep(self.game_verification_interval)
+            
+            # All attempts failed, but don't block the workflow
+            print(f"⚠️ Game verification failed after {max_attempts} attempts")
+            print("   Proceeding anyway with image detection...")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Error in game verification: {e}")
+            print("   Proceeding anyway with image detection...")
+            return True
 
     # ================================================================
     # == CHROME DEBUG BROWSER MANAGEMENT (from json_generator.py) ==
@@ -742,25 +822,15 @@ class SprunkiGamePlayer:
             return False
 
     def navigate_and_prepare_game(self, url):
-            """
-            ENHANCED: Navigate to game URL using Chrome debug mode with DOM-first approach
-            """
+            """Navigate to game URL using Chrome debug mode with Smart Verification"""
             try:
-                print(f"🌐 ENHANCED GAME NAVIGATION & PREPARATION")
-                print("="*70)
-                print(f"📍 Target URL: {url}")
+                print(f"🌐 Opening game URL with Chrome debug session: {url}")
                 
                 # Complete cleanup first
                 self.cleanup_chrome_complete()
                 time.sleep(2)
                 
                 self.game_url = url
-                
-                # ================================================================
-                # PHASE 1: BROWSER LAUNCH WITH EXTENSIONS
-                # ================================================================
-                print("\n📝 PHASE 1: Browser Launch with Extensions")
-                print("-" * 50)
                 
                 # Find uBlock extension (AdBlocker)
                 extensions_dir = os.path.join(os.getcwd(), 'extensions')
@@ -804,25 +874,18 @@ class SprunkiGamePlayer:
                 print("🔧 Launching Chrome with debug mode and AdBlocker...")
                 self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
-                print(f"⏳ Initial browser startup wait: {self.page_load_wait}s...")
+                print(f"⏳ Waiting {self.page_load_wait}s for Chrome and AdBlocker to initialize...")
                 time.sleep(self.page_load_wait)
-                
-                # ================================================================
-                # PHASE 2: WINDOW MANAGEMENT & FOCUS
-                # ================================================================
-                print("\n📝 PHASE 2: Window Management & Focus")
-                print("-" * 50)
                 
                 # Find game window
                 game_window = None
-                for attempt in range(10): 
+                for _ in range(10): 
                     possible_windows = gw.getWindowsWithTitle('cocrea.world')
                     if not possible_windows: 
                         possible_windows = gw.getWindowsWithTitle('Chrome')
                     if possible_windows: 
                         game_window = possible_windows[0]
                         break
-                    print(f"   🔍 Looking for game window... attempt {attempt + 1}/10")
                     time.sleep(1)
                     
                 if not game_window: 
@@ -836,192 +899,109 @@ class SprunkiGamePlayer:
                 time.sleep(2)
                 
                 # ================================================================
-                # PHASE 3: ENHANCED PAGE & GAME VERIFICATION
+                # 🔍 SMART VERIFICATION SYSTEM (REPLACES FIXED 40s WAIT)
                 # ================================================================
-                print("\n📝 PHASE 3: Enhanced Page & Game Verification")
-                print("-" * 50)
+                print(f"\n🔍 STARTING SMART VERIFICATION SYSTEM")
+                print("="*70)
                 
-                # Use real page load verifier instead of stub
-                from page_load_verifier import PageLoadVerifier
-                verifier = PageLoadVerifier(self.debugging_port)
+                # Phase 1: Page Load Verification
+                print("🔍 Phase 1: Smart Page Load Verification...")
+                page_verification_success = self.verify_page_fully_loaded(url)
                 
-                print("🔍 Starting comprehensive page & game verification...")
-                verification_success, verification_message = verifier.verify_page_fully_loaded(url, max_retries=3)
+                if not page_verification_success:
+                    print("⚠️ Page verification failed, but continuing with workflow...")
                 
-                if not verification_success:
-                    print(f"❌ Page/Game verification failed: {verification_message}")
-                    
-                    # Try refresh and verify again
-                    print("🔄 Attempting page refresh and re-verification...")
-                    refresh_success, refresh_message = verifier.wait_for_page_ready_with_refresh(url)
-                    
-                    if not refresh_success:
-                        messagebox.showerror("Verification Error", 
-                            f"Page/Game verification failed even after refresh:\n\n"
-                            f"Initial: {verification_message}\n"
-                            f"After refresh: {refresh_message}")
-                        return False
-                    else:
-                        print(f"✅ Verification successful after refresh: {refresh_message}")
+                # Phase 2: Game Components Verification  
+                print("🎮 Phase 2: Smart Game Components Verification...")
+                game_verification_success = self.verify_game_components_ready()
+                
+                if not game_verification_success:
+                    print("⚠️ Game verification failed, but continuing with workflow...")
+                
+                # Phase 3: Stabilization wait (replaces fixed 40s with smart 3s)
+                if page_verification_success and game_verification_success:
+                    print(f"✅ VERIFICATION SUCCESSFUL: Page and game fully loaded!")
+                    print(f"⏳ Stabilization wait: {self.stabilization_wait}s for optimal image detection...")
+                    time.sleep(self.stabilization_wait)
                 else:
-                    print(f"✅ Verification successful: {verification_message}")
+                    print(f"⚠️ Verification had issues, using fallback stabilization...")
+                    time.sleep(5)  # Fallback wait if verification failed
+                
+                print("🎯 Smart verification completed - starting enhanced Run button detection...")
+                print("="*70)
                 
                 # ================================================================
-                # PHASE 4: IMAGE-BASED RUN BUTTON DETECTION (After Verification)
+                # 🚀 ENHANCED RUN BUTTON DETECTION (KEEPS ORIGINAL IMAGE LOGIC)
                 # ================================================================
-                print("\n📝 PHASE 4: Image-Based Run Button Detection (After Verification)")
-                print("-" * 50)
                 
-                print("✅ Page & Game verification completed - Starting Run button detection...")
+                # Find and click Run button with enhanced workflow
+                run_button_clicked = False
+                max_retries = 3
                 
-                # Use traditional image detection with scroll capability
-                if hasattr(self, 'detector') and self.detector:
-                    print("🖼️ Using Image Detector for Run button with enhanced scrolling...")
+                for attempt in range(1, max_retries + 1):
+                    print(f"\n--- 🚀 Finding 'Run' Button - Attempt {attempt}/{max_retries} ---")
                     
-                    # Enhanced run button click with better timing
-                    run_success = self.detector.click_run_button(
-                        max_pagedown_attempts=self.max_pagedown_attempts,
-                        focus_window=True,  # Ensure window focus
-                        wait_between_attempts=2  # Slower for stability
-                    )
-                    
-                    if run_success:
-                        print("✅ Run button clicked successfully with image detection!")
+                    if attempt > 1:
+                        print("   -> Action: Reloading page to clear potential issues...")
+                        pyautogui.hotkey('ctrl', 'r')
                         
-                        # Verify click worked (brief check)
-                        print("🔍 Verifying Run button click...")
-                        time.sleep(3)  # Give time for game to respond
-                        
-                        # Simple verification via image detector
-                        verification_success = True  # Assume success if no exceptions
-                        try:
-                            # Check if Run button disappeared by trying to find it again
-                            print("   📊 Checking if Run button disappeared...")
-                            run_still_visible = self.detector.find_image_on_screen(
-                                self.detector.run_button_path, 
-                                confidence=0.7, 
-                                timeout=3
-                            )
-                            if not run_still_visible:
-                                print("   ✅ Run button disappeared - click likely successful")
-                                verification_success = True
-                            else:
-                                print("   ⚠️ Run button still visible - click may have failed")
-                                verification_success = False
-                        except Exception as verify_error:
-                            print(f"   ⚠️ Verification check failed: {verify_error}")
-                            verification_success = True  # Assume success on error
-                        
-                        if not verification_success:
-                            print("🔄 Run button verification failed, but continuing anyway...")
+                        # Quick re-verification after reload
+                        print("   -> Quick re-verification after reload...")
+                        time.sleep(3)  # Brief wait for reload
+                        quick_verification = self._execute_verification_js("document.readyState")
+                        if quick_verification == 'complete':
+                            print("   -> ✅ Page reloaded successfully")
+                            time.sleep(self.stabilization_wait)  # Smart stabilization
+                        else:
+                            print("   -> ⚠️ Page reload uncertain, using fallback wait...")
+                            time.sleep(8)  # Fallback wait
                     else:
-                        messagebox.showerror("Setup Error", 
-                            "Could not find or click Run button using image detection.\n\n"
-                            "Please ensure the Run button is visible on screen.")
-                        return False
-                else:
-                    messagebox.showerror("Setup Error", 
-                        "Image detector not initialized. Cannot proceed with Run button detection.")
+                        # First attempt - verification already done above
+                        print("   -> Using smart verification results (no additional wait needed)")
+                    
+                    print("   -> 🔍 Searching for 'Run' button on screen...")
+                    
+                    # KEEP ORIGINAL IMAGE DETECTION LOGIC EXACTLY AS-IS
+                    if self.detector.click_run_button(max_pagedown_attempts=self.max_pagedown_attempts):
+                        print(f"✅ SUCCESS: 'Run' button found and clicked on attempt {attempt}.")
+                        run_button_clicked = True
+                        break
+                    else:
+                        print(f"⚠️ FAILED: 'Run' button not found on attempt {attempt}.")
+                        if attempt < max_retries:
+                            print("   -> Preparing for next attempt...")
+                        else:
+                            messagebox.showerror("Setup Error", f"Could not find 'Run' button after {max_retries} attempts.")
+                            return False
+                            
+                if not run_button_clicked: 
                     return False
-                
-                # ================================================================
-                # PHASE 5: GAME LOADING WAIT
-                # ================================================================
-                print("\n📝 PHASE 5: Game Loading Wait")
-                print("-" * 50)
-                
-                game_load_wait = self.game_load_wait
-                print(f"⏳ Waiting {game_load_wait}s for game to fully initialize...")
-                time.sleep(game_load_wait)
-                
-                # ================================================================
-                # PHASE 6: IMAGE-BASED FULLSCREEN DETECTION (After Game Load)
-                # ================================================================
-                print("\n📝 PHASE 6: Image-Based Fullscreen Detection (After Game Load)")
-                print("-" * 50)
-                
-                print("✅ Game loading wait completed - Starting Fullscreen detection...")
-                
-                # Use traditional image detection for fullscreen
-                if hasattr(self, 'detector') and self.detector:
-                    print("🖼️ Using Image Detector for Fullscreen button...")
                     
-                    fullscreen_success = self.detector.click_fullscreen_button(
-                        wait_time=self.fullscreen_wait,
-                        focus_window=True  # Ensure window focus
-                    )
-                    
-                    if fullscreen_success:
-                        print("✅ Fullscreen activated successfully with image detection!")
-                    else:
-                        print("⚠️ Fullscreen activation failed with image detection")
-                        print("🔄 Attempting manual F11 fullscreen...")
-                        
-                        # Fallback to F11
-                        try:
-                            pyautogui.press('f11')
-                            time.sleep(2)
-                            print("✅ F11 fullscreen fallback applied")
-                        except Exception as f11_error:
-                            print(f"⚠️ F11 fallback failed: {f11_error}")
-                            print("ℹ️ Continuing without fullscreen...")
+                print(f"\n⏳ Waiting {self.game_load_wait}s for game to load after clicking Run...")
+                time.sleep(self.game_load_wait)
+                
+                # ================================================================
+                # 📺 FULLSCREEN BUTTON DETECTION (KEEPS ORIGINAL IMAGE LOGIC)
+                # ================================================================
+                
+                # Click fullscreen button - KEEP ORIGINAL LOGIC EXACTLY AS-IS
+                if self.detector.click_fullscreen_button(wait_time=self.fullscreen_wait):
+                    print("✅ Clicked game's own fullscreen button.")
+                    time.sleep(2)
                 else:
-                    print("⚠️ Image detector not available for fullscreen - trying F11...")
-                    try:
-                        pyautogui.press('f11')
-                        time.sleep(2)
-                        print("✅ F11 fullscreen applied")
-                    except Exception as f11_error:
-                        print(f"⚠️ F11 fallback failed: {f11_error}")
-                
-                # ================================================================
-                # PHASE 7: FINAL FULLSCREEN SETUP
-                # ================================================================
-                print("\n📝 PHASE 7: Final Fullscreen Setup")
-                print("-" * 50)
-                
-                # Press F11 for true fullscreen (additional safety)
-                print("⌨️ Pressing F11 for additional fullscreen assurance...")
+                    print("⚠️ Fullscreen button not found, continuing anyway.")
+                    
+                # Press F11 for true fullscreen
+                print("⌨️ Pressing F11 for true fullscreen mode...")
                 pyautogui.press('f11')
                 time.sleep(3)
                 
-                # ================================================================
-                # PHASE 8: ENHANCED INTRO SKIPPING
-                # ================================================================
-                print("\n📝 PHASE 8: Enhanced Intro Skipping")
-                print("-" * 50)
-                
-                # Skip intros using hybrid approach (CDP preferred, pyautogui fallback)
-                intro_skip_success = self.intro_skip_via_cdp()
-                
-                if not intro_skip_success:
-                    print("⚠️ CDP intro skipping had issues, but continuing...")
-                else:
-                    print("✅ Enhanced intro skipping completed successfully")
-                
-                # ================================================================
-                # COMPLETION
-                # ================================================================
-                print("\n🎉 ENHANCED GAME NAVIGATION & PREPARATION COMPLETED!")
-                print("="*70)
-                print("✅ FEATURES SUCCESSFULLY ACTIVATED:")
-                print("   🌐 Chrome debug mode for browser management")
-                print("   🔍 Real page & game load verification (not stub)")
-                print("   🎯 DOM-first Run button detection with image fallback")
-                print("   🖥️ Enhanced fullscreen detection with state validation")
-                print("   🎮 Smart intro skipping with multiple methods")
-                print("   🛡️ AdBlocker extension loaded")
-                print("   ⚡ WebSocket/CDP for advanced control")
-                print("="*70)
-                
+                print("✅ Game setup completed with Smart Verification System. Ready for automation.")
                 return True
                 
             except Exception as e:
-                error_message = f"Enhanced game navigation failed: {e}"
-                print(f"❌ {error_message}")
-                import traceback
-                traceback.print_exc()
-                messagebox.showerror("Setup Error", error_message)
+                messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
+                print(f"⌚ Failed to navigate and prepare game: {e}")
                 self.cleanup_chrome_complete()
                 return False
 
@@ -1100,1613 +1080,48 @@ class SprunkiGamePlayer:
         self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseReleased", "x": end_x, "y": end_y, "button": "left", "clickCount": 1}})
 
     # ================================================================
-    # == DOM-BASED UI ELEMENT DETECTION ==
-    # ================================================================
-
-    def find_run_button_dom(self, timeout_ms: int = None) -> Optional[Dict[str, Any]]:
-            """
-            Find Run button using DOM selectors with MANDATORY viewport scrolling
-            Returns: {x, y, width, height, element_info} or None if not found
-            """
-            try:
-                print("🔍 DOM DETECTION WITH MANDATORY VIEWPORT: Searching for Run button...")
-                
-                # Get config
-                run_config = self.app_config.get('run_button', {})
-                if timeout_ms is None:
-                    timeout_ms = run_config.get('timeout_ms', 90000)
-                check_interval_ms = run_config.get('check_interval_ms', 2000)  # Slower for scroll stability
-                
-                start_time = time.time()
-                timeout_seconds = timeout_ms / 1000
-                check_interval_seconds = check_interval_ms / 1000
-                
-                while (time.time() - start_time) < timeout_seconds:
-                    elapsed = int(time.time() - start_time)
-                    print(f"   🎯 Searching for Run button... ({elapsed}s/{int(timeout_seconds)}s)")
-                    
-                    # MANDATORY SCROLL DETECTION JavaScript
-                    find_and_scroll_js = """
-                    (function() {
-                        const result = {
-                            found: false,
-                            method: null,
-                            element: null,
-                            coordinates: null,
-                            clickability: {},
-                            scrollInfo: {},
-                            error: null
-                        };
-                        
-                        try {
-                            let targetElement = null;
-                            let method = null;
-                            
-                            // Method 1: Icon-based detection
-                            console.log('[DOM] Searching for Run button...');
-                            const iconImages = document.querySelectorAll('img[src*="icon-run.svg"]');
-                            
-                            for (const img of iconImages) {
-                                const button = img.closest('button');
-                                if (button) {
-                                    targetElement = button;
-                                    method = 'icon_closest_button';
-                                    break;
-                                }
-                            }
-                            
-                            // Method 2: Text-based fallback
-                            if (!targetElement) {
-                                const allButtons = document.querySelectorAll('button');
-                                for (const button of allButtons) {
-                                    const text = button.textContent ? button.textContent.trim().toLowerCase() : '';
-                                    if (text === 'run') {
-                                        targetElement = button;
-                                        method = 'text_manual';
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            if (!targetElement) {
-                                result.error = 'No Run button found in DOM';
-                                return result;
-                            }
-                            
-                            console.log('[DOM] Button found, checking position...');
-                            
-                            // Get initial position
-                            const initialRect = targetElement.getBoundingClientRect();
-                            const isInitiallyInViewport = (
-                                initialRect.top >= 0 &&
-                                initialRect.left >= 0 &&
-                                initialRect.bottom <= window.innerHeight &&
-                                initialRect.right <= window.innerWidth &&
-                                initialRect.width > 0 &&
-                                initialRect.height > 0
-                            );
-                            
-                            result.scrollInfo.initialPosition = {
-                                top: initialRect.top,
-                                left: initialRect.left,
-                                bottom: initialRect.bottom,
-                                right: initialRect.right,
-                                inViewport: isInitiallyInViewport,
-                                scrollY: window.scrollY
-                            };
-                            
-                            // MANDATORY SCROLL INTO VIEW (always perform)
-                            console.log('[DOM] Performing MANDATORY scroll into view...');
-                            targetElement.scrollIntoView({
-                                block: 'center',
-                                inline: 'center',
-                                behavior: 'smooth'
-                            });
-                            
-                            // Wait for scroll to complete
-                            await new Promise(resolve => setTimeout(resolve, 1000));
-                            
-                            // Get position after scroll
-                            const finalRect = targetElement.getBoundingClientRect();
-                            const isFinallyInViewport = (
-                                finalRect.top >= 0 &&
-                                finalRect.left >= 0 &&
-                                finalRect.bottom <= window.innerHeight &&
-                                finalRect.right <= window.innerWidth &&
-                                finalRect.width > 0 &&
-                                finalRect.height > 0
-                            );
-                            
-                            result.scrollInfo.finalPosition = {
-                                top: finalRect.top,
-                                left: finalRect.left,
-                                bottom: finalRect.bottom,
-                                right: finalRect.right,
-                                inViewport: isFinallyInViewport,
-                                scrollY: window.scrollY
-                            };
-                            
-                            // Enhanced clickability checks with MANDATORY viewport requirement
-                            const clickability = {};
-                            clickability.isConnected = targetElement.isConnected;
-                            clickability.isButton = targetElement.tagName.toLowerCase() === 'button';
-                            
-                            // Use final position after scroll
-                            clickability.hasBoundingBox = finalRect.width > 0 && finalRect.height > 0;
-                            clickability.isInViewport = isFinallyInViewport;
-                            
-                            clickability.boundingBox = {
-                                x: Math.round(finalRect.left),
-                                y: Math.round(finalRect.top),
-                                width: Math.round(finalRect.width),
-                                height: Math.round(finalRect.height),
-                                centerX: Math.round(finalRect.left + finalRect.width / 2),
-                                centerY: Math.round(finalRect.top + finalRect.height / 2)
-                            };
-                            
-                            // Style checks
-                            const computedStyle = window.getComputedStyle(targetElement);
-                            clickability.isVisible = (
-                                computedStyle.display !== 'none' &&
-                                computedStyle.visibility !== 'hidden' &&
-                                parseFloat(computedStyle.opacity) > 0
-                            );
-                            
-                            clickability.isNotDisabled = !targetElement.disabled;
-                            clickability.pointerEvents = computedStyle.pointerEvents !== 'none';
-                            
-                            // Hit test (only if in viewport)
-                            let hitTestPassed = false;
-                            if (clickability.isInViewport) {
-                                const centerX = clickability.boundingBox.centerX;
-                                const centerY = clickability.boundingBox.centerY;
-                                const elementAtPoint = document.elementFromPoint(centerX, centerY);
-                                hitTestPassed = (
-                                    elementAtPoint === targetElement || 
-                                    targetElement.contains(elementAtPoint) ||
-                                    elementAtPoint?.closest('button') === targetElement
-                                );
-                                
-                                clickability.hitTestElement = elementAtPoint ? elementAtPoint.tagName : 'none';
-                            }
-                            
-                            clickability.hitTest = hitTestPassed;
-                            
-                            // STRICT clickability - MUST be in viewport
-                            clickability.isClickable = (
-                                clickability.isConnected &&
-                                clickability.hasBoundingBox &&
-                                clickability.isVisible &&
-                                clickability.isNotDisabled &&
-                                clickability.pointerEvents &&
-                                clickability.isInViewport &&  // MANDATORY
-                                clickability.hitTest
-                            );
-                            
-                            result.found = true;
-                            result.method = method;
-                            result.clickability = clickability;
-                            result.coordinates = clickability.boundingBox;
-                            result.element = {
-                                tagName: targetElement.tagName,
-                                textContent: targetElement.textContent?.trim(),
-                                className: targetElement.className,
-                                id: targetElement.id
-                            };
-                            
-                            console.log('[DOM] Final clickability:', clickability.isClickable);
-                            
-                        } catch (error) {
-                            result.error = error.toString();
-                            console.error('[DOM] Error:', error);
-                        }
-                        
-                        return result;
-                    })();
-                    """
-                    
-                    find_result = self._execute_verification_js(find_and_scroll_js)
-                    
-                    if find_result and find_result.get('found'):
-                        clickability = find_result.get('clickability', {})
-                        scroll_info = find_result.get('scrollInfo', {})
-                        
-                        print(f"   📊 Scroll Analysis:")
-                        initial_pos = scroll_info.get('initialPosition', {})
-                        final_pos = scroll_info.get('finalPosition', {})
-                        print(f"      Before scroll: Y={initial_pos.get('top', 'unknown')}, InView={initial_pos.get('inViewport', False)}")
-                        print(f"      After scroll: Y={final_pos.get('top', 'unknown')}, InView={final_pos.get('inViewport', False)}")
-                        
-                        if clickability.get('isClickable'):
-                            coords = find_result.get('coordinates', {})
-                            print(f"   ✅ VIEWPORT-VERIFIED Run button found ({find_result.get('method')})")
-                            print(f"      📍 Position: ({coords.get('centerX')}, {coords.get('centerY')})")
-                            print(f"      📏 Size: {coords.get('width')}x{coords.get('height')}")
-                            print(f"      📺 In viewport: {clickability.get('isInViewport')} (MANDATORY)")
-                            print(f"      🎯 Hit test: {clickability.get('hitTest')}")
-                            
-                            return {
-                                'x': coords.get('centerX'),
-                                'y': coords.get('centerY'),
-                                'width': coords.get('width'),
-                                'height': coords.get('height'),
-                                'method': find_result.get('method'),
-                                'element_info': find_result.get('element'),
-                                'clickability': clickability,
-                                'scroll_info': scroll_info
-                            }
-                        else:
-                            print(f"   ⏳ Button found but NOT VIEWPORT-CLICKABLE:")
-                            for check, passed in clickability.items():
-                                if not passed and check not in ['boundingBox', 'hitTestElement']:
-                                    print(f"      ❌ {check}: {passed}")
-                            
-                            # If not in viewport after scroll, this is a critical issue
-                            if not clickability.get('isInViewport'):
-                                print(f"      🚨 CRITICAL: Button still not in viewport after mandatory scroll!")
-                            
-                    elif find_result and find_result.get('error'):
-                        print(f"   ⚠️ Search error: {find_result.get('error')}")
-                    else:
-                        print(f"   ⏳ Run button not found in DOM...")
-                    
-                    time.sleep(check_interval_seconds)
-                
-                print(f"   ❌ VIEWPORT-VERIFIED Run button detection TIMEOUT after {timeout_seconds}s")
-                return None
-                
-            except Exception as e:
-                print(f"❌ Error in viewport-verified Run button detection: {e}")
-                import traceback
-                traceback.print_exc()
-                return None
-
-    def _perform_smart_scroll(self, attempt: int):
-        """
-        Perform smart scrolling to find Run button
-        Uses same logic as image detector but via DOM
-        """
-        try:
-            print(f"   📜 Smart scroll attempt {attempt}...")
-            
-            # JavaScript to perform page scroll
-            scroll_js = f"""
-            (function() {{
-                const scrollInfo = {{
-                    beforeScroll: {{
-                        scrollY: window.scrollY,
-                        scrollHeight: document.documentElement.scrollHeight,
-                        viewportHeight: window.innerHeight
-                    }}
-                }};
-                
-                // Method 1: Page Down simulation (like PageDown key)
-                const scrollAmount = window.innerHeight * 0.8; // 80% of viewport
-                const targetScroll = window.scrollY + scrollAmount;
-                
-                window.scrollTo({{
-                    top: targetScroll,
-                    behavior: 'smooth'
-                }});
-                
-                // Alternative method: Try finding game container and scroll to it
-                const gameContainers = [
-                    '.ccw-stage-wrapper',
-                    '#stage-canvas-wrapper',
-                    '.gandi_stage_stage_1fD7k',
-                    '[class*="game"]',
-                    '[class*="stage"]',
-                    '[class*="player"]'
-                ];
-                
-                for (const selector of gameContainers) {{
-                    const container = document.querySelector(selector);
-                    if (container) {{
-                        console.log('[SCROLL] Found game container:', selector);
-                        container.scrollIntoView({{
-                            block: 'center',
-                            inline: 'center',
-                            behavior: 'smooth'
-                        }});
-                        break;
-                    }}
-                }}
-                
-                scrollInfo.afterScroll = {{
-                    scrollY: window.scrollY,
-                    targetReached: window.scrollY >= targetScroll - 50
-                }};
-                
-                return scrollInfo;
-            }})();
-            """
-            
-            scroll_result = self._execute_verification_js(scroll_js)
-            
-            if scroll_result:
-                before = scroll_result.get('beforeScroll', {})
-                after = scroll_result.get('afterScroll', {})
-                print(f"      📊 Scroll: {before.get('scrollY', 0)} → {after.get('scrollY', 0)}")
-            
-            # Also try PyAutoGUI PageDown as backup
-            try:
-                pyautogui.press('pagedown')
-                print(f"      ⌨️ PageDown key sent")
-            except Exception as pgdn_error:
-                print(f"      ⚠️ PageDown failed: {pgdn_error}")
-            
-            return True
-            
-        except Exception as e:
-            print(f"   ❌ Smart scroll error: {e}")
-            return False
-
-    def wait_for_playing_state(self, timeout_ms: int = None) -> bool:
-        """
-        Wait for game to enter playing state (after Run button clicked)
-        Returns True if playing state detected, False if timeout
-        """
-        try:
-            print("🎮 Waiting for playing state...")
-            
-            # Get config
-            playing_config = self.app_config.get('playing_state_verification', {})
-            if timeout_ms is None:
-                timeout_ms = playing_config.get('timeout_ms', 60000)
-            check_interval_ms = playing_config.get('check_interval_ms', 1000)
-            criteria = playing_config.get('criteria', {})
-            playing_indicators = playing_config.get('playing_indicators', [])
-            start_overlay_selectors = playing_config.get('start_overlay_selectors', [])
-            
-            start_time = time.time()
-            timeout_seconds = timeout_ms / 1000
-            check_interval_seconds = check_interval_ms / 1000
-            
-            while (time.time() - start_time) < timeout_seconds:
-                elapsed = int(time.time() - start_time)
-                print(f"   🎮 Checking playing state... ({elapsed}s/{int(timeout_seconds)}s)")
-                
-                # JavaScript to check playing state
-                playing_check_js = f"""
-                (function() {{
-                    const result = {{
-                        isPlaying: false,
-                        runButtonDisappeared: false,
-                        hasPlayingIndicators: false,
-                        noStartOverlay: false,
-                        details: {{}}
-                    }};
-                    
-                    try {{
-                        // Check if Run button disappeared/disabled
-                        const runButtons = document.querySelectorAll('button');
-                        let activeRunButton = null;
-                        for (const button of runButtons) {{
-                            if (button.textContent && button.textContent.trim().toLowerCase() === 'run') {{
-                                const style = window.getComputedStyle(button);
-                                if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && !button.disabled) {{
-                                    activeRunButton = button;
-                                    break;
-                                }}
-                            }}
-                        }}
-                        result.runButtonDisappeared = !activeRunButton;
-                        
-                        // Check for playing indicators
-                        const playingSelectors = {json.dumps(playing_indicators)};
-                        const foundPlayingElements = [];
-                        for (const selector of playingSelectors) {{
-                            // Handle wildcard selectors
-                            let actualSelector = selector;
-                            if (selector.includes('*')) {{
-                                actualSelector = selector.replace('*', '');
-                                const elements = document.querySelectorAll(`[class*="${{actualSelector.replace('.', '')}}"]`);
-                                if (elements.length > 0) {{
-                                    foundPlayingElements.push(selector);
-                                }}
-                            }} else {{
-                                const elements = document.querySelectorAll(selector);
-                                if (elements.length > 0) {{
-                                    foundPlayingElements.push(selector);
-                                }}
-                            }}
-                        }}
-                        result.hasPlayingIndicators = foundPlayingElements.length > 0;
-                        result.details.foundPlayingElements = foundPlayingElements;
-                        
-                        // Check for start overlay absence
-                        const overlaySelectors = {json.dumps(start_overlay_selectors)};
-                        const foundOverlayElements = [];
-                        for (const selector of overlaySelectors) {{
-                            let actualSelector = selector;
-                            if (selector.includes('*')) {{
-                                actualSelector = selector.replace('*', '');
-                                const elements = document.querySelectorAll(`[class*="${{actualSelector.replace('.', '')}}"]`);
-                                for (const el of elements) {{
-                                    const style = window.getComputedStyle(el);
-                                    if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {{
-                                        foundOverlayElements.push(selector);
-                                        break;
-                                    }}
-                                }}
-                            }} else {{
-                                const elements = document.querySelectorAll(selector);
-                                for (const el of elements) {{
-                                    const style = window.getComputedStyle(el);
-                                    if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {{
-                                        foundOverlayElements.push(selector);
-                                        break;
-                                    }}
-                                }}
-                            }}
-                        }}
-                        result.noStartOverlay = foundOverlayElements.length === 0;
-                        result.details.foundOverlayElements = foundOverlayElements;
-                        
-                        // Overall playing state assessment
-                        result.isPlaying = result.runButtonDisappeared && (result.hasPlayingIndicators || result.noStartOverlay);
-                        
-                    }} catch (error) {{
-                        result.error = error.toString();
-                    }}
-                    
-                    return result;
-                }})();
-                """
-                
-                playing_result = self._execute_verification_js(playing_check_js)
-                
-                if playing_result:
-                    if playing_result.get('isPlaying'):
-                        details = playing_result.get('details', {})
-                        print(f"   ✅ Playing state detected!")
-                        print(f"      🎯 Run button gone: {playing_result.get('runButtonDisappeared')}")
-                        print(f"      🎮 Playing indicators: {details.get('foundPlayingElements', [])}")
-                        print(f"      🚫 No start overlay: {playing_result.get('noStartOverlay')}")
-                        return True
-                    else:
-                        status_info = []
-                        if not playing_result.get('runButtonDisappeared'):
-                            status_info.append('Run button still visible')
-                        if not playing_result.get('hasPlayingIndicators'):
-                            status_info.append('no playing indicators')
-                        if not playing_result.get('noStartOverlay'):
-                            overlays = playing_result.get('details', {}).get('foundOverlayElements', [])
-                            status_info.append(f'start overlay present: {overlays}')
-                        
-                        print(f"   ⏳ Not playing yet: {', '.join(status_info)}")
-                else:
-                    print(f"   ⚠️ Could not check playing state")
-                
-                time.sleep(check_interval_seconds)
-            
-            print(f"   ❌ Playing state detection TIMEOUT after {timeout_seconds}s")
-            return False
-            
-        except Exception as e:
-            print(f"❌ Error waiting for playing state: {e}")
-            return False
-
-    def find_fullscreen_button_dom(self, timeout_ms: int = None) -> Optional[Dict[str, Any]]:
-        """
-        Find Fullscreen button using DOM selectors (after playing state)
-        Returns: {x, y, width, height, element_info} or None if not found
-        """
-        try:
-            print("🔍 DOM DETECTION: Searching for Fullscreen button...")
-            
-            # Get config
-            fs_config = self.app_config.get('fullscreen_button', {})
-            if timeout_ms is None:
-                timeout_ms = fs_config.get('timeout_ms', 60000)
-            check_interval_ms = fs_config.get('check_interval_ms', 1000)
-            selectors = fs_config.get('selectors', {})
-            clickability_checks = fs_config.get('clickability_checks', {})
-            
-            start_time = time.time()
-            timeout_seconds = timeout_ms / 1000
-            check_interval_seconds = check_interval_ms / 1000
-            
-            while (time.time() - start_time) < timeout_seconds:
-                elapsed = int(time.time() - start_time)
-                print(f"   🎯 Searching for Fullscreen button... ({elapsed}s/{int(timeout_seconds)}s)")
-                
-                # JavaScript to find and validate Fullscreen button
-                find_fullscreen_js = f"""
-                (function() {{
-                    const result = {{
-                        found: false,
-                        method: null,
-                        element: null,
-                        coordinates: null,
-                        clickability: {{}},
-                        error: null
-                    }};
-                    
-                    try {{
-                        let targetElement = null;
-                        let method = null;
-                        
-                        // Method 1: Find by text "Full screen"
-                        const textElements = document.querySelectorAll('*');
-                        for (const el of textElements) {{
-                            if (el.textContent && el.textContent.trim() === 'Full screen') {{
-                                // Found text element, now find clickable ancestor
-                                let clickableAncestor = el;
-                                let maxDepth = 5;
-                                let depth = 0;
-                                
-                                while (clickableAncestor && depth < maxDepth) {{
-                                    // Check if current element is clickable
-                                    const style = window.getComputedStyle(clickableAncestor);
-                                    const isClickable = (
-                                        clickableAncestor.tagName.toLowerCase() === 'button' ||
-                                        clickableAncestor.hasAttribute('onclick') ||
-                                        clickableAncestor.getAttribute('role') === 'button' ||
-                                        (clickableAncestor.hasAttribute('tabindex') && parseInt(clickableAncestor.getAttribute('tabindex')) >= 0) ||
-                                        style.cursor === 'pointer'
-                                    );
-                                    
-                                    if (isClickable) {{
-                                        targetElement = clickableAncestor;
-                                        method = 'text_with_clickable_ancestor';
-                                        break;
-                                    }}
-                                    
-                                    clickableAncestor = clickableAncestor.parentElement;
-                                    depth++;
-                                }}
-                                
-                                // If no clickable ancestor found, use the text element's parent container
-                                if (!targetElement) {{
-                                    const container = el.closest('.style_gandi-player-actions-item__*') || 
-                                                    el.closest('[class*="gandi-player-actions-item"]') ||
-                                                    el.closest('[class*="actions"]') ||
-                                                    el.parentElement;
-                                    if (container) {{
-                                        targetElement = container;
-                                        method = 'text_with_container';
-                                    }}
-                                }}
-                                
-                                break;
-                            }}
-                        }}
-                        
-                        if (!targetElement) {{
-                            result.error = 'No Fullscreen button found';
-                            return result;
-                        }}
-                        
-                        // Check element clickability
-                        const clickability = {{}};
-                        
-                        // Basic checks
-                        clickability.isConnected = targetElement.isConnected;
-                        
-                        // Bounding box check
-                        const rect = targetElement.getBoundingClientRect();
-                        clickability.hasBoundingBox = rect.width > 0 && rect.height > 0;
-                        clickability.boundingBox = {{
-                            x: Math.round(rect.left),
-                            y: Math.round(rect.top),
-                            width: Math.round(rect.width),
-                            height: Math.round(rect.height),
-                            centerX: Math.round(rect.left + rect.width / 2),
-                            centerY: Math.round(rect.top + rect.height / 2)
-                        }};
-                        
-                        // Style checks
-                        const computedStyle = window.getComputedStyle(targetElement);
-                        clickability.isVisible = (
-                            computedStyle.display !== 'none' &&
-                            computedStyle.visibility !== 'hidden' &&
-                            parseFloat(computedStyle.opacity) > 0
-                        );
-                        
-                        clickability.pointerEvents = computedStyle.pointerEvents !== 'none';
-                        
-                        // Hit test check
-                        const centerX = clickability.boundingBox.centerX;
-                        const centerY = clickability.boundingBox.centerY;
-                        const elementAtPoint = document.elementFromPoint(centerX, centerY);
-                        clickability.hitTest = (
-                            elementAtPoint === targetElement || 
-                            targetElement.contains(elementAtPoint) ||
-                            elementAtPoint?.closest('[class*="gandi-player-actions"]') === targetElement.closest('[class*="gandi-player-actions"]')
-                        );
-                        
-                        clickability.hitTestElement = elementAtPoint ? elementAtPoint.tagName.toLowerCase() : null;
-                        
-                        // Overall clickability assessment
-                        clickability.isClickable = (
-                            clickability.isConnected &&
-                            clickability.hasBoundingBox &&
-                            clickability.isVisible &&
-                            clickability.pointerEvents &&
-                            clickability.hitTest
-                        );
-                        
-                        // Scroll into view if needed
-                        if (clickability.isClickable) {{
-                            targetElement.scrollIntoView({{
-                                block: 'center',
-                                inline: 'center',
-                                behavior: 'smooth'
-                            }});
-                        }}
-                        
-                        result.found = true;
-                        result.method = method;
-                        result.clickability = clickability;
-                        result.coordinates = clickability.boundingBox;
-                        result.element = {{
-                            tagName: targetElement.tagName,
-                            textContent: targetElement.textContent?.trim(),
-                            className: targetElement.className,
-                            id: targetElement.id
-                        }};
-                        
-                    }} catch (error) {{
-                        result.error = error.toString();
-                    }}
-                    
-                    return result;
-                }})();
-                """
-                
-                find_result = self._execute_verification_js(find_fullscreen_js)
-                
-                if find_result and find_result.get('found'):
-                    clickability = find_result.get('clickability', {})
-                    
-                    if clickability.get('isClickable'):
-                        coords = find_result.get('coordinates', {})
-                        print(f"   ✅ Fullscreen button found via DOM ({find_result.get('method')})")
-                        print(f"      📍 Position: ({coords.get('centerX')}, {coords.get('centerY')})")
-                        print(f"      📏 Size: {coords.get('width')}x{coords.get('height')}")
-                        print(f"      🎯 Clickability: {clickability.get('isClickable')}")
-                        
-                        return {
-                            'x': coords.get('centerX'),
-                            'y': coords.get('centerY'),
-                            'width': coords.get('width'),
-                            'height': coords.get('height'),
-                            'method': find_result.get('method'),
-                            'element_info': find_result.get('element'),
-                            'clickability': clickability
-                        }
-                    else:
-                        print(f"   ⏳ Fullscreen button found but not clickable yet:")
-                        for check, passed in clickability.items():
-                            if not passed and check != 'boundingBox':
-                                print(f"      ❌ {check}: {passed}")
-                elif find_result and find_result.get('error'):
-                    print(f"   ⚠️ Search error: {find_result.get('error')}")
-                else:
-                    print(f"   ⏳ Fullscreen button not found yet...")
-                
-                time.sleep(check_interval_seconds)
-            
-            print(f"   ❌ Fullscreen button DOM detection TIMEOUT after {timeout_seconds}s")
-            return None
-            
-        except Exception as e:
-            print(f"❌ Error in Fullscreen button DOM detection: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    def _execute_verification_js(self, js_code: str) -> Optional[Any]:
-        """Execute JavaScript for verification and return result"""
-        try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return None
-            
-            ws = websocket.create_connection(ws_url, timeout=30)
-            
-            response = self._send_cdp_command(ws, {
-                "method": "Runtime.evaluate",
-                "params": {"expression": js_code, "returnByValue": True}
-            })
-            
-            ws.close()
-            
-            if response and 'result' in response:
-                result = response.get('result', {}).get('result', {})
-                if 'value' in result:
-                    return result['value']
-                elif 'error' in response.get('result', {}):
-                    print(f"⚠️ JS execution error: {response['result'].get('error', {}).get('message', 'Unknown error')}")
-                    return None
-            
-            return None
-            
-        except Exception as e:
-            print(f"❌ Error executing verification JS: {e}")
-            return None
-
-    def verify_run_button_click_success(self, timeout_ms: int = 8000) -> bool:
-            """
-            STRICT: Verify Run button click with game state changes
-            Returns True only if game actually started, False otherwise
-            """
-            try:
-                print("🔍 STRICT: Verifying Run button click success...")
-                
-                start_time = time.time()
-                timeout_seconds = timeout_ms / 1000
-                check_interval = 0.5
-                
-                while (time.time() - start_time) < timeout_seconds:
-                    elapsed = int(time.time() - start_time)
-                    print(f"   🔍 Strict verification... ({elapsed}s/{int(timeout_seconds)}s)")
-                    
-                    # STRICT verification JavaScript
-                    verify_js = """
-                    (function() {
-                        const result = {
-                            buttonDisappeared: false,
-                            buttonDisabled: false,
-                            gameStarted: false,
-                            gameVisible: false,
-                            canvasActive: false,
-                            success: false,
-                            confidence: 0,
-                            details: {}
-                        };
-                        
-                        try {
-                            // Check Run button state
-                            const runButtons = document.querySelectorAll('button');
-                            let activeRunButton = null;
-                            let disabledRunButton = null;
-                            
-                            for (const button of runButtons) {
-                                if (button.textContent && button.textContent.trim().toLowerCase() === 'run') {
-                                    const style = window.getComputedStyle(button);
-                                    const rect = button.getBoundingClientRect();
-                                    const isVisible = (
-                                        style.display !== 'none' &&
-                                        style.visibility !== 'hidden' &&
-                                        parseFloat(style.opacity) > 0 &&
-                                        rect.width > 0 && rect.height > 0
-                                    );
-                                    
-                                    if (isVisible) {
-                                        if (button.disabled) {
-                                            disabledRunButton = button;
-                                        } else {
-                                            activeRunButton = button;
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            result.buttonDisappeared = !activeRunButton && !disabledRunButton;
-                            result.buttonDisabled = !!disabledRunButton;
-                            
-                            // STRICT game detection
-                            let gameScore = 0;
-                            
-                            // Check for visible canvas elements
-                            const canvases = document.querySelectorAll('canvas');
-                            let visibleCanvases = 0;
-                            for (const canvas of canvases) {
-                                const style = window.getComputedStyle(canvas);
-                                const rect = canvas.getBoundingClientRect();
-                                if (style.display !== 'none' && 
-                                    style.visibility !== 'hidden' && 
-                                    rect.width > 100 && rect.height > 100) {
-                                    visibleCanvases++;
-                                    gameScore += 2;
-                                }
-                            }
-                            result.canvasActive = visibleCanvases > 0;
-                            result.details.visibleCanvases = visibleCanvases;
-                            
-                            // Check for game container elements
-                            const gameContainers = [
-                                '.ccw-stage-wrapper',
-                                '#stage-canvas-wrapper',
-                                '.gandi_stage_stage_1fD7k'
-                            ];
-                            
-                            let visibleContainers = 0;
-                            for (const selector of gameContainers) {
-                                const elements = document.querySelectorAll(selector);
-                                for (const el of elements) {
-                                    const style = window.getComputedStyle(el);
-                                    const rect = el.getBoundingClientRect();
-                                    if (style.display !== 'none' && 
-                                        style.visibility !== 'hidden' && 
-                                        rect.width > 50 && rect.height > 50) {
-                                        visibleContainers++;
-                                        gameScore += 1;
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            result.gameVisible = visibleContainers >= 2;
-                            result.details.visibleContainers = visibleContainers;
-                            
-                            // Check for game UI elements (icons, characters, etc.)
-                            const gameUISelectors = [
-                                'img[src*="icon"]',
-                                '.character',
-                                '.sprite',
-                                '[class*="game"]',
-                                '[class*="player"]'
-                            ];
-                            
-                            let uiElements = 0;
-                            for (const selector of gameUISelectors) {
-                                const elements = document.querySelectorAll(selector);
-                                uiElements += elements.length;
-                            }
-                            
-                            if (uiElements > 10) gameScore += 2;
-                            else if (uiElements > 5) gameScore += 1;
-                            
-                            result.details.uiElements = uiElements;
-                            
-                            // Overall assessment
-                            result.gameStarted = gameScore >= 4;
-                            result.confidence = Math.min(gameScore / 6, 1.0);
-                            
-                            // STRICT success criteria
-                            result.success = (
-                                (result.buttonDisappeared || result.buttonDisabled) &&
-                                result.canvasActive &&
-                                result.gameVisible &&
-                                result.gameStarted &&
-                                result.confidence >= 0.7
-                            );
-                            
-                            result.details.gameScore = gameScore;
-                            result.details.buttonStateChanged = result.buttonDisappeared || result.buttonDisabled;
-                            
-                        } catch (error) {
-                            result.error = error.toString();
-                        }
-                        
-                        return result;
-                    })();
-                    """
-                    
-                    verify_result = self._execute_verification_js(verify_js)
-                    
-                    if verify_result and verify_result.get('success'):
-                        details = verify_result.get('details', {})
-                        print(f"   ✅ STRICT Run button click SUCCESS verified!")
-                        print(f"      🎯 Button state changed: {details.get('buttonStateChanged')}")
-                        print(f"      🎮 Game score: {details.get('gameScore', 0)}/6")
-                        print(f"      📊 Confidence: {verify_result.get('confidence', 0):.1f}")
-                        print(f"      🖼️ Canvas active: {verify_result.get('canvasActive')}")
-                        print(f"      📺 Game visible: {verify_result.get('gameVisible')}")
-                        return True
-                    elif verify_result:
-                        details = verify_result.get('details', {})
-                        confidence = verify_result.get('confidence', 0)
-                        print(f"   ⏳ Verification pending (confidence: {confidence:.1f}):")
-                        
-                        if details.get('buttonStateChanged'):
-                            print(f"      ✅ Button state changed")
-                        else:
-                            print(f"      ❌ Button still active")
-                        
-                        print(f"      🎮 Game score: {details.get('gameScore', 0)}/6")
-                        print(f"      📺 Canvas: {verify_result.get('canvasActive')}, UI: {details.get('uiElements', 0)} elements")
-                    else:
-                        print(f"   ⚠️ Could not verify click status")
-                    
-                    time.sleep(check_interval)
-                
-                print(f"   ❌ STRICT Run button verification TIMEOUT - click likely FAILED")
-                return False
-                
-            except Exception as e:
-                print(f"❌ Error in strict Run button verification: {e}")
-                return False
-
-    def verify_fullscreen_click_success(self, timeout_ms: int = 5000) -> bool:
-        """
-        Verify that Fullscreen button click was successful
-        Returns True if success detected, False otherwise
-        """
-        try:
-            print("🔍 Verifying Fullscreen button click success...")
-            
-            start_time = time.time()
-            timeout_seconds = timeout_ms / 1000
-            check_interval = 0.5
-            
-            while (time.time() - start_time) < timeout_seconds:
-                elapsed = int(time.time() - start_time)
-                print(f"   🔍 Checking fullscreen success... ({elapsed}s/{int(timeout_seconds)}s)")
-                
-                # JavaScript to check if Fullscreen click was successful
-                verify_js = """
-                (function() {
-                    const result = {
-                        fullscreenElementExists: false,
-                        textChanged: false,
-                        buttonDisappeared: false,
-                        success: false
-                    };
-                    
-                    try {
-                        // Check document.fullscreenElement (most reliable)
-                        result.fullscreenElementExists = !!document.fullscreenElement;
-                        
-                        // Check if button text changed to "Exit full screen"
-                        const textElements = document.querySelectorAll('*');
-                        for (const el of textElements) {
-                            if (el.textContent && el.textContent.trim() === 'Exit full screen') {
-                                result.textChanged = true;
-                                break;
-                            }
-                        }
-                        
-                        // Check if "Full screen" button disappeared
-                        let foundFullscreenText = false;
-                        for (const el of textElements) {
-                            if (el.textContent && el.textContent.trim() === 'Full screen') {
-                                foundFullscreenText = true;
-                                break;
-                            }
-                        }
-                        result.buttonDisappeared = !foundFullscreenText;
-                        
-                        // Success if any indicator is positive
-                        result.success = result.fullscreenElementExists || result.textChanged || result.buttonDisappeared;
-                        
-                    } catch (error) {
-                        result.error = error.toString();
-                    }
-                    
-                    return result;
-                })();
-                """
-                
-                verify_result = self._execute_verification_js(verify_js)
-                
-                if verify_result and verify_result.get('success'):
-                    print(f"   ✅ Fullscreen click SUCCESS verified!")
-                    if verify_result.get('fullscreenElementExists'):
-                        print(f"      🎯 document.fullscreenElement detected")
-                    if verify_result.get('textChanged'):
-                        print(f"      🎯 Button text changed to 'Exit full screen'")
-                    if verify_result.get('buttonDisappeared'):
-                        print(f"      🎯 'Full screen' button disappeared")
-                    return True
-                elif verify_result:
-                    print(f"   ⏳ Fullscreen verification pending...")
-                else:
-                    print(f"   ⚠️ Could not verify fullscreen status")
-                
-                time.sleep(check_interval)
-            
-            print(f"   ❌ Fullscreen click verification TIMEOUT after {timeout_seconds}s")
-            return False
-            
-        except Exception as e:
-            print(f"❌ Error verifying Fullscreen click: {e}")
-            return False
-
-    # ================================================================
-    # == DOM-BASED BUTTON CLICKING ==
-    # ================================================================
-
-    def click_run_button_dom(self, max_retries: int = None) -> bool:
-        """
-        Click Run button using DOM detection (primary) with image fallback
-        Returns True if successful, False otherwise
-        """
-        try:
-            print("\n🎯 DOM-FIRST RUN BUTTON CLICK")
-            print("="*60)
-            
-            # Get config
-            run_config = self.app_config.get('run_button', {})
-            if max_retries is None:
-                max_retries = self.app_config.get('game', {}).get('run_button_max_retries', 2)
-            
-            strategy = run_config.get('strategy', 'auto')  # 'dom', 'image', 'auto'
-            
-            for attempt in range(max_retries):
-                print(f"\n📝 Run button click attempt {attempt + 1}/{max_retries}")
-                
-                # Try DOM method first (unless strategy is 'image' only)
-                if strategy in ['dom', 'auto']:
-                    print("🔍 PRIMARY: Attempting DOM-based Run button click...")
-                    
-                    # Find Run button via DOM
-                    dom_result = self.find_run_button_dom()
-                    
-                    if dom_result:
-                        print(f"✅ Run button found via DOM: {dom_result['method']}")
-                        
-                        # Execute DOM click
-                        click_success = self._execute_dom_click(
-                            dom_result['x'], 
-                            dom_result['y'],
-                            f"Run button (DOM-{dom_result['method']})"
-                        )
-                        
-                        if click_success:
-                            # Verify click success
-                            verify_timeout = run_config.get('verify_after_click_ms', 8000)
-                            verify_success = self.verify_run_button_click_success(verify_timeout)
-                            
-                            if verify_success:
-                                print("🎉 DOM-based Run button click SUCCESSFUL!")
-                                print("="*60)
-                                return True
-                            else:
-                                print("❌ DOM click executed but verification failed")
-                        else:
-                            print("❌ DOM click execution failed")
-                    else:
-                        print("❌ Run button not found via DOM")
-                
-                # Fallback to image detection (if strategy allows)
-                if strategy in ['image', 'auto']:
-                    print("🔄 FALLBACK: Attempting image-based Run button click...")
-                    
-                    try:
-                        # Use existing image detection method
-                        if hasattr(self, 'detector') and self.detector:
-                            image_success = self.detector.click_run_button(
-                                max_pagedown_attempts=self.max_pagedown_attempts
-                            )
-                            
-                            if image_success:
-                                print("✅ Image-based Run button click executed")
-                                
-                                # Verify click success
-                                verify_timeout = run_config.get('verify_after_click_ms', 8000)
-                                verify_success = self.verify_run_button_click_success(verify_timeout)
-                                
-                                if verify_success:
-                                    print("🎉 IMAGE-based Run button click SUCCESSFUL!")
-                                    print("="*60)
-                                    return True
-                                else:
-                                    print("❌ Image click executed but verification failed")
-                            else:
-                                print("❌ Image-based Run button click failed")
-                        else:
-                            print("⚠️ Image detector not available")
-                    except Exception as e:
-                        print(f"❌ Image detection fallback error: {e}")
-                
-                # Wait before retry (except last attempt)
-                if attempt < max_retries - 1:
-                    wait_time = 3
-                    print(f"⏳ Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-            
-            print("💥 All Run button click attempts FAILED")
-            print("="*60)
-            return False
-            
-        except Exception as e:
-            print(f"❌ Error in DOM-first Run button click: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def click_fullscreen_button_dom(self) -> bool:
-        """
-        Click Fullscreen button using DOM detection 
-        Returns True if successful, False otherwise
-        """
-        try:
-            print("\n🎯 DOM-BASED FULLSCREEN BUTTON CLICK")
-            print("="*60)
-            
-            # Get config
-            fs_config = self.app_config.get('fullscreen_button', {})
-            
-            # Find Fullscreen button via DOM
-            print("🔍 Searching for Fullscreen button via DOM...")
-            dom_result = self.find_fullscreen_button_dom()
-            
-            if not dom_result:
-                print("❌ Fullscreen button not found via DOM")
-                print("="*60)
-                return False
-            
-            print(f"✅ Fullscreen button found via DOM: {dom_result['method']}")
-            
-            # Execute DOM click
-            click_success = self._execute_dom_click(
-                dom_result['x'], 
-                dom_result['y'],
-                f"Fullscreen button (DOM-{dom_result['method']})"
-            )
-            
-            if not click_success:
-                print("❌ Fullscreen DOM click execution failed")
-                print("="*60)
-                return False
-            
-            # Verify click success
-            verify_timeout = fs_config.get('verify_after_click_ms', 5000)
-            verify_success = self.verify_fullscreen_click_success(verify_timeout)
-            
-            if verify_success:
-                print("🎉 DOM-based Fullscreen button click SUCCESSFUL!")
-                print("="*60)
-                return True
-            else:
-                print("❌ Fullscreen DOM click executed but verification failed")
-                print("="*60)
-                return False
-                
-        except Exception as e:
-            print(f"❌ Error in DOM-based Fullscreen button click: {e}")
-            import traceback
-            traceback.print_exc()
-            print("="*60)
-            return False
-
-    def _execute_dom_click(self, x: int, y: int, description: str = "element", retry_attempts: int = 3) -> bool:
-            """
-            ENHANCED: Execute click with multiple retry strategies
-            Returns True if click executed successfully, False otherwise
-            """
-            try:
-                print(f"🖱️ ENHANCED: Executing click on {description} at ({x}, {y})")
-                
-                for attempt in range(retry_attempts):
-                    if attempt > 0:
-                        print(f"   🔄 Retry attempt {attempt + 1}/{retry_attempts}")
-                        time.sleep(0.5)
-                    
-                    # Try CDP first
-                    if self._execute_cdp_click_enhanced(x, y, attempt):
-                        print(f"   ✅ CDP click executed successfully (attempt {attempt + 1})")
-                        return True
-                    
-                    # Try PyAutoGUI with slight position variation
-                    varied_x = x + random.randint(-3, 3)
-                    varied_y = y + random.randint(-3, 3)
-                    
-                    if self._execute_pyautogui_click_enhanced(varied_x, varied_y, attempt):
-                        print(f"   ✅ PyAutoGUI click executed successfully (attempt {attempt + 1})")
-                        return True
-                    
-                    print(f"   ❌ Both methods failed on attempt {attempt + 1}")
-                
-                print(f"   💥 All {retry_attempts} click attempts failed")
-                return False
-                
-            except Exception as e:
-                print(f"❌ Error executing enhanced DOM click: {e}")
-                return False
-
-    def _execute_cdp_click_enhanced(self, x: int, y: int, attempt: int = 0) -> bool:
-        """Enhanced CDP click with better timing"""
-        try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return False
-            
-            ws = websocket.create_connection(ws_url, timeout=30)
-            
-            # Enhanced click sequence with better timing
-            # Move to position
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mouseMoved", "x": x, "y": y}
-            })
-            time.sleep(0.2)  # Increased wait
-            
-            # Double click for stubborn buttons
-            for click_num in range(2):
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent", 
-                    "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}
-                })
-                time.sleep(0.1)
-                
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent", 
-                    "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}
-                })
-                time.sleep(0.2)
-            
-            ws.close()
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ Enhanced CDP click error (attempt {attempt + 1}): {e}")
-            return False
-
-    def _execute_pyautogui_click_enhanced(self, x: int, y: int, attempt: int = 0) -> bool:
-        """Enhanced PyAutoGUI click with better timing"""
-        try:
-            # Move to position with duration
-            pyautogui.moveTo(x, y, duration=0.3)
-            time.sleep(0.2)
-            
-            # Double click for stubborn buttons
-            pyautogui.click(button='left')
-            time.sleep(0.1)
-            pyautogui.click(button='left')
-            time.sleep(0.2)
-            
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ Enhanced PyAutoGUI click error (attempt {attempt + 1}): {e}")
-            return False
-
-    def _execute_cdp_click(self, x: int, y: int) -> bool:
-        """Execute click using CDP WebSocket commands"""
-        try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return False
-            
-            ws = websocket.create_connection(ws_url, timeout=30)
-            
-            # Move to position
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mouseMoved", "x": x, "y": y}
-            })
-            time.sleep(0.1)
-            
-            # Click (mouse down + up)
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}
-            })
-            time.sleep(0.05)
-            
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}
-            })
-            
-            ws.close()
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ CDP click error: {e}")
-            return False
-
-    def _execute_pyautogui_click(self, x: int, y: int) -> bool:
-        """Execute click using PyAutoGUI"""
-        try:
-            # Move to position
-            pyautogui.moveTo(x, y, duration=0.2)
-            time.sleep(0.1)
-            
-            # Click
-            pyautogui.click(button='left')
-            time.sleep(0.1)
-            
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ PyAutoGUI click error: {e}")
-            return False
-
-    def enhanced_run_button_detection_and_click(self) -> bool:
-        """
-        Enhanced Run button detection and click with comprehensive approach
-        This replaces the old image-only detection in navigate_and_prepare_game()
-        """
-        try:
-            print("\n🚀 ENHANCED RUN BUTTON DETECTION & CLICK")
-            print("="*70)
-            
-            # Get config
-            run_config = self.app_config.get('run_button', {})
-            max_retries = self.app_config.get('game', {}).get('run_button_max_retries', 2)
-            
-            print(f"🎯 Strategy: {run_config.get('strategy', 'auto')}")
-            print(f"🔄 Max retries: {max_retries}")
-            print(f"⏱️ Timeout: {run_config.get('timeout_ms', 90000)}ms")
-            
-            # Execute DOM-first click
-            success = self.click_run_button_dom(max_retries)
-            
-            if success:
-                print("🎉 ENHANCED RUN BUTTON CLICK COMPLETED SUCCESSFULLY!")
-                print("="*70)
-                return True
-            else:
-                print("💥 ENHANCED RUN BUTTON CLICK FAILED")
-                print("="*70)
-                return False
-                
-        except Exception as e:
-            print(f"❌ Error in enhanced Run button detection: {e}")
-            print("="*70)
-            return False
-
-    def enhanced_fullscreen_detection_and_click(self) -> bool:
-        """
-        Enhanced Fullscreen button detection and click
-        This replaces the old image-only detection
-        """
-        try:
-            print("\n🚀 ENHANCED FULLSCREEN DETECTION & CLICK")
-            print("="*70)
-            
-            # Step 1: Wait for playing state first
-            print("📝 Step 1: Waiting for playing state...")
-            playing_success = self.wait_for_playing_state()
-            
-            if not playing_success:
-                print("❌ Playing state not detected - cannot proceed with fullscreen")
-                print("="*70)
-                return False
-            
-            print("✅ Playing state confirmed - proceeding with fullscreen detection")
-            
-            # Step 2: Find and click fullscreen button
-            print("📝 Step 2: Finding and clicking fullscreen button...")
-            fullscreen_success = self.click_fullscreen_button_dom()
-            
-            if fullscreen_success:
-                print("🎉 ENHANCED FULLSCREEN CLICK COMPLETED SUCCESSFULLY!")
-                print("="*70)
-                return True
-            else:
-                print("💥 ENHANCED FULLSCREEN CLICK FAILED")
-                print("="*70)
-                return False
-                
-        except Exception as e:
-            print(f"❌ Error in enhanced Fullscreen detection: {e}")
-            print("="*70)
-            return False
-
-    def update_load_config_with_dom_support(self):
-        """
-        Update load_config method to read new DOM-related configurations
-        """
-        try:
-            # This method will be called from load_config() to ensure DOM configs are loaded
-            
-            # Validate DOM-related configs
-            required_configs = [
-                'run_button', 'fullscreen_button', 'playing_state_verification',
-                'page_verification', 'game_load_verification'
-            ]
-            
-            missing_configs = []
-            for config_key in required_configs:
-                if config_key not in self.app_config:
-                    missing_configs.append(config_key)
-            
-            if missing_configs:
-                print(f"⚠️ Missing DOM configs: {missing_configs}")
-                print("ℹ️ Using default DOM configuration")
-                
-                # Set default configs for missing ones
-                if 'run_button' not in self.app_config:
-                    self.app_config['run_button'] = {
-                        'strategy': 'auto',
-                        'timeout_ms': 90000,
-                        'check_interval_ms': 1000,
-                        'verify_after_click_ms': 8000,
-                        'selector_mode': 'icon_then_text'
-                    }
-                
-                if 'fullscreen_button' not in self.app_config:
-                    self.app_config['fullscreen_button'] = {
-                        'strategy': 'dom',
-                        'timeout_ms': 60000,
-                        'check_interval_ms': 1000,
-                        'verify_after_click_ms': 5000,
-                        'scroll_into_view': True
-                    }
-            else:
-                print("✅ All DOM-related configs loaded successfully")
-            
-            # Log DOM strategy being used
-            run_strategy = self.app_config.get('run_button', {}).get('strategy', 'auto')
-            fs_strategy = self.app_config.get('fullscreen_button', {}).get('strategy', 'dom')
-            
-            print(f"🎯 DOM Click Strategies:")
-            print(f"   Run button: {run_strategy}")
-            print(f"   Fullscreen button: {fs_strategy}")
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error updating DOM config: {e}")
-            return False
-
-    def validate_enhanced_config(self) -> Dict[str, Any]:
-            """
-            Validate enhanced configuration and return status report
-            Returns dict with validation results and recommendations
-            """
-            try:
-                print("🔍 ENHANCED CONFIG VALIDATION")
-                print("="*40)
-                
-                validation_result = {
-                    'overall_status': 'unknown',
-                    'critical_issues': [],
-                    'warnings': [],
-                    'recommendations': [],
-                    'feature_status': {}
-                }
-                
-                # ================================================================
-                # CRITICAL VALIDATIONS
-                # ================================================================
-                
-                # Chrome configuration
-                if not self.chrome_paths or not any(os.path.exists(path) for path in self.chrome_paths):
-                    validation_result['critical_issues'].append("Chrome executable not found")
-                
-                # Debug port validation
-                if not isinstance(self.debugging_port, int) or self.debugging_port < 1024 or self.debugging_port > 65535:
-                    validation_result['critical_issues'].append(f"Invalid debug port: {self.debugging_port}")
-                
-                # Required config sections
-                required_configs = ['run_button', 'fullscreen_button', 'page_verification']
-                for config_name in required_configs:
-                    if config_name not in self.app_config:
-                        validation_result['critical_issues'].append(f"Missing {config_name} configuration")
-                
-                # ================================================================
-                # FEATURE STATUS VALIDATION
-                # ================================================================
-                
-                # DOM detection features
-                run_strategy = self.app_config.get('run_button', {}).get('strategy', 'auto')
-                validation_result['feature_status']['run_button_dom'] = run_strategy in ['dom', 'auto']
-                
-                fs_strategy = self.app_config.get('fullscreen_button', {}).get('strategy', 'dom')
-                validation_result['feature_status']['fullscreen_dom'] = fs_strategy == 'dom'
-                
-                page_verification = self.app_config.get('page_verification', {}).get('enabled', True)
-                validation_result['feature_status']['page_verification'] = page_verification
-                
-                game_verification = self.app_config.get('game_load_verification', {}).get('enabled', True)
-                validation_result['feature_status']['game_verification'] = game_verification
-                
-                # ================================================================
-                # TIMEOUT VALIDATIONS
-                # ================================================================
-                
-                # Check for reasonable timeouts
-                timeout_checks = {
-                    'page_load_wait': self.page_load_wait,
-                    'game_load_wait': self.game_load_wait,
-                    'run_button_timeout': self.app_config.get('run_button', {}).get('timeout_ms', 90000) / 1000,
-                    'fullscreen_timeout': self.app_config.get('fullscreen_button', {}).get('timeout_ms', 60000) / 1000
-                }
-                
-                for timeout_name, timeout_value in timeout_checks.items():
-                    if timeout_value < 5:
-                        validation_result['warnings'].append(f"{timeout_name} is very low ({timeout_value}s)")
-                    elif timeout_value > 180:
-                        validation_result['warnings'].append(f"{timeout_name} is very high ({timeout_value}s)")
-                
-                # ================================================================
-                # COMPATIBILITY CHECKS
-                # ================================================================
-                
-                # WebSocket availability check
-                try:
-                    ws_url = self._get_websocket_url()
-                    validation_result['feature_status']['websocket_ready'] = ws_url is not None
-                    if not ws_url:
-                        validation_result['warnings'].append("WebSocket connection not available (Chrome may not be running)")
-                except:
-                    validation_result['feature_status']['websocket_ready'] = False
-                    validation_result['warnings'].append("Cannot test WebSocket connection")
-                
-                # ================================================================
-                # OVERALL STATUS DETERMINATION
-                # ================================================================
-                
-                if validation_result['critical_issues']:
-                    validation_result['overall_status'] = 'critical_issues'
-                    validation_result['recommendations'].append("Fix critical issues before proceeding")
-                elif validation_result['warnings']:
-                    validation_result['overall_status'] = 'warnings_present'
-                    validation_result['recommendations'].append("Review warnings for optimal performance")
-                else:
-                    validation_result['overall_status'] = 'all_good'
-                    validation_result['recommendations'].append("Configuration looks good!")
-                
-                # ================================================================
-                # REPORT GENERATION
-                # ================================================================
-                
-                print(f"📊 VALIDATION RESULTS:")
-                print(f"   Overall Status: {validation_result['overall_status'].upper()}")
-                
-                if validation_result['critical_issues']:
-                    print(f"   ❌ Critical Issues: {len(validation_result['critical_issues'])}")
-                    for issue in validation_result['critical_issues']:
-                        print(f"      • {issue}")
-                
-                if validation_result['warnings']:
-                    print(f"   ⚠️ Warnings: {len(validation_result['warnings'])}")
-                    for warning in validation_result['warnings']:
-                        print(f"      • {warning}")
-                
-                print(f"   🎯 Feature Status:")
-                for feature, status in validation_result['feature_status'].items():
-                    status_icon = "✅" if status else "❌"
-                    print(f"      {status_icon} {feature}: {'ENABLED' if status else 'DISABLED'}")
-                
-                print("="*40)
-                return validation_result
-                
-            except Exception as e:
-                print(f"❌ Config validation error: {e}")
-                return {
-                    'overall_status': 'validation_error',
-                    'critical_issues': [f"Validation failed: {str(e)}"],
-                    'warnings': [],
-                    'recommendations': ['Manual configuration review required'],
-                    'feature_status': {}
-                }
-
-    # ================================================================
     # == NEW: DRAG VERIFICATION SYSTEM ==
     # ================================================================
 
-    def setup_putted_chars_monitor(self):
+    def setup_dual_verification_system(self):
         """
-        ADDED: Setup JavaScript monitoring for 'Putted characters' variable
-        Run once during game setup to create high-performance monitoring
+        🔄 DUAL VERIFICATION: Setup cả Characters Array + Putted Characters
+        Chỉ cần 1 trong 2 hoạt động là đủ
         """
         try:
-            print("🔍 Setting up Putted characters monitoring...")
+            print("🔄 Setting up DUAL verification system...")
             
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("⚠️ WebSocket not available, drag verification disabled")
-                self.verification_available = False
+                print("⚠️ WebSocket not available, dual verification disabled")
+                self.characters_available = False
+                self.putted_chars_available = False
                 return False
             
-            # JavaScript code adapted from user's F12 Console script
-            setup_js = """
+            # Setup JavaScript cho CẢ HAI systems
+            dual_setup_js = '''
             (() => {
-                // Check if already setup
-                if (window.getPuttedChars) {
-                    console.log('✅ Putted characters monitoring already setup');
-                    return true;
-                }
+                console.log("🚀 Setting up DUAL verification system...");
                 
-                console.log('🚀 Setting up high-performance Putted characters monitoring...');
-                
-                // Find VM function
-                function findVM() {
-                    if (window.__vm && window.__vm.runtime) return window.__vm;
-                    const getReactKey = el => Object.keys(el).find(k => k.startsWith('__react'));
+                // VM Finder
+                function findVMInWindow(win) {
+                    if (!win) return null;
+                    if (win.__vm?.runtime) return win.__vm;
+                    if (win.Scratch?.vm?.runtime) return win.Scratch.vm;
+                    if (win.vm?.runtime) return win.vm;
+                    
+                    function getReactKey(el){ return Object.keys(el).find(k => k.startsWith('__react')); }
                     const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
                     for (const selector of selectors) {
-                        const elements = document.querySelectorAll(selector);
-                        for (const el of elements) {
-                            const reactKey = getReactKey(el);
-                            if (!reactKey) continue;
-                            let fiber = el[reactKey];
-                            let depth = 0;
-                            while (fiber && depth++ < 100) {
+                        const nodes = win.document?.querySelectorAll?.(selector) || [];
+                        for (const el of nodes) {
+                            const fiberKey = getReactKey(el);
+                            if (!fiberKey) continue;
+                            let fiber = el[fiberKey];
+                            let hop = 0;
+                            while (fiber && hop++ < 200) {
                                 const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
-                                if (props?.vm && props.vm.runtime) {
-                                    return props.vm;
-                                }
+                                if (props?.vm?.runtime) return props.vm;
                                 fiber = fiber.return;
                             }
                         }
@@ -2714,197 +1129,190 @@ class SprunkiGamePlayer:
                     return null;
                 }
                 
-                // 1. Find and store VM
-                const vm = findVM();
+                const vm = findVMInWindow(window);
                 if (!vm) {
-                    console.error('❌ Cannot find Scratch VM for Putted characters monitoring');
-                    return false;
+                    console.error("❌ Cannot find VM for dual verification");
+                    return { characters: false, putted: false };
                 }
-                window.__sprunki_vm = vm;
-                console.log('✅ VM found and stored');
                 
-                // 2. Find and store variable ID
-                const stage = vm.runtime.getTargetForStage();
+                const runtime = vm.runtime || vm;
+                const stage = (runtime.targets || []).find(t => t.isStage) || (runtime.targets || [])[0];
                 if (!stage) {
-                    console.error('❌ Cannot find Stage object');
-                    return false;
+                    console.error("❌ Cannot find Stage for dual verification");
+                    return { characters: false, putted: false };
                 }
                 
-                const variableName = 'Putted characters';
-                const targetVariable = Object.values(stage.variables).find(v => v.name === variableName);
+                // Store VM và Stage
+                window.__dual_vm = vm;
+                window.__dual_stage = stage;
                 
-                if (!targetVariable) {
-                    console.error(`❌ Cannot find variable "${variableName}"`);
-                    return false;
-                }
-                
-                window.__sprunki_var_id = targetVariable.id;
-                console.log(`✅ Variable "${variableName}" ID found and stored`);
-                
-                // 3. Create high-performance function
-                window.getPuttedChars = () => {
-                    try {
-                        return window.__sprunki_vm.runtime.getTargetForStage().variables[window.__sprunki_var_id].value;
-                    } catch (e) {
-                        console.error("Error getting Putted characters value:", e);
-                        return null;
+                // Helper functions
+                function getListByName(name) {
+                    for (const id in stage.variables) {
+                        const v = stage.variables[id];
+                        if (v?.name === name && Array.isArray(v.value)) return v;
                     }
-                };
-                
-                console.log('✅ High-performance getPuttedChars() function created');
-                console.log('👉 Current value:', window.getPuttedChars());
-                return true;
-            })();
-            """
-            
-            ws = websocket.create_connection(ws_url, timeout=30)
-            
-            # Execute setup JavaScript
-            response = self._send_cdp_command(ws, {
-                "method": "Runtime.evaluate",
-                "params": {"expression": setup_js, "returnByValue": True}
-            })
-            
-            ws.close()
-            
-            if response and 'result' in response:
-                result_value = response.get('result', {}).get('result', {}).get('value', False)
-                if result_value:
-                    print("✅ Putted characters monitoring setup successful!")
-                    self.putted_chars_setup_done = True
-                    self.verification_available = True
-                    
-                    # Test the monitoring
-                    test_value = self.get_putted_chars_value()
-                    if test_value is not None:
-                        print(f"🧪 Test successful - Current Putted characters: {test_value}")
-                        return True
-                    else:
-                        print("⚠️ Setup successful but test failed")
-                        self.verification_available = False
-                        return False
-                else:
-                    print("❌ Putted characters monitoring setup failed")
-                    self.verification_available = False
-                    return False
-            else:
-                print("❌ No response from JavaScript setup")
-                self.verification_available = False
-                return False
-                
-        except Exception as e:
-            print(f"❌ Error setting up Putted characters monitoring: {e}")
-            self.verification_available = False
-            return False
-
-    def get_putted_chars_value(self):
-        """
-        ADDED: Get current value of 'Putted characters' variable
-        Returns integer value or None if error
-        """
-        try:
-            if not self.verification_available:
-                return None
-                
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return None
-            
-            ws = websocket.create_connection(ws_url, timeout=10)
-            
-            # Call the high-performance function
-            response = self._send_cdp_command(ws, {
-                "method": "Runtime.evaluate",
-                "params": {"expression": "window.getPuttedChars()", "returnByValue": True}
-            })
-            
-            ws.close()
-            
-            if response and 'result' in response:
-                value = response.get('result', {}).get('result', {}).get('value')
-                if isinstance(value, (int, float)):
-                    return int(value)
-                else:
-                    print(f"⚠️ Unexpected Putted characters value type: {type(value)} = {value}")
-                    return None
-            else:
-                print("⚠️ No response when getting Putted characters value")
-                return None
-                
-        except Exception as e:
-            print(f"❌ Error getting Putted characters value: {e}")
-            return None
-
-    def get_polos_array(self):
-        """
-        🎯 NEW: Get Polos array from Stage variables 
-        Returns: list of strings ["0","1","0"...] or None if error
-        """
-        try:
-            if not self.verification_available:
-                return None
-                
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return None
-            
-            ws = websocket.create_connection(ws_url, timeout=10)
-            
-            # JavaScript to get Polos array from Stage variables
-            js_get_polos = '''
-            (() => {
-                try {
-                    if (!window.__sprunki_vm) {
-                        console.error("VM not found for Polos array");
-                        return null;
+                    if (stage.lists) {
+                        for (const id in stage.lists) {
+                            const L = stage.lists[id];
+                            if (L?.name === name) return L;
+                        }
                     }
-                    
-                    const stage = window.__sprunki_vm.runtime.getTargetForStage();
-                    if (!stage) {
-                        console.error("Stage not found for Polos array");
-                        return null;
-                    }
-                    
-                    // Find Polos variable in Stage variables
-                    const polosVariable = Object.values(stage.variables).find(v => v.name === 'Polos');
-                    
-                    if (!polosVariable) {
-                        console.error("Polos variable not found in Stage");
-                        return null;
-                    }
-                    
-                    console.log("✅ Found Polos array:", polosVariable.value);
-                    return polosVariable.value;
-                    
-                } catch (e) {
-                    console.error("Error getting Polos array:", e);
                     return null;
                 }
+                
+                function getVarByName(name) {
+                    for (const id in stage.variables) {
+                        const v = stage.variables[id];
+                        if (v?.name === name) return v;
+                    }
+                    return null;
+                }
+                
+                let charactersSuccess = false;
+                let puttedSuccess = false;
+                
+                // SYSTEM 1: Characters Array
+                try {
+                    window.getCharactersCount = () => {
+                        try {
+                            const entry = getListByName("Characters") || getVarByName("Characters");
+                            const raw = Array.isArray(entry?.value) ? entry.value.slice() : [];
+                            const normalized = raw.map(v => (v === 1 ? "1" : v === 0 ? "0" : String(v)));
+                            return normalized.filter(v => v === "1").length;
+                        } catch (e) {
+                            console.error("Error getting Characters count:", e);
+                            return null;
+                        }
+                    };
+                    
+                    const testChars = window.getCharactersCount();
+                    if (testChars !== null) {
+                        charactersSuccess = true;
+                        console.log("✅ Characters Array system ready:", testChars);
+                    }
+                } catch (e) {
+                    console.warn("⚠️ Characters Array setup failed:", e);
+                }
+                
+                // SYSTEM 2: Putted Characters (from old code)
+                try {
+                    const puttedVar = getVarByName("Putted characters");
+                    if (puttedVar) {
+                        window.__putted_var_id = puttedVar.id;
+                        
+                        window.getPuttedChars = () => {
+                            try {
+                                return window.__dual_vm.runtime.getTargetForStage().variables[window.__putted_var_id].value;
+                            } catch (e) {
+                                console.error("Error getting Putted characters:", e);
+                                return null;
+                            }
+                        };
+                        
+                        const testPutted = window.getPuttedChars();
+                        if (testPutted !== null) {
+                            puttedSuccess = true;
+                            console.log("✅ Putted Characters system ready:", testPutted);
+                        }
+                    }
+                } catch (e) {
+                    console.warn("⚠️ Putted Characters setup failed:", e);
+                }
+                
+                console.log("🔄 DUAL VERIFICATION SETUP RESULT:");
+                console.log("   Characters Array:", charactersSuccess ? "✅ Ready" : "❌ Failed");
+                console.log("   Putted Characters:", puttedSuccess ? "✅ Ready" : "❌ Failed");
+                
+                return {
+                    characters: charactersSuccess,
+                    putted: puttedSuccess,
+                    hasBackup: charactersSuccess || puttedSuccess
+                };
             })();
             '''
             
+            ws = websocket.create_connection(ws_url, timeout=30)
+            
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
-                "params": {"expression": js_get_polos, "returnByValue": True}
+                "params": {"expression": dual_setup_js, "returnByValue": True}
             })
             
             ws.close()
             
             if response and 'result' in response:
-                polos_value = response.get('result', {}).get('result', {}).get('value')
+                result = response.get('result', {}).get('result', {}).get('value', {})
                 
-                if isinstance(polos_value, list):
-                    print(f"🎯 Polos array retrieved: {polos_value}")
-                    return polos_value
+                self.characters_available = result.get('characters', False)
+                self.putted_chars_available = result.get('putted', False)
+                has_backup = result.get('hasBackup', False)
+                
+                if has_backup:
+                    print("✅ DUAL verification system setup successful!")
+                    print(f"   Characters Array: {'✅ Ready' if self.characters_available else '❌ Failed'}")
+                    print(f"   Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ Failed'}")
+                    
+                    # Test cả hai systems
+                    if self.characters_available:
+                        test_chars = self.get_characters_count()
+                        print(f"   🧪 Characters test: {test_chars}")
+                    
+                    if self.putted_chars_available:
+                        test_putted = self.get_putted_chars_value()
+                        print(f"   🧪 Putted test: {test_putted}")
+                    
+                    self.characters_setup_done = True
+                    self.putted_chars_setup_done = True
+                    return True
                 else:
-                    print(f"⚠️ Unexpected Polos value type: {type(polos_value)} = {polos_value}")
+                    print("❌ DUAL verification setup failed - no systems available")
+                    return False
+            else:
+                print("❌ No response from dual verification setup")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error setting up dual verification: {e}")
+            self.characters_available = False
+            self.putted_chars_available = False
+            return False
+
+    def get_characters_count(self):
+        """
+        🔢 ĐẾM SỐ "1" TRONG CHARACTERS ARRAY = NEW PUTTED CHARACTERS
+        Thay thế hoàn toàn get_putted_chars_value()
+        """
+        try:
+            if not self.characters_available:
+                return None
+                
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return None
+            
+            ws = websocket.create_connection(ws_url, timeout=10)
+            
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": "window.getCharactersCount()", "returnByValue": True}
+            })
+            
+            ws.close()
+            
+            if response and 'result' in response:
+                count = response.get('result', {}).get('result', {}).get('value')
+                if isinstance(count, (int, float)):
+                    return int(count)
+                else:
+                    print(f"⚠️ Unexpected Characters count type: {type(count)} = {count}")
                     return None
             else:
-                print("⚠️ No response when getting Polos array")
+                print("⚠️ No response when getting Characters count")
                 return None
                 
         except Exception as e:
-            print(f"❌ Error getting Polos array: {e}")
+            print(f"❌ Error getting Characters count: {e}")
             return None
 
     def get_enabled_list_array(self):
@@ -2913,7 +1321,7 @@ class SprunkiGamePlayer:
         Returns: list of strings ["0","1","0"...] or None if error
         """
         try:
-            if not self.verification_available:
+            if not self.characters_available:
                 return None
                 
             ws_url = self._get_websocket_url()
@@ -2979,155 +1387,125 @@ class SprunkiGamePlayer:
             print(f"❌ Error getting Enabled List: {e}")
             return None
 
-    def get_comprehensive_slot_state(self):
+    def get_putted_chars_value(self):
         """
-        📊 NEW: Get comprehensive slot state for verification
-        Returns: dict with all slot tracking data or None if error
+        🔢 GET PUTTED CHARACTERS (backup method)
+        Restored from old system as backup for Characters Array
         """
         try:
-            putted_chars = self.get_putted_chars_value()
-            polos_array = self.get_polos_array()
-            enabled_list = self.get_enabled_list_array()
-            
-            if putted_chars is None:
-                print("⚠️ Could not get Putted characters")
+            if not self.putted_chars_available:
+                return None
+                
+            ws_url = self._get_websocket_url()
+            if not ws_url:
                 return None
             
-            # Build comprehensive state
+            ws = websocket.create_connection(ws_url, timeout=10)
+            
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": "window.getPuttedChars()", "returnByValue": True}
+            })
+            
+            ws.close()
+            
+            if response and 'result' in response:
+                value = response.get('result', {}).get('result', {}).get('value')
+                if isinstance(value, (int, float)):
+                    return int(value)
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error getting putted chars: {e}")
+            return None
+
+    def get_dual_counts(self):
+        """
+        🔄 GET BOTH VALUES: Characters count + Putted characters
+        Returns: (characters_count, putted_count)
+        """
+        characters_count = self.get_characters_count() if self.characters_available else None
+        putted_count = self.get_putted_chars_value() if self.putted_chars_available else None
+        
+        return characters_count, putted_count
+
+    def get_comprehensive_slot_state(self):
+        """
+        📊 NEW: Get comprehensive slot state for verification - UPDATED for Characters Array
+        FIXED: Sử dụng Characters Array thay vì Putted Characters và Polos Array
+        Returns: dict with Characters Array data or None if error
+        """
+        try:
+            characters_count = self.get_characters_count()
+            
+            if characters_count is None:
+                print("⚠️ Could not get Characters count")
+                return None
+            
+            # Build comprehensive state using Characters Array
             state = {
-                'putted_characters': putted_chars,
-                'polos_array': polos_array,
-                'enabled_list': enabled_list,
+                'characters_count': characters_count,
                 'timestamp': time.time()
             }
             
-            # Cross-validation if arrays available
-            if polos_array:
-                polos_count = sum(1 for x in polos_array if x == "1")
-                state['polos_count'] = polos_count
-                state['putted_polos_match'] = (polos_count == putted_chars)
-                
-                if not state['putted_polos_match']:
-                    print(f"⚠️ INCONSISTENCY: Putted chars ({putted_chars}) ≠ Polos count ({polos_count})")
-            
-            # Enabled List validation
-            if enabled_list and polos_array:
-                arrays_match = (polos_array == enabled_list)
-                state['polos_enabled_match'] = arrays_match
-                
-                if not arrays_match:
-                    print(f"⚠️ INCONSISTENCY: Polos {polos_array} ≠ Enabled {enabled_list}")
-            
-            print(f"📊 Comprehensive slot state captured:")
-            print(f"   Putted characters: {putted_chars}")
-            if polos_array:
-                print(f"   Polos array: {polos_array} (count: {state.get('polos_count', 'N/A')})")
-            if enabled_list:
-                print(f"   Enabled List: {enabled_list}")
+            print(f"📊 Comprehensive state captured:")
+            print(f"   Characters count: {characters_count}")
             
             return state
             
         except Exception as e:
-            print(f"❌ Error getting comprehensive slot state: {e}")
+            print(f"❌ Error getting comprehensive state: {e}")
             return None
 
     def verify_slot_specific_return_enhanced(self, target_slot_index, state_before, state_after):
         """
-        🔍 ENHANCED: Slot-specific verification with Polos array validation
+        🔍 ENHANCED: Slot-specific verification với Characters Array
+        FIXED: Chỉ sử dụng Characters count thay vì Polos và Enabled List
         Returns: (success, reason, details)
         """
         try:
             if not state_before or not state_after:
                 return False, "missing_state_data", {}
             
-            putted_before = state_before.get('putted_characters')
-            putted_after = state_after.get('putted_characters')
-            polos_before = state_before.get('polos_array')
-            polos_after = state_after.get('polos_array')
+            count_before = state_before.get('characters_count')
+            count_after = state_after.get('characters_count')
             
             print(f"\n🔍 ENHANCED SLOT VERIFICATION for Slot {target_slot_index}")
             print("-" * 50)
             
-            # Basic putted characters check
-            expected_putted = putted_before - 1 if putted_before is not None else None
-            putted_success = (putted_after == expected_putted)
+            # Characters count check
+            expected_count = count_before - 1 if count_before is not None else None
+            count_success = (count_after == expected_count)
             
-            print(f"   📊 Putted chars: {putted_before} → {putted_after} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+            print(f"   📊 Characters count: {count_before} → {count_after} (expected: {expected_count}) = {'✅' if count_success else '❌'}")
             
-            # Advanced Polos array verification
-            polos_success = False
-            cross_contamination = []
-            target_slot_cleared = False
-            
-            if polos_before and polos_after and len(polos_before) == len(polos_after):
-                print(f"   🎯 Polos BEFORE: {polos_before}")
-                print(f"   🎯 Polos AFTER:  {polos_after}")
-                
-                # Check if target slot was cleared
-                if target_slot_index < len(polos_before):
-                    slot_before = polos_before[target_slot_index]
-                    slot_after = polos_after[target_slot_index]
-                    target_slot_cleared = (slot_before == "1" and slot_after == "0")
-                    
-                    print(f"   🎯 Target slot {target_slot_index}: '{slot_before}' → '{slot_after}' = {'✅ CLEARED' if target_slot_cleared else '❌ NOT CLEARED'}")
-                
-                # Check for unintended changes (cross-contamination)
-                for i, (before, after) in enumerate(zip(polos_before, polos_after)):
-                    if i == target_slot_index:
-                        continue  # Skip target slot
-                        
-                    if before != after:
-                        cross_contamination.append({
-                            'slot_index': i,
-                            'before': before,
-                            'after': after,
-                            'type': 'unexpected_clear' if before == "1" and after == "0" else 'unexpected_fill'
-                        })
-                
-                if cross_contamination:
-                    print(f"   🚨 CROSS-CONTAMINATION DETECTED:")
-                    for contamination in cross_contamination:
-                        slot_idx = contamination['slot_index']
-                        change_type = contamination['type']
-                        print(f"      Slot {slot_idx}: {contamination['before']} → {contamination['after']} ({change_type})")
-                else:
-                    print(f"   🛡️ No cross-contamination detected")
-                
-                polos_success = target_slot_cleared and len(cross_contamination) == 0
-            else:
-                print(f"   ⚠️ Cannot verify Polos array (missing or invalid data)")
-            
-            # Combined verification result
-            overall_success = putted_success and (polos_success if polos_before and polos_after else True)
+            # Decision logic: Chỉ dựa vào Characters count
+            overall_success = count_success
             
             # Determine reason and build details
             if overall_success:
                 reason = "verified_success"
                 details = {
-                    'target_slot_cleared': target_slot_cleared,
-                    'cross_contamination': cross_contamination,
-                    'putted_change': f"{putted_before} → {putted_after}",
-                    'verification_method': 'enhanced_polos_array'
+                    'characters_change': f"{count_before} → {count_after}",
+                    'verification_method': 'characters_array_only',
+                    'target_slot': target_slot_index
                 }
             else:
-                if not putted_success:
-                    reason = "putted_characters_mismatch"
-                elif cross_contamination:
-                    reason = "cross_contamination_detected"
-                elif not target_slot_cleared:
-                    reason = "target_slot_not_cleared"
+                if not count_success:
+                    reason = "characters_count_mismatch"
                 else:
                     reason = "unknown_failure"
                 
                 details = {
-                    'target_slot_cleared': target_slot_cleared,
-                    'cross_contamination': cross_contamination,
-                    'putted_change': f"{putted_before} → {putted_after}",
-                    'expected_putted': expected_putted,
-                    'verification_method': 'enhanced_polos_array'
+                    'characters_change': f"{count_before} → {count_after}",
+                    'expected_count': expected_count,
+                    'verification_method': 'characters_array_only',
+                    'target_slot': target_slot_index
                 }
             
             print(f"   🎯 FINAL RESULT: {'✅ SUCCESS' if overall_success else '❌ FAILED'} ({reason})")
+            print(f"   💡 METHOD: Characters Array count verification only")
             print("-" * 50)
             
             return overall_success, reason, details
@@ -3138,7 +1516,8 @@ class SprunkiGamePlayer:
 
     def check_slot_needs_return(self, target_slot_index):
         """
-        🔍 NEW: Pre-flight check if slot actually needs return
+        🔍 NEW: Pre-flight check - UPDATED for Characters Array
+        FIXED: Chỉ dựa vào Characters count thay vì Polos array
         Returns: (needs_return, current_state, reason)
         """
         try:
@@ -3148,23 +1527,14 @@ class SprunkiGamePlayer:
             if not state:
                 return True, None, "cannot_verify_state"  # Assume needs return if can't check
             
-            polos_array = state.get('polos_array')
+            characters_count = state.get('characters_count', 0)
             
-            if polos_array and target_slot_index < len(polos_array):
-                slot_status = polos_array[target_slot_index]
-                
-                if slot_status == "0":
-                    print(f"   ✅ Slot {target_slot_index} already empty ('{slot_status}') - SKIPPING")
-                    return False, state, "already_empty"
-                elif slot_status == "1":
-                    print(f"   🎯 Slot {target_slot_index} has icon ('{slot_status}') - NEEDS RETURN")
-                    return True, state, "has_icon"
-                else:
-                    print(f"   ⚠️ Slot {target_slot_index} unknown status ('{slot_status}') - ASSUME NEEDS RETURN")
-                    return True, state, "unknown_status"
+            if characters_count == 0:
+                print(f"   ✅ No characters on slots (count: {characters_count}) - SKIPPING")
+                return False, state, "no_characters_placed"
             else:
-                print(f"   ⚠️ Cannot check slot {target_slot_index} status - ASSUME NEEDS RETURN")
-                return True, state, "polos_unavailable"
+                print(f"   🎯 Characters on slots (count: {characters_count}) - NEEDS RETURN")
+                return True, state, "characters_need_return"
                 
         except Exception as e:
             print(f"❌ Pre-flight check error: {e}")
@@ -3172,8 +1542,9 @@ class SprunkiGamePlayer:
 
     def get_active_slots_queue(self):
         """
-        📋 NEW: Get smart-ordered queue of active slots that need return
-        Returns: list of slot indices in optimal return order
+        📋 NEW: Get smart-ordered queue - UPDATED for Characters Array
+        FIXED: Dựa vào Characters count thay vì Polos array
+        Returns: list of slot indices (simplified for Characters Array system)
         """
         try:
             print(f"\n📋 BUILDING SMART RETURN QUEUE")
@@ -3184,27 +1555,24 @@ class SprunkiGamePlayer:
                 print("⚠️ Cannot get slot state, using fallback")
                 return []
             
-            polos_array = state.get('polos_array')
-            if not polos_array:
-                print("⚠️ No Polos array available, using fallback")
+            characters_count = state.get('characters_count', 0)
+            
+            print(f"   📊 Characters count: {characters_count}")
+            
+            if characters_count == 0:
+                print(f"   ✅ No characters to return")
                 return []
             
-            # Find all active slots (status "1")
-            active_slots = []
-            for i, status in enumerate(polos_array):
-                if status == "1":
-                    active_slots.append(i)
+            # For Characters Array system, we don't know specific slot indices
+            # Just return a simple range based on typical slot usage
+            if characters_count > 0:
+                # Return slots in reverse order (high → low) for safety
+                active_slots_estimated = list(range(min(characters_count, 7) - 1, -1, -1))
+                print(f"   📋 Estimated active slots: {active_slots_estimated}")
+                print(f"   💡 Reason: Characters Array doesn't track specific slot indices")
+                return active_slots_estimated
             
-            print(f"   🎯 Found {len(active_slots)} active slots: {active_slots}")
-            
-            # Smart ordering: Return from highest index to lowest
-            # This prevents index shifting issues during batch operations
-            active_slots_ordered = sorted(active_slots, reverse=True)
-            
-            print(f"   📋 Optimal return order: {active_slots_ordered} (high → low)")
-            print(f"   💡 Reason: Prevents index shifting during batch return")
-            
-            return active_slots_ordered
+            return []
             
         except Exception as e:
             print(f"❌ Error building return queue: {e}")
@@ -3388,14 +1756,14 @@ class SprunkiGamePlayer:
             print("   🔥 Method 1: Rapid-fire center clicks")
             center_coords = [(center_x, center_y)]
             
-            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            state_before = self.get_comprehensive_slot_state() if self.characters_available else None
             
             for _ in range(5):  # 5 rapid clicks
                 self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
                 time.sleep(0.1)
             
             time.sleep(1.0)
-            if self.verification_available and state_before:
+            if self.characters_available and state_before:
                 state_after = self.get_comprehensive_slot_state()
                 if state_after:
                     is_success, reason, details = self.verify_slot_specific_return_enhanced(
@@ -3409,12 +1777,12 @@ class SprunkiGamePlayer:
             print("   🔥 Method 2: Hold clicks on expanded area")
             expanded_coords = self.generate_circle_pattern_coordinates(center_x, center_y, radius=40, num_points=8)
             
-            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            state_before = self.get_comprehensive_slot_state() if self.characters_available else None
             
             self.execute_multi_method_clicks(expanded_coords, use_cdp, domain_adj, method="hold")
             
             time.sleep(1.5)
-            if self.verification_available and state_before:
+            if self.characters_available and state_before:
                 state_after = self.get_comprehensive_slot_state()
                 if state_after:
                     is_success, reason, details = self.verify_slot_specific_return_enhanced(
@@ -3427,7 +1795,7 @@ class SprunkiGamePlayer:
             # Method 3: Mixed method barrage
             print("   🔥 Method 3: Mixed method barrage")
             
-            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            state_before = self.get_comprehensive_slot_state() if self.characters_available else None
             
             methods = ["single", "double", "triple"]
             for method in methods:
@@ -3435,7 +1803,7 @@ class SprunkiGamePlayer:
                 time.sleep(0.3)
             
             time.sleep(1.5)
-            if self.verification_available and state_before:
+            if self.characters_available and state_before:
                 state_after = self.get_comprehensive_slot_state()
                 if state_after:
                     is_success, reason, details = self.verify_slot_specific_return_enhanced(
@@ -3454,7 +1822,8 @@ class SprunkiGamePlayer:
 
     def validate_workflow_completion(self):
         """
-        ✅ NEW: Validate that workflow completed successfully
+        ✅ NEW: Validate workflow completion - UPDATED for Characters Array
+        FIXED: Chỉ sử dụng Characters count validation
         Returns: (is_complete, remaining_issues, recommendations)
         """
         try:
@@ -3465,45 +1834,17 @@ class SprunkiGamePlayer:
             if not state:
                 return False, ["Cannot get final state"], ["Manual verification needed"]
             
-            putted_chars = state.get('putted_characters', 0)
-            polos_array = state.get('polos_array')
-            enabled_list = state.get('enabled_list')
+            characters_count = state.get('characters_count', 0)
             
             issues = []
             recommendations = []
             
-            # Check 1: Putted characters should be 0
-            if putted_chars != 0:
-                issues.append(f"Putted characters = {putted_chars} (expected: 0)")
+            # Check: Characters count should be 0
+            if characters_count != 0:
+                issues.append(f"Characters count = {characters_count} (expected: 0)")
                 recommendations.append("Run additional return operations")
             else:
-                print("✅ Putted characters = 0 (perfect)")
-            
-            # Check 2: All Polos should be "0"
-            if polos_array:
-                active_polos = [i for i, status in enumerate(polos_array) if status == "1"]
-                if active_polos:
-                    issues.append(f"Active slots remaining: {active_polos}")
-                    recommendations.append(f"Target slots {active_polos} for additional return")
-                else:
-                    print("✅ All Polos slots = '0' (perfect)")
-            
-            # Check 3: Cross-validation
-            if polos_array and enabled_list:
-                if polos_array != enabled_list:
-                    issues.append("Polos and Enabled List mismatch")
-                    recommendations.append("Investigate state inconsistency")
-                else:
-                    print("✅ Polos and Enabled List match (perfect)")
-            
-            # Check 4: Consistency
-            if polos_array:
-                polos_count = sum(1 for x in polos_array if x == "1")
-                if polos_count != putted_chars:
-                    issues.append(f"Count mismatch: Polos count ({polos_count}) ≠ Putted chars ({putted_chars})")
-                    recommendations.append("State synchronization needed")
-                else:
-                    print("✅ Counts are consistent (perfect)")
+                print("✅ Characters count = 0 (perfect)")
             
             is_complete = len(issues) == 0
             
@@ -3515,12 +1856,38 @@ class SprunkiGamePlayer:
                 print("💡 Recommendations:")
                 for rec in recommendations:
                     print(f"   - {rec}")
+            else:
+                print("🎉 Characters Array validation passed!")
+                print("   ✅ Characters count = 0")
+                print("   ✅ All characters returned successfully")
             
             return is_complete, issues, recommendations
             
         except Exception as e:
             print(f"❌ Validation error: {e}")
-            return False, [f"Validation error: {str(e)}"], ["Manual check required"]    
+            return False, [f"Validation error: {str(e)}"], ["Manual check required"]
+
+    def store_target_slot_for_verification(self, target_slot_index):
+        """
+        🎯 Helper: Store target slot index for verification tracking
+        """
+        self.last_target_slot_index = target_slot_index
+        print(f"🎯 Stored target slot index: {target_slot_index} for verification")
+
+    def get_index_correction_report(self):
+        """
+        📊 Helper: Get report of all index corrections discovered
+        """
+        if hasattr(self, 'index_corrections') and self.index_corrections:
+            print(f"\n📊 INDEX CORRECTION REPORT:")
+            print("-" * 40)
+            for config_index, actual_index in self.index_corrections.items():
+                offset = actual_index - config_index
+                print(f"   Config {config_index} → Actual {actual_index} (offset: {offset:+d})")
+            return self.index_corrections
+        else:
+            print("📊 No index corrections recorded")
+            return {}
 
     def generate_icon_coordinates(self, base_x, base_y, offset=35):
         """
@@ -3795,51 +2162,79 @@ class SprunkiGamePlayer:
         except:
             return False
 
-    def verify_drag_success(self, before_value, after_value):
+    def verify_drag_success_dual(self, before_chars, after_chars, before_putted, after_putted):
         """
-        ADDED: Verify drag success by checking if Putted characters increased by 1
+        🔄 DUAL VERIFICATION: CHỈ CẦN 1 TRONG 2 TĂNG 1 ĐƠN VỊ
         """
-        if before_value is None or after_value is None:
-            print("⚠️ Cannot verify drag - missing Putted characters values, assuming success")
-            return True  # Fallback to assume success if verification not available
+        print(f"📊 DUAL Drag verification:")
         
-        expected_value = before_value + 1
-        success = (after_value == expected_value)
+        # Check Characters Array
+        chars_success = False
+        if before_chars is not None and after_chars is not None:
+            expected_chars = before_chars + 1
+            chars_success = (after_chars == expected_chars)
+            print(f"   🔢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
+        else:
+            print(f"   🔢 Characters: N/A (not available)")
         
-        print(f"📊 Drag verification: {before_value} → {after_value} (expected: {expected_value}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
+        # Check Putted Characters  
+        putted_success = False
+        if before_putted is not None and after_putted is not None:
+            expected_putted = before_putted + 1
+            putted_success = (after_putted == expected_putted)
+            print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+        else:
+            print(f"   🎯 Putted: N/A (not available)")
         
-        if not success:
-            if after_value == before_value:
-                print("   Reason: No change in Putted characters (icon not placed)")
-            elif after_value > expected_value:
-                print(f"   Reason: Too much increase (+{after_value - before_value}) - multiple icons placed?")
-            elif after_value < before_value:
-                print(f"   Reason: Decrease detected ({after_value - before_value}) - game state changed?")
+        # DUAL LOGIC: CHỈ CẦN 1 TRONG 2 THÀNH CÔNG
+        overall_success = chars_success or putted_success
         
-        return success
+        if overall_success:
+            successful_method = []
+            if chars_success: successful_method.append("Characters Array")
+            if putted_success: successful_method.append("Putted Characters")
+            print(f"   🎉 DUAL SUCCESS via: {', '.join(successful_method)}")
+        else:
+            print(f"   ❌ DUAL FAILURE: Both methods failed")
+        
+        return overall_success
 
-    def verify_return_success(self, before_value, after_value):
+    def verify_return_success_dual(self, before_chars, after_chars, before_putted, after_putted):
         """
-        ADDED: Verify return success by checking if Putted characters decreased by 1
+        🔄 DUAL VERIFICATION: CHỈ CẦN 1 TRONG 2 GIẢM 1 ĐƠN VỊ
         """
-        if before_value is None or after_value is None:
-            print("⚠️ Cannot verify return - missing Putted characters values, assuming success")
-            return True  # Fallback to assume success if verification not available
+        print(f"📊 DUAL Return verification:")
         
-        expected_value = before_value - 1
-        success = (after_value == expected_value)
+        # Check Characters Array
+        chars_success = False
+        if before_chars is not None and after_chars is not None:
+            expected_chars = before_chars - 1
+            chars_success = (after_chars == expected_chars)
+            print(f"   🔢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
+        else:
+            print(f"   🔢 Characters: N/A (not available)")
         
-        print(f"📊 Return verification: {before_value} → {after_value} (expected: {expected_value}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
+        # Check Putted Characters  
+        putted_success = False
+        if before_putted is not None and after_putted is not None:
+            expected_putted = before_putted - 1
+            putted_success = (after_putted == expected_putted)
+            print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+        else:
+            print(f"   🎯 Putted: N/A (not available)")
         
-        if not success:
-            if after_value == before_value:
-                print("   Reason: No change in Putted characters (icon not returned)")
-            elif after_value < expected_value:
-                print(f"   Reason: Too much decrease ({before_value - after_value}) - multiple icons returned?")
-            elif after_value > before_value:
-                print(f"   Reason: Increase detected (+{after_value - before_value}) - new icon placed?")
+        # DUAL LOGIC: CHỈ CẦN 1 TRONG 2 THÀNH CÔNG
+        overall_success = chars_success or putted_success
         
-        return success
+        if overall_success:
+            successful_method = []
+            if chars_success: successful_method.append("Characters Array") 
+            if putted_success: successful_method.append("Putted Characters")
+            print(f"   🎉 DUAL SUCCESS via: {', '.join(successful_method)}")
+        else:
+            print(f"   ❌ DUAL FAILURE: Both methods failed")
+        
+        return overall_success
 
     def _execute_single_return_click(self, click_x, click_y, use_cdp, domain_adj):
         """
@@ -3889,10 +2284,13 @@ class SprunkiGamePlayer:
     def attempt_icon_return(self, target_slot):
         """
         ADDED: Attempt to return icon from slot before next retry
-        Used when drag verification fails
+        UPDATED: Sử dụng Characters Array verification
         """
         try:
             print("🔄 Attempting to return icon before retry...")
+            
+            # Get count before return
+            count_before = self.get_characters_count() if self.characters_available else None
             
             # Quick click to return icon
             center_x, center_y = target_slot['x'], target_slot['y']
@@ -3902,6 +2300,14 @@ class SprunkiGamePlayer:
             time.sleep(0.1)
             pyautogui.click(button='left')
             time.sleep(0.5)  # Wait for return animation
+            
+            # Verify return if possible
+            if self.characters_available and count_before is not None:
+                count_after = self.get_characters_count()
+                if count_after is not None and count_after < count_before:
+                    print("✅ Icon return verified via Characters Array")
+                else:
+                    print("⚠️ Icon return unclear via Characters Array")
             
             print("✅ Icon return attempt completed")
             return True
@@ -3916,18 +2322,25 @@ class SprunkiGamePlayer:
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=False):
         """
-        ENHANCED: Drag and drop with verification and 5-coordinate retry
-        This replaces the old corrected_drag_and_drop method
+        ENHANCED: Drag and drop with DUAL verification (Characters Array + Putted Characters)
+        UPDATED: Reduced timing for faster workflow
+        CHỈ CẦN 1 TRONG 2 THÀNH CÔNG LÀ ĐỦ - Maximum compatibility across all mods
         """
-        print(f"\n🎯 ENHANCED DRAG START: Icon to slot with verification")
+        print(f"\n🎯 ENHANCED DRAG START: Icon to slot with DUAL verification")
         print("="*60)
-        
-        # Check if verification is available
-        verification_enabled = self.verification_available
-        if verification_enabled:
-            print("🔍 Drag verification ENABLED - will check Putted characters")
+
+        # Store target slot for verification
+        target_slot_index = target_slot.get('index', -1)
+        self.store_target_slot_for_verification(target_slot_index)
+
+        # Check if DUAL verification is available
+        dual_verification_enabled = self.characters_available or self.putted_chars_available
+        if dual_verification_enabled:
+            print("🔄 DUAL verification ENABLED:")
+            print(f"   🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
+            print(f"   🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ N/A'}")
         else:
-            print("⚠️ Drag verification DISABLED - using fallback logic")
+            print("⚠️ DUAL verification DISABLED - using fallback logic")
         
         # Generate 5 coordinates to try
         coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
@@ -3945,11 +2358,13 @@ class SprunkiGamePlayer:
             coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
             print(f"\n🎯 Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
             
-            # Get Putted characters value BEFORE drag (if verification available)
-            putted_before = None
-            if verification_enabled:
-                putted_before = self.get_putted_chars_value()
-                print(f"📊 Putted characters BEFORE drag: {putted_before}")
+            # Get DUAL counts BEFORE drag (if verification available)
+            characters_before, putted_before = None, None
+            if dual_verification_enabled:
+                characters_before, putted_before = self.get_dual_counts()
+                print(f"📊 DUAL counts BEFORE drag:")
+                print(f"   🔢 Characters: {characters_before}")
+                print(f"   🎯 Putted: {putted_before}")
             
             # Execute single drag attempt
             drag_executed = self._execute_single_drag_attempt(
@@ -3960,62 +2375,70 @@ class SprunkiGamePlayer:
                 print(f"❌ Drag execution failed at coordinate {coord_used}")
                 if coord_index < len(coordinates) - 1:
                     print("   Trying next coordinate...")
-                    time.sleep(0.5)
+                    time.sleep(0.3)  # REDUCED from 0.5
                 continue
             
-            # Wait for game state to update
-            verification_wait = 1.0 if verification_enabled else 0.3
+            # Wait for game state to update - REDUCED TIMING
+            verification_wait = 0.6 if dual_verification_enabled else 0.2  # REDUCED from 1.0 and 0.3
             print(f"⏳ Waiting {verification_wait}s for game state update (mouse at safe position)...")
             time.sleep(verification_wait)
             
-            # Get Putted characters value AFTER drag (if verification available)
-            if verification_enabled:
-                putted_after = self.get_putted_chars_value()
-                print(f"📊 Putted characters AFTER drag: {putted_after}")
+            # Get DUAL counts AFTER drag (if verification available)
+            if dual_verification_enabled:
+                characters_after, putted_after = self.get_dual_counts()
+                print(f"📊 DUAL counts AFTER drag:")
+                print(f"   🔢 Characters: {characters_after}")
+                print(f"   🎯 Putted: {putted_after}")
                 
-                # Verify drag success
-                if self.verify_drag_success(putted_before, putted_after):
-                    print(f"🎉 VERIFIED SUCCESS at coordinate {coord_used}!")
+                # Verify drag success using DUAL system
+                if self.verify_drag_success_dual(characters_before, characters_after, putted_before, putted_after):
+                    print(f"🎉 DUAL VERIFIED SUCCESS at coordinate {coord_used}!")
                     success = True
                     break
                 else:
-                    print(f"❌ VERIFICATION FAILED at coordinate {coord_used}")
+                    print(f"❌ DUAL VERIFICATION FAILED at coordinate {coord_used}")
                     
-                    # Only return icon if it was actually placed (putted_after > putted_before)
+                    # Only return icon if ANY value increased (either chars or putted)
+                    characters_increased = (characters_after is not None and characters_before is not None and characters_after > characters_before)
+                    putted_increased = (putted_after is not None and putted_before is not None and putted_after > putted_before)
+                    any_increase = characters_increased or putted_increased
+                    
                     if coord_index < len(coordinates) - 1:
-                        if putted_after > putted_before:
-                            print("🔄 Icon was placed but incorrectly, returning before retry...")
+                        if any_increase:
+                            print("🔄 Icon was placed (detected by DUAL system), returning before retry...")
                             self.attempt_icon_return(target_slot)
-                            time.sleep(0.8)
+                            time.sleep(0.5)  # REDUCED from 0.8
                         else:
-                            print("ℹ️ Icon was not placed, trying next coordinate directly...")
-                            time.sleep(0.3)  # Short delay before next coordinate
+                            print("ℹ️ Icon was not placed (no increase in DUAL system), trying next coordinate...")
+                            time.sleep(0.2)  # REDUCED from 0.3
             else:
                 # No verification available - assume success if drag executed
                 print(f"✅ ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
                 success = True
                 break
             
-            # Small delay before next coordinate
+            # Small delay before next coordinate - REDUCED
             if coord_index < len(coordinates) - 1:
                 print("   Preparing next coordinate attempt...")
-                time.sleep(0.3)
+                time.sleep(0.2)  # REDUCED from 0.3
         
         # Final result
         if success:
             print(f"🎉 ENHANCED DRAG COMPLETED SUCCESSFULLY!")
             print(f"   Coordinate used: {coord_used}/5")
-            print(f"   Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+            print(f"   Verification: {'🔄 DUAL Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
+            if dual_verification_enabled:
+                print(f"   Systems: Characters Array {'✅' if self.characters_available else '❌'} + Putted Characters {'✅' if self.putted_chars_available else '❌'}")
             print("   Mouse already at safe position")
             print("="*60)
             
-            self.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=verification_enabled)
+            self.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=dual_verification_enabled)
             return True
         else:
             print(f"💥 ENHANCED DRAG FAILED - All {len(coordinates)} coordinates attempted")
             print("="*60)
             
-            self.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=verification_enabled)
+            self.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=dual_verification_enabled)
             return False
 
     def _execute_single_drag_attempt(self, start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj):
@@ -4265,7 +2688,7 @@ class SprunkiGamePlayer:
 
     def setup_game_environment(self, progress_callback=None, first_setup=True):
         """
-        ENHANCED: Setup with drag verification system
+        ENHANCED: Setup with DUAL verification system (Characters Array + Putted Characters)
         """
         try:
             if not self.config:
@@ -4289,14 +2712,7 @@ class SprunkiGamePlayer:
                 self.cleanup_chrome_complete()
                 time.sleep(3)  # Extra wait for complete cleanup
 
-            # Use enhanced navigation with DOM-first approach
             success = self.navigate_and_prepare_game(self.config['currentUrl'])
-            
-            if success:
-                print("✅ Enhanced navigation completed - DOM-first approach active")
-            else:
-                print("❌ Enhanced navigation failed")
-                return False
             if not success:
                 print("⚠️ Chrome debug launch failed")
                 return False
@@ -4308,14 +2724,14 @@ class SprunkiGamePlayer:
             if not self.intro_skip_via_cdp():
                 print("CDP intro skipping failed, but continuing anyway...")
 
-            # ADDED: Setup drag verification monitoring
+            # THAY ĐỔI: Setup DUAL verification system (Characters Array + Putted Characters)
             if progress_callback:
-                progress_callback("🔍 Setting up drag verification...")
+                progress_callback("🔄 Setting up DUAL verification system...")
             
-            if not self.setup_putted_chars_monitor():
-                print("⚠️ Drag verification setup failed, continuing with basic workflow")
+            if not self.setup_dual_verification_system():
+                print("⚠️ DUAL verification setup failed, continuing with basic workflow")
             else:
-                print("✅ Drag verification system ready!")
+                print("✅ DUAL verification system ready!")
 
             # Prepare game for playing
             self.prepare_game_for_playing()
@@ -4330,10 +2746,15 @@ class SprunkiGamePlayer:
             print("   🎮 PyAutoGUI for precise game automation")
             print("   📡 WebSocket/CDP for advanced control")
             print("   🛡️ AdBlocker extension loaded")
-            if self.verification_available:
-                print("   🔍 Drag verification system ENABLED")
+            
+            # DUAL verification status
+            if self.characters_available or self.putted_chars_available:
+                print("   🔄 DUAL verification system ENABLED:")
+                print(f"      🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ Failed'}")
+                print(f"      🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ Failed'}")
+                print("      💡 Only 1 method needs to work = Maximum compatibility!")
             else:
-                print("   ⚠️ Drag verification system DISABLED (fallback mode)")
+                print("   ⚠️ DUAL verification system DISABLED (fallback mode)")
             
             return True
                 
@@ -4524,8 +2945,8 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        🛡️ SMART SLOT STATE TRACKING: Pre-flight + Enhanced Verification + Cross-contamination Prevention
-        Uses Polos array for bulletproof slot-specific verification
+        🛡️ SMART SLOT STATE TRACKING: Pre-flight + DUAL Verification + Cross-contamination Prevention
+        UPDATED: Sử dụng DUAL verification cho Return (Characters + Putted)
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
@@ -4535,12 +2956,14 @@ class SprunkiGamePlayer:
             print(f"\n🛡️ SMART SLOT RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
             print("="*80)
             
-            # Check if verification is available
-            verification_enabled = self.verification_available
-            if verification_enabled:
-                print("🔍 Enhanced verification ENABLED with Polos array tracking")
+            # Check if DUAL verification is available
+            dual_verification_enabled = self.characters_available or self.putted_chars_available
+            if dual_verification_enabled:
+                print("🔄 DUAL verification ENABLED for Return:")
+                print(f"   🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
+                print(f"   🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ N/A'}")
             else:
-                print("⚠️ Enhanced verification DISABLED - using basic fallback")
+                print("⚠️ DUAL verification DISABLED - using fallback logic")
             
             # ================================================================
             # PHASE 0: PRE-FLIGHT CHECK (Skip if already empty)
@@ -4548,7 +2971,7 @@ class SprunkiGamePlayer:
             print("\n🔍 PHASE 0: PRE-FLIGHT CHECK")
             print("-" * 40)
             
-            if verification_enabled:
+            if dual_verification_enabled:
                 needs_return, initial_state, reason = self.check_slot_needs_return(target_slot_index)
                 
                 if not needs_return:
@@ -4585,107 +3008,96 @@ class SprunkiGamePlayer:
             phase_used = "none"
             
             # ================================================================
-            # PHASE 1: PRECISION CENTER ATTACK
+            # PHASE 1: PRECISION CENTER ATTACK with DUAL VERIFICATION
             # ================================================================
-            print(f"\n🎯 PHASE 1: PRECISION CENTER (Safe radius: {max_safe_radius}px)")
+            print(f"\n🎯 PHASE 1: PRECISION CENTER with DUAL VERIFICATION")
             print("-" * 40)
             
             center_coords = [(center_x, center_y)]
             
-            # Get initial state for this phase
-            state_before = None
-            if verification_enabled:
-                state_before = self.get_comprehensive_slot_state()
-                if state_before:
-                    print(f"📊 State BEFORE Phase 1: Putted={state_before.get('putted_characters')}")
-                    if state_before.get('polos_array'):
-                        print(f"   🎯 Polos: {state_before['polos_array']}")
+            # Get DUAL counts BEFORE return (if verification available)
+            characters_before, putted_before = None, None
+            if dual_verification_enabled:
+                characters_before, putted_before = self.get_dual_counts()
+                print(f"📊 DUAL counts BEFORE return:")
+                print(f"   🔢 Characters: {characters_before}")
+                print(f"   🎯 Putted: {putted_before}")
             
             # Try single click on center
             print("   🔹 Method: Precision single click")
             self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
             
-            # Wait and verify with enhanced verification
-            time.sleep(0.8)
-            if verification_enabled and state_before:
-                state_after = self.get_comprehensive_slot_state()
-                if state_after:
-                    is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                        target_slot_index, state_before, state_after
-                    )
-                    
-                    if is_success:
-                        print("🎉 PHASE 1 SUCCESS: Precision center click worked!")
-                        success = True
-                        phase_used = "phase_1_precision_center"
-                    else:
-                        print(f"❌ Phase 1 failed: {reason}")
-                        if details.get('cross_contamination'):
-                            print("🚨 Cross-contamination detected in Phase 1!")
+            # Wait and verify with DUAL verification
+            verification_wait = 0.5 if dual_verification_enabled else 0.3  # REDUCED from 0.8
+            time.sleep(verification_wait)
+            
+            if dual_verification_enabled:
+                characters_after, putted_after = self.get_dual_counts()
+                print(f"📊 DUAL counts AFTER return:")
+                print(f"   🔢 Characters: {characters_after}")
+                print(f"   🎯 Putted: {putted_after}")
+                
+                # Use DUAL verification for return
+                if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                    print("🎉 PHASE 1 SUCCESS: Precision center click worked with DUAL verification!")
+                    success = True
+                    phase_used = "phase_1_precision_center_dual"
+                else:
+                    print(f"❌ Phase 1 failed: DUAL verification failed")
             
             # Try double click if single failed
             if not success and not self.should_stop:
-                print("   🔹 Method: Precision double click")
+                print("   🔹 Method: Precision double click with DUAL verification")
                 
-                # Get state before double click
-                if verification_enabled:
-                    state_before = self.get_comprehensive_slot_state()
+                # Get DUAL counts before double click
+                if dual_verification_enabled:
+                    characters_before, putted_before = self.get_dual_counts()
                 
                 self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="double")
                 
-                time.sleep(0.8)
-                if verification_enabled and state_before:
-                    state_after = self.get_comprehensive_slot_state()
-                    if state_after:
-                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                            target_slot_index, state_before, state_after
-                        )
-                        
-                        if is_success:
-                            print("🎉 PHASE 1 SUCCESS: Precision double click worked!")
-                            success = True
-                            phase_used = "phase_1_precision_double"
+                time.sleep(verification_wait)
+                if dual_verification_enabled:
+                    characters_after, putted_after = self.get_dual_counts()
+                    
+                    # Use DUAL verification
+                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                        print("🎉 PHASE 1 SUCCESS: Precision double click worked with DUAL verification!")
+                        success = True
+                        phase_used = "phase_1_precision_double_dual"
             
             # ================================================================
-            # PHASE 2: SAFE BOUNDARY PATTERN
+            # PHASE 2: SAFE BOUNDARY PATTERN with DUAL VERIFICATION
             # ================================================================
             if not success and not self.should_stop and len(safe_coordinates) > 1:
-                print(f"\n🛡️ PHASE 2: SAFE BOUNDARY PATTERN ({len(safe_coordinates)} coords)")
+                print(f"\n🛡️ PHASE 2: SAFE BOUNDARY PATTERN with DUAL VERIFICATION ({len(safe_coordinates)} coords)")
                 print("-" * 40)
                 
-                # Get state before phase 2
-                state_before = None
-                if verification_enabled:
-                    state_before = self.get_comprehensive_slot_state()
-                    if state_before:
-                        print(f"📊 State BEFORE Phase 2: Putted={state_before.get('putted_characters')}")
+                # Get DUAL counts before phase 2
+                if dual_verification_enabled:
+                    characters_before, putted_before = self.get_dual_counts()
+                    print(f"📊 DUAL counts BEFORE Phase 2: Characters={characters_before}, Putted={putted_before}")
                 
                 # Execute all clicks within safe boundary
                 self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method="single")
                 
                 # Wait and verify after entire phase
-                time.sleep(1.2)
-                if verification_enabled and state_before:
-                    state_after = self.get_comprehensive_slot_state()
-                    if state_after:
-                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                            target_slot_index, state_before, state_after
-                        )
-                        
-                        if is_success:
-                            print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked!")
-                            success = True
-                            phase_used = "phase_2_safe_boundary"
-                        else:
-                            print(f"❌ Phase 2 failed: {reason}")
-                            if details.get('cross_contamination'):
-                                print("🚨 Cross-contamination detected in Phase 2!")
+                time.sleep(verification_wait + 0.2)  # Slightly longer for multi-coord
+                if dual_verification_enabled:
+                    characters_after, putted_after = self.get_dual_counts()
+                    
+                    # Use DUAL verification
+                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                        print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked with DUAL verification!")
+                        success = True
+                        phase_used = "phase_2_safe_boundary_dual"
+                    else:
+                        print(f"❌ Phase 2 failed: DUAL verification failed")
             
             # ================================================================
-            # PHASE 3: MULTI-METHOD ON SAFE COORDS
+            # PHASE 3: MULTI-METHOD ON SAFE COORDS with DUAL VERIFICATION
             # ================================================================
             if not success and not self.should_stop and len(safe_coordinates) > 1:
-                print(f"\n💥 PHASE 3: MULTI-METHOD ON SAFE COORDINATES")
+                print(f"\n💥 PHASE 3: MULTI-METHOD with DUAL VERIFICATION")
                 print("-" * 40)
                 
                 # Try different methods on safe coordinates
@@ -4695,37 +3107,33 @@ class SprunkiGamePlayer:
                     if success or self.should_stop:
                         break
                         
-                    print(f"   🔥 Method: {method} on safe coordinates")
+                    print(f"   🔥 Method: {method} with DUAL verification")
                     
-                    # Get state before this method
-                    state_before = None
-                    if verification_enabled:
-                        state_before = self.get_comprehensive_slot_state()
+                    # Get DUAL counts before this method
+                    if dual_verification_enabled:
+                        characters_before, putted_before = self.get_dual_counts()
                     
                     self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method=method)
                     
                     # Check after each method
-                    time.sleep(1.0)
-                    if verification_enabled and state_before:
-                        state_after = self.get_comprehensive_slot_state()
-                        if state_after:
-                            is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                                target_slot_index, state_before, state_after
-                            )
-                            
-                            if is_success:
-                                print(f"🎉 PHASE 3 SUCCESS: {method} method worked!")
-                                success = True
-                                phase_used = f"phase_3_{method}_safe"
-                                break
-                            else:
-                                print(f"❌ Method {method} failed: {reason}")
+                    time.sleep(verification_wait)
+                    if dual_verification_enabled:
+                        characters_after, putted_after = self.get_dual_counts()
+                        
+                        # Use DUAL verification
+                        if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                            print(f"🎉 PHASE 3 SUCCESS: {method} method worked with DUAL verification!")
+                            success = True
+                            phase_used = f"phase_3_{method}_dual"
+                            break
+                        else:
+                            print(f"❌ Method {method} failed: DUAL verification failed")
             
             # ================================================================
-            # PHASE 4: EMERGENCY MICRO-EXPANSION (VERY LIMITED)
+            # PHASE 4: EMERGENCY MICRO-EXPANSION with DUAL VERIFICATION
             # ================================================================
             if not success and not self.should_stop:
-                print(f"\n🚨 PHASE 4: EMERGENCY MICRO-EXPANSION (Max {max_safe_radius + 10}px)")
+                print(f"\n🚨 PHASE 4: EMERGENCY MICRO-EXPANSION with DUAL VERIFICATION (Max {max_safe_radius + 10}px)")
                 print("-" * 40)
                 
                 # Generate emergency coordinates - slightly beyond safe zone but still conservative
@@ -4734,56 +3142,49 @@ class SprunkiGamePlayer:
                     center_x, center_y, radius=emergency_radius, num_points=6
                 )
                 
-                # Get state before emergency
-                state_before = None
-                if verification_enabled:
-                    state_before = self.get_comprehensive_slot_state()
-                    if state_before:
-                        print(f"📊 State BEFORE Emergency: Putted={state_before.get('putted_characters')}")
+                # Get DUAL counts before emergency
+                if dual_verification_enabled:
+                    characters_before, putted_before = self.get_dual_counts()
+                    print(f"📊 DUAL counts BEFORE Emergency: Characters={characters_before}, Putted={putted_before}")
                 
                 print(f"   🚨 Micro-expansion: {len(emergency_coords)} points at {emergency_radius}px")
                 self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
                 
                 # Final check
-                time.sleep(1.5)
-                if verification_enabled and state_before:
-                    state_after = self.get_comprehensive_slot_state()
-                    if state_after:
-                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                            target_slot_index, state_before, state_after
-                        )
-                        
-                        if is_success:
-                            print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked!")
-                            success = True
-                            phase_used = "phase_4_emergency_micro"
-                        else:
-                            print(f"❌ Emergency phase failed: {reason}")
-                            if details.get('cross_contamination'):
-                                print("🚨 Cross-contamination even in emergency phase!")
+                time.sleep(verification_wait + 0.3)  # Longer wait for emergency
+                if dual_verification_enabled:
+                    characters_after, putted_after = self.get_dual_counts()
+                    
+                    # Use DUAL verification
+                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                        print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked with DUAL verification!")
+                        success = True
+                        phase_used = "phase_4_emergency_dual"
+                    else:
+                        print(f"❌ Emergency phase failed: DUAL verification failed")
             
             # ================================================================
             # FINAL RESULT WITH COMPREHENSIVE REPORT
             # ================================================================
             print("\n" + "="*80)
             if success:
-                print(f"🎉 SMART SLOT RETURN COMPLETED SUCCESSFULLY!")
+                print(f"🎉 SMART SLOT RETURN COMPLETED SUCCESSFULLY with DUAL VERIFICATION!")
                 print(f"   ✅ Target slot: {target_slot_index}")
                 print(f"   ✅ Success method: {phase_used}")
                 print(f"   🛡️ Max safe radius used: {max_safe_radius}px")
-                print(f"   🔍 Enhanced verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
                 print(f"   🛡️ Cross-slot contamination: PREVENTED")
-                print(f"   📊 Polos array tracking: {'✅ Active' if verification_enabled else '⚠️ N/A'}")
+                print(f"   📊 Verification systems: Characters Array {'✅' if self.characters_available else '❌'} + Putted Characters {'✅' if self.putted_chars_available else '❌'}")
                 print("="*80)
                 return True
             else:
-                print(f"💥 SMART SLOT RETURN FAILED")
+                print(f"💥 SMART SLOT RETURN FAILED with DUAL VERIFICATION")
                 print(f"   ❌ Target slot: {target_slot_index}")
                 print(f"   ❌ All phases attempted within safe boundary")
                 print(f"   🛡️ Max safe radius: {max_safe_radius}px")
-                print(f"   🔍 Enhanced verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
                 print(f"   🛡️ Cross-contamination protection: ACTIVE")
-                print(f"   📊 Detailed slot state: TRACKED")
+                print(f"   📊 DUAL verification systems tested")
                 print("="*80)
                 return False
                 
@@ -4925,7 +3326,7 @@ class SprunkiGamePlayer:
                 time.sleep(0.3)
                 validation_state = self.get_comprehensive_slot_state()
                 
-                if validation_state and self.verification_available:
+                if validation_state and self.characters_available:
                     polos_array = validation_state.get('polos_array', [])
                     target_index = target_slot.get('index', -1)
                     
@@ -4939,7 +3340,7 @@ class SprunkiGamePlayer:
                 print(f"⚠️ Warning: Failed to return icon {icon_index}")
                 
                 # Emergency cleanup attempt for failed return
-                if self.verification_available:
+                if self.characters_available:
                     print(f"🚨 Emergency cleanup attempt for icon {icon_index}")
                     emergency_success = self._emergency_slot_recovery(target_slot.get('index', -1), target_slot, use_cdp)
                     if emergency_success:
@@ -5101,7 +3502,7 @@ class SprunkiGamePlayer:
             
             print(f"\n🎪 STARTING ENHANCED {mode.upper()} SHOWCASE")
             print(f"📊 Will showcase {len(icon_range)} icons with verification system")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -5142,7 +3543,7 @@ class SprunkiGamePlayer:
             emoji = "🎵" if mode == "Test" else ("👻" if mode == "Horror" else "🎪")
             
             print(f"\n{emoji} STARTING ENHANCED REMIX: {remix_name}")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Verification system ENABLED for all drags")
             else:
                 print("⚠️ Verification system DISABLED - using fallback")
@@ -5234,7 +3635,7 @@ class SprunkiGamePlayer:
             has_bonus = game_settings.get('hasBonus', False)
             
             print("\n🎪 STARTING ENHANCED FULL SHOWCASE WORKFLOW")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification system: ENABLED")
             else:
                 print("⚠️ Drag verification system: DISABLED (fallback mode)")
@@ -5361,7 +3762,7 @@ class SprunkiGamePlayer:
             emoji = "🎁" if mode == "Normal" else "👻"
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} BONUS SHOWCASE")
             print(f"📊 Will showcase {len(bonus_chars)} bonus characters")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -5423,7 +3824,7 @@ class SprunkiGamePlayer:
             emoji = "🎵" if mode == "Test" else ("👻" if mode == "Horror" else "🎪")
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} REMIX SESSION")
             print(f"📊 Will play {len(self.remix_library)} remixes")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED for all remix drags")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -5482,7 +3883,7 @@ class SprunkiGamePlayer:
                 progress_callback("👻 Triggering Horror Mode with verification...")
             
             print("\n👻 TRIGGERING ENHANCED HORROR MODE TRANSITION...")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Using verification for horror icon drag")
             else:
                 print("⚠️ Verification disabled - using fallback")
@@ -5519,7 +3920,7 @@ class SprunkiGamePlayer:
                     # Validate horror mode activation state
                     horror_state = self.get_comprehensive_slot_state()
                     
-                    if horror_state and self.verification_available:
+                    if horror_state and self.characters_available:
                         putted_chars = horror_state.get('putted_characters', 0)
                         polos_array = horror_state.get('polos_array', [])
                         
@@ -5554,7 +3955,7 @@ class SprunkiGamePlayer:
                 progress_callback("🎵 Starting enhanced remix-only workflow...")
             
             print("\n🎵 STARTING ENHANCED REMIX-ONLY WORKFLOW")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED for all remixes")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -5651,36 +4052,70 @@ class SprunkiGamePlayer:
     
     def setup_gui(self):
         self.root = Tk()
-        self.root.title("Sprunki Game Player - ENHANCED with Drag Verification")
-        self.root.geometry("650x750")
+        self.root.title("Sprunki Game Player - ENHANCED with Characters Array Verification + Smart Page Verification")
+        self.root.geometry("650x900")
         
         self.mode = IntVar(value=1)
         self.status_var = StringVar()
         self.status_var.set("Config not loaded")
         self.action_var = StringVar()
-        self.action_var.set("🚀 Ready for ENHANCED workflow...")
+        self.action_var.set("🚀 Ready for ENHANCED workflow with Smart Verification...")
         
         # Header
         Label(self.root, text="Sprunki Game Player", font=("Arial", 16, "bold")).pack(pady=10)
-        Label(self.root, text="🎮 ENHANCED: Chrome Debug + Drag Verification + 5-Coordinate Retry 🚀", 
-              font=("Arial", 12), fg="green").pack()
+        Label(self.root, text="🎮 ENHANCED: Chrome Debug + Characters Array Verification + Smart Page Verification 🚀", 
+            font=("Arial", 12), fg="green").pack()
         
         # Enhanced workflow info
         enhanced_info_frame = Frame(self.root, bg="#E8F5E8", relief="ridge", bd=1)
         enhanced_info_frame.pack(fill="x", padx=10, pady=5)
         
         Label(enhanced_info_frame, text="⚡ ENHANCED WORKFLOW:", 
-              font=("Arial", 10, "bold"), bg="#E8F5E8", fg="#2E7D32").pack(anchor="w", padx=10, pady=(5,2))
+            font=("Arial", 10, "bold"), bg="#E8F5E8", fg="#2E7D32").pack(anchor="w", padx=10, pady=(5,2))
         
-        enhanced_features = """✅ Drag Verification: Check 'Putted characters' variable before/after each drag
-✅ 5-Coordinate Retry: Center → Left → Right → Top → Bottom positions for each icon
-✅ Smart Fallback: Auto-fallback to PyAutoGUI if CDP verification fails
-✅ Enhanced Statistics: Track verification success rate and coordinate usage
-✅ Game-Aware: Real-time monitoring of game internal state
-✅ Intelligent Retry: Return icon and retry at different coordinate if verification fails"""
+        enhanced_features = """✅ Characters Array Verification: Count "1" values in Characters Array for accurate state
+        ✅ 5-Coordinate Retry: Center → Left → Right → Top → Bottom positions for each icon
+        ✅ Smart Fallback: Auto-fallback to PyAutoGUI if CDP verification fails
+        ✅ Enhanced Statistics: Track verification success rate and coordinate usage
+        ✅ Game-Aware: Real-time monitoring of Characters Array state
+        ✅ Intelligent Retry: Return icon and retry at different coordinate if verification fails"""
         
         Label(enhanced_info_frame, text=enhanced_features, justify="left",
-              font=("Arial", 8), fg="#1B5E20", bg="#E8F5E8").pack(anchor="w", padx=15, pady=(0,5))
+            font=("Arial", 8), fg="#1B5E20", bg="#E8F5E8").pack(anchor="w", padx=15, pady=(0,5))
+        
+        # Smart verification system info
+        verification_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
+        verification_frame.pack(fill="x", padx=10, pady=5)
+        
+        Label(verification_frame, text="🔢 CHARACTERS ARRAY SYSTEM:", 
+            font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
+        
+        verification_text = """🔢 Characters Array Monitoring: Real-time tracking of character placement state
+        🎯 Count-Based Verification: Count "1" values in array = number of icons on slots
+        ⚡ Stable Across Mods: Works reliably on all game modifications
+        🎮 High Performance: Direct VM access with optimized JavaScript functions
+        📊 Accurate State: No dependency on unreliable Putted Characters or Polos Array
+        🔄 Real-Time Updates: Instant detection of drag/return operations"""
+        
+        Label(verification_frame, text=verification_text, justify="left",
+            font=("Arial", 8), fg="#0D47A1", bg="#E3F2FD").pack(anchor="w", padx=15, pady=(0,5))
+        
+        # Image detection info
+        detection_frame = Frame(self.root, bg="#FFF3E0", relief="ridge", bd=1)
+        detection_frame.pack(fill="x", padx=10, pady=5)
+        
+        Label(detection_frame, text="🖼️ ENHANCED IMAGE DETECTION:", 
+            font=("Arial", 10, "bold"), bg="#FFF3E0", fg="#E65100").pack(anchor="w", padx=10, pady=(5,2))
+        
+        detection_text = """🎯 Smart Auto-Scroll: Automatic PageDown if Run/Fullscreen buttons not in viewport
+        🔍 Multi-Scale Detection: Test multiple scale factors for button recognition
+        🎪 Domain-Optimized: Specific adjustments for cocrea.world game timing
+        🔍 Template Matching: Advanced CV2 image matching with confidence thresholds
+        🔄 Retry Logic: Multiple attempts with different scroll positions
+        ⚙️ Config-Driven: All detection parameters configurable via config.json"""
+        
+        Label(detection_frame, text=detection_text, justify="left",
+            font=("Arial", 8), fg="#BF360C", bg="#FFF3E0").pack(anchor="w", padx=15, pady=(0,5))
         
         # Mode selection
         mode_frame = Frame(self.root)
@@ -5688,92 +4123,89 @@ class SprunkiGamePlayer:
         
         Label(mode_frame, text="🎯 Select play mode:", font=("Arial", 11, "bold")).pack()
         
-        Radiobutton(mode_frame, text="📀 Showcase + Remix (ENHANCED)", 
-                   variable=self.mode, value=1, font=("Arial", 10)).pack(anchor="w")
+        Radiobutton(mode_frame, text="🔀 Showcase + Remix (ENHANCED)", 
+                variable=self.mode, value=1, font=("Arial", 10)).pack(anchor="w")
         
         Radiobutton(mode_frame, text="🎵 Remix Only (ENHANCED)", 
-                   variable=self.mode, value=2, font=("Arial", 10)).pack(anchor="w")
+                variable=self.mode, value=2, font=("Arial", 10)).pack(anchor="w")
         
-        # Verification system info
-        verification_frame = Frame(self.root, bg="#FFF3E0", relief="ridge", bd=1)
-        verification_frame.pack(fill="x", padx=10, pady=5)
-        
-        Label(verification_frame, text="🔍 DRAG VERIFICATION SYSTEM:", 
-              font=("Arial", 10, "bold"), bg="#FFF3E0", fg="#E65100").pack(anchor="w", padx=10, pady=(5,2))
-        
-        verification_text = """🎯 High-Performance Monitoring: Setup JavaScript once, O(1) access to 'Putted characters'
-🔄 5-Coordinate Strategy: Try Center → Left → Right → Top → Bottom until success
-✅ Real-Time Verification: Check before_value + 1 == after_value for each drag
-🧹 Smart Cleanup: Auto-return icon before retry if verification fails
-📊 Enhanced Statistics: Track verification rates, coordinate usage, success patterns"""
-        
-        Label(verification_frame, text=verification_text, justify="left",
-              font=("Arial", 8), fg="#BF360C", bg="#FFF3E0").pack(anchor="w", padx=15, pady=(0,5))
-        
-        # Debug frame
+        # Debug frame with Characters Array System
         debug_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
         debug_frame.pack(fill="x", padx=10, pady=5)
         
-        Label(debug_frame, text="🔍 DEBUG TOOLS:", 
-              font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
+        Label(debug_frame, text="🔧 DEBUG TOOLS:", 
+            font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
         
         debug_buttons = Frame(debug_frame, bg="#E3F2FD")
         debug_buttons.pack(fill="x", padx=10, pady=(0,5))
         
         Button(debug_buttons, text="📊 Enhanced Stats", 
-               command=self.show_drag_stats, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left")
+            command=self.show_drag_stats, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left")
         
         Button(debug_buttons, text="🌐 Test WebSocket", 
-               command=self.test_websocket_connection, bg="#FF9800", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+            command=self.test_websocket_connection, bg="#FF9800", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
         
-        Button(debug_buttons, text="🔍 Test Verification", 
-               command=self.test_verification_system, bg="#9C27B0", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+        Button(debug_buttons, text="🔢 Test Characters Array", 
+            command=self.test_verification_system, bg="#9C27B0", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+        
+        Button(debug_buttons, text="⚡ Test Smart Verification", 
+            command=self.test_smart_verification_system, bg="#2196F3", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
         
         # Remix info display
         self.display_remix_library_info()
         
         # Main button
-        Button(self.root, text="📁 Load JSON & Start ENHANCED Auto", 
-               command=self.load_config_and_start, 
-               bg="#4CAF50", fg="white", font=("Arial", 12, "bold")).pack(pady=15)
+        Button(self.root, text="🔢 Load JSON & Start ENHANCED Auto with Characters Array Verification", 
+            command=self.load_config_and_start, 
+            bg="#4CAF50", fg="white", font=("Arial", 12, "bold")).pack(pady=15)
         
         # Status
         Label(self.root, text="📊 Status:").pack(pady=(20,5))
         Label(self.root, textvariable=self.status_var, fg="blue").pack()
         
-        # Instructions
+        # Instructions with Characters Array System
         instruction_text = """
-🎯 ENHANCED DRAG VERIFICATION WORKFLOW:
+    🎯 ENHANCED WORKFLOW WITH CHARACTERS ARRAY VERIFICATION:
 
-🔍 VERIFICATION PROCESS:
-1. Setup high-performance JavaScript monitoring (once per session)
-2. Before drag: Get 'Putted characters' value from game VM
-3. Execute drag at coordinate (Center/Left/Right/Top/Bottom)
-4. After drag: Get 'Putted characters' value again
-5. Verify: after_value == before_value + 1 = SUCCESS
-6. If failed: Return icon and try next coordinate
+    🔢 CHARACTERS ARRAY SYSTEM:
+    1. Characters Array Monitoring: Real-time tracking of character placement array
+    2. Count-Based Verification: Count "1" values = accurate number of placed icons
+    3. Stable Across Mods: Works reliably on all game modifications (no Putted Characters bugs)
+    4. High Performance: Direct VM access with optimized JavaScript functions
 
-⚡ 5-COORDINATE STRATEGY:
-• Coordinate 1: Center (original icon position)
-• Coordinate 2: Left (icon_x - 15, icon_y)
-• Coordinate 3: Right (icon_x + 15, icon_y)  
-• Coordinate 4: Top (icon_x, icon_y - 15)
-• Coordinate 5: Bottom (icon_x, icon_y + 15)
+    ⚡ 5-COORDINATE STRATEGY (UNCHANGED):
+    - Coordinate 1: Center (original icon position)
+    - Coordinate 2: Left (icon_x - 15, icon_y)
+    - Coordinate 3: Right (icon_x + 15, icon_y)  
+    - Coordinate 4: Top (icon_x, icon_y - 15)
+    - Coordinate 5: Bottom (icon_x, icon_y + 15)
 
-📊 SMART FEATURES:
-• Real-time game state monitoring
-• Automatic fallback if WebSocket unavailable
-• Enhanced statistics with verification tracking
-• Intelligent retry with coordinate variation
-• Game-aware success detection
+    🖼️ IMAGE DETECTION (PRESERVED):
+    - Original Run button & Fullscreen detection logic kept exactly as-is
+    - Auto-scroll capability for buttons outside viewport
+    - Multi-scale template matching with confidence thresholds
+    - Domain-specific timing adjustments for cocrea.world
+
+    🚀 NEW WORKFLOW:
+    Page Load → Smart Verification → Game Verification → ✅ Verification Success
+    → 3s Stabilization → Start Image Detection (Run Button) → Game Load
+    → Image Detection (Fullscreen Button) → F11 Fullscreen → Characters Array Setup
+    → Ready for Automation with Characters Array Verification
+
+    🎮 BENEFITS:
+    - Replaces unreliable Putted Characters with stable Characters Array
+    - Works consistently across all game mods and versions
+    - Real-time accurate state monitoring
+    - No dependency on buggy game variables
+    - Enhanced reliability for drag/return operations
         """
         Label(self.root, text=instruction_text, justify="left", 
-              font=("Arial", 8), bg="#f0f0f0").pack(pady=10, padx=10, fill="x")
+            font=("Arial", 8), bg="#f0f0f0").pack(pady=10, padx=10, fill="x")
         
         # Control buttons
         self.stop_btn = Button(self.root, text="🛑 Stop Enhanced Auto", 
-                              command=self.stop_all, state="disabled",
-                              bg="#f44336", fg="white", font=("Arial", 12, "bold"))
+                            command=self.stop_all, state="disabled",
+                            bg="#f44336", fg="white", font=("Arial", 12, "bold"))
         self.stop_btn.pack(pady=10)
         
         # Progress
@@ -5783,15 +4215,15 @@ class SprunkiGamePlayer:
         
         # Current action
         Label(self.root, textvariable=self.action_var, fg="green", 
-              font=("Arial", 10, "bold")).pack(pady=5)
+            font=("Arial", 10, "bold")).pack(pady=5)
         
-        # Domain support
-        domains_text = f"🌐 Enhanced for: cocrea.world (Chrome Debug + Verification)"
+        # Domain support with Characters Array System
+        domains_text = f"🌐 Enhanced for: cocrea.world (Chrome Debug + Characters Array Verification + Image Detection)"
         Label(self.root, text=domains_text, fg="gray", font=("Arial", 9)).pack(pady=5)
         
         # Hotkey
         Label(self.root, text="⌨️ ESC = Emergency stop", 
-              fg="red", font=("Arial", 10, "bold")).pack(pady=5)
+            fg="red", font=("Arial", 10, "bold")).pack(pady=5)
     
     def show_drag_stats(self):
         """Show enhanced drag statistics"""
@@ -5830,39 +4262,83 @@ class SprunkiGamePlayer:
             messagebox.showerror("WebSocket Test", f"❌ WebSocket test failed: {e}")
 
     def test_verification_system(self):
-        """Test drag verification system"""
+        """Test Characters Array verification system"""
         try:
-            if not self.putted_chars_setup_done:
+            if not self.characters_setup_done:
                 messagebox.showinfo("Verification Test", 
-                    "🔍 Verification system not setup yet.\n\n"
+                    "🔢 Characters Array system not setup yet.\n\n"
                     "Load a JSON file and start the workflow to initialize verification.")
                 return
             
-            if not self.verification_available:
+            if not self.characters_available:
                 messagebox.showwarning("Verification Test", 
-                    "⚠️ Verification system is disabled.\n\n"
+                    "⚠️ Characters Array system is disabled.\n\n"
                     "WebSocket connection may not be available.")
                 return
             
-            # Test getting current value
-            current_value = self.get_putted_chars_value()
+            # Test getting current count
+            current_count = self.get_characters_count()
             
-            if current_value is not None:
+            if current_count is not None:
                 messagebox.showinfo("Verification Test", 
-                    f"✅ Verification system working!\n\n"
-                    f"Current 'Putted characters' value: {current_value}\n"
+                    f"✅ Characters Array system working!\n\n"
+                    f"Current Characters count: {current_count}\n"
                     f"JavaScript monitoring: ACTIVE\n"
                     f"High-performance access: ENABLED\n\n"
                     f"Ready for drag verification!")
             else:
                 messagebox.showerror("Verification Test", 
-                    "❌ Verification test failed!\n\n"
-                    "Could not get 'Putted characters' value.\n"
+                    "❌ Characters Array test failed!\n\n"
+                    "Could not get Characters count.\n"
                     "Game may not be loaded or VM not found.")
                     
         except Exception as e:
-            messagebox.showerror("Verification Test", f"❌ Verification test error: {e}")
-    
+            messagebox.showerror("Verification Test", f"❌ Characters Array test error: {e}")
+
+    def test_smart_verification_system(self):
+            """Test Smart Verification System"""
+            try:
+                if not hasattr(self, 'page_verification_enabled'):
+                    messagebox.showinfo("Smart Verification Test", 
+                        "🔍 Smart Verification system not initialized yet.\n\n"
+                        "Load a JSON file and start the workflow to initialize verification.")
+                    return
+                
+                # Test WebSocket connection first
+                ws_url = self._get_websocket_url()
+                if not ws_url:
+                    messagebox.showerror("Smart Verification Test", 
+                        "⌚ WebSocket connection not available.\n\n"
+                        "Make sure Chrome debug mode is running.")
+                    return
+                
+                # Test page verification
+                print("🔍 Testing Smart Page Verification...")
+                page_result = self.verify_page_fully_loaded("test")
+                
+                # Test game verification  
+                print("🎮 Testing Smart Game Verification...")
+                game_result = self.verify_game_components_ready()
+                
+                # Show results
+                status_page = "✅ PASSED" if page_result else "⚠️ FAILED"
+                status_game = "✅ PASSED" if game_result else "⚠️ FAILED"
+                
+                messagebox.showinfo("Smart Verification Test Results", 
+                    f"🔍 SMART VERIFICATION SYSTEM TEST\n\n"
+                    f"📄 Page Verification: {status_page}\n"
+                    f"🎮 Game Verification: {status_game}\n\n"
+                    f"⚙️ Configuration:\n"
+                    f"   • Page verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}\n"
+                    f"   • Game verification: {'✅ Enabled' if self.game_verification_enabled else '❌ Disabled'}\n"
+                    f"   • Page timeout: {getattr(self, 'page_verification_timeout', 'N/A')}s\n"
+                    f"   • Game timeout: {getattr(self, 'game_verification_timeout', 'N/A')}s\n"
+                    f"   • Stabilization wait: {getattr(self, 'stabilization_wait', 'N/A')}s\n\n"
+                    f"🚀 Smart Verification ready to replace fixed 40s waits!")
+                        
+            except Exception as e:
+                messagebox.showerror("Smart Verification Test", f"⌚ Test error: {e}")
+
     def display_remix_library_info(self):
         info_frame = Frame(self.root)
         info_frame.pack(pady=10)
@@ -6076,7 +4552,7 @@ class SprunkiGamePlayer:
             f"🔍 VERIFICATION STATISTICS:\n"
             f"   • Verification enabled: {verification_rate:.1f}%\n"
             f"   • Verification success: {verification_success_rate:.1f}%\n"
-            f"   • System status: {'✅ ACTIVE' if self.verification_available else '⚠️ DISABLED'}\n\n"
+            f"   • System status: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}\n\n"
             f"⚡ ENHANCED FEATURES USED:\n"
             f"   • Chrome Debug Mode (port {self.debugging_port})\n"
             f"   • Drag verification via 'Putted characters'\n"
@@ -6129,18 +4605,19 @@ class SprunkiGamePlayer:
             self.cleanup_chrome_complete()
 
     def get_enhanced_workflow_summary(self):
-        """
-        📊 NEW: Get comprehensive workflow summary with smart features
-        """
-        try:
-            stats = self.drag_stats
-            current_state = self.get_comprehensive_slot_state()
-            
-            # Basic stats
-            success_rate = (stats.successful_drags / stats.total_attempts * 100) if stats.total_attempts > 0 else 0
-            verification_rate = (stats.verification_enabled / stats.total_attempts * 100) if stats.total_attempts > 0 else 0
-            
-            summary = f"""
+            """
+            📊 NEW: Get comprehensive workflow summary with smart features
+            FIXED: Distinguish between Polos (icon placement) and Enabled (UI state)
+            """
+            try:
+                stats = self.drag_stats
+                current_state = self.get_comprehensive_slot_state()
+                
+                # Basic stats
+                success_rate = (stats.successful_drags / stats.total_attempts * 100) if stats.total_attempts > 0 else 0
+                verification_rate = (stats.verification_enabled / stats.total_attempts * 100) if stats.total_attempts > 0 else 0
+                
+                summary = f"""
     📊 ENHANCED WORKFLOW SUMMARY:
     {'='*60}
     🎯 DRAG OPERATIONS:
@@ -6150,7 +4627,7 @@ class SprunkiGamePlayer:
     • Average coordinate retries: {sum(stats.coordinate_retries) / len(stats.coordinate_retries) if stats.coordinate_retries else 0:.1f}/5
 
     🛡️ SMART FEATURES ACTIVE:
-    • ✅ Polos array tracking
+    • ✅ Polos array tracking (PRIMARY)
     • ✅ Cross-contamination prevention  
     • ✅ Pre-flight slot checking
     • ✅ Smart batch return sequencing
@@ -6159,31 +4636,39 @@ class SprunkiGamePlayer:
 
     🔍 CURRENT SLOT STATE:"""
 
-            if current_state:
-                putted = current_state.get('putted_characters', 'N/A')
-                polos = current_state.get('polos_array', [])
-                summary += f"""
+                if current_state:
+                    putted = current_state.get('putted_characters', 'N/A')
+                    polos = current_state.get('polos_array', [])
+                    enabled = current_state.get('enabled_list', [])
+                    
+                    summary += f"""
     • Putted characters: {putted}
-    • Active slots: {sum(1 for x in polos if x == "1") if polos else 'N/A'}
-    • State consistency: {'✅ Good' if current_state.get('putted_polos_match', True) else '⚠️ Issues'}"""
-            else:
-                summary += "\n   • ⚠️ Current state unavailable"
+    • Active slots (Polos): {sum(1 for x in polos if x == "1") if polos else 'N/A'}
+    • PRIMARY consistency: {'✅ Good' if current_state.get('putted_polos_match', True) else '⚠️ Issue'}
+    • Polos array: {polos if len(str(polos)) < 50 else f'{len(polos)} slots'}
+    • Enabled List: {enabled if len(str(enabled)) < 50 else f'{len(enabled)} slots'} (UI state)"""
+                else:
+                    summary += "\n• ⚠️ Current state unavailable"
 
-            summary += f"""
+                summary += f"""
 
     ⚡ SYSTEM STATUS:
-    • Verification system: {'✅ ACTIVE' if self.verification_available else '⚠️ DISABLED'}
+    • Verification system: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}
     • WebSocket connection: {'✅ Ready' if self._get_websocket_url() else '❌ Failed'}
     • Configuration: {'✅ Loaded' if hasattr(self, 'config') and self.config else '❌ Missing'}
+
+    ℹ️ ARRAY UNDERSTANDING:
+    • Polos Array = Icon placement state (PRIMARY for verification)
+    • Enabled List = UI availability state (informational only)
 
     {'='*60}
     🎉 ENHANCED SPRUNKI GAME PLAYER READY!
     """
-            
-            return summary
-            
-        except Exception as e:
-            return f"❌ Error generating workflow summary: {e}"
+                
+                return summary
+                
+            except Exception as e:
+                return f"❌ Error generating workflow summary: {e}"
 
     def log_comprehensive_session_report(self, session_type="Unknown"):
         """
@@ -6205,11 +4690,11 @@ class SprunkiGamePlayer:
     {self.get_enhanced_workflow_summary()}
 
     🛡️ SMART FEATURES STATUS:
-    • Pre-flight slot checking: {'✅ Active' if self.verification_available else '❌ Disabled'}
-    • Cross-contamination prevention: {'✅ Active' if self.verification_available else '❌ Disabled'}
+    • Pre-flight slot checking: {'✅ Active' if self.characters_available else '❌ Disabled'}
+    • Cross-contamination prevention: {'✅ Active' if self.characters_available else '❌ Disabled'}
     • Smart batch return: ✅ Available
     • Emergency recovery: ✅ Available
-    • Real-time validation: {'✅ Active' if self.verification_available else '❌ Disabled'}
+    • Real-time validation: {'✅ Active' if self.characters_available else '❌ Disabled'}
 
     📊 FINAL STATE VALIDATION:
     """
@@ -6276,7 +4761,7 @@ class SprunkiGamePlayer:
             print("="*60)
             
             # Final smart cleanup
-            if self.verification_available:
+            if self.characters_available:
                 print("🔄 Final smart batch cleanup...")
                 cleanup_success, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
                 

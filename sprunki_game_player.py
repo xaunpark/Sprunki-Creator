@@ -100,6 +100,9 @@ class SprunkiGamePlayer:
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
 
+        # Cache cho Safe Zone coordinates
+        self.safe_zone_cache = {}
+
         # Image Detector for UI navigation
         self.detector = ImageDetector("cocrea.world")
 
@@ -2007,6 +2010,138 @@ class SprunkiGamePlayer:
             print(f"❌ Error calculating safe zone: {e}")
             return 30, []  # Emergency fallback
 
+    def _precompute_all_safe_zones(self):
+        """
+        🔥 NEW: Pre-compute safe zones for all slots to avoid repeated calculations
+        Cache results in self.safe_zone_cache for performance optimization
+        """
+        try:
+            print(f"\n🔥 STARTING SAFE ZONE PRE-COMPUTATION...")
+            print("="*60)
+            
+            # Debug: Check if config exists
+            if not self.config:
+                print("⚠️ No config available for safe zone pre-computation")
+                self.safe_zone_cache = {}
+                return False
+            
+            layout = self.config.get('layout', {})
+            all_slots = layout.get('slots', [])
+            
+            # Debug: Check slots data
+            print(f"📊 Config validation:")
+            print(f"   Layout exists: {'✅' if layout else '❌'}")
+            print(f"   Slots found: {len(all_slots)}")
+            
+            if not all_slots:
+                print("⚠️ No slots found for safe zone pre-computation")
+                self.safe_zone_cache = {}
+                return False
+            
+            # Debug: Show first few slots
+            print(f"📋 Sample slots data:")
+            for i, slot in enumerate(all_slots[:3]):  # Show first 3 slots
+                slot_index = slot.get('index', 'NO_INDEX')
+                x, y = slot.get('x', 'NO_X'), slot.get('y', 'NO_Y')
+                print(f"   Slot {i}: index={slot_index}, coords=({x}, {y})")
+            
+            print(f"\n🔥 PRE-COMPUTING SAFE ZONES for {len(all_slots)} slots...")
+            print("="*50)
+            
+            # Initialize cache
+            self.safe_zone_cache = {}
+            successful_computations = 0
+            failed_computations = 0
+            
+            for slot in all_slots:
+                slot_index = slot.get('index', -1)
+                
+                if slot_index == -1:
+                    print(f"⚠️ Slot missing index, skipping: {slot}")
+                    failed_computations += 1
+                    continue
+                
+                try:
+                    print(f"🛡️ Computing safe zone for Slot {slot_index}...")
+                    
+                    # Use existing calculate_slot_safe_zone method
+                    max_safe_radius, safe_coordinates = self.calculate_slot_safe_zone(slot_index, all_slots)
+                    
+                    # Validate calculation results
+                    if safe_coordinates and max_safe_radius > 0:
+                        # Cache the results
+                        self.safe_zone_cache[slot_index] = {
+                            'max_radius': max_safe_radius,
+                            'coordinates': safe_coordinates,
+                            'center_x': slot['x'],
+                            'center_y': slot['y']
+                        }
+                        
+                        print(f"   ✅ Slot {slot_index}: {len(safe_coordinates)} coords, max radius {max_safe_radius}px")
+                        successful_computations += 1
+                    else:
+                        print(f"   ❌ Slot {slot_index}: Computation failed (empty coordinates or invalid radius)")
+                        failed_computations += 1
+                        
+                except Exception as e:
+                    print(f"   ❌ Slot {slot_index}: Exception during computation: {e}")
+                    failed_computations += 1
+            
+            # Final summary
+            print(f"\n📊 PRE-COMPUTATION SUMMARY:")
+            print(f"   ✅ Successful: {successful_computations}")
+            print(f"   ❌ Failed: {failed_computations}")
+            print(f"   📦 Cache size: {len(self.safe_zone_cache)}")
+            
+            if successful_computations > 0:
+                print(f"✅ SAFE ZONE PRE-COMPUTATION COMPLETED!")
+                print(f"🚀 Performance: {successful_computations} slots cached for instant access")
+                print("="*60)
+                return True
+            else:
+                print(f"❌ SAFE ZONE PRE-COMPUTATION FAILED!")
+                print(f"⚠️ All {len(all_slots)} slots failed to compute - will use lazy caching")
+                print("="*60)
+                return False
+            
+        except Exception as e:
+            print(f"❌ Critical error in safe zone pre-computation: {e}")
+            import traceback
+            traceback.print_exc()
+            self.safe_zone_cache = {}
+            return False
+
+    def check_safe_zone_cache_status(self):
+        """
+        🔍 NEW: Check and display safe zone cache status for debugging
+        """
+        try:
+            print(f"\n🔍 SAFE ZONE CACHE STATUS:")
+            print("="*40)
+            
+            if not hasattr(self, 'safe_zone_cache') or not self.safe_zone_cache:
+                print("❌ Cache is empty or not initialized")
+                return False
+            
+            print(f"📦 Cache size: {len(self.safe_zone_cache)} slots")
+            print(f"📋 Cached slot indices: {list(self.safe_zone_cache.keys())}")
+            
+            # Show details for each cached slot
+            for slot_index, cache_data in self.safe_zone_cache.items():
+                coords_count = len(cache_data.get('coordinates', []))
+                max_radius = cache_data.get('max_radius', 0)
+                center_x = cache_data.get('center_x', 'N/A')
+                center_y = cache_data.get('center_y', 'N/A')
+                
+                print(f"   Slot {slot_index}: {coords_count} coords, radius {max_radius}px, center ({center_x}, {center_y})")
+            
+            print("="*40)
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error checking cache status: {e}")
+            return False
+
     def generate_safe_boundary_coordinates(self, center_x, center_y, max_radius):
         """
         🛡️ NEW: Generate coordinates within safe boundary only
@@ -2986,23 +3121,52 @@ class SprunkiGamePlayer:
                 initial_state = None
             
             # ================================================================
-            # SAFE ZONE CALCULATION
+            # SAFE ZONE RETRIEVAL WITH LAZY CACHING (ENHANCED)
             # ================================================================
-            print("\n🛡️ SAFE ZONE CALCULATION")
+            print("\n🛡️ SAFE ZONE RETRIEVAL WITH LAZY CACHING")
             print("-" * 40)
-            
-            # Get all slots for boundary calculation
-            if hasattr(self, 'config') and self.config:
-                all_slots = self.config.get('layout', {}).get('slots', [])
+
+            # Check cache first
+            if target_slot_index in self.safe_zone_cache:
+                cache_data = self.safe_zone_cache[target_slot_index]
+                max_safe_radius = cache_data['max_radius']
+                safe_coordinates = cache_data['coordinates']
+                
+                print(f"🚀 CACHE HIT: Slot {target_slot_index}")
+                print(f"   📊 Cached coordinates: {len(safe_coordinates)}")
+                print(f"   🛡️ Max radius: {max_safe_radius}px")
+                print(f"   ⚡ Performance: INSTANT (no calculation needed)")
             else:
-                print("⚠️ No config available, using conservative defaults")
-                all_slots = []
-            
-            max_safe_radius, safe_coordinates = self.calculate_slot_safe_zone(target_slot_index, all_slots)
-            
+                print(f"⚠️ CACHE MISS: Slot {target_slot_index} not found in cache")
+                print("   🔄 Computing and caching for future use...")
+                
+                # Get config for calculation
+                if hasattr(self, 'config') and self.config:
+                    all_slots = self.config.get('layout', {}).get('slots', [])
+                else:
+                    print("⚠️ No config available, using conservative defaults")
+                    all_slots = []
+                
+                # Calculate safe zone
+                max_safe_radius, safe_coordinates = self.calculate_slot_safe_zone(target_slot_index, all_slots)
+                
+                # 🔥 LAZY CACHING: Cache the result for future use
+                if safe_coordinates:  # Only cache if calculation was successful
+                    self.safe_zone_cache[target_slot_index] = {
+                        'max_radius': max_safe_radius,
+                        'coordinates': safe_coordinates,
+                        'center_x': center_x,
+                        'center_y': center_y
+                    }
+                    print(f"   ✅ LAZY CACHED: Slot {target_slot_index} saved for future use")
+                    print(f"   📊 Cache size: {len(self.safe_zone_cache)} slots")
+                else:
+                    print(f"   ⚠️ Could not cache: Calculation failed for Slot {target_slot_index}")
+
             if not safe_coordinates:
-                print("❌ Could not generate safe coordinates, using minimal fallback")
+                print("❌ Could not get safe coordinates, using minimal fallback")
                 safe_coordinates = [(center_x, center_y)]
+                max_safe_radius = 30
             
             success = False
             phase_used = "none"
@@ -3322,18 +3486,17 @@ class SprunkiGamePlayer:
             return_success = self.corrected_return_icon(target_slot, use_cdp)
 
             if return_success:
-                # Post-return validation for single icon
+                # Post-return validation for single icon  
                 time.sleep(0.3)
                 validation_state = self.get_comprehensive_slot_state()
-                
+
                 if validation_state and self.characters_available:
-                    polos_array = validation_state.get('polos_array', [])
-                    target_index = target_slot.get('index', -1)
+                    characters_count = validation_state.get('characters_count', -1)
                     
-                    if target_index < len(polos_array) and polos_array[target_index] == "0":
-                        print(f"✅ Icon {icon_index + 1} return validated: Slot {target_index} clean")
+                    if characters_count == 0:
+                        print(f"✅ Icon {icon_index + 1} return validated: Characters count = 0")
                     else:
-                        print(f"⚠️ Icon {icon_index + 1} return validation warning: May need cleanup")
+                        print(f"⚠️ Icon {icon_index + 1} return validation warning: Characters count = {characters_count}")
                 else:
                     print(f"✅ Icon {icon_index + 1} returned (basic validation)")
             else:
@@ -4150,7 +4313,10 @@ class SprunkiGamePlayer:
         
         Button(debug_buttons, text="⚡ Test Smart Verification", 
             command=self.test_smart_verification_system, bg="#2196F3", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
-        
+
+        Button(debug_buttons, text="🛡️ Check Cache", 
+            command=self.check_safe_zone_cache_status, bg="#795548", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+
         # Remix info display
         self.display_remix_library_info()
         
@@ -4367,76 +4533,91 @@ class SprunkiGamePlayer:
                 self.remix_display_var.set(remix_summary)
     
     def load_config_and_start(self):
-        """Load config and start enhanced auto process"""
-        try:
-            file_path = filedialog.askopenfilename(
-                title="Choose JSON configuration file",
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-            )
-            
-            if not file_path:
-                return
-            
-            # Load JSON
-            with open(file_path, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
-            
-            # Basic validation
-            if 'currentUrl' not in self.config or 'layout' not in self.config:
-                raise ValueError("Invalid JSON structure")
-            
-            layout = self.config['layout']
-            if 'icons' not in layout or 'slots' not in layout:
-                raise ValueError("Missing icons or slots in layout")
-            
-            # Check domain support
-            current_url = self.config.get('currentUrl', '').lower()
-            if 'cocrea.world' not in current_url:
-                messagebox.showerror("Domain Error", 
-                    f"This version is optimized for 'cocrea.world' only!\n\n"
-                    f"Current URL: {current_url}")
-                return
-            
-            # Check hasHorror setting for remix generation
-            game_settings = self.config.get('gameSettings', {})
-            has_horror = game_settings.get('hasHorror', False)
-            
-            # Generate remix library with horror-aware logic
-            self.remix_library = self.generate_random_remixes(avoid_horror_icon=has_horror)
-            self.current_remix_index = 0
-            self.drag_stats = DragOperationStats()
-            self.update_remix_display()
-            
-            # Enhanced confirmation with horror info and verification status
-            horror_info = ""
-            if has_horror:
-                horror_info = f"👻 Horror Mode: YES (Icon 19 avoided in normal remixes)\n"
-            else:
-                horror_info = f"🎪 Horror Mode: NO (All 20 icons available)\n"
-            
-            # Confirmation
-            result = messagebox.askyesno("Confirm ENHANCED Auto", 
-                f"🎯 ENHANCED WORKFLOW READY\n\n"
-                f"🎮 Icons: {len(layout['icons'])}\n"
-                f"🎪 Slots: {len(layout['slots'])}\n"
-                f"🎼 Remixes: {len(self.remix_library)}\n"
-                f"{horror_info}\n"
-                f"⚡ ENHANCED FEATURES:\n"
-                f"• Chrome Debug Mode (port {self.debugging_port})\n"
-                f"• Drag Verification via 'Putted characters'\n"
-                f"• 5-Coordinate Retry System\n"
-                f"• WebSocket/CDP for advanced control\n"
-                f"• PyAutoGUI with smart fallback\n"
-                f"• Real-time game state monitoring\n"
-                f"• Enhanced statistics tracking\n"
-                f"• Horror-aware remix generation\n\n"
-                f"Continue with ENHANCED workflow?")
-            
-            if result:
-                self.start_full_auto_process()
-            
-        except Exception as e:
-            messagebox.showerror("Error", "Cannot load config: " + str(e))
+            """Load config and start enhanced auto process"""
+            try:
+                file_path = filedialog.askopenfilename(
+                    title="Choose JSON configuration file",
+                    filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+                )
+                
+                if not file_path:
+                    return
+                
+                # Load JSON
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    self.config = json.load(f)
+                
+                # Basic validation
+                if 'currentUrl' not in self.config or 'layout' not in self.config:
+                    raise ValueError("Invalid JSON structure")
+                
+                layout = self.config['layout']
+                if 'icons' not in layout or 'slots' not in layout:
+                    raise ValueError("Missing icons or slots in layout")
+                
+                # Check domain support
+                current_url = self.config.get('currentUrl', '').lower()
+                if 'cocrea.world' not in current_url:
+                    messagebox.showerror("Domain Error", 
+                        f"This version is optimized for 'cocrea.world' only!\n\n"
+                        f"Current URL: {current_url}")
+                    return
+                
+                # ================================================================
+                # Pre-compute safe zones FOR PERFORMANCE immediately after config is loaded.
+                # This ensures the cache is ready before any other action.
+                print("\n🔥 PRE-COMPUTING SAFE ZONES FOR OPTIMAL PERFORMANCE...")
+                if not self._precompute_all_safe_zones():
+                    # Thông báo cho người dùng nếu cache thất bại nhưng vẫn tiếp tục
+                    print("⚠️ Safe zone pre-computation failed, will use fallback real-time calculations.")
+                    messagebox.showwarning("Performance Warning", 
+                                        "Safe Zone pre-computation failed.\n"
+                                        "The automation will run slower as it needs to calculate on-the-fly.")
+                # ================================================================
+                
+                # Check hasHorror setting for remix generation
+                game_settings = self.config.get('gameSettings', {})
+                has_horror = game_settings.get('hasHorror', False)
+                
+                # Generate remix library with horror-aware logic
+                self.remix_library = self.generate_random_remixes(avoid_horror_icon=has_horror)
+                self.current_remix_index = 0
+                self.drag_stats = DragOperationStats()
+                self.update_remix_display()
+
+                # Check domain support
+                current_url = self.config.get('currentUrl', '').lower()
+
+                # Enhanced confirmation with horror info and verification status
+                horror_info = ""
+                if has_horror:
+                    horror_info = f"👻 Horror Mode: YES (Icon 19 avoided in normal remixes)\n"
+                else:
+                    horror_info = f"🎪 Horror Mode: NO (All 20 icons available)\n"
+                
+                # Confirmation
+                result = messagebox.askyesno("Confirm ENHANCED Auto", 
+                    f"🎯 ENHANCED WORKFLOW READY\n\n"
+                    f"🎮 Icons: {len(layout['icons'])}\n"
+                    f"🎪 Slots: {len(layout['slots'])}\n"
+                    f"🎼 Remixes: {len(self.remix_library)}\n"
+                    f"{horror_info}\n"
+                    f"⚡ ENHANCED FEATURES:\n"
+                    f"• Chrome Debug Mode (port {self.debugging_port})\n"
+                    f"• Drag Verification via 'Putted characters'\n"
+                    f"• 5-Coordinate Retry System\n"
+                    f"• WebSocket/CDP for advanced control\n"
+                    f"• PyAutoGUI with smart fallback\n"
+                    f"• Real-time game state monitoring\n"
+                    f"• Enhanced statistics tracking\n"
+                    f"• Horror-aware remix generation\n\n"
+                    f"Continue with ENHANCED workflow?")
+                
+                if result:
+                    self.start_full_auto_process()
+                
+            except Exception as e:
+                messagebox.showerror("Error", "Cannot load config: " + str(e))
     
     def calculate_total_steps(self):
         """Calculate total steps for progress"""
