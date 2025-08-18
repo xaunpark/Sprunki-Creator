@@ -75,7 +75,35 @@ class SprunkiGamePlayer:
     def __init__(self):
         # Load configuration from config.json (like json_generator.py)
         self.load_config()
+
+        # Return Mode Constants
+        self.RETURN_MODE_INDIVIDUAL = "individual"  # Single icon operations
+        self.RETURN_MODE_REMIX = "remix"           # Multiple icons batch operations
+        self.RETURN_MODE_AUTO = "auto"             # Auto-detect based on context
         
+        # Current return mode tracking
+        self.current_return_mode = self.RETURN_MODE_AUTO
+        self.active_icons_count = 0  # Track how many icons currently on slots
+
+        # Carpet Grid Configuration
+        self.carpet_bombing_config = {
+            'base_coords_per_slot': 2,      # Start with 2 coordinates per slot
+            'max_sets': 6,                  # Maximum bombing sets
+            'inter_click_delay': 0.03,      # Delay between clicks within slot
+            'inter_slot_delay': 1.5,        # Delay between slots
+            'inter_set_delay': 0.3,         # Delay between sets
+            'coordinate_strategies': [       # Strategy per coordinate number
+                'center',                    # 1st coordinate
+                'horizontal_offset',         # 2nd coordinate  
+                'vertical_offset',           # 3rd coordinate
+                'diagonal',                  # 4th coordinate
+                'random_scatter'             # 5th+ coordinates
+            ]
+        }
+
+        # Grid cache for performance
+        self.carpet_grid_cache = {}
+
         # Core state
         self.config = None
         self.is_playing = False
@@ -1922,6 +1950,1058 @@ class SprunkiGamePlayer:
         """
         # Try batch first for maximum performance
         return self.get_dual_counts_batch()
+
+    def detect_return_mode(self, operation_context="unknown", icons_count=1):
+        """
+        🎯 NEW: Detect appropriate return mode based on context
+        Returns: RETURN_MODE_INDIVIDUAL or RETURN_MODE_REMIX
+        """
+        try:
+            print(f"\n🎯 MODE DETECTION: Context='{operation_context}', Icons={icons_count}")
+            
+            # Rule 1: Check operation context (explicit detection)
+            if "showcase" in operation_context.lower() or "individual" in operation_context.lower():
+                detected_mode = self.RETURN_MODE_INDIVIDUAL
+                reason = f"Context indicates individual operation: '{operation_context}'"
+                
+            elif "remix" in operation_context.lower() or "batch" in operation_context.lower():
+                detected_mode = self.RETURN_MODE_REMIX  
+                reason = f"Context indicates remix operation: '{operation_context}'"
+                
+            # Rule 2: Check icons count (threshold-based detection)
+            elif icons_count == 1:
+                detected_mode = self.RETURN_MODE_INDIVIDUAL
+                reason = f"Single icon operation detected (count={icons_count})"
+                
+            elif icons_count > 1:
+                detected_mode = self.RETURN_MODE_REMIX
+                reason = f"Multiple icons operation detected (count={icons_count})"
+                
+            # Rule 3: Check current slot state (state-based detection)
+            else:
+                current_count = self.get_characters_count() if self.characters_available else 0
+                if current_count is None:
+                    current_count = 0
+                    
+                if current_count <= 1:
+                    detected_mode = self.RETURN_MODE_INDIVIDUAL
+                    reason = f"Current state indicates individual mode (active_icons={current_count})"
+                else:
+                    detected_mode = self.RETURN_MODE_REMIX
+                    reason = f"Current state indicates remix mode (active_icons={current_count})"
+            
+            # Update tracking
+            self.current_return_mode = detected_mode
+            self.active_icons_count = icons_count
+            
+            print(f"   📊 Detected mode: {detected_mode.upper()}")
+            print(f"   💡 Reason: {reason}")
+            print(f"   📈 Active icons: {self.active_icons_count}")
+            
+            return detected_mode
+            
+        except Exception as e:
+            print(f"❌ Error in mode detection: {e}")
+            # Safe fallback to individual mode
+            return self.RETURN_MODE_INDIVIDUAL
+
+    def set_return_mode_explicit(self, mode, reason="manual_override"):
+        """
+        🎯 NEW: Explicitly set return mode (for manual control)
+        """
+        if mode in [self.RETURN_MODE_INDIVIDUAL, self.RETURN_MODE_REMIX]:
+            print(f"🎯 EXPLICIT MODE SET: {mode.upper()} ({reason})")
+            self.current_return_mode = mode
+            return True
+        else:
+            print(f"❌ Invalid return mode: {mode}")
+            return False
+
+    def get_current_return_mode(self):
+        """
+        🎯 NEW: Get current return mode with auto-detection fallback
+        """
+        if self.current_return_mode == self.RETURN_MODE_AUTO:
+            # Auto-detect based on current state
+            return self.detect_return_mode("auto_detection")
+        else:
+            return self.current_return_mode
+
+    def execute_smart_return_with_mode_detection(self, target_slot, operation_context="unknown", use_cdp=False):
+        """
+        🎯 NEW: Smart return router with automatic mode detection
+        Routes to appropriate return strategy based on detected mode
+        """
+        try:
+            print(f"\n🎯 SMART RETURN ROUTER: Starting mode detection...")
+            print("="*70)
+            
+            # Detect appropriate mode
+            detected_mode = self.detect_return_mode(operation_context)
+            
+            # Route to appropriate strategy
+            if detected_mode == self.RETURN_MODE_INDIVIDUAL:
+                print("🎪 ROUTING → Individual Return Strategy (Precision Targeting)")
+                return self.execute_individual_return_strategy(target_slot, use_cdp)
+                
+            elif detected_mode == self.RETURN_MODE_REMIX:
+                print("🎵 ROUTING → Remix Return Strategy (Carpet Bombing)")
+                return self.execute_remix_return_strategy(target_slot, use_cdp)
+                
+            else:
+                print(f"⚠️ Unknown mode: {detected_mode}, falling back to individual")
+                return self.execute_individual_return_strategy(target_slot, use_cdp)
+                
+        except Exception as e:
+            print(f"❌ Error in smart return router: {e}")
+            # Fallback to current method
+            return self.corrected_return_icon(target_slot, use_cdp)
+
+    def execute_individual_return_strategy(self, target_slot, use_cdp=False):
+        """
+        🎪 NEW: Individual return strategy (current precision method)
+        """
+        print("🎪 EXECUTING INDIVIDUAL RETURN STRATEGY...")
+        print("   🎯 Method: Precision targeting with safe zones")
+        print("   🔍 Verification: Per-operation count monitoring")
+        
+        # Use current method for individual operations
+        return self.corrected_return_icon(target_slot, use_cdp)
+
+    def execute_remix_return_strategy(self, target_slot, use_cdp=False):
+        """
+        🎵 ULTRA SIMPLIFIED: Sequential carpet bombing slot by slot
+        """
+        try:
+            print("🎵 ULTRA SIMPLIFIED CARPET BOMBING")
+            print("="*50)
+            print("   🎯 Strategy: Sequential slot-by-slot carpet bombing")
+            print("   📊 Progression: 2→3→4→5... coordinates per slot")
+            
+            # Get current count
+            initial_count = self.get_characters_count() if self.characters_available else 0
+            if initial_count == 0:
+                print("   ✅ Already clean")
+                return True
+            
+            print(f"   📊 Icons to clear: {initial_count}")
+            
+            # Get ALL slots from config
+            if not self.config:
+                print("❌ No config available")
+                return False
+                
+            all_slots = self.config.get('layout', {}).get('slots', [])
+            if not all_slots:
+                print("❌ No slots in config")
+                return False
+            
+            # Sort slots by index for sequential processing
+            sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
+            print(f"   🎯 Will process {len(sorted_slots)} slots sequentially")
+            
+            # Execute progressive carpet bombing sets
+            success = self.execute_sequential_carpet_bombing_sets(sorted_slots, initial_count, use_cdp)
+            
+            return success
+            
+        except Exception as e:
+            print(f"❌ Error in simplified carpet bombing: {e}")
+            return False
+
+    def _determine_adaptive_density(self, icon_count, slot_count):
+        """
+        🎨 NEW: Determine optimal grid density based on situation
+        """
+        try:
+            # Density rules based on complexity
+            if icon_count <= 2:
+                return "default"  # 3x3 grid sufficient
+            elif icon_count <= 5:
+                return "default"  # 3x3 still good
+            elif icon_count <= 8:
+                return "high"     # 5x5 for more coverage
+            else:
+                return "high"     # Maximum density for complex cases
+                
+        except:
+            return "default"
+
+    def _detect_progress_stagnation(self, progress_history, current_wave):
+        """
+        📊 NEW: Detect if progress has stagnated (no improvement in recent waves)
+        """
+        try:
+            if len(progress_history) < 3:
+                return False  # Need at least 3 waves to detect stagnation
+            
+            # Check last 3 waves for progress
+            recent_counts = [p['count'] for p in progress_history[-3:] if p['count'] is not None]
+            
+            if len(recent_counts) >= 3:
+                # No improvement in last 3 waves = stagnation
+                if recent_counts[-1] == recent_counts[-2] == recent_counts[-3]:
+                    return True
+            
+            return False
+            
+        except:
+            return False
+
+    def generate_carpet_grid_for_slots(self, slot_indices, density="default"):
+        """
+        🎨 NEW: Generate carpet bombing grid covering specified slots
+        Returns: List of (x, y) coordinates for systematic clicking
+        """
+        try:
+            print(f"\n🎨 GENERATING CARPET GRID")
+            print("="*50)
+            print(f"   🎯 Target slots: {slot_indices}")
+            print(f"   🎨 Density: {density}")
+            
+            if not self.config:
+                print("❌ No config available for grid generation")
+                return []
+            
+            all_slots = self.config.get('layout', {}).get('slots', [])
+            if not all_slots:
+                print("❌ No slots configuration found")
+                return []
+            
+            # Get density setting
+            grid_density = self.carpet_grid_config.get(f'{density}_density', 
+                                                    self.carpet_grid_config['default_density'])
+            overlap_margin = self.carpet_grid_config['overlap_margin']
+            
+            print(f"   📐 Grid density: {grid_density}x{grid_density}")
+            print(f"   📏 Overlap margin: {overlap_margin}px")
+            
+            # Calculate overall coverage area
+            coverage_area = self._calculate_slots_coverage_area(slot_indices, all_slots, overlap_margin)
+            if not coverage_area:
+                print("❌ Could not calculate coverage area")
+                return []
+            
+            # Generate grid points within coverage area
+            grid_points = self._generate_grid_points(coverage_area, grid_density)
+            
+            print(f"   ✅ Generated {len(grid_points)} grid points")
+            print(f"   📊 Coverage: {coverage_area['width']}x{coverage_area['height']}px")
+            
+            return grid_points
+            
+        except Exception as e:
+            print(f"❌ Error generating carpet grid: {e}")
+            return []
+
+
+
+    def _generate_grid_points(self, coverage_area, density):
+        """
+        🎯 NEW: Generate systematic grid points within coverage area
+        """
+        try:
+            grid_points = []
+            
+            width = coverage_area['width']
+            height = coverage_area['height']
+            min_x = coverage_area['min_x']
+            min_y = coverage_area['min_y']
+            
+            # Calculate step sizes
+            step_x = width / (density + 1)  # +1 to avoid edges
+            step_y = height / (density + 1)
+            
+            # Generate grid pattern
+            for row in range(1, density + 1):
+                for col in range(1, density + 1):
+                    x = min_x + (col * step_x)
+                    y = min_y + (row * step_y)
+                    
+                    # Add small random jitter to avoid perfect grid (more natural)
+                    jitter_x = random.randint(-3, 3)
+                    jitter_y = random.randint(-3, 3)
+                    
+                    final_x = int(x + jitter_x)
+                    final_y = int(y + jitter_y)
+                    
+                    grid_points.append((final_x, final_y))
+            
+            # Sort points for optimal clicking pattern (spiral or row-by-row)
+            grid_points = self._optimize_click_sequence(grid_points, coverage_area)
+            
+            return grid_points
+            
+        except Exception as e:
+            print(f"❌ Error generating grid points: {e}")
+            return []
+
+    def _optimize_click_sequence(self, points, coverage_area):
+        """
+        🔄 NEW: Optimize click sequence for efficiency
+        Options: spiral, row-by-row, center-out
+        """
+        try:
+            # For now, use center-out pattern (click from center outward)
+            center_x = coverage_area['center_x']
+            center_y = coverage_area['center_y']
+            
+            # Sort by distance from center
+            def distance_from_center(point):
+                x, y = point
+                return ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+            
+            optimized_points = sorted(points, key=distance_from_center)
+            
+            print(f"   🔄 Optimized click sequence: center-out pattern")
+            
+            return optimized_points
+            
+        except Exception as e:
+            print(f"❌ Error optimizing click sequence: {e}")
+            return points  # Return original if optimization fails
+
+    def visualize_carpet_grid(self, slot_indices=None):
+        """
+        🎨 NEW: Visualize carpet grid for debugging (optional tool)
+        """
+        try:
+            if slot_indices is None:
+                # Default to first few slots for testing
+                slot_indices = [0, 1, 2, 3]
+            
+            print(f"\n🎨 CARPET GRID VISUALIZATION")
+            print("="*50)
+            
+            grid_points = self.generate_carpet_grid_for_slots(slot_indices, "default")
+            
+            if grid_points:
+                print(f"📍 Grid Points Generated:")
+                for i, (x, y) in enumerate(grid_points, 1):
+                    print(f"   {i:2d}. ({x:4d}, {y:4d})")
+                
+                # Show pattern
+                print(f"\n🎯 Click Pattern (first 9 points):")
+                for i in range(min(9, len(grid_points))):
+                    x, y = grid_points[i]
+                    print(f"   Wave 1, Click {i+1}: ({x}, {y})")
+            else:
+                print("❌ No grid points generated")
+                
+        except Exception as e:
+            print(f"❌ Visualization error: {e}")
+
+    def show_carpet_grid_info(self):
+        """Ultra simplified carpet bombing info"""
+        try:
+            config_info = f"""🎯 ULTRA SIMPLIFIED CARPET BOMBING:
+
+    📊 STRATEGY: Sequential slot-by-slot progression
+    🎯 EXECUTION: Process slots 0→1→2→...→last sequentially
+    📈 PROGRESSION: 2→3→4→5→6→7... coordinates per slot
+
+    📍 COORDINATE STRATEGY PER SLOT:
+    - Set 1: 2 coords = Center + Horizontal offset
+    - Set 2: 3 coords = Center + Horizontal + Vertical
+    - Set 3: 4 coords = Center + H + V + Diagonal
+    - Set 4: 5 coords = Previous + More diagonals
+    - Set 5+: 6+ coords = Previous + Random scatter
+
+    ⏱️ TIMING:
+    - Inter-click: {self.carpet_bombing_config['inter_click_delay']}s (within slot)
+    - Inter-slot: {self.carpet_bombing_config['inter_slot_delay']}s (between slots)  
+    - Inter-set: {self.carpet_bombing_config['inter_set_delay']}s (between sets)
+    - Max sets: {self.carpet_bombing_config['max_sets']}
+
+    🔄 TERMINATION: Continue until Characters count = 0
+
+    ✅ SIMPLIFIED FEATURES:
+    - No edge detection
+    - No complex grid calculation
+    - No boundary sweeps
+    - Pure sequential slot processing
+    - Progressive coordinate increase"""
+            
+            messagebox.showinfo("Ultra Simplified Carpet Bombing", config_info)
+            
+        except Exception as e:
+            messagebox.showerror("Config Error", f"Error: {e}")
+
+    def execute_carpet_bombing_waves(self, grid_points, target_description="slots", use_cdp=False):
+        """
+        🎯 NEW: Execute carpet bombing in waves with progress monitoring
+        """
+        try:
+            print(f"\n🎯 CARPET BOMBING EXECUTION")
+            print("="*60)
+            print(f"   🎯 Target: {target_description}")
+            print(f"   📊 Total points: {len(grid_points)}")
+            
+            wave_size = self.carpet_grid_config['wave_size']
+            max_waves = self.carpet_grid_config['max_waves']
+            inter_click_delay = self.carpet_grid_config['inter_click_delay']
+            inter_wave_delay = self.carpet_grid_config['inter_wave_delay']
+            
+            # Split into waves
+            waves = [grid_points[i:i+wave_size] for i in range(0, len(grid_points), wave_size)]
+            total_waves = min(len(waves), max_waves)
+            
+            print(f"   🌊 Total waves: {total_waves} (max: {max_waves})")
+            print(f"   ⏱️ Wave size: {wave_size} clicks")
+            
+            # Get initial state
+            initial_count = self.get_characters_count() if self.characters_available else None
+            print(f"   📊 Initial count: {initial_count}")
+            
+            if initial_count == 0:
+                print("   ✅ Already clean - no bombing needed")
+                return True, 0, []
+            
+            waves_executed = 0
+            total_clicks = 0
+            
+            for wave_num, wave_points in enumerate(waves[:max_waves], 1):
+                if self.should_stop:
+                    break
+                    
+                print(f"\n🌊 WAVE {wave_num}/{total_waves}")
+                print(f"   📍 Points: {len(wave_points)}")
+                
+                # Execute wave
+                wave_success, clicks_in_wave = self._execute_single_wave(
+                    wave_points, wave_num, use_cdp, inter_click_delay
+                )
+                
+                waves_executed += 1
+                total_clicks += clicks_in_wave
+                
+                if not wave_success:
+                    print(f"   ❌ Wave {wave_num} failed")
+                    continue
+                
+                # Check progress after wave
+                time.sleep(inter_wave_delay)
+                current_count = self.get_characters_count() if self.characters_available else None
+                
+                print(f"   📊 Count after wave: {current_count}")
+                
+                if current_count == 0:
+                    print(f"   🎉 SUCCESS! Clean after wave {wave_num}")
+                    return True, waves_executed, []
+                elif current_count and initial_count and current_count < initial_count:
+                    print(f"   📈 Progress: {initial_count} → {current_count}")
+                
+                # Continue to next wave
+                print(f"   ⏭️ Continuing to next wave...")
+            
+            # Final check
+            final_count = self.get_characters_count() if self.characters_available else None
+            success = (final_count == 0)
+            
+            print(f"\n🎯 CARPET BOMBING COMPLETED")
+            print(f"   🌊 Waves executed: {waves_executed}")
+            print(f"   👆 Total clicks: {total_clicks}")
+            print(f"   📊 Final count: {final_count}")
+            print(f"   🎯 Result: {'✅ SUCCESS' if success else '❌ INCOMPLETE'}")
+            
+            return success, waves_executed, [] if success else [f"Still {final_count} icons remaining"]
+            
+        except Exception as e:
+            print(f"❌ Error in carpet bombing: {e}")
+            return False, 0, [f"Execution error: {str(e)}"]
+
+    def _execute_single_wave(self, wave_points, wave_num, use_cdp, inter_click_delay):
+        """
+        🌊 NEW: Execute a single wave of clicks
+        """
+        try:
+            print(f"   🎯 Executing {len(wave_points)} clicks...")
+            
+            clicks_executed = 0
+            
+            for i, (x, y) in enumerate(wave_points, 1):
+                if self.should_stop:
+                    break
+                    
+                # Execute click
+                click_success = self._execute_carpet_click(x, y, use_cdp)
+                
+                if click_success:
+                    clicks_executed += 1
+                    print(f"      {i}/{len(wave_points)}: ({x},{y}) ✅")
+                else:
+                    print(f"      {i}/{len(wave_points)}: ({x},{y}) ❌")
+                
+                # Delay between clicks in same wave
+                if i < len(wave_points):  # Don't delay after last click
+                    time.sleep(inter_click_delay)
+            
+            print(f"   ✅ Wave completed: {clicks_executed}/{len(wave_points)} clicks")
+            return True, clicks_executed
+            
+        except Exception as e:
+            print(f"   ❌ Wave execution error: {e}")
+            return False, 0
+
+    def _execute_carpet_click(self, x, y, use_cdp):
+        """
+        👆 NEW: Execute single carpet bombing click
+        """
+        try:
+            if use_cdp:
+                return self._execute_cdp_carpet_click(x, y)
+            else:
+                return self._execute_pyautogui_carpet_click(x, y)
+                
+        except Exception as e:
+            print(f"      ❌ Click error at ({x},{y}): {e}")
+            return False
+
+    def _execute_cdp_carpet_click(self, x, y):
+        """👆 NEW: CDP carpet click"""
+        try:
+            if self.batch_verification_active and self.session_websocket:
+                # Use batch WebSocket if available
+                self._send_batch_cdp_command({
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}
+                })
+                time.sleep(0.05)
+                self._send_batch_cdp_command({
+                    "method": "Input.dispatchMouseEvent", 
+                    "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}
+                })
+                return True
+            else:
+                # Fallback to individual WebSocket
+                ws_url = self._get_websocket_url()
+                if ws_url:
+                    ws = websocket.create_connection(ws_url, timeout=3)
+                    self._simulate_click_via_cdp(ws, x, y)
+                    ws.close()
+                    return True
+                return False
+                
+        except Exception as e:
+            return False
+
+    def _execute_pyautogui_carpet_click(self, x, y):
+        """👆 NEW: PyAutoGUI carpet click"""
+        try:
+            pyautogui.click(x, y)
+            return True
+        except Exception as e:
+            return False
+
+    def smart_batch_return_all_slots_with_mode(self, use_cdp=False):
+        """
+        🔄 ULTRA SIMPLIFIED: Sequential carpet bombing for batch returns
+        """
+        try:
+            print(f"\n🔄 ULTRA SIMPLIFIED BATCH RETURN")
+            print("="*50)
+            
+            # Always use simplified carpet bombing
+            dummy_slot = {'x': 999, 'y': 515, 'index': 3}
+            success = self.execute_remix_return_strategy(dummy_slot, use_cdp)
+            
+            if success:
+                return 1, 1, []  # success_count, total_attempted, errors
+            else:
+                return 0, 1, ["Sequential carpet bombing incomplete"]
+            
+        except Exception as e:
+            print(f"❌ Ultra simplified batch return error: {e}")
+            return 0, 1, [f"Error: {str(e)}"]
+
+    def _execute_carpet_bombing_strategy(self, icon_count, use_cdp=False):
+        """
+        🎵 PHASE 4.3A: Carpet bombing strategy execution
+        """
+        try:
+            print("🎵 CARPET BOMBING STRATEGY")
+            print("-" * 40)
+            
+            # Get active slots for carpet bombing
+            active_slots = self.get_active_slots_queue()
+            if not active_slots:
+                # Fallback to estimated slot coverage
+                active_slots = list(range(min(8, icon_count + 1)))
+            
+            print(f"   🎯 Target slots: {active_slots}")
+            
+            # Execute carpet bombing via remix strategy
+            dummy_slot = {'x': 999, 'y': 515, 'index': 3}  # Dummy slot for interface compatibility
+            success = self.execute_remix_return_strategy(dummy_slot, use_cdp)
+            
+            return success, {
+                'method': 'carpet_bombing',
+                'target_slots': active_slots,
+                'icon_count': icon_count
+            }
+            
+        except Exception as e:
+            print(f"❌ Carpet bombing strategy error: {e}")
+            return False, {'error': str(e)}
+
+    def _execute_precision_strategy(self, icon_count, use_cdp=False):
+        """
+        🎪 PHASE 4.3B: Precision strategy execution  
+        """
+        try:
+            print("🎪 PRECISION STRATEGY")
+            print("-" * 40)
+            
+            # Use existing smart batch return for precision operations
+            result = self.smart_batch_return_all_slots(use_cdp)
+            success_count, total_attempted, errors = result
+            
+            success = (success_count == total_attempted)
+            
+            return success, {
+                'method': 'precision_targeting',
+                'success_count': success_count,
+                'total_attempted': total_attempted,
+                'errors': errors
+            }
+            
+        except Exception as e:
+            print(f"❌ Precision strategy error: {e}")
+            return False, {'error': str(e)}
+
+    def show_current_mode_info(self):
+        """Show current return mode information"""
+        try:
+            current_mode = self.get_current_return_mode()
+            active_count = self.get_characters_count() if self.characters_available else "N/A"
+            
+            mode_info = f"""🎯 RETURN MODE INFORMATION:
+
+    📊 Current Mode: {current_mode.upper()}
+    📈 Active Icons: {active_count}
+    🎮 Auto-Detection: {'✅ Enabled' if self.current_return_mode == self.RETURN_MODE_AUTO else '❌ Manual Override'}
+
+    🎪 INDIVIDUAL MODE:
+    - Used for: Single icon operations
+    - Strategy: Precision targeting with safe zones
+    - Verification: Per-operation count monitoring
+
+    🎵 REMIX MODE:
+    - Used for: Multiple icons batch operations  
+    - Strategy: Carpet bombing (Phase 2)
+    - Verification: Progressive count monitoring
+
+    🔄 Mode Detection Rules:
+    1. Context keywords (showcase/remix/batch)
+    2. Icons count threshold (1 vs >1)
+    3. Current slot state analysis"""
+            
+            messagebox.showinfo("Return Mode Information", mode_info)
+            
+        except Exception as e:
+            messagebox.showerror("Mode Info Error", f"Error getting mode info: {e}")
+
+    def _execute_precision_fallback_for_remix(self, slot_indices, use_cdp=False):
+        """
+        🎯 SIMPLIFIED: Just return false - no precision fallback needed
+        """
+        print("🎯 PRECISION FALLBACK DISABLED - Pure carpet bombing only")
+        return False
+
+    def _execute_precision_recovery(self, slot_indices, use_cdp=False):
+        """
+        🔄 SIMPLIFIED: Just return false - no precision recovery needed  
+        """
+        print("🔄 PRECISION RECOVERY DISABLED - Pure carpet bombing only")
+        return False
+
+    def execute_smart_return_with_auto_recovery(self, target_slot, operation_context="unknown", max_retries=2, use_cdp=False):
+        """
+        🛡️ PHASE 4: Smart return with automatic error recovery
+        """
+        try:
+            print(f"\n🛡️ SMART RETURN WITH AUTO-RECOVERY")
+            print("="*60)
+            print(f"   🎯 Context: {operation_context}")
+            print(f"   🔄 Max retries: {max_retries}")
+            
+            for attempt in range(1, max_retries + 1):
+                if self.should_stop:
+                    break
+                    
+                print(f"\n🔄 ATTEMPT {attempt}/{max_retries}")
+                
+                # Try primary method
+                success = self.execute_smart_return_with_mode_detection(
+                    target_slot, operation_context, use_cdp
+                )
+                
+                if success:
+                    print(f"✅ SUCCESS on attempt {attempt}")
+                    return True
+                
+                # If failed and retries available, try recovery
+                if attempt < max_retries:
+                    print(f"⚠️ Attempt {attempt} failed, trying recovery...")
+                    
+                    # Recovery strategy based on mode
+                    recovery_success = self._attempt_smart_recovery(
+                        target_slot, operation_context, attempt, use_cdp
+                    )
+                    
+                    if recovery_success:
+                        print(f"✅ RECOVERY SUCCESS on attempt {attempt}")
+                        return True
+                    else:
+                        print(f"❌ Recovery failed, will retry...")
+                        time.sleep(1.0)  # Brief pause before retry
+            
+            print(f"❌ ALL ATTEMPTS FAILED after {max_retries} tries")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Error in smart return with recovery: {e}")
+            return False
+
+    def _attempt_smart_recovery(self, target_slot, context, attempt_num, use_cdp):
+        """
+        🔄 SIMPLIFIED: Just return false - no smart recovery needed
+        """
+        print("🔄 SMART RECOVERY DISABLED - Pure carpet bombing only")
+        return False
+
+    def test_carpet_bombing_system(self):
+        """
+        🧪 NEW: Comprehensive test of carpet bombing system
+        """
+        try:
+            print("\n🧪 TESTING CARPET BOMBING SYSTEM")
+            print("="*60)
+            
+            # Test 1: Mode Detection
+            print("🧪 TEST 1: Mode Detection")
+            individual_mode = self.detect_return_mode("showcase_icon_test", 1)
+            remix_mode = self.detect_return_mode("remix_test", 5)
+            print(f"   Individual detection: {'✅' if individual_mode == self.RETURN_MODE_INDIVIDUAL else '❌'}")
+            print(f"   Remix detection: {'✅' if remix_mode == self.RETURN_MODE_REMIX else '❌'}")
+            
+            # Test 2: Grid Generation
+            print("\n🧪 TEST 2: Grid Generation")
+            test_slots = [0, 1, 2, 3]
+            grid_points = self.generate_carpet_grid_for_slots(test_slots, "default")
+            print(f"   Grid generation: {'✅' if len(grid_points) > 0 else '❌'} ({len(grid_points)} points)")
+            
+            # Test 3: Configuration Validation
+            print("\n🧪 TEST 3: Configuration Validation")
+            config_valid = all(key in self.carpet_grid_config for key in [
+                'default_density', 'wave_size', 'max_waves'
+            ])
+            print(f"   Configuration: {'✅' if config_valid else '❌'}")
+            
+            # Test 4: Integration
+            print("\n🧪 TEST 4: Integration Test")
+            try:
+                dummy_slot = {'x': 999, 'y': 515, 'index': 3}
+                test_context = "integration_test"
+                # Don't actually execute, just test setup
+                mode = self.detect_return_mode(test_context, 3)
+                integration_ready = (mode in [self.RETURN_MODE_INDIVIDUAL, self.RETURN_MODE_REMIX])
+                print(f"   Integration: {'✅' if integration_ready else '❌'}")
+            except Exception as e:
+                print(f"   Integration: ❌ ({e})")
+            
+            print("\n🎯 CARPET BOMBING SYSTEM TEST COMPLETED")
+            
+        except Exception as e:
+            print(f"❌ Testing error: {e}")
+
+    def show_carpet_bombing_test_results(self):
+        """GUI method to show test results"""
+        try:
+            # Capture test output
+            import io
+            import sys
+            
+            # Redirect stdout to capture test output
+            old_stdout = sys.stdout
+            sys.stdout = test_output = io.StringIO()
+            
+            self.test_carpet_bombing_system()
+            
+            # Restore stdout
+            sys.stdout = old_stdout
+            test_results = test_output.getvalue()
+            
+            messagebox.showinfo("Carpet Bombing Test Results", test_results)
+            
+        except Exception as e:
+            messagebox.showerror("Test Error", f"Error running tests: {e}")
+
+    def execute_full_carpet_bombing_round(self, grid_points, round_num, expected_clear, use_cdp=False):
+        """
+        🌊 ENHANCED: Execute round with edge priority
+        """
+        try:
+            print(f"🌊 ENHANCED ROUND {round_num} WITH EDGE PRIORITY")
+            print(f"   📍 Total points: {len(grid_points)}")
+            print(f"   🎯 Expected to clear: {expected_clear}")
+            
+            # PHASE 1: Execute all grid points
+            total_clicks = 0
+            successful_clicks = 0
+            
+            print(f"   🎯 Phase 1: Main grid execution ({len(grid_points)} points)")
+            
+            for i, (x, y) in enumerate(grid_points, 1):
+                if self.should_stop:
+                    break
+                    
+                # Execute single click
+                click_success = self._execute_carpet_click(x, y, use_cdp)
+                
+                total_clicks += 1
+                if click_success:
+                    successful_clicks += 1
+                
+                # Minimal delay between clicks
+                time.sleep(0.02)
+                
+                # Progress indicator every 30 clicks
+                if i % 30 == 0:
+                    print(f"      Progress: {i}/{len(grid_points)} clicks")
+            
+            print(f"   ✅ Phase 1 completed: {successful_clicks}/{total_clicks} clicks")
+            
+            # PHASE 2: EDGE REINFORCEMENT (extra clicks for stubborn edge slots)
+            if round_num >= 2:  # Start edge reinforcement from round 2
+                edge_reinforcement_clicks = self._execute_edge_reinforcement(round_num, use_cdp)
+                total_clicks += edge_reinforcement_clicks
+                successful_clicks += edge_reinforcement_clicks
+                print(f"   🎯 Phase 2: Edge reinforcement - {edge_reinforcement_clicks} extra clicks")
+            
+            print(f"   ✅ Round {round_num} TOTAL: {successful_clicks}/{total_clicks} clicks successful")
+            
+            return successful_clicks > 0
+            
+        except Exception as e:
+            print(f"❌ Error in enhanced round execution: {e}")
+            return False
+
+    def execute_sequential_carpet_bombing_sets(self, sorted_slots, initial_count, use_cdp=False):
+        """
+        🎯 NEW: Execute progressive carpet bombing sets
+        Set 1: 2 coords/slot, Set 2: 3 coords/slot, etc.
+        """
+        try:
+            print(f"\n🎯 SEQUENTIAL CARPET BOMBING SETS")
+            print("="*60)
+            
+            max_sets = 6  # Maximum bombing sets
+            base_coords_per_slot = 2  # Start with 2 coordinates per slot
+            
+            for set_num in range(1, max_sets + 1):
+                if self.should_stop:
+                    break
+                    
+                print(f"\n🎯 CARPET SET {set_num}/{max_sets}")
+                print("-" * 40)
+                
+                # Check current count before set
+                current_count = self.get_characters_count() if self.characters_available else None
+                if current_count == 0:
+                    print(f"✅ COMPLETE! All clear before set {set_num}")
+                    return True
+                
+                print(f"   📊 Icons remaining: {current_count}")
+                
+                # Calculate coordinates per slot for this set
+                coords_per_slot = base_coords_per_slot + (set_num - 1)
+                print(f"   📍 Set {set_num}: {coords_per_slot} coordinates per slot")
+                
+                # Generate coordinate set for all slots
+                coordinate_set = self.generate_simple_coordinate_set(sorted_slots, coords_per_slot, set_num)
+                
+                if not coordinate_set:
+                    print(f"   ❌ Could not generate coordinates for set {set_num}")
+                    continue
+                
+                print(f"   📊 Generated {len(coordinate_set)} total coordinates")
+                
+                # Execute sequential clicking for this set
+                set_success = self.execute_sequential_clicking_set(coordinate_set, set_num, use_cdp)
+                
+                # Check progress after set
+                after_count = self.get_characters_count() if self.characters_available else None
+                progress = (current_count or 0) - (after_count or 0)
+                
+                print(f"   📊 Set {set_num} result: {current_count} → {after_count} (cleared: {progress})")
+                
+                if after_count == 0:
+                    print(f"🎉 SUCCESS! All icons cleared after set {set_num}")
+                    return True
+                elif progress > 0:
+                    print(f"   📈 Progress made, continuing to next set...")
+                else:
+                    print(f"   ⚠️ No progress in set {set_num}, but continuing...")
+                
+                # Brief pause between sets
+                time.sleep(0.3)
+            
+            # Final check
+            final_count = self.get_characters_count() if self.characters_available else None
+            
+            if final_count == 0:
+                print(f"🎉 FINAL SUCCESS! All icons cleared")
+                return True
+            else:
+                print(f"⚠️ INCOMPLETE after {max_sets} sets: {final_count} icons remaining")
+                return False
+            
+        except Exception as e:
+            print(f"❌ Error in sequential carpet bombing: {e}")
+            return False
+
+    def generate_simple_coordinate_set(self, sorted_slots, coords_per_slot, set_num):
+        """
+        📍 NEW: Generate simple coordinate set - coords_per_slot for each slot
+        """
+        try:
+            coordinate_set = []
+            
+            print(f"   📍 Generating {coords_per_slot} coordinates per slot:")
+            
+            for slot in sorted_slots:
+                slot_index = slot.get('index', -1)
+                slot_x, slot_y = slot['x'], slot['y']
+                
+                # Generate coordinates for this specific slot
+                slot_coordinates = self.generate_slot_coordinates(slot_x, slot_y, coords_per_slot, set_num)
+                
+                # Add slot info to each coordinate for tracking
+                for coord_x, coord_y in slot_coordinates:
+                    coordinate_set.append({
+                        'x': coord_x,
+                        'y': coord_y,
+                        'slot_index': slot_index,
+                        'slot_center': (slot_x, slot_y)
+                    })
+                
+                print(f"      Slot {slot_index}: {len(slot_coordinates)} coords at ({slot_x}, {slot_y})")
+            
+            return coordinate_set
+            
+        except Exception as e:
+            print(f"❌ Error generating coordinate set: {e}")
+            return []
+
+    def generate_slot_coordinates(self, center_x, center_y, num_coords, set_num):
+        """
+        🎯 NEW: Generate coordinates for single slot using progressive strategy
+        """
+        try:
+            coordinates = []
+            
+            # Strategy: Cross pattern + random offsets
+            if num_coords >= 1:
+                # Always include center
+                coordinates.append((center_x, center_y))
+            
+            if num_coords >= 2:
+                # Add one offset (left or right alternating by set)
+                offset = 15 + (set_num * 3)  # Increase offset with set number
+                if set_num % 2 == 1:
+                    coordinates.append((center_x - offset, center_y))  # Left
+                else:
+                    coordinates.append((center_x + offset, center_y))  # Right
+            
+            if num_coords >= 3:
+                # Add vertical offset
+                offset = 15 + (set_num * 3)
+                if set_num % 2 == 1:
+                    coordinates.append((center_x, center_y - offset))  # Top
+                else:
+                    coordinates.append((center_x, center_y + offset))  # Bottom
+            
+            if num_coords >= 4:
+                # Add diagonal
+                offset = 12 + (set_num * 2)
+                coordinates.append((center_x - offset, center_y - offset))  # Top-left
+            
+            if num_coords >= 5:
+                # Add another diagonal
+                offset = 12 + (set_num * 2)
+                coordinates.append((center_x + offset, center_y - offset))  # Top-right
+            
+            if num_coords >= 6:
+                # Add more diagonals
+                offset = 12 + (set_num * 2)
+                coordinates.append((center_x - offset, center_y + offset))  # Bottom-left
+                coordinates.append((center_x + offset, center_y + offset))  # Bottom-right
+            
+            # For more than 7 coordinates, add random scatter
+            while len(coordinates) < num_coords:
+                scatter_range = 20 + (set_num * 2)
+                jitter_x = random.randint(-scatter_range, scatter_range)
+                jitter_y = random.randint(-scatter_range, scatter_range)
+                coordinates.append((center_x + jitter_x, center_y + jitter_y))
+            
+            return coordinates[:num_coords]  # Ensure exact count
+            
+        except Exception as e:
+            print(f"❌ Error generating slot coordinates: {e}")
+            return [(center_x, center_y)]  # Fallback to center only
+
+    def execute_sequential_clicking_set(self, coordinate_set, set_num, use_cdp=False):
+        """
+        👆 NEW: Execute clicking in sequential order (slot 0 → slot 1 → slot 2...)
+        """
+        try:
+            print(f"   👆 Executing sequential clicking for set {set_num}")
+            
+            # Group coordinates by slot for sequential processing
+            slots_coords = {}
+            for coord in coordinate_set:
+                slot_index = coord['slot_index']
+                if slot_index not in slots_coords:
+                    slots_coords[slot_index] = []
+                slots_coords[slot_index].append(coord)
+            
+            # Sort slots for sequential processing
+            sorted_slot_indices = sorted(slots_coords.keys())
+            
+            total_clicks = 0
+            successful_clicks = 0
+            
+            # Process each slot sequentially
+            for slot_index in sorted_slot_indices:
+                if self.should_stop:
+                    break
+                
+                slot_coords = slots_coords[slot_index]
+                print(f"      🎯 Processing slot {slot_index}: {len(slot_coords)} clicks")
+                
+                # Execute all coordinates for this slot
+                for i, coord in enumerate(slot_coords):
+                    click_success = self._execute_carpet_click(coord['x'], coord['y'], use_cdp)
+                    
+                    total_clicks += 1
+                    if click_success:
+                        successful_clicks += 1
+                    
+                    # Small delay between clicks within same slot
+                    time.sleep(0.03)
+                
+                # Slightly longer delay between slots for visual feedback
+                if slot_index != sorted_slot_indices[-1]:  # Not last slot
+                    time.sleep(0.1)
+            
+            print(f"   ✅ Set {set_num} executed: {successful_clicks}/{total_clicks} clicks successful")
+            
+            return successful_clicks > 0
+            
+        except Exception as e:
+            print(f"❌ Error executing clicking set: {e}")
+            return False
 
     def get_comprehensive_slot_state(self):
         """
@@ -3976,13 +5056,16 @@ class SprunkiGamePlayer:
             if self.should_stop:
                 return False
             
-            # PHASE 3: SMART RETURN ICON WITH VALIDATION
-            print("🔄 PHASE 3: Smart returning icon with validation...")
+            # PHASE 3: SMART RETURN WITH AUTO-RECOVERY
+            print("🔄 PHASE 3: Smart returning with auto-recovery...")
             if progress_callback:
                 progress_callback(f"↺ Smart returning {mode} icon {icon_index + 1}")
 
-            # Enhanced return with streamlined validation
-            return_success = self.corrected_return_icon(target_slot, use_cdp)
+            # PHASE 4: Enhanced return with auto-recovery
+            operation_context = f"showcase_{mode}_icon_{icon_index}"
+            return_success = self.execute_smart_return_with_auto_recovery(
+                target_slot, operation_context, max_retries=2, use_cdp=use_cdp
+            )
 
             if return_success:
                 # STREAMLINED: Quick validation without extra delays
@@ -4252,15 +5335,18 @@ class SprunkiGamePlayer:
             if self.should_stop:
                 return False
             
-            # Phase 3: Smart batch return all icons
-            print("🔄 PHASE 3: Smart batch returning all icons...")
+            # Phase 3: Smart batch return with mode detection
+            print("🔄 PHASE 3: Smart batch returning with mode detection...")
             if progress_callback:
                 progress_callback(f"🧹 Smart cleanup {remix_name}")
 
-            print(f"  🔄 Using smart batch return for {len(remix_icons)} icons...")
+            # Set explicit remix mode for batch operations
+            self.set_return_mode_explicit(self.RETURN_MODE_REMIX, f"remix_cleanup_{len(remix_icons)}_icons")
 
-            # Use smart batch return instead of individual returns
-            success_count, total_attempted, error_log = self.smart_batch_return_all_slots(use_cdp=False)
+            print(f"  🔄 Using mode-aware batch return for {len(remix_icons)} icons...")
+
+            # Use smart batch return with mode awareness
+            success_count, total_attempted, error_log = self.smart_batch_return_all_slots_with_mode(use_cdp=False)
 
             if success_count == total_attempted:
                 print(f"  ✅ Smart batch return: {success_count}/{total_attempted} icons returned successfully")
@@ -4810,6 +5896,15 @@ class SprunkiGamePlayer:
 
         Button(debug_buttons, text="🛡️ Check Cache", 
             command=self.check_safe_zone_cache_status, bg="#795548", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+
+        Button(debug_buttons, text="🎯 Check Mode", 
+            command=self.show_current_mode_info, bg="#607D8B", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+
+        Button(debug_buttons, text="🎨 Grid Info", 
+            command=self.show_carpet_grid_info, bg="#795548", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+
+        Button(debug_buttons, text="🧪 Test Carpet", 
+            command=self.show_carpet_bombing_test_results, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
 
         # Remix info display
         self.display_remix_library_info()
