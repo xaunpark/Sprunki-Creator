@@ -88,9 +88,14 @@ class SprunkiGamePlayer:
         self.ws_url = None
         self.game_url = None
         
-        # Characters Array system thay vì putted chars
+        # ✅ DUAL VERIFICATION SYSTEM
+        # Characters Array system  
         self.characters_setup_done = False
         self.characters_available = False
+        
+        # Putted Characters system (backup)
+        self.putted_chars_setup_done = False
+        self.putted_chars_available = False
         
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
@@ -1078,33 +1083,33 @@ class SprunkiGamePlayer:
     # == NEW: DRAG VERIFICATION SYSTEM ==
     # ================================================================
 
-    def setup_characters_array_monitor(self):
+    def setup_dual_verification_system(self):
         """
-        🔢 CHARACTERS ARRAY MONITORING: Thay thế hoàn toàn putted_chars_monitor
-        Sử dụng đếm số "1" trong Characters Array thay vì putted characters biến
+        🔄 DUAL VERIFICATION: Setup cả Characters Array + Putted Characters
+        Chỉ cần 1 trong 2 hoạt động là đủ
         """
         try:
-            print("🔢 Setting up Characters Array monitoring...")
+            print("🔄 Setting up DUAL verification system...")
             
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("⚠️ WebSocket not available, Characters Array monitoring disabled")
+                print("⚠️ WebSocket not available, dual verification disabled")
                 self.characters_available = False
+                self.putted_chars_available = False
                 return False
             
-            # JavaScript tích hợp - KHÔNG tạo file riêng
-            setup_characters_js = '''
+            # Setup JavaScript cho CẢ HAI systems
+            dual_setup_js = '''
             (() => {
-                console.log("🚀 Setting up Characters Array monitoring...");
+                console.log("🚀 Setting up DUAL verification system...");
                 
-                // VM Finder (từ paste.txt)
+                // VM Finder
                 function findVMInWindow(win) {
                     if (!win) return null;
                     if (win.__vm?.runtime) return win.__vm;
                     if (win.Scratch?.vm?.runtime) return win.Scratch.vm;
-                    if (win.Scratch?.runtime?.vm?.runtime) return win.Scratch.runtime.vm;
                     if (win.vm?.runtime) return win.vm;
-
+                    
                     function getReactKey(el){ return Object.keys(el).find(k => k.startsWith('__react')); }
                     const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
                     for (const selector of selectors) {
@@ -1124,41 +1129,22 @@ class SprunkiGamePlayer:
                     return null;
                 }
                 
-                function findVMDeep(rootWin=window) {
-                    let vm = findVMInWindow(rootWin);
-                    if (vm) return vm;
-                    const visited = new Set();
-                    (function dfs(win){
-                        if (!win || visited.has(win)) return;
-                        visited.add(win);
-                        try {
-                            const found = findVMInWindow(win);
-                            if (found) { vm = found; return; }
-                            win.document?.querySelectorAll?.('iframe')?.forEach(f=>{
-                                try { dfs(f.contentWindow); } catch {}
-                            });
-                        } catch {}
-                    })(rootWin);
-                    return vm;
-                }
-
-                // Find VM và Stage
-                const vm = findVMDeep();
+                const vm = findVMInWindow(window);
                 if (!vm) {
-                    console.error("❌ Không tìm thấy VM cho Characters Array");
-                    return false;
+                    console.error("❌ Cannot find VM for dual verification");
+                    return { characters: false, putted: false };
                 }
                 
                 const runtime = vm.runtime || vm;
                 const stage = (runtime.targets || []).find(t => t.isStage) || (runtime.targets || [])[0];
                 if (!stage) {
-                    console.error("❌ Không tìm thấy Stage target cho Characters Array");
-                    return false;
+                    console.error("❌ Cannot find Stage for dual verification");
+                    return { characters: false, putted: false };
                 }
                 
                 // Store VM và Stage
-                window.__characters_vm = vm;
-                window.__characters_stage = stage;
+                window.__dual_vm = vm;
+                window.__dual_stage = stage;
                 
                 // Helper functions
                 function getListByName(name) {
@@ -1183,33 +1169,66 @@ class SprunkiGamePlayer:
                     return null;
                 }
                 
-                // Tạo high-performance functions
-                window.getCharactersArray = () => {
-                    try {
-                        const entry = getListByName("Characters") || getVarByName("Characters");
-                        const raw = Array.isArray(entry?.value) ? entry.value.slice() : [];
-                        // Normalize về "0"/"1" string
-                        return raw.map(v => (v === 1 ? "1" : v === 0 ? "0" : String(v)));
-                    } catch (e) {
-                        console.error("Error getting Characters array:", e);
-                        return null;
-                    }
-                };
+                let charactersSuccess = false;
+                let puttedSuccess = false;
                 
-                window.getCharactersCount = () => {
-                    try {
-                        const chars = window.getCharactersArray();
-                        if (!chars) return null;
-                        return chars.filter(v => v === "1").length;
-                    } catch (e) {
-                        console.error("Error counting Characters:", e);
-                        return null;
+                // SYSTEM 1: Characters Array
+                try {
+                    window.getCharactersCount = () => {
+                        try {
+                            const entry = getListByName("Characters") || getVarByName("Characters");
+                            const raw = Array.isArray(entry?.value) ? entry.value.slice() : [];
+                            const normalized = raw.map(v => (v === 1 ? "1" : v === 0 ? "0" : String(v)));
+                            return normalized.filter(v => v === "1").length;
+                        } catch (e) {
+                            console.error("Error getting Characters count:", e);
+                            return null;
+                        }
+                    };
+                    
+                    const testChars = window.getCharactersCount();
+                    if (testChars !== null) {
+                        charactersSuccess = true;
+                        console.log("✅ Characters Array system ready:", testChars);
                     }
-                };
+                } catch (e) {
+                    console.warn("⚠️ Characters Array setup failed:", e);
+                }
                 
-                console.log("✅ Characters Array monitoring setup completed!");
-                console.log("📊 Current Characters count:", window.getCharactersCount());
-                return true;
+                // SYSTEM 2: Putted Characters (from old code)
+                try {
+                    const puttedVar = getVarByName("Putted characters");
+                    if (puttedVar) {
+                        window.__putted_var_id = puttedVar.id;
+                        
+                        window.getPuttedChars = () => {
+                            try {
+                                return window.__dual_vm.runtime.getTargetForStage().variables[window.__putted_var_id].value;
+                            } catch (e) {
+                                console.error("Error getting Putted characters:", e);
+                                return null;
+                            }
+                        };
+                        
+                        const testPutted = window.getPuttedChars();
+                        if (testPutted !== null) {
+                            puttedSuccess = true;
+                            console.log("✅ Putted Characters system ready:", testPutted);
+                        }
+                    }
+                } catch (e) {
+                    console.warn("⚠️ Putted Characters setup failed:", e);
+                }
+                
+                console.log("🔄 DUAL VERIFICATION SETUP RESULT:");
+                console.log("   Characters Array:", charactersSuccess ? "✅ Ready" : "❌ Failed");
+                console.log("   Putted Characters:", puttedSuccess ? "✅ Ready" : "❌ Failed");
+                
+                return {
+                    characters: charactersSuccess,
+                    putted: puttedSuccess,
+                    hasBackup: charactersSuccess || puttedSuccess
+                };
             })();
             '''
             
@@ -1217,39 +1236,46 @@ class SprunkiGamePlayer:
             
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
-                "params": {"expression": setup_characters_js, "returnByValue": True}
+                "params": {"expression": dual_setup_js, "returnByValue": True}
             })
             
             ws.close()
             
             if response and 'result' in response:
-                result_value = response.get('result', {}).get('result', {}).get('value', False)
-                if result_value:
-                    print("✅ Characters Array monitoring setup successful!")
-                    self.characters_setup_done = True
-                    self.characters_available = True
+                result = response.get('result', {}).get('result', {}).get('value', {})
+                
+                self.characters_available = result.get('characters', False)
+                self.putted_chars_available = result.get('putted', False)
+                has_backup = result.get('hasBackup', False)
+                
+                if has_backup:
+                    print("✅ DUAL verification system setup successful!")
+                    print(f"   Characters Array: {'✅ Ready' if self.characters_available else '❌ Failed'}")
+                    print(f"   Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ Failed'}")
                     
-                    # Test thử
-                    test_count = self.get_characters_count()
-                    if test_count is not None:
-                        print(f"🧪 Test successful - Current Characters count: {test_count}")
-                        return True
-                    else:
-                        print("⚠️ Setup successful but test failed")
-                        self.characters_available = False
-                        return False
+                    # Test cả hai systems
+                    if self.characters_available:
+                        test_chars = self.get_characters_count()
+                        print(f"   🧪 Characters test: {test_chars}")
+                    
+                    if self.putted_chars_available:
+                        test_putted = self.get_putted_chars_value()
+                        print(f"   🧪 Putted test: {test_putted}")
+                    
+                    self.characters_setup_done = True
+                    self.putted_chars_setup_done = True
+                    return True
                 else:
-                    print("❌ Characters Array monitoring setup failed")
-                    self.characters_available = False
+                    print("❌ DUAL verification setup failed - no systems available")
                     return False
             else:
-                print("❌ No response from Characters Array setup")
-                self.characters_available = False
+                print("❌ No response from dual verification setup")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error setting up Characters Array monitoring: {e}")
+            print(f"❌ Error setting up dual verification: {e}")
             self.characters_available = False
+            self.putted_chars_available = False
             return False
 
     def get_characters_count(self):
@@ -1360,6 +1386,49 @@ class SprunkiGamePlayer:
         except Exception as e:
             print(f"❌ Error getting Enabled List: {e}")
             return None
+
+    def get_putted_chars_value(self):
+        """
+        🔢 GET PUTTED CHARACTERS (backup method)
+        Restored from old system as backup for Characters Array
+        """
+        try:
+            if not self.putted_chars_available:
+                return None
+                
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return None
+            
+            ws = websocket.create_connection(ws_url, timeout=10)
+            
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": "window.getPuttedChars()", "returnByValue": True}
+            })
+            
+            ws.close()
+            
+            if response and 'result' in response:
+                value = response.get('result', {}).get('result', {}).get('value')
+                if isinstance(value, (int, float)):
+                    return int(value)
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error getting putted chars: {e}")
+            return None
+
+    def get_dual_counts(self):
+        """
+        🔄 GET BOTH VALUES: Characters count + Putted characters
+        Returns: (characters_count, putted_count)
+        """
+        characters_count = self.get_characters_count() if self.characters_available else None
+        putted_count = self.get_putted_chars_value() if self.putted_chars_available else None
+        
+        return characters_count, putted_count
 
     def get_comprehensive_slot_state(self):
         """
@@ -2093,53 +2162,79 @@ class SprunkiGamePlayer:
         except:
             return False
 
-    def verify_drag_success_characters(self, before_count, after_count):
+    def verify_drag_success_dual(self, before_chars, after_chars, before_putted, after_putted):
         """
-        🔢 XÁC NHẬN DRAG THÀNH CÔNG bằng Characters Array count
-        Thay thế hoàn toàn verify_drag_success()
+        🔄 DUAL VERIFICATION: CHỈ CẦN 1 TRONG 2 TĂNG 1 ĐƠN VỊ
         """
-        if before_count is None or after_count is None:
-            print("⚠️ Cannot verify drag - missing Characters count, assuming success")
-            return True  # Fallback to assume success if verification not available
+        print(f"📊 DUAL Drag verification:")
         
-        expected_count = before_count + 1
-        success = (after_count == expected_count)
+        # Check Characters Array
+        chars_success = False
+        if before_chars is not None and after_chars is not None:
+            expected_chars = before_chars + 1
+            chars_success = (after_chars == expected_chars)
+            print(f"   🔢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
+        else:
+            print(f"   🔢 Characters: N/A (not available)")
         
-        print(f"📊 Characters Drag verification: {before_count} → {after_count} (expected: {expected_count}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
+        # Check Putted Characters  
+        putted_success = False
+        if before_putted is not None and after_putted is not None:
+            expected_putted = before_putted + 1
+            putted_success = (after_putted == expected_putted)
+            print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+        else:
+            print(f"   🎯 Putted: N/A (not available)")
         
-        if not success:
-            if after_count == before_count:
-                print("   Reason: No change in Characters count (icon not placed)")
-            elif after_count > expected_count:
-                print(f"   Reason: Too much increase (+{after_count - before_count}) - multiple icons placed?")
-            elif after_count < before_count:
-                print(f"   Reason: Decrease detected ({after_count - before_count}) - game state changed?")
+        # DUAL LOGIC: CHỈ CẦN 1 TRONG 2 THÀNH CÔNG
+        overall_success = chars_success or putted_success
         
-        return success
+        if overall_success:
+            successful_method = []
+            if chars_success: successful_method.append("Characters Array")
+            if putted_success: successful_method.append("Putted Characters")
+            print(f"   🎉 DUAL SUCCESS via: {', '.join(successful_method)}")
+        else:
+            print(f"   ❌ DUAL FAILURE: Both methods failed")
+        
+        return overall_success
 
-    def verify_return_success_characters(self, before_count, after_count):
+    def verify_return_success_dual(self, before_chars, after_chars, before_putted, after_putted):
         """
-        🔢 XÁC NHẬN RETURN THÀNH CÔNG bằng Characters Array count
-        Thay thế hoàn toàn verify_return_success()
+        🔄 DUAL VERIFICATION: CHỈ CẦN 1 TRONG 2 GIẢM 1 ĐƠN VỊ
         """
-        if before_count is None or after_count is None:
-            print("⚠️ Cannot verify return - missing Characters count, assuming success")
-            return True  # Fallback to assume success if verification not available
+        print(f"📊 DUAL Return verification:")
         
-        expected_count = before_count - 1
-        success = (after_count == expected_count)
+        # Check Characters Array
+        chars_success = False
+        if before_chars is not None and after_chars is not None:
+            expected_chars = before_chars - 1
+            chars_success = (after_chars == expected_chars)
+            print(f"   🔢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
+        else:
+            print(f"   🔢 Characters: N/A (not available)")
         
-        print(f"📊 Characters Return verification: {before_count} → {after_count} (expected: {expected_count}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
+        # Check Putted Characters  
+        putted_success = False
+        if before_putted is not None and after_putted is not None:
+            expected_putted = before_putted - 1
+            putted_success = (after_putted == expected_putted)
+            print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+        else:
+            print(f"   🎯 Putted: N/A (not available)")
         
-        if not success:
-            if after_count == before_count:
-                print("   Reason: No change in Characters count (icon not returned)")
-            elif after_count < expected_count:
-                print(f"   Reason: Too much decrease ({before_count - after_count}) - multiple icons returned?")
-            elif after_count > before_count:
-                print(f"   Reason: Increase detected (+{after_count - before_count}) - new icon placed?")
+        # DUAL LOGIC: CHỈ CẦN 1 TRONG 2 THÀNH CÔNG
+        overall_success = chars_success or putted_success
         
-        return success
+        if overall_success:
+            successful_method = []
+            if chars_success: successful_method.append("Characters Array") 
+            if putted_success: successful_method.append("Putted Characters")
+            print(f"   🎉 DUAL SUCCESS via: {', '.join(successful_method)}")
+        else:
+            print(f"   ❌ DUAL FAILURE: Both methods failed")
+        
+        return overall_success
 
     def _execute_single_return_click(self, click_x, click_y, use_cdp, domain_adj):
         """
@@ -2227,22 +2322,24 @@ class SprunkiGamePlayer:
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=False):
         """
-        ENHANCED: Drag and drop with Characters Array verification and 5-coordinate retry
-        Thay thế hoàn toàn hệ thống putted characters cũ bằng Characters Array
+        ENHANCED: Drag and drop with DUAL verification (Characters Array + Putted Characters)
+        CHỈ CẦN 1 TRONG 2 THÀNH CÔNG LÀ ĐỦ - Maximum compatibility across all mods
         """
-        print(f"\n🎯 ENHANCED DRAG START: Icon to slot with Characters Array verification")
+        print(f"\n🎯 ENHANCED DRAG START: Icon to slot with DUAL verification")
         print("="*60)
 
         # Store target slot for verification
         target_slot_index = target_slot.get('index', -1)
         self.store_target_slot_for_verification(target_slot_index)
 
-        # Check if Characters Array verification is available
-        verification_enabled = self.characters_available
-        if verification_enabled:
-            print("🔢 Characters Array verification ENABLED - will check Characters count")
+        # Check if DUAL verification is available
+        dual_verification_enabled = self.characters_available or self.putted_chars_available
+        if dual_verification_enabled:
+            print("🔄 DUAL verification ENABLED:")
+            print(f"   🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
+            print(f"   🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ N/A'}")
         else:
-            print("⚠️ Characters Array verification DISABLED - using fallback logic")
+            print("⚠️ DUAL verification DISABLED - using fallback logic")
         
         # Generate 5 coordinates to try
         coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
@@ -2260,11 +2357,13 @@ class SprunkiGamePlayer:
             coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
             print(f"\n🎯 Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
             
-            # Get Characters count BEFORE drag (if verification available)
-            characters_before = None
-            if verification_enabled:
-                characters_before = self.get_characters_count()
-                print(f"📊 Characters count BEFORE drag: {characters_before}")
+            # Get DUAL counts BEFORE drag (if verification available)
+            characters_before, putted_before = None, None
+            if dual_verification_enabled:
+                characters_before, putted_before = self.get_dual_counts()
+                print(f"📊 DUAL counts BEFORE drag:")
+                print(f"   🔢 Characters: {characters_before}")
+                print(f"   🎯 Putted: {putted_before}")
             
             # Execute single drag attempt
             drag_executed = self._execute_single_drag_attempt(
@@ -2279,31 +2378,37 @@ class SprunkiGamePlayer:
                 continue
             
             # Wait for game state to update
-            verification_wait = 1.0 if verification_enabled else 0.3
+            verification_wait = 1.0 if dual_verification_enabled else 0.3
             print(f"⏳ Waiting {verification_wait}s for game state update (mouse at safe position)...")
             time.sleep(verification_wait)
             
-            # Get Characters count AFTER drag (if verification available)
-            if verification_enabled:
-                characters_after = self.get_characters_count()
-                print(f"📊 Characters count AFTER drag: {characters_after}")
+            # Get DUAL counts AFTER drag (if verification available)
+            if dual_verification_enabled:
+                characters_after, putted_after = self.get_dual_counts()
+                print(f"📊 DUAL counts AFTER drag:")
+                print(f"   🔢 Characters: {characters_after}")
+                print(f"   🎯 Putted: {putted_after}")
                 
-                # Verify drag success using Characters Array
-                if self.verify_drag_success_characters(characters_before, characters_after):
-                    print(f"🎉 VERIFIED SUCCESS at coordinate {coord_used}!")
+                # Verify drag success using DUAL system
+                if self.verify_drag_success_dual(characters_before, characters_after, putted_before, putted_after):
+                    print(f"🎉 DUAL VERIFIED SUCCESS at coordinate {coord_used}!")
                     success = True
                     break
                 else:
-                    print(f"❌ VERIFICATION FAILED at coordinate {coord_used}")
+                    print(f"❌ DUAL VERIFICATION FAILED at coordinate {coord_used}")
                     
-                    # Only return icon if it was actually placed (characters_after > characters_before)
+                    # Only return icon if ANY value increased (either chars or putted)
+                    characters_increased = (characters_after is not None and characters_before is not None and characters_after > characters_before)
+                    putted_increased = (putted_after is not None and putted_before is not None and putted_after > putted_before)
+                    any_increase = characters_increased or putted_increased
+                    
                     if coord_index < len(coordinates) - 1:
-                        if characters_after is not None and characters_before is not None and characters_after > characters_before:
-                            print("🔄 Icon was placed but incorrectly, returning before retry...")
+                        if any_increase:
+                            print("🔄 Icon was placed (detected by DUAL system), returning before retry...")
                             self.attempt_icon_return(target_slot)
                             time.sleep(0.8)
                         else:
-                            print("ℹ️ Icon was not placed, trying next coordinate directly...")
+                            print("ℹ️ Icon was not placed (no increase in DUAL system), trying next coordinate...")
                             time.sleep(0.3)  # Short delay before next coordinate
             else:
                 # No verification available - assume success if drag executed
@@ -2320,17 +2425,19 @@ class SprunkiGamePlayer:
         if success:
             print(f"🎉 ENHANCED DRAG COMPLETED SUCCESSFULLY!")
             print(f"   Coordinate used: {coord_used}/5")
-            print(f"   Verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+            print(f"   Verification: {'🔄 DUAL Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
+            if dual_verification_enabled:
+                print(f"   Systems: Characters Array {'✅' if self.characters_available else '❌'} + Putted Characters {'✅' if self.putted_chars_available else '❌'}")
             print("   Mouse already at safe position")
             print("="*60)
             
-            self.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=verification_enabled)
+            self.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=dual_verification_enabled)
             return True
         else:
             print(f"💥 ENHANCED DRAG FAILED - All {len(coordinates)} coordinates attempted")
             print("="*60)
             
-            self.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=verification_enabled)
+            self.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=dual_verification_enabled)
             return False
 
     def _execute_single_drag_attempt(self, start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj):
@@ -2580,7 +2687,7 @@ class SprunkiGamePlayer:
 
     def setup_game_environment(self, progress_callback=None, first_setup=True):
         """
-        ENHANCED: Setup with Characters Array verification system
+        ENHANCED: Setup with DUAL verification system (Characters Array + Putted Characters)
         """
         try:
             if not self.config:
@@ -2616,14 +2723,14 @@ class SprunkiGamePlayer:
             if not self.intro_skip_via_cdp():
                 print("CDP intro skipping failed, but continuing anyway...")
 
-            # THAY ĐỔI: Setup Characters Array monitoring thay vì putted chars
+            # THAY ĐỔI: Setup DUAL verification system (Characters Array + Putted Characters)
             if progress_callback:
-                progress_callback("🔢 Setting up Characters Array verification...")
+                progress_callback("🔄 Setting up DUAL verification system...")
             
-            if not self.setup_characters_array_monitor():
-                print("⚠️ Characters Array verification setup failed, continuing with basic workflow")
+            if not self.setup_dual_verification_system():
+                print("⚠️ DUAL verification setup failed, continuing with basic workflow")
             else:
-                print("✅ Characters Array verification system ready!")
+                print("✅ DUAL verification system ready!")
 
             # Prepare game for playing
             self.prepare_game_for_playing()
@@ -2638,10 +2745,15 @@ class SprunkiGamePlayer:
             print("   🎮 PyAutoGUI for precise game automation")
             print("   📡 WebSocket/CDP for advanced control")
             print("   🛡️ AdBlocker extension loaded")
-            if self.characters_available:
-                print("   🔢 Characters Array verification system ENABLED")
+            
+            # DUAL verification status
+            if self.characters_available or self.putted_chars_available:
+                print("   🔄 DUAL verification system ENABLED:")
+                print(f"      🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ Failed'}")
+                print(f"      🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ Failed'}")
+                print("      💡 Only 1 method needs to work = Maximum compatibility!")
             else:
-                print("   ⚠️ Characters Array verification system DISABLED (fallback mode)")
+                print("   ⚠️ DUAL verification system DISABLED (fallback mode)")
             
             return True
                 
