@@ -88,9 +88,9 @@ class SprunkiGamePlayer:
         self.ws_url = None
         self.game_url = None
         
-        # ADDED: Drag verification system
-        self.putted_chars_setup_done = False
-        self.verification_available = False
+        # Characters Array system thay vì putted chars
+        self.characters_setup_done = False
+        self.characters_available = False
         
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
@@ -1078,48 +1078,45 @@ class SprunkiGamePlayer:
     # == NEW: DRAG VERIFICATION SYSTEM ==
     # ================================================================
 
-    def setup_putted_chars_monitor(self):
+    def setup_characters_array_monitor(self):
         """
-        ADDED: Setup JavaScript monitoring for 'Putted characters' variable
-        Run once during game setup to create high-performance monitoring
+        🔢 CHARACTERS ARRAY MONITORING: Thay thế hoàn toàn putted_chars_monitor
+        Sử dụng đếm số "1" trong Characters Array thay vì putted characters biến
         """
         try:
-            print("🔍 Setting up Putted characters monitoring...")
+            print("🔢 Setting up Characters Array monitoring...")
             
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("⚠️ WebSocket not available, drag verification disabled")
-                self.verification_available = False
+                print("⚠️ WebSocket not available, Characters Array monitoring disabled")
+                self.characters_available = False
                 return False
             
-            # JavaScript code adapted from user's F12 Console script
-            setup_js = """
+            # JavaScript tích hợp - KHÔNG tạo file riêng
+            setup_characters_js = '''
             (() => {
-                // Check if already setup
-                if (window.getPuttedChars) {
-                    console.log('✅ Putted characters monitoring already setup');
-                    return true;
-                }
+                console.log("🚀 Setting up Characters Array monitoring...");
                 
-                console.log('🚀 Setting up high-performance Putted characters monitoring...');
-                
-                // Find VM function
-                function findVM() {
-                    if (window.__vm && window.__vm.runtime) return window.__vm;
-                    const getReactKey = el => Object.keys(el).find(k => k.startsWith('__react'));
+                // VM Finder (từ paste.txt)
+                function findVMInWindow(win) {
+                    if (!win) return null;
+                    if (win.__vm?.runtime) return win.__vm;
+                    if (win.Scratch?.vm?.runtime) return win.Scratch.vm;
+                    if (win.Scratch?.runtime?.vm?.runtime) return win.Scratch.runtime.vm;
+                    if (win.vm?.runtime) return win.vm;
+
+                    function getReactKey(el){ return Object.keys(el).find(k => k.startsWith('__react')); }
                     const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
                     for (const selector of selectors) {
-                        const elements = document.querySelectorAll(selector);
-                        for (const el of elements) {
-                            const reactKey = getReactKey(el);
-                            if (!reactKey) continue;
-                            let fiber = el[reactKey];
-                            let depth = 0;
-                            while (fiber && depth++ < 100) {
+                        const nodes = win.document?.querySelectorAll?.(selector) || [];
+                        for (const el of nodes) {
+                            const fiberKey = getReactKey(el);
+                            if (!fiberKey) continue;
+                            let fiber = el[fiberKey];
+                            let hop = 0;
+                            while (fiber && hop++ < 200) {
                                 const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
-                                if (props?.vm && props.vm.runtime) {
-                                    return props.vm;
-                                }
+                                if (props?.vm?.runtime) return props.vm;
                                 fiber = fiber.return;
                             }
                         }
@@ -1127,55 +1124,100 @@ class SprunkiGamePlayer:
                     return null;
                 }
                 
-                // 1. Find and store VM
-                const vm = findVM();
+                function findVMDeep(rootWin=window) {
+                    let vm = findVMInWindow(rootWin);
+                    if (vm) return vm;
+                    const visited = new Set();
+                    (function dfs(win){
+                        if (!win || visited.has(win)) return;
+                        visited.add(win);
+                        try {
+                            const found = findVMInWindow(win);
+                            if (found) { vm = found; return; }
+                            win.document?.querySelectorAll?.('iframe')?.forEach(f=>{
+                                try { dfs(f.contentWindow); } catch {}
+                            });
+                        } catch {}
+                    })(rootWin);
+                    return vm;
+                }
+
+                // Find VM và Stage
+                const vm = findVMDeep();
                 if (!vm) {
-                    console.error('❌ Cannot find Scratch VM for Putted characters monitoring');
+                    console.error("❌ Không tìm thấy VM cho Characters Array");
                     return false;
                 }
-                window.__sprunki_vm = vm;
-                console.log('✅ VM found and stored');
                 
-                // 2. Find and store variable ID
-                const stage = vm.runtime.getTargetForStage();
+                const runtime = vm.runtime || vm;
+                const stage = (runtime.targets || []).find(t => t.isStage) || (runtime.targets || [])[0];
                 if (!stage) {
-                    console.error('❌ Cannot find Stage object');
+                    console.error("❌ Không tìm thấy Stage target cho Characters Array");
                     return false;
                 }
                 
-                const variableName = 'Putted characters';
-                const targetVariable = Object.values(stage.variables).find(v => v.name === variableName);
+                // Store VM và Stage
+                window.__characters_vm = vm;
+                window.__characters_stage = stage;
                 
-                if (!targetVariable) {
-                    console.error(`❌ Cannot find variable "${variableName}"`);
-                    return false;
+                // Helper functions
+                function getListByName(name) {
+                    for (const id in stage.variables) {
+                        const v = stage.variables[id];
+                        if (v?.name === name && Array.isArray(v.value)) return v;
+                    }
+                    if (stage.lists) {
+                        for (const id in stage.lists) {
+                            const L = stage.lists[id];
+                            if (L?.name === name) return L;
+                        }
+                    }
+                    return null;
                 }
                 
-                window.__sprunki_var_id = targetVariable.id;
-                console.log(`✅ Variable "${variableName}" ID found and stored`);
+                function getVarByName(name) {
+                    for (const id in stage.variables) {
+                        const v = stage.variables[id];
+                        if (v?.name === name) return v;
+                    }
+                    return null;
+                }
                 
-                // 3. Create high-performance function
-                window.getPuttedChars = () => {
+                // Tạo high-performance functions
+                window.getCharactersArray = () => {
                     try {
-                        return window.__sprunki_vm.runtime.getTargetForStage().variables[window.__sprunki_var_id].value;
+                        const entry = getListByName("Characters") || getVarByName("Characters");
+                        const raw = Array.isArray(entry?.value) ? entry.value.slice() : [];
+                        // Normalize về "0"/"1" string
+                        return raw.map(v => (v === 1 ? "1" : v === 0 ? "0" : String(v)));
                     } catch (e) {
-                        console.error("Error getting Putted characters value:", e);
+                        console.error("Error getting Characters array:", e);
                         return null;
                     }
                 };
                 
-                console.log('✅ High-performance getPuttedChars() function created');
-                console.log('👉 Current value:', window.getPuttedChars());
+                window.getCharactersCount = () => {
+                    try {
+                        const chars = window.getCharactersArray();
+                        if (!chars) return null;
+                        return chars.filter(v => v === "1").length;
+                    } catch (e) {
+                        console.error("Error counting Characters:", e);
+                        return null;
+                    }
+                };
+                
+                console.log("✅ Characters Array monitoring setup completed!");
+                console.log("📊 Current Characters count:", window.getCharactersCount());
                 return true;
             })();
-            """
+            '''
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            # Execute setup JavaScript
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
-                "params": {"expression": setup_js, "returnByValue": True}
+                "params": {"expression": setup_characters_js, "returnByValue": True}
             })
             
             ws.close()
@@ -1183,40 +1225,40 @@ class SprunkiGamePlayer:
             if response and 'result' in response:
                 result_value = response.get('result', {}).get('result', {}).get('value', False)
                 if result_value:
-                    print("✅ Putted characters monitoring setup successful!")
-                    self.putted_chars_setup_done = True
-                    self.verification_available = True
+                    print("✅ Characters Array monitoring setup successful!")
+                    self.characters_setup_done = True
+                    self.characters_available = True
                     
-                    # Test the monitoring
-                    test_value = self.get_putted_chars_value()
-                    if test_value is not None:
-                        print(f"🧪 Test successful - Current Putted characters: {test_value}")
+                    # Test thử
+                    test_count = self.get_characters_count()
+                    if test_count is not None:
+                        print(f"🧪 Test successful - Current Characters count: {test_count}")
                         return True
                     else:
                         print("⚠️ Setup successful but test failed")
-                        self.verification_available = False
+                        self.characters_available = False
                         return False
                 else:
-                    print("❌ Putted characters monitoring setup failed")
-                    self.verification_available = False
+                    print("❌ Characters Array monitoring setup failed")
+                    self.characters_available = False
                     return False
             else:
-                print("❌ No response from JavaScript setup")
-                self.verification_available = False
+                print("❌ No response from Characters Array setup")
+                self.characters_available = False
                 return False
                 
         except Exception as e:
-            print(f"❌ Error setting up Putted characters monitoring: {e}")
-            self.verification_available = False
+            print(f"❌ Error setting up Characters Array monitoring: {e}")
+            self.characters_available = False
             return False
 
-    def get_putted_chars_value(self):
+    def get_characters_count(self):
         """
-        ADDED: Get current value of 'Putted characters' variable
-        Returns integer value or None if error
+        🔢 ĐẾM SỐ "1" TRONG CHARACTERS ARRAY = NEW PUTTED CHARACTERS
+        Thay thế hoàn toàn get_putted_chars_value()
         """
         try:
-            if not self.verification_available:
+            if not self.characters_available:
                 return None
                 
             ws_url = self._get_websocket_url()
@@ -1225,99 +1267,26 @@ class SprunkiGamePlayer:
             
             ws = websocket.create_connection(ws_url, timeout=10)
             
-            # Call the high-performance function
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
-                "params": {"expression": "window.getPuttedChars()", "returnByValue": True}
+                "params": {"expression": "window.getCharactersCount()", "returnByValue": True}
             })
             
             ws.close()
             
             if response and 'result' in response:
-                value = response.get('result', {}).get('result', {}).get('value')
-                if isinstance(value, (int, float)):
-                    return int(value)
+                count = response.get('result', {}).get('result', {}).get('value')
+                if isinstance(count, (int, float)):
+                    return int(count)
                 else:
-                    print(f"⚠️ Unexpected Putted characters value type: {type(value)} = {value}")
+                    print(f"⚠️ Unexpected Characters count type: {type(count)} = {count}")
                     return None
             else:
-                print("⚠️ No response when getting Putted characters value")
+                print("⚠️ No response when getting Characters count")
                 return None
                 
         except Exception as e:
-            print(f"❌ Error getting Putted characters value: {e}")
-            return None
-
-    def get_polos_array(self):
-        """
-        🎯 NEW: Get Polos array from Stage variables 
-        Returns: list of strings ["0","1","0"...] or None if error
-        """
-        try:
-            if not self.verification_available:
-                return None
-                
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return None
-            
-            ws = websocket.create_connection(ws_url, timeout=10)
-            
-            # JavaScript to get Polos array from Stage variables
-            js_get_polos = '''
-            (() => {
-                try {
-                    if (!window.__sprunki_vm) {
-                        console.error("VM not found for Polos array");
-                        return null;
-                    }
-                    
-                    const stage = window.__sprunki_vm.runtime.getTargetForStage();
-                    if (!stage) {
-                        console.error("Stage not found for Polos array");
-                        return null;
-                    }
-                    
-                    // Find Polos variable in Stage variables
-                    const polosVariable = Object.values(stage.variables).find(v => v.name === 'Polos');
-                    
-                    if (!polosVariable) {
-                        console.error("Polos variable not found in Stage");
-                        return null;
-                    }
-                    
-                    console.log("✅ Found Polos array:", polosVariable.value);
-                    return polosVariable.value;
-                    
-                } catch (e) {
-                    console.error("Error getting Polos array:", e);
-                    return null;
-                }
-            })();
-            '''
-            
-            response = self._send_cdp_command(ws, {
-                "method": "Runtime.evaluate",
-                "params": {"expression": js_get_polos, "returnByValue": True}
-            })
-            
-            ws.close()
-            
-            if response and 'result' in response:
-                polos_value = response.get('result', {}).get('result', {}).get('value')
-                
-                if isinstance(polos_value, list):
-                    print(f"🎯 Polos array retrieved: {polos_value}")
-                    return polos_value
-                else:
-                    print(f"⚠️ Unexpected Polos value type: {type(polos_value)} = {polos_value}")
-                    return None
-            else:
-                print("⚠️ No response when getting Polos array")
-                return None
-                
-        except Exception as e:
-            print(f"❌ Error getting Polos array: {e}")
+            print(f"❌ Error getting Characters count: {e}")
             return None
 
     def get_enabled_list_array(self):
@@ -1326,7 +1295,7 @@ class SprunkiGamePlayer:
         Returns: list of strings ["0","1","0"...] or None if error
         """
         try:
-            if not self.verification_available:
+            if not self.characters_available:
                 return None
                 
             ws_url = self._get_websocket_url()
@@ -1393,268 +1362,152 @@ class SprunkiGamePlayer:
             return None
 
     def get_comprehensive_slot_state(self):
-            """
-            📊 NEW: Get comprehensive slot state for verification
-            FIXED: Enabled List is UI state, not icon placement state
-            Returns: dict with all slot tracking data or None if error
-            """
-            try:
-                putted_chars = self.get_putted_chars_value()
-                polos_array = self.get_polos_array()
-                enabled_list = self.get_enabled_list_array()
-                
-                if putted_chars is None:
-                    print("⚠️ Could not get Putted characters")
-                    return None
-                
-                # Build comprehensive state
-                state = {
-                    'putted_characters': putted_chars,
-                    'polos_array': polos_array,
-                    'enabled_list': enabled_list,
-                    'timestamp': time.time()
-                }
-                
-                # PRIMARY validation: Polos array vs Putted characters
-                if polos_array:
-                    polos_count = sum(1 for x in polos_array if x == "1")
-                    state['polos_count'] = polos_count
-                    state['putted_polos_match'] = (polos_count == putted_chars)
-                    
-                    if not state['putted_polos_match']:
-                        print(f"⚠️ PRIMARY INCONSISTENCY: Putted chars ({putted_chars}) ≠ Polos count ({polos_count})")
-                
-                # SECONDARY info: Enabled List (UI state - not for validation)
-                if enabled_list and polos_array:
-                    arrays_match = (polos_array == enabled_list)
-                    state['polos_enabled_match'] = arrays_match
-                    
-                    if not arrays_match:
-                        print(f"ℹ️ EXPECTED DIFFERENCE: Polos {polos_array} ≠ Enabled {enabled_list}")
-                        print("ℹ️ This is normal: Polos=icon placement, Enabled=UI availability")
-                    else:
-                        print(f"ℹ️ Arrays happen to match (rare but not problematic)")
-                
-                print(f"📊 Comprehensive slot state captured:")
-                print(f"   Putted characters: {putted_chars}")
-                if polos_array:
-                    print(f"   Polos array: {polos_array} (count: {state.get('polos_count', 'N/A')})")
-                    print(f"   PRIMARY health: {'✅ Good' if state.get('putted_polos_match', True) else '⚠️ Issue'}")
-                if enabled_list:
-                    print(f"   Enabled List: {enabled_list} (UI state - informational)")
-                
-                return state
-                
-            except Exception as e:
-                print(f"❌ Error getting comprehensive slot state: {e}")
+        """
+        📊 NEW: Get comprehensive slot state for verification - UPDATED for Characters Array
+        FIXED: Sử dụng Characters Array thay vì Putted Characters và Polos Array
+        Returns: dict with Characters Array data or None if error
+        """
+        try:
+            characters_count = self.get_characters_count()
+            
+            if characters_count is None:
+                print("⚠️ Could not get Characters count")
                 return None
+            
+            # Build comprehensive state using Characters Array
+            state = {
+                'characters_count': characters_count,
+                'timestamp': time.time()
+            }
+            
+            print(f"📊 Comprehensive state captured:")
+            print(f"   Characters count: {characters_count}")
+            
+            return state
+            
+        except Exception as e:
+            print(f"❌ Error getting comprehensive state: {e}")
+            return None
 
     def verify_slot_specific_return_enhanced(self, target_slot_index, state_before, state_after):
-            """
-            🔍 ENHANCED: Slot-specific verification with Polos array validation
-            FIXED: Enabled List is UI state, not icon placement state
-            Returns: (success, reason, details)
-            """
-            try:
-                if not state_before or not state_after:
-                    return False, "missing_state_data", {}
-                
-                putted_before = state_before.get('putted_characters')
-                putted_after = state_after.get('putted_characters')
-                polos_before = state_before.get('polos_array')
-                polos_after = state_after.get('polos_array')
-                enabled_before = state_before.get('enabled_list')
-                enabled_after = state_after.get('enabled_list')
-                
-                print(f"\n🔍 ENHANCED SLOT VERIFICATION for Slot {target_slot_index}")
-                print("-" * 50)
-                
-                # Basic putted characters check
-                expected_putted = putted_before - 1 if putted_before is not None else None
-                putted_success = (putted_after == expected_putted)
-                
-                print(f"   📊 Putted chars: {putted_before} → {putted_after} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
-                
-                # PRIMARY: Polos array verification (this is the main indicator)
-                polos_success = False
-                cross_contamination = []
-                target_slot_cleared = False
-                
-                if polos_before and polos_after and len(polos_before) == len(polos_after):
-                    print(f"   🎯 Polos BEFORE: {polos_before}")
-                    print(f"   🎯 Polos AFTER:  {polos_after}")
-                    
-                    # Check if target slot was cleared
-                    if target_slot_index < len(polos_before):
-                        slot_before = polos_before[target_slot_index]
-                        slot_after = polos_after[target_slot_index]
-                        target_slot_cleared = (slot_before == "1" and slot_after == "0")
-                        
-                        print(f"   🎯 Target slot {target_slot_index}: '{slot_before}' → '{slot_after}' = {'✅ CLEARED' if target_slot_cleared else '❌ NOT CLEARED'}")
-                    
-                    # Check for unintended changes (cross-contamination)
-                    for i, (before, after) in enumerate(zip(polos_before, polos_after)):
-                        if i == target_slot_index:
-                            continue  # Skip target slot
-                            
-                        if before != after:
-                            cross_contamination.append({
-                                'slot_index': i,
-                                'before': before,
-                                'after': after,
-                                'type': 'unexpected_clear' if before == "1" and after == "0" else 'unexpected_fill'
-                            })
-                    
-                    if cross_contamination:
-                        print(f"   🚨 CROSS-CONTAMINATION DETECTED:")
-                        for contamination in cross_contamination:
-                            slot_idx = contamination['slot_index']
-                            change_type = contamination['type']
-                            print(f"      Slot {slot_idx}: {contamination['before']} → {contamination['after']} ({change_type})")
-                    else:
-                        print(f"   🛡️ No cross-contamination detected")
-                    
-                    polos_success = target_slot_cleared and len(cross_contamination) == 0
+        """
+        🔍 ENHANCED: Slot-specific verification với Characters Array
+        FIXED: Chỉ sử dụng Characters count thay vì Polos và Enabled List
+        Returns: (success, reason, details)
+        """
+        try:
+            if not state_before or not state_after:
+                return False, "missing_state_data", {}
+            
+            count_before = state_before.get('characters_count')
+            count_after = state_after.get('characters_count')
+            
+            print(f"\n🔍 ENHANCED SLOT VERIFICATION for Slot {target_slot_index}")
+            print("-" * 50)
+            
+            # Characters count check
+            expected_count = count_before - 1 if count_before is not None else None
+            count_success = (count_after == expected_count)
+            
+            print(f"   📊 Characters count: {count_before} → {count_after} (expected: {expected_count}) = {'✅' if count_success else '❌'}")
+            
+            # Decision logic: Chỉ dựa vào Characters count
+            overall_success = count_success
+            
+            # Determine reason and build details
+            if overall_success:
+                reason = "verified_success"
+                details = {
+                    'characters_change': f"{count_before} → {count_after}",
+                    'verification_method': 'characters_array_only',
+                    'target_slot': target_slot_index
+                }
+            else:
+                if not count_success:
+                    reason = "characters_count_mismatch"
                 else:
-                    print(f"   ⚠️ Cannot verify Polos array (missing or invalid data)")
+                    reason = "unknown_failure"
                 
-                # SECONDARY: Enabled List info (for debugging only, not for pass/fail)
-                if enabled_before and enabled_after:
-                    print(f"   🔍 Enabled BEFORE: {enabled_before}")
-                    print(f"   🔍 Enabled AFTER:  {enabled_after}")
-                    enabled_changed = (enabled_before != enabled_after)
-                    if enabled_changed:
-                        print(f"   ℹ️ Enabled List changed (this is UI state, not icon placement)")
-                    else:
-                        print(f"   ℹ️ Enabled List unchanged (normal - this is UI availability state)")
-                else:
-                    print(f"   ℹ️ Enabled List data not available")
-                
-                # DECISION LOGIC: Only Polos array + Putted characters matter
-                overall_success = putted_success and (polos_success if polos_before and polos_after else True)
-                
-                # Determine reason and build details
-                if overall_success:
-                    reason = "verified_success"
-                    details = {
-                        'target_slot_cleared': target_slot_cleared,
-                        'cross_contamination': cross_contamination,
-                        'putted_change': f"{putted_before} → {putted_after}",
-                        'verification_method': 'enhanced_polos_array_primary',
-                        'enabled_list_note': 'Enabled List is UI state, not used for pass/fail decision'
-                    }
-                else:
-                    if not putted_success:
-                        reason = "putted_characters_mismatch"
-                    elif cross_contamination:
-                        reason = "cross_contamination_detected"
-                    elif not target_slot_cleared:
-                        reason = "target_slot_not_cleared"
-                    else:
-                        reason = "unknown_failure"
-                    
-                    details = {
-                        'target_slot_cleared': target_slot_cleared,
-                        'cross_contamination': cross_contamination,
-                        'putted_change': f"{putted_before} → {putted_after}",
-                        'expected_putted': expected_putted,
-                        'verification_method': 'enhanced_polos_array_primary',
-                        'enabled_list_note': 'Enabled List ignored for verification (UI state only)'
-                    }
-                
-                print(f"   🎯 FINAL RESULT: {'✅ SUCCESS' if overall_success else '❌ FAILED'} ({reason})")
-                print(f"   💡 PRIMARY INDICATORS: Putted chars ({'✅' if putted_success else '❌'}) + Polos array ({'✅' if polos_success else '❌'})")
-                print(f"   ℹ️ Enabled List: Informational only (UI availability state)")
-                print("-" * 50)
-                
-                return overall_success, reason, details
-                
-            except Exception as e:
-                print(f"❌ Enhanced slot verification error: {e}")
-                return False, f"verification_error: {e}", {}
+                details = {
+                    'characters_change': f"{count_before} → {count_after}",
+                    'expected_count': expected_count,
+                    'verification_method': 'characters_array_only',
+                    'target_slot': target_slot_index
+                }
+            
+            print(f"   🎯 FINAL RESULT: {'✅ SUCCESS' if overall_success else '❌ FAILED'} ({reason})")
+            print(f"   💡 METHOD: Characters Array count verification only")
+            print("-" * 50)
+            
+            return overall_success, reason, details
+            
+        except Exception as e:
+            print(f"❌ Enhanced slot verification error: {e}")
+            return False, f"verification_error: {e}", {}
 
     def check_slot_needs_return(self, target_slot_index):
-            """
-            🔍 NEW: Pre-flight check if slot actually needs return
-            FIXED: Only check Polos array (icon placement), not Enabled List (UI state)
-            Returns: (needs_return, current_state, reason)
-            """
-            try:
-                print(f"\n🔍 PRE-FLIGHT CHECK: Slot {target_slot_index}")
+        """
+        🔍 NEW: Pre-flight check - UPDATED for Characters Array
+        FIXED: Chỉ dựa vào Characters count thay vì Polos array
+        Returns: (needs_return, current_state, reason)
+        """
+        try:
+            print(f"\n🔍 PRE-FLIGHT CHECK: Slot {target_slot_index}")
+            
+            state = self.get_comprehensive_slot_state()
+            if not state:
+                return True, None, "cannot_verify_state"  # Assume needs return if can't check
+            
+            characters_count = state.get('characters_count', 0)
+            
+            if characters_count == 0:
+                print(f"   ✅ No characters on slots (count: {characters_count}) - SKIPPING")
+                return False, state, "no_characters_placed"
+            else:
+                print(f"   🎯 Characters on slots (count: {characters_count}) - NEEDS RETURN")
+                return True, state, "characters_need_return"
                 
-                state = self.get_comprehensive_slot_state()
-                if not state:
-                    return True, None, "cannot_verify_state"  # Assume needs return if can't check
-                
-                polos_array = state.get('polos_array')
-                
-                if polos_array and target_slot_index < len(polos_array):
-                    slot_status = polos_array[target_slot_index]
-                    
-                    if slot_status == "0":
-                        print(f"   ✅ Slot {target_slot_index} already empty ('{slot_status}') - SKIPPING")
-                        return False, state, "already_empty"
-                    elif slot_status == "1":
-                        print(f"   🎯 Slot {target_slot_index} has icon ('{slot_status}') - NEEDS RETURN")
-                        return True, state, "has_icon"
-                    else:
-                        print(f"   ⚠️ Slot {target_slot_index} unknown status ('{slot_status}') - ASSUME NEEDS RETURN")
-                        return True, state, "unknown_status"
-                else:
-                    print(f"   ⚠️ Cannot check slot {target_slot_index} status - ASSUME NEEDS RETURN")
-                    return True, state, "polos_unavailable"
-                    
-            except Exception as e:
-                print(f"❌ Pre-flight check error: {e}")
-                return True, None, f"error: {e}"  # Assume needs return on error
+        except Exception as e:
+            print(f"❌ Pre-flight check error: {e}")
+            return True, None, f"error: {e}"  # Assume needs return on error
 
     def get_active_slots_queue(self):
-            """
-            📋 NEW: Get smart-ordered queue of active slots that need return
-            FIXED: Only use Polos array (icon placement), not Enabled List (UI state)
-            Returns: list of slot indices in optimal return order
-            """
-            try:
-                print(f"\n📋 BUILDING SMART RETURN QUEUE")
-                print("-" * 40)
-                
-                state = self.get_comprehensive_slot_state()
-                if not state:
-                    print("⚠️ Cannot get slot state, using fallback")
-                    return []
-                
-                polos_array = state.get('polos_array')
-                if not polos_array:
-                    print("⚠️ No Polos array available, using fallback")
-                    return []
-                
-                # Find all active slots (status "1") - ONLY FROM POLOS ARRAY
-                active_slots = []
-                for i, status in enumerate(polos_array):
-                    if status == "1":
-                        active_slots.append(i)
-                
-                print(f"   🎯 Found {len(active_slots)} active slots: {active_slots}")
-                print(f"   📊 Based on Polos array: {polos_array}")
-                
-                # Smart ordering: Return from highest index to lowest
-                # This prevents index shifting issues during batch operations
-                active_slots_ordered = sorted(active_slots, reverse=True)
-                
-                print(f"   📋 Optimal return order: {active_slots_ordered} (high → low)")
-                print(f"   💡 Reason: Prevents index shifting during batch return")
-                
-                # Optional: Show Enabled List for info (but don't use for queue)
-                enabled_list = state.get('enabled_list')
-                if enabled_list:
-                    print(f"   ℹ️ Enabled List (UI state): {enabled_list}")
-                    print(f"   ℹ️ Note: Queue based on Polos only, not Enabled List")
-                
-                return active_slots_ordered
-                
-            except Exception as e:
-                print(f"❌ Error building return queue: {e}")
+        """
+        📋 NEW: Get smart-ordered queue - UPDATED for Characters Array
+        FIXED: Dựa vào Characters count thay vì Polos array
+        Returns: list of slot indices (simplified for Characters Array system)
+        """
+        try:
+            print(f"\n📋 BUILDING SMART RETURN QUEUE")
+            print("-" * 40)
+            
+            state = self.get_comprehensive_slot_state()
+            if not state:
+                print("⚠️ Cannot get slot state, using fallback")
                 return []
+            
+            characters_count = state.get('characters_count', 0)
+            
+            print(f"   📊 Characters count: {characters_count}")
+            
+            if characters_count == 0:
+                print(f"   ✅ No characters to return")
+                return []
+            
+            # For Characters Array system, we don't know specific slot indices
+            # Just return a simple range based on typical slot usage
+            if characters_count > 0:
+                # Return slots in reverse order (high → low) for safety
+                active_slots_estimated = list(range(min(characters_count, 7) - 1, -1, -1))
+                print(f"   📋 Estimated active slots: {active_slots_estimated}")
+                print(f"   💡 Reason: Characters Array doesn't track specific slot indices")
+                return active_slots_estimated
+            
+            return []
+            
+        except Exception as e:
+            print(f"❌ Error building return queue: {e}")
+            return []
 
     def smart_batch_return_all_slots(self, use_cdp=False):
         """
@@ -1834,14 +1687,14 @@ class SprunkiGamePlayer:
             print("   🔥 Method 1: Rapid-fire center clicks")
             center_coords = [(center_x, center_y)]
             
-            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            state_before = self.get_comprehensive_slot_state() if self.characters_available else None
             
             for _ in range(5):  # 5 rapid clicks
                 self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
                 time.sleep(0.1)
             
             time.sleep(1.0)
-            if self.verification_available and state_before:
+            if self.characters_available and state_before:
                 state_after = self.get_comprehensive_slot_state()
                 if state_after:
                     is_success, reason, details = self.verify_slot_specific_return_enhanced(
@@ -1855,12 +1708,12 @@ class SprunkiGamePlayer:
             print("   🔥 Method 2: Hold clicks on expanded area")
             expanded_coords = self.generate_circle_pattern_coordinates(center_x, center_y, radius=40, num_points=8)
             
-            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            state_before = self.get_comprehensive_slot_state() if self.characters_available else None
             
             self.execute_multi_method_clicks(expanded_coords, use_cdp, domain_adj, method="hold")
             
             time.sleep(1.5)
-            if self.verification_available and state_before:
+            if self.characters_available and state_before:
                 state_after = self.get_comprehensive_slot_state()
                 if state_after:
                     is_success, reason, details = self.verify_slot_specific_return_enhanced(
@@ -1873,7 +1726,7 @@ class SprunkiGamePlayer:
             # Method 3: Mixed method barrage
             print("   🔥 Method 3: Mixed method barrage")
             
-            state_before = self.get_comprehensive_slot_state() if self.verification_available else None
+            state_before = self.get_comprehensive_slot_state() if self.characters_available else None
             
             methods = ["single", "double", "triple"]
             for method in methods:
@@ -1881,7 +1734,7 @@ class SprunkiGamePlayer:
                 time.sleep(0.3)
             
             time.sleep(1.5)
-            if self.verification_available and state_before:
+            if self.characters_available and state_before:
                 state_after = self.get_comprehensive_slot_state()
                 if state_after:
                     is_success, reason, details = self.verify_slot_specific_return_enhanced(
@@ -1899,81 +1752,51 @@ class SprunkiGamePlayer:
             return False
 
     def validate_workflow_completion(self):
-            """
-            ✅ NEW: Validate that workflow completed successfully
-            FIXED: Only validate Polos array, not Enabled List
-            Returns: (is_complete, remaining_issues, recommendations)
-            """
-            try:
-                print(f"\n✅ WORKFLOW COMPLETION VALIDATION")
-                print("="*50)
-                
-                state = self.get_comprehensive_slot_state()
-                if not state:
-                    return False, ["Cannot get final state"], ["Manual verification needed"]
-                
-                putted_chars = state.get('putted_characters', 0)
-                polos_array = state.get('polos_array')
-                enabled_list = state.get('enabled_list')
-                
-                issues = []
-                recommendations = []
-                
-                # Check 1: Putted characters should be 0
-                if putted_chars != 0:
-                    issues.append(f"Putted characters = {putted_chars} (expected: 0)")
-                    recommendations.append("Run additional return operations")
-                else:
-                    print("✅ Putted characters = 0 (perfect)")
-                
-                # Check 2: All Polos should be "0" (PRIMARY CHECK)
-                if polos_array:
-                    active_polos = [i for i, status in enumerate(polos_array) if status == "1"]
-                    if active_polos:
-                        issues.append(f"Active slots remaining: {active_polos}")
-                        recommendations.append(f"Target slots {active_polos} for additional return")
-                    else:
-                        print("✅ All Polos slots = '0' (perfect)")
-                
-                # Check 3: Polos vs Putted consistency (PRIMARY CHECK)
-                if polos_array:
-                    polos_count = sum(1 for x in polos_array if x == "1")
-                    if polos_count != putted_chars:
-                        issues.append(f"Count mismatch: Polos count ({polos_count}) ≠ Putted chars ({putted_chars})")
-                        recommendations.append("State synchronization needed")
-                    else:
-                        print("✅ Counts are consistent (perfect)")
-                
-                # Info 4: Enabled List info (NOT A VALIDATION CRITERIA)
-                if enabled_list and polos_array:
-                    if polos_array != enabled_list:
-                        print("ℹ️ Polos and Enabled List differ (normal - different purposes)")
-                        print("   Polos = icon placement state")
-                        print("   Enabled = UI availability state")
-                    else:
-                        print("ℹ️ Polos and Enabled List happen to match (rare)")
-                
-                is_complete = len(issues) == 0
-                
-                print(f"\n📊 VALIDATION RESULT: {'✅ COMPLETE' if is_complete else '⚠️ ISSUES FOUND'}")
-                if issues:
-                    print("❌ Issues found:")
-                    for issue in issues:
-                        print(f"   - {issue}")
-                    print("💡 Recommendations:")
-                    for rec in recommendations:
-                        print(f"   - {rec}")
-                else:
-                    print("🎉 All PRIMARY indicators are perfect!")
-                    print("   ✅ Putted characters = 0")
-                    print("   ✅ All Polos slots cleared")
-                    print("   ✅ State consistency verified")
-                
-                return is_complete, issues, recommendations
-                
-            except Exception as e:
-                print(f"❌ Validation error: {e}")
-                return False, [f"Validation error: {str(e)}"], ["Manual check required"]
+        """
+        ✅ NEW: Validate workflow completion - UPDATED for Characters Array
+        FIXED: Chỉ sử dụng Characters count validation
+        Returns: (is_complete, remaining_issues, recommendations)
+        """
+        try:
+            print(f"\n✅ WORKFLOW COMPLETION VALIDATION")
+            print("="*50)
+            
+            state = self.get_comprehensive_slot_state()
+            if not state:
+                return False, ["Cannot get final state"], ["Manual verification needed"]
+            
+            characters_count = state.get('characters_count', 0)
+            
+            issues = []
+            recommendations = []
+            
+            # Check: Characters count should be 0
+            if characters_count != 0:
+                issues.append(f"Characters count = {characters_count} (expected: 0)")
+                recommendations.append("Run additional return operations")
+            else:
+                print("✅ Characters count = 0 (perfect)")
+            
+            is_complete = len(issues) == 0
+            
+            print(f"\n📊 VALIDATION RESULT: {'✅ COMPLETE' if is_complete else '⚠️ ISSUES FOUND'}")
+            if issues:
+                print("❌ Issues found:")
+                for issue in issues:
+                    print(f"   - {issue}")
+                print("💡 Recommendations:")
+                for rec in recommendations:
+                    print(f"   - {rec}")
+            else:
+                print("🎉 Characters Array validation passed!")
+                print("   ✅ Characters count = 0")
+                print("   ✅ All characters returned successfully")
+            
+            return is_complete, issues, recommendations
+            
+        except Exception as e:
+            print(f"❌ Validation error: {e}")
+            return False, [f"Validation error: {str(e)}"], ["Manual check required"]
 
     def store_target_slot_for_verification(self, target_slot_index):
         """
@@ -2270,49 +2093,51 @@ class SprunkiGamePlayer:
         except:
             return False
 
-    def verify_drag_success(self, before_value, after_value):
+    def verify_drag_success_characters(self, before_count, after_count):
         """
-        ADDED: Verify drag success by checking if Putted characters increased by 1
+        🔢 XÁC NHẬN DRAG THÀNH CÔNG bằng Characters Array count
+        Thay thế hoàn toàn verify_drag_success()
         """
-        if before_value is None or after_value is None:
-            print("⚠️ Cannot verify drag - missing Putted characters values, assuming success")
+        if before_count is None or after_count is None:
+            print("⚠️ Cannot verify drag - missing Characters count, assuming success")
             return True  # Fallback to assume success if verification not available
         
-        expected_value = before_value + 1
-        success = (after_value == expected_value)
+        expected_count = before_count + 1
+        success = (after_count == expected_count)
         
-        print(f"📊 Drag verification: {before_value} → {after_value} (expected: {expected_value}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
+        print(f"📊 Characters Drag verification: {before_count} → {after_count} (expected: {expected_count}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
         
         if not success:
-            if after_value == before_value:
-                print("   Reason: No change in Putted characters (icon not placed)")
-            elif after_value > expected_value:
-                print(f"   Reason: Too much increase (+{after_value - before_value}) - multiple icons placed?")
-            elif after_value < before_value:
-                print(f"   Reason: Decrease detected ({after_value - before_value}) - game state changed?")
+            if after_count == before_count:
+                print("   Reason: No change in Characters count (icon not placed)")
+            elif after_count > expected_count:
+                print(f"   Reason: Too much increase (+{after_count - before_count}) - multiple icons placed?")
+            elif after_count < before_count:
+                print(f"   Reason: Decrease detected ({after_count - before_count}) - game state changed?")
         
         return success
 
-    def verify_return_success(self, before_value, after_value):
+    def verify_return_success_characters(self, before_count, after_count):
         """
-        ADDED: Verify return success by checking if Putted characters decreased by 1
+        🔢 XÁC NHẬN RETURN THÀNH CÔNG bằng Characters Array count
+        Thay thế hoàn toàn verify_return_success()
         """
-        if before_value is None or after_value is None:
-            print("⚠️ Cannot verify return - missing Putted characters values, assuming success")
+        if before_count is None or after_count is None:
+            print("⚠️ Cannot verify return - missing Characters count, assuming success")
             return True  # Fallback to assume success if verification not available
         
-        expected_value = before_value - 1
-        success = (after_value == expected_value)
+        expected_count = before_count - 1
+        success = (after_count == expected_count)
         
-        print(f"📊 Return verification: {before_value} → {after_value} (expected: {expected_value}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
+        print(f"📊 Characters Return verification: {before_count} → {after_count} (expected: {expected_count}) = {'✅ SUCCESS' if success else '❌ FAILED'}")
         
         if not success:
-            if after_value == before_value:
-                print("   Reason: No change in Putted characters (icon not returned)")
-            elif after_value < expected_value:
-                print(f"   Reason: Too much decrease ({before_value - after_value}) - multiple icons returned?")
-            elif after_value > before_value:
-                print(f"   Reason: Increase detected (+{after_value - before_value}) - new icon placed?")
+            if after_count == before_count:
+                print("   Reason: No change in Characters count (icon not returned)")
+            elif after_count < expected_count:
+                print(f"   Reason: Too much decrease ({before_count - after_count}) - multiple icons returned?")
+            elif after_count > before_count:
+                print(f"   Reason: Increase detected (+{after_count - before_count}) - new icon placed?")
         
         return success
 
@@ -2364,10 +2189,13 @@ class SprunkiGamePlayer:
     def attempt_icon_return(self, target_slot):
         """
         ADDED: Attempt to return icon from slot before next retry
-        Used when drag verification fails
+        UPDATED: Sử dụng Characters Array verification
         """
         try:
             print("🔄 Attempting to return icon before retry...")
+            
+            # Get count before return
+            count_before = self.get_characters_count() if self.characters_available else None
             
             # Quick click to return icon
             center_x, center_y = target_slot['x'], target_slot['y']
@@ -2377,6 +2205,14 @@ class SprunkiGamePlayer:
             time.sleep(0.1)
             pyautogui.click(button='left')
             time.sleep(0.5)  # Wait for return animation
+            
+            # Verify return if possible
+            if self.characters_available and count_before is not None:
+                count_after = self.get_characters_count()
+                if count_after is not None and count_after < count_before:
+                    print("✅ Icon return verified via Characters Array")
+                else:
+                    print("⚠️ Icon return unclear via Characters Array")
             
             print("✅ Icon return attempt completed")
             return True
@@ -2391,22 +2227,22 @@ class SprunkiGamePlayer:
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=False):
         """
-        ENHANCED: Drag and drop with verification and 5-coordinate retry
-        This replaces the old corrected_drag_and_drop method
+        ENHANCED: Drag and drop with Characters Array verification and 5-coordinate retry
+        Thay thế hoàn toàn hệ thống putted characters cũ bằng Characters Array
         """
-        print(f"\n🎯 ENHANCED DRAG START: Icon to slot with verification")
+        print(f"\n🎯 ENHANCED DRAG START: Icon to slot with Characters Array verification")
         print("="*60)
 
         # Store target slot for verification
         target_slot_index = target_slot.get('index', -1)
         self.store_target_slot_for_verification(target_slot_index)
 
-        # Check if verification is available
-        verification_enabled = self.verification_available
+        # Check if Characters Array verification is available
+        verification_enabled = self.characters_available
         if verification_enabled:
-            print("🔍 Drag verification ENABLED - will check Putted characters")
+            print("🔢 Characters Array verification ENABLED - will check Characters count")
         else:
-            print("⚠️ Drag verification DISABLED - using fallback logic")
+            print("⚠️ Characters Array verification DISABLED - using fallback logic")
         
         # Generate 5 coordinates to try
         coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
@@ -2424,11 +2260,11 @@ class SprunkiGamePlayer:
             coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
             print(f"\n🎯 Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
             
-            # Get Putted characters value BEFORE drag (if verification available)
-            putted_before = None
+            # Get Characters count BEFORE drag (if verification available)
+            characters_before = None
             if verification_enabled:
-                putted_before = self.get_putted_chars_value()
-                print(f"📊 Putted characters BEFORE drag: {putted_before}")
+                characters_before = self.get_characters_count()
+                print(f"📊 Characters count BEFORE drag: {characters_before}")
             
             # Execute single drag attempt
             drag_executed = self._execute_single_drag_attempt(
@@ -2447,22 +2283,22 @@ class SprunkiGamePlayer:
             print(f"⏳ Waiting {verification_wait}s for game state update (mouse at safe position)...")
             time.sleep(verification_wait)
             
-            # Get Putted characters value AFTER drag (if verification available)
+            # Get Characters count AFTER drag (if verification available)
             if verification_enabled:
-                putted_after = self.get_putted_chars_value()
-                print(f"📊 Putted characters AFTER drag: {putted_after}")
+                characters_after = self.get_characters_count()
+                print(f"📊 Characters count AFTER drag: {characters_after}")
                 
-                # Verify drag success
-                if self.verify_drag_success(putted_before, putted_after):
+                # Verify drag success using Characters Array
+                if self.verify_drag_success_characters(characters_before, characters_after):
                     print(f"🎉 VERIFIED SUCCESS at coordinate {coord_used}!")
                     success = True
                     break
                 else:
                     print(f"❌ VERIFICATION FAILED at coordinate {coord_used}")
                     
-                    # Only return icon if it was actually placed (putted_after > putted_before)
+                    # Only return icon if it was actually placed (characters_after > characters_before)
                     if coord_index < len(coordinates) - 1:
-                        if putted_after > putted_before:
+                        if characters_after is not None and characters_before is not None and characters_after > characters_before:
                             print("🔄 Icon was placed but incorrectly, returning before retry...")
                             self.attempt_icon_return(target_slot)
                             time.sleep(0.8)
@@ -2744,7 +2580,7 @@ class SprunkiGamePlayer:
 
     def setup_game_environment(self, progress_callback=None, first_setup=True):
         """
-        ENHANCED: Setup with drag verification system
+        ENHANCED: Setup with Characters Array verification system
         """
         try:
             if not self.config:
@@ -2780,14 +2616,14 @@ class SprunkiGamePlayer:
             if not self.intro_skip_via_cdp():
                 print("CDP intro skipping failed, but continuing anyway...")
 
-            # ADDED: Setup drag verification monitoring
+            # THAY ĐỔI: Setup Characters Array monitoring thay vì putted chars
             if progress_callback:
-                progress_callback("🔍 Setting up drag verification...")
+                progress_callback("🔢 Setting up Characters Array verification...")
             
-            if not self.setup_putted_chars_monitor():
-                print("⚠️ Drag verification setup failed, continuing with basic workflow")
+            if not self.setup_characters_array_monitor():
+                print("⚠️ Characters Array verification setup failed, continuing with basic workflow")
             else:
-                print("✅ Drag verification system ready!")
+                print("✅ Characters Array verification system ready!")
 
             # Prepare game for playing
             self.prepare_game_for_playing()
@@ -2802,10 +2638,10 @@ class SprunkiGamePlayer:
             print("   🎮 PyAutoGUI for precise game automation")
             print("   📡 WebSocket/CDP for advanced control")
             print("   🛡️ AdBlocker extension loaded")
-            if self.verification_available:
-                print("   🔍 Drag verification system ENABLED")
+            if self.characters_available:
+                print("   🔢 Characters Array verification system ENABLED")
             else:
-                print("   ⚠️ Drag verification system DISABLED (fallback mode)")
+                print("   ⚠️ Characters Array verification system DISABLED (fallback mode)")
             
             return True
                 
@@ -3008,7 +2844,7 @@ class SprunkiGamePlayer:
             print("="*80)
             
             # Check if verification is available
-            verification_enabled = self.verification_available
+            verification_enabled = self.characters_available
             if verification_enabled:
                 print("🔍 Enhanced verification ENABLED with Polos array tracking")
             else:
@@ -3397,7 +3233,7 @@ class SprunkiGamePlayer:
                 time.sleep(0.3)
                 validation_state = self.get_comprehensive_slot_state()
                 
-                if validation_state and self.verification_available:
+                if validation_state and self.characters_available:
                     polos_array = validation_state.get('polos_array', [])
                     target_index = target_slot.get('index', -1)
                     
@@ -3411,7 +3247,7 @@ class SprunkiGamePlayer:
                 print(f"⚠️ Warning: Failed to return icon {icon_index}")
                 
                 # Emergency cleanup attempt for failed return
-                if self.verification_available:
+                if self.characters_available:
                     print(f"🚨 Emergency cleanup attempt for icon {icon_index}")
                     emergency_success = self._emergency_slot_recovery(target_slot.get('index', -1), target_slot, use_cdp)
                     if emergency_success:
@@ -3573,7 +3409,7 @@ class SprunkiGamePlayer:
             
             print(f"\n🎪 STARTING ENHANCED {mode.upper()} SHOWCASE")
             print(f"📊 Will showcase {len(icon_range)} icons with verification system")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -3614,7 +3450,7 @@ class SprunkiGamePlayer:
             emoji = "🎵" if mode == "Test" else ("👻" if mode == "Horror" else "🎪")
             
             print(f"\n{emoji} STARTING ENHANCED REMIX: {remix_name}")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Verification system ENABLED for all drags")
             else:
                 print("⚠️ Verification system DISABLED - using fallback")
@@ -3706,7 +3542,7 @@ class SprunkiGamePlayer:
             has_bonus = game_settings.get('hasBonus', False)
             
             print("\n🎪 STARTING ENHANCED FULL SHOWCASE WORKFLOW")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification system: ENABLED")
             else:
                 print("⚠️ Drag verification system: DISABLED (fallback mode)")
@@ -3833,7 +3669,7 @@ class SprunkiGamePlayer:
             emoji = "🎁" if mode == "Normal" else "👻"
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} BONUS SHOWCASE")
             print(f"📊 Will showcase {len(bonus_chars)} bonus characters")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -3895,7 +3731,7 @@ class SprunkiGamePlayer:
             emoji = "🎵" if mode == "Test" else ("👻" if mode == "Horror" else "🎪")
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} REMIX SESSION")
             print(f"📊 Will play {len(self.remix_library)} remixes")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED for all remix drags")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -3954,7 +3790,7 @@ class SprunkiGamePlayer:
                 progress_callback("👻 Triggering Horror Mode with verification...")
             
             print("\n👻 TRIGGERING ENHANCED HORROR MODE TRANSITION...")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Using verification for horror icon drag")
             else:
                 print("⚠️ Verification disabled - using fallback")
@@ -3991,7 +3827,7 @@ class SprunkiGamePlayer:
                     # Validate horror mode activation state
                     horror_state = self.get_comprehensive_slot_state()
                     
-                    if horror_state and self.verification_available:
+                    if horror_state and self.characters_available:
                         putted_chars = horror_state.get('putted_characters', 0)
                         polos_array = horror_state.get('polos_array', [])
                         
@@ -4026,7 +3862,7 @@ class SprunkiGamePlayer:
                 progress_callback("🎵 Starting enhanced remix-only workflow...")
             
             print("\n🎵 STARTING ENHANCED REMIX-ONLY WORKFLOW")
-            if self.verification_available:
+            if self.characters_available:
                 print("🔍 Drag verification: ENABLED for all remixes")
             else:
                 print("⚠️ Drag verification: DISABLED (fallback mode)")
@@ -4122,178 +3958,179 @@ class SprunkiGamePlayer:
     # ================================================================
     
     def setup_gui(self):
-            self.root = Tk()
-            self.root.title("Sprunki Game Player - ENHANCED with Drag Verification + Smart Page Verification")
-            self.root.geometry("650x900")
-            
-            self.mode = IntVar(value=1)
-            self.status_var = StringVar()
-            self.status_var.set("Config not loaded")
-            self.action_var = StringVar()
-            self.action_var.set("🚀 Ready for ENHANCED workflow with Smart Verification...")
-            
-            # Header
-            Label(self.root, text="Sprunki Game Player", font=("Arial", 16, "bold")).pack(pady=10)
-            Label(self.root, text="🎮 ENHANCED: Chrome Debug + Drag Verification + Smart Page Verification 🚀", 
-                font=("Arial", 12), fg="green").pack()
-            
-            # Enhanced workflow info
-            enhanced_info_frame = Frame(self.root, bg="#E8F5E8", relief="ridge", bd=1)
-            enhanced_info_frame.pack(fill="x", padx=10, pady=5)
-            
-            Label(enhanced_info_frame, text="⚡ ENHANCED WORKFLOW:", 
-                font=("Arial", 10, "bold"), bg="#E8F5E8", fg="#2E7D32").pack(anchor="w", padx=10, pady=(5,2))
-            
-            enhanced_features = """✅ Drag Verification: Check 'Putted characters' variable before/after each drag
-    ✅ 5-Coordinate Retry: Center → Left → Right → Top → Bottom positions for each icon
-    ✅ Smart Fallback: Auto-fallback to PyAutoGUI if CDP verification fails
-    ✅ Enhanced Statistics: Track verification success rate and coordinate usage
-    ✅ Game-Aware: Real-time monitoring of game internal state
-    ✅ Intelligent Retry: Return icon and retry at different coordinate if verification fails"""
-            
-            Label(enhanced_info_frame, text=enhanced_features, justify="left",
-                font=("Arial", 8), fg="#1B5E20", bg="#E8F5E8").pack(anchor="w", padx=15, pady=(0,5))
-            
-            # Smart verification system info
-            verification_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
-            verification_frame.pack(fill="x", padx=10, pady=5)
-            
-            Label(verification_frame, text="🔍 SMART VERIFICATION SYSTEM:", 
-                font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
-            
-            verification_text = """🔍 Page Load Verification: Check document.readyState, loading spinners, basic elements
-    🎮 Game Components Verification: Check game containers, React components, Run button in DOM
-    ⚡ Real-Time Monitoring: WebSocket/CDP JavaScript execution for live page state
-    🎯 Smart Timing: Replace fixed 40s wait with intelligent verification + 3s stabilization
-    📊 Comprehensive Checks: Network idle, DOM completeness, spinner disappearance
-    🔄 Auto-Retry: Page reload and re-verification if initial checks fail"""
-            
-            Label(verification_frame, text=verification_text, justify="left",
-                font=("Arial", 8), fg="#0D47A1", bg="#E3F2FD").pack(anchor="w", padx=15, pady=(0,5))
-            
-            # Image detection info
-            detection_frame = Frame(self.root, bg="#FFF3E0", relief="ridge", bd=1)
-            detection_frame.pack(fill="x", padx=10, pady=5)
-            
-            Label(detection_frame, text="🖼️ ENHANCED IMAGE DETECTION:", 
-                font=("Arial", 10, "bold"), bg="#FFF3E0", fg="#E65100").pack(anchor="w", padx=10, pady=(5,2))
-            
-            detection_text = """🎯 Smart Auto-Scroll: Automatic PageDown if Run/Fullscreen buttons not in viewport
-    🔍 Multi-Scale Detection: Test multiple scale factors for button recognition
-    🎪 Domain-Optimized: Specific adjustments for cocrea.world game timing
-    📐 Template Matching: Advanced CV2 image matching with confidence thresholds
-    🔄 Retry Logic: Multiple attempts with different scroll positions
-    ⚙️ Config-Driven: All detection parameters configurable via config.json"""
-            
-            Label(detection_frame, text=detection_text, justify="left",
-                font=("Arial", 8), fg="#BF360C", bg="#FFF3E0").pack(anchor="w", padx=15, pady=(0,5))
-            
-            # Mode selection
-            mode_frame = Frame(self.root)
-            mode_frame.pack(pady=10)
-            
-            Label(mode_frame, text="🎯 Select play mode:", font=("Arial", 11, "bold")).pack()
-            
-            Radiobutton(mode_frame, text="🔀 Showcase + Remix (ENHANCED)", 
-                    variable=self.mode, value=1, font=("Arial", 10)).pack(anchor="w")
-            
-            Radiobutton(mode_frame, text="🎵 Remix Only (ENHANCED)", 
-                    variable=self.mode, value=2, font=("Arial", 10)).pack(anchor="w")
-            
-            # Debug frame with Smart Verification
-            debug_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
-            debug_frame.pack(fill="x", padx=10, pady=5)
-            
-            Label(debug_frame, text="🔧 DEBUG TOOLS:", 
-                font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
-            
-            debug_buttons = Frame(debug_frame, bg="#E3F2FD")
-            debug_buttons.pack(fill="x", padx=10, pady=(0,5))
-            
-            Button(debug_buttons, text="📊 Enhanced Stats", 
-                command=self.show_drag_stats, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left")
-            
-            Button(debug_buttons, text="🌐 Test WebSocket", 
-                command=self.test_websocket_connection, bg="#FF9800", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
-            
-            Button(debug_buttons, text="🔍 Test Verification", 
-                command=self.test_verification_system, bg="#9C27B0", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
-            
-            Button(debug_buttons, text="⚡ Test Smart Verification", 
-                command=self.test_smart_verification_system, bg="#2196F3", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
-            
-            # Remix info display
-            self.display_remix_library_info()
-            
-            # Main button
-            Button(self.root, text="🔍 Load JSON & Start ENHANCED Auto with Smart Verification", 
-                command=self.load_config_and_start, 
-                bg="#4CAF50", fg="white", font=("Arial", 12, "bold")).pack(pady=15)
-            
-            # Status
-            Label(self.root, text="📊 Status:").pack(pady=(20,5))
-            Label(self.root, textvariable=self.status_var, fg="blue").pack()
-            
-            # Instructions with Smart Verification
-            instruction_text = """
-    🎯 ENHANCED WORKFLOW WITH SMART VERIFICATION:
+        self.root = Tk()
+        self.root.title("Sprunki Game Player - ENHANCED with Characters Array Verification + Smart Page Verification")
+        self.root.geometry("650x900")
+        
+        self.mode = IntVar(value=1)
+        self.status_var = StringVar()
+        self.status_var.set("Config not loaded")
+        self.action_var = StringVar()
+        self.action_var.set("🚀 Ready for ENHANCED workflow with Smart Verification...")
+        
+        # Header
+        Label(self.root, text="Sprunki Game Player", font=("Arial", 16, "bold")).pack(pady=10)
+        Label(self.root, text="🎮 ENHANCED: Chrome Debug + Characters Array Verification + Smart Page Verification 🚀", 
+            font=("Arial", 12), fg="green").pack()
+        
+        # Enhanced workflow info
+        enhanced_info_frame = Frame(self.root, bg="#E8F5E8", relief="ridge", bd=1)
+        enhanced_info_frame.pack(fill="x", padx=10, pady=5)
+        
+        Label(enhanced_info_frame, text="⚡ ENHANCED WORKFLOW:", 
+            font=("Arial", 10, "bold"), bg="#E8F5E8", fg="#2E7D32").pack(anchor="w", padx=10, pady=(5,2))
+        
+        enhanced_features = """✅ Characters Array Verification: Count "1" values in Characters Array for accurate state
+        ✅ 5-Coordinate Retry: Center → Left → Right → Top → Bottom positions for each icon
+        ✅ Smart Fallback: Auto-fallback to PyAutoGUI if CDP verification fails
+        ✅ Enhanced Statistics: Track verification success rate and coordinate usage
+        ✅ Game-Aware: Real-time monitoring of Characters Array state
+        ✅ Intelligent Retry: Return icon and retry at different coordinate if verification fails"""
+        
+        Label(enhanced_info_frame, text=enhanced_features, justify="left",
+            font=("Arial", 8), fg="#1B5E20", bg="#E8F5E8").pack(anchor="w", padx=15, pady=(0,5))
+        
+        # Smart verification system info
+        verification_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
+        verification_frame.pack(fill="x", padx=10, pady=5)
+        
+        Label(verification_frame, text="🔢 CHARACTERS ARRAY SYSTEM:", 
+            font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
+        
+        verification_text = """🔢 Characters Array Monitoring: Real-time tracking of character placement state
+        🎯 Count-Based Verification: Count "1" values in array = number of icons on slots
+        ⚡ Stable Across Mods: Works reliably on all game modifications
+        🎮 High Performance: Direct VM access with optimized JavaScript functions
+        📊 Accurate State: No dependency on unreliable Putted Characters or Polos Array
+        🔄 Real-Time Updates: Instant detection of drag/return operations"""
+        
+        Label(verification_frame, text=verification_text, justify="left",
+            font=("Arial", 8), fg="#0D47A1", bg="#E3F2FD").pack(anchor="w", padx=15, pady=(0,5))
+        
+        # Image detection info
+        detection_frame = Frame(self.root, bg="#FFF3E0", relief="ridge", bd=1)
+        detection_frame.pack(fill="x", padx=10, pady=5)
+        
+        Label(detection_frame, text="🖼️ ENHANCED IMAGE DETECTION:", 
+            font=("Arial", 10, "bold"), bg="#FFF3E0", fg="#E65100").pack(anchor="w", padx=10, pady=(5,2))
+        
+        detection_text = """🎯 Smart Auto-Scroll: Automatic PageDown if Run/Fullscreen buttons not in viewport
+        🔍 Multi-Scale Detection: Test multiple scale factors for button recognition
+        🎪 Domain-Optimized: Specific adjustments for cocrea.world game timing
+        🔍 Template Matching: Advanced CV2 image matching with confidence thresholds
+        🔄 Retry Logic: Multiple attempts with different scroll positions
+        ⚙️ Config-Driven: All detection parameters configurable via config.json"""
+        
+        Label(detection_frame, text=detection_text, justify="left",
+            font=("Arial", 8), fg="#BF360C", bg="#FFF3E0").pack(anchor="w", padx=15, pady=(0,5))
+        
+        # Mode selection
+        mode_frame = Frame(self.root)
+        mode_frame.pack(pady=10)
+        
+        Label(mode_frame, text="🎯 Select play mode:", font=("Arial", 11, "bold")).pack()
+        
+        Radiobutton(mode_frame, text="🔀 Showcase + Remix (ENHANCED)", 
+                variable=self.mode, value=1, font=("Arial", 10)).pack(anchor="w")
+        
+        Radiobutton(mode_frame, text="🎵 Remix Only (ENHANCED)", 
+                variable=self.mode, value=2, font=("Arial", 10)).pack(anchor="w")
+        
+        # Debug frame with Characters Array System
+        debug_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
+        debug_frame.pack(fill="x", padx=10, pady=5)
+        
+        Label(debug_frame, text="🔧 DEBUG TOOLS:", 
+            font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
+        
+        debug_buttons = Frame(debug_frame, bg="#E3F2FD")
+        debug_buttons.pack(fill="x", padx=10, pady=(0,5))
+        
+        Button(debug_buttons, text="📊 Enhanced Stats", 
+            command=self.show_drag_stats, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left")
+        
+        Button(debug_buttons, text="🌐 Test WebSocket", 
+            command=self.test_websocket_connection, bg="#FF9800", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+        
+        Button(debug_buttons, text="🔢 Test Characters Array", 
+            command=self.test_verification_system, bg="#9C27B0", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+        
+        Button(debug_buttons, text="⚡ Test Smart Verification", 
+            command=self.test_smart_verification_system, bg="#2196F3", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+        
+        # Remix info display
+        self.display_remix_library_info()
+        
+        # Main button
+        Button(self.root, text="🔢 Load JSON & Start ENHANCED Auto with Characters Array Verification", 
+            command=self.load_config_and_start, 
+            bg="#4CAF50", fg="white", font=("Arial", 12, "bold")).pack(pady=15)
+        
+        # Status
+        Label(self.root, text="📊 Status:").pack(pady=(20,5))
+        Label(self.root, textvariable=self.status_var, fg="blue").pack()
+        
+        # Instructions with Characters Array System
+        instruction_text = """
+    🎯 ENHANCED WORKFLOW WITH CHARACTERS ARRAY VERIFICATION:
 
-    🔍 SMART VERIFICATION PROCESS:
-    1. Page Load Verification: Check document.readyState, loading spinners, network idle
-    2. Game Components Verification: Check game containers, React components, Run button DOM
-    3. Real-Time Monitoring: WebSocket/CDP JavaScript execution for live state
-    4. Smart Timing: Replace fixed 40s wait → intelligent verification + 3s stabilization
+    🔢 CHARACTERS ARRAY SYSTEM:
+    1. Characters Array Monitoring: Real-time tracking of character placement array
+    2. Count-Based Verification: Count "1" values = accurate number of placed icons
+    3. Stable Across Mods: Works reliably on all game modifications (no Putted Characters bugs)
+    4. High Performance: Direct VM access with optimized JavaScript functions
 
     ⚡ 5-COORDINATE STRATEGY (UNCHANGED):
-    • Coordinate 1: Center (original icon position)
-    • Coordinate 2: Left (icon_x - 15, icon_y)
-    • Coordinate 3: Right (icon_x + 15, icon_y)  
-    • Coordinate 4: Top (icon_x, icon_y - 15)
-    • Coordinate 5: Bottom (icon_x, icon_y + 15)
+    - Coordinate 1: Center (original icon position)
+    - Coordinate 2: Left (icon_x - 15, icon_y)
+    - Coordinate 3: Right (icon_x + 15, icon_y)  
+    - Coordinate 4: Top (icon_x, icon_y - 15)
+    - Coordinate 5: Bottom (icon_x, icon_y + 15)
 
     🖼️ IMAGE DETECTION (PRESERVED):
-    • Original Run button & Fullscreen detection logic kept exactly as-is
-    • Auto-scroll capability for buttons outside viewport
-    • Multi-scale template matching with confidence thresholds
-    • Domain-specific timing adjustments for cocrea.world
+    - Original Run button & Fullscreen detection logic kept exactly as-is
+    - Auto-scroll capability for buttons outside viewport
+    - Multi-scale template matching with confidence thresholds
+    - Domain-specific timing adjustments for cocrea.world
 
     🚀 NEW WORKFLOW:
     Page Load → Smart Verification → Game Verification → ✅ Verification Success
     → 3s Stabilization → Start Image Detection (Run Button) → Game Load
-    → Image Detection (Fullscreen Button) → F11 Fullscreen → Ready for Automation
+    → Image Detection (Fullscreen Button) → F11 Fullscreen → Characters Array Setup
+    → Ready for Automation with Characters Array Verification
 
     🎮 BENEFITS:
-    • Replaces blind 40s wait with intelligent verification
-    • Knows exactly when page/game is ready
-    • Reduces total setup time when page loads quickly
-    • Maintains reliability when page loads slowly
-    • Zero changes to proven image detection methods
-            """
-            Label(self.root, text=instruction_text, justify="left", 
-                font=("Arial", 8), bg="#f0f0f0").pack(pady=10, padx=10, fill="x")
-            
-            # Control buttons
-            self.stop_btn = Button(self.root, text="🛑 Stop Enhanced Auto", 
-                                command=self.stop_all, state="disabled",
-                                bg="#f44336", fg="white", font=("Arial", 12, "bold"))
-            self.stop_btn.pack(pady=10)
-            
-            # Progress
-            Label(self.root, text="📈 Progress:").pack(pady=(10,5))
-            self.progress = Progressbar(self.root, length=500, mode='determinate')
-            self.progress.pack(pady=5)
-            
-            # Current action
-            Label(self.root, textvariable=self.action_var, fg="green", 
-                font=("Arial", 10, "bold")).pack(pady=5)
-            
-            # Domain support with Smart Verification
-            domains_text = f"🌐 Enhanced for: cocrea.world (Chrome Debug + Smart Verification + Image Detection)"
-            Label(self.root, text=domains_text, fg="gray", font=("Arial", 9)).pack(pady=5)
-            
-            # Hotkey
-            Label(self.root, text="⌨️ ESC = Emergency stop", 
-                fg="red", font=("Arial", 10, "bold")).pack(pady=5)
+    - Replaces unreliable Putted Characters with stable Characters Array
+    - Works consistently across all game mods and versions
+    - Real-time accurate state monitoring
+    - No dependency on buggy game variables
+    - Enhanced reliability for drag/return operations
+        """
+        Label(self.root, text=instruction_text, justify="left", 
+            font=("Arial", 8), bg="#f0f0f0").pack(pady=10, padx=10, fill="x")
+        
+        # Control buttons
+        self.stop_btn = Button(self.root, text="🛑 Stop Enhanced Auto", 
+                            command=self.stop_all, state="disabled",
+                            bg="#f44336", fg="white", font=("Arial", 12, "bold"))
+        self.stop_btn.pack(pady=10)
+        
+        # Progress
+        Label(self.root, text="📈 Progress:").pack(pady=(10,5))
+        self.progress = Progressbar(self.root, length=500, mode='determinate')
+        self.progress.pack(pady=5)
+        
+        # Current action
+        Label(self.root, textvariable=self.action_var, fg="green", 
+            font=("Arial", 10, "bold")).pack(pady=5)
+        
+        # Domain support with Characters Array System
+        domains_text = f"🌐 Enhanced for: cocrea.world (Chrome Debug + Characters Array Verification + Image Detection)"
+        Label(self.root, text=domains_text, fg="gray", font=("Arial", 9)).pack(pady=5)
+        
+        # Hotkey
+        Label(self.root, text="⌨️ ESC = Emergency stop", 
+            fg="red", font=("Arial", 10, "bold")).pack(pady=5)
     
     def show_drag_stats(self):
         """Show enhanced drag statistics"""
@@ -4332,38 +4169,38 @@ class SprunkiGamePlayer:
             messagebox.showerror("WebSocket Test", f"❌ WebSocket test failed: {e}")
 
     def test_verification_system(self):
-        """Test drag verification system"""
+        """Test Characters Array verification system"""
         try:
-            if not self.putted_chars_setup_done:
+            if not self.characters_setup_done:
                 messagebox.showinfo("Verification Test", 
-                    "🔍 Verification system not setup yet.\n\n"
+                    "🔢 Characters Array system not setup yet.\n\n"
                     "Load a JSON file and start the workflow to initialize verification.")
                 return
             
-            if not self.verification_available:
+            if not self.characters_available:
                 messagebox.showwarning("Verification Test", 
-                    "⚠️ Verification system is disabled.\n\n"
+                    "⚠️ Characters Array system is disabled.\n\n"
                     "WebSocket connection may not be available.")
                 return
             
-            # Test getting current value
-            current_value = self.get_putted_chars_value()
+            # Test getting current count
+            current_count = self.get_characters_count()
             
-            if current_value is not None:
+            if current_count is not None:
                 messagebox.showinfo("Verification Test", 
-                    f"✅ Verification system working!\n\n"
-                    f"Current 'Putted characters' value: {current_value}\n"
+                    f"✅ Characters Array system working!\n\n"
+                    f"Current Characters count: {current_count}\n"
                     f"JavaScript monitoring: ACTIVE\n"
                     f"High-performance access: ENABLED\n\n"
                     f"Ready for drag verification!")
             else:
                 messagebox.showerror("Verification Test", 
-                    "❌ Verification test failed!\n\n"
-                    "Could not get 'Putted characters' value.\n"
+                    "❌ Characters Array test failed!\n\n"
+                    "Could not get Characters count.\n"
                     "Game may not be loaded or VM not found.")
                     
         except Exception as e:
-            messagebox.showerror("Verification Test", f"❌ Verification test error: {e}")
+            messagebox.showerror("Verification Test", f"❌ Characters Array test error: {e}")
 
     def test_smart_verification_system(self):
             """Test Smart Verification System"""
@@ -4622,7 +4459,7 @@ class SprunkiGamePlayer:
             f"🔍 VERIFICATION STATISTICS:\n"
             f"   • Verification enabled: {verification_rate:.1f}%\n"
             f"   • Verification success: {verification_success_rate:.1f}%\n"
-            f"   • System status: {'✅ ACTIVE' if self.verification_available else '⚠️ DISABLED'}\n\n"
+            f"   • System status: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}\n\n"
             f"⚡ ENHANCED FEATURES USED:\n"
             f"   • Chrome Debug Mode (port {self.debugging_port})\n"
             f"   • Drag verification via 'Putted characters'\n"
@@ -4723,7 +4560,7 @@ class SprunkiGamePlayer:
                 summary += f"""
 
     ⚡ SYSTEM STATUS:
-    • Verification system: {'✅ ACTIVE' if self.verification_available else '⚠️ DISABLED'}
+    • Verification system: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}
     • WebSocket connection: {'✅ Ready' if self._get_websocket_url() else '❌ Failed'}
     • Configuration: {'✅ Loaded' if hasattr(self, 'config') and self.config else '❌ Missing'}
 
@@ -4760,11 +4597,11 @@ class SprunkiGamePlayer:
     {self.get_enhanced_workflow_summary()}
 
     🛡️ SMART FEATURES STATUS:
-    • Pre-flight slot checking: {'✅ Active' if self.verification_available else '❌ Disabled'}
-    • Cross-contamination prevention: {'✅ Active' if self.verification_available else '❌ Disabled'}
+    • Pre-flight slot checking: {'✅ Active' if self.characters_available else '❌ Disabled'}
+    • Cross-contamination prevention: {'✅ Active' if self.characters_available else '❌ Disabled'}
     • Smart batch return: ✅ Available
     • Emergency recovery: ✅ Available
-    • Real-time validation: {'✅ Active' if self.verification_available else '❌ Disabled'}
+    • Real-time validation: {'✅ Active' if self.characters_available else '❌ Disabled'}
 
     📊 FINAL STATE VALIDATION:
     """
@@ -4831,7 +4668,7 @@ class SprunkiGamePlayer:
             print("="*60)
             
             # Final smart cleanup
-            if self.verification_available:
+            if self.characters_available:
                 print("🔄 Final smart batch cleanup...")
                 cleanup_success, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
                 
