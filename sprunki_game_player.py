@@ -180,7 +180,16 @@ class SprunkiGamePlayer:
         pyautogui.PAUSE = 0.08
         pyautogui.DURATION = 0.2
 
-        # NEW: JavaScript for finding ALL Skip Intro buttons (Multi-Target Detection)
+        # Batch Verification Session Management
+        self.batch_verification_active = False
+        self.session_websocket = None
+        self.session_websocket_url = None
+        self.verification_functions_ready = False
+        self.last_health_check = 0
+        self.health_check_interval = 30  # Check every 30s
+        self.session_start_time = None
+
+        # JavaScript for finding ALL Skip Intro buttons (Multi-Target Detection)
         self.js_find_skip_intro = '''
         new Promise(async (resolve, reject) => {
             try {
@@ -1032,7 +1041,7 @@ class SprunkiGamePlayer:
             command['id'] = command_id
             ws.send(json.dumps(command))
             
-            max_wait_time = 30
+            max_wait_time = 15
             start_time = time.time()
             
             while time.time() - start_time < max_wait_time:
@@ -1281,10 +1290,417 @@ class SprunkiGamePlayer:
             self.putted_chars_available = False
             return False
 
+    def start_batch_verification_session(self):
+        """
+        🚀 NEW: Start batch verification session with persistent WebSocket (FIXED LOGIC)
+        """
+        try:
+            print("🚀 STARTING BATCH VERIFICATION SESSION...")
+            print("="*60)
+            
+            # Get WebSocket URL
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                print("❌ Cannot get WebSocket URL for batch session")
+                return False
+            
+            # Create persistent WebSocket connection
+            self.session_websocket = websocket.create_connection(ws_url, timeout=10)
+            # 🔧 NEW: Set default timeout for operations
+            self.session_websocket.settimeout(5)  # 5 second default timeout
+            self.session_websocket_url = ws_url
+            self.session_start_time = time.time()
+            
+            # 🔧 FIX: Set active BEFORE testing to allow _send_batch_cdp_command to work
+            self.batch_verification_active = True
+            
+            print(f"✅ Batch WebSocket connected: {ws_url}")
+            
+            # Test connection with active flag set
+            print("🔍 Testing batch WebSocket connection...")
+            test_response = self._send_batch_cdp_command({
+                "method": "Runtime.evaluate",
+                "params": {"expression": "window.location.href", "returnByValue": True}
+            })
+            
+            if not test_response:
+                print("❌ Batch WebSocket test failed - trying simple test...")
+                
+                # Try simpler test
+                simple_test = self._send_batch_cdp_command({
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": "true", "returnByValue": True}
+                })
+                
+                if not simple_test:
+                    print("❌ Even simple batch test failed")
+                    self.stop_batch_verification_session()
+                    return False
+                else:
+                    print("✅ Simple batch test passed, continuing...")
+            else:
+                print("✅ Batch WebSocket test successful")
+            
+            # Setup verification functions
+            success = self._setup_batch_verification_functions()
+            if success:
+                # Keep batch_verification_active = True (already set above)
+                print("🎯 BATCH VERIFICATION SESSION ACTIVE!")
+                print(f"   📊 Performance: WebSocket reuse enabled")
+                print(f"   ⚡ Speed: Pre-warmed verification functions")
+                print(f"   🛡️ Reliability: Connection health monitoring")
+                print("="*60)
+                return True
+            else:
+                print("❌ Failed to setup batch verification functions")
+                self.stop_batch_verification_session()
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error starting batch verification session: {e}")
+            self.stop_batch_verification_session()
+            return False
+
+    def stop_batch_verification_session(self):
+        """
+        🛑 NEW: Stop batch verification session and cleanup
+        """
+        try:
+            print("\n🛑 STOPPING BATCH VERIFICATION SESSION...")
+            
+            if self.session_websocket:
+                try:
+                    self.session_websocket.close()
+                    print("   ✅ Batch WebSocket closed")
+                except:
+                    print("   ⚠️ WebSocket close warning (already closed)")
+            
+            # Reset session state
+            self.batch_verification_active = False
+            self.session_websocket = None
+            self.session_websocket_url = None
+            self.verification_functions_ready = False
+            self.session_start_time = None
+            
+            print("✅ Batch verification session stopped")
+            
+        except Exception as e:
+            print(f"⚠️ Error stopping batch session: {e}")
+            # Force reset
+            self.batch_verification_active = False
+            self.session_websocket = None
+
+    def _setup_batch_verification_functions(self):
+        """
+        ⚡ NEW: Setup verification functions once for entire session
+        """
+        try:
+            print("⚡ Setting up batch verification functions...")
+            
+            # Enhanced JavaScript setup for batch operations
+            batch_setup_js = '''
+            (() => {
+                console.log("⚡ Setting up BATCH verification functions...");
+                
+                // VM Finder (same as before)
+                function findVMInWindow(win) {
+                    if (!win) return null;
+                    if (win.__vm?.runtime) return win.__vm;
+                    if (win.Scratch?.vm?.runtime) return win.Scratch.vm;
+                    if (win.vm?.runtime) return win.vm;
+                    
+                    function getReactKey(el){ return Object.keys(el).find(k => k.startsWith('__react')); }
+                    const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
+                    for (const selector of selectors) {
+                        const nodes = win.document?.querySelectorAll?.(selector) || [];
+                        for (const el of nodes) {
+                            const fiberKey = getReactKey(el);
+                            if (!fiberKey) continue;
+                            let fiber = el[fiberKey];
+                            let hop = 0;
+                            while (fiber && hop++ < 200) {
+                                const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
+                                if (props?.vm?.runtime) return props.vm;
+                                fiber = fiber.return;
+                            }
+                        }
+                    }
+                    return null;
+                }
+                
+                const vm = findVMInWindow(window);
+                if (!vm) {
+                    console.error("❌ VM not found for batch verification");
+                    return { success: false, reason: "vm_not_found" };
+                }
+                
+                const runtime = vm.runtime || vm;
+                const stage = (runtime.targets || []).find(t => t.isStage) || (runtime.targets || [])[0];
+                if (!stage) {
+                    console.error("❌ Stage not found for batch verification");
+                    return { success: false, reason: "stage_not_found" };
+                }
+                
+                // Store VM and Stage globally for batch operations
+                window.__batch_vm = vm;
+                window.__batch_stage = stage;
+                
+                // Helper functions for batch operations
+                function getListByName(name) {
+                    for (const id in stage.variables) {
+                        const v = stage.variables[id];
+                        if (v?.name === name && Array.isArray(v.value)) return v;
+                    }
+                    if (stage.lists) {
+                        for (const id in stage.lists) {
+                            const L = stage.lists[id];
+                            if (L?.name === name) return L;
+                        }
+                    }
+                    return null;
+                }
+                
+                function getVarByName(name) {
+                    for (const id in stage.variables) {
+                        const v = stage.variables[id];
+                        if (v?.name === name) return v;
+                    }
+                    return null;
+                }
+                
+                // BATCH FUNCTION 1: Characters Array count
+                window.getBatchCharactersCount = () => {
+                    try {
+                        const entry = getListByName("Characters") || getVarByName("Characters");
+                        const raw = Array.isArray(entry?.value) ? entry.value.slice() : [];
+                        const normalized = raw.map(v => (v === 1 ? "1" : v === 0 ? "0" : String(v)));
+                        return normalized.filter(v => v === "1").length;
+                    } catch (e) {
+                        console.error("Error in getBatchCharactersCount:", e);
+                        return null;
+                    }
+                };
+                
+                // BATCH FUNCTION 2: Putted Characters count
+                const puttedVar = getVarByName("Putted characters");
+                if (puttedVar) {
+                    window.__batch_putted_var_id = puttedVar.id;
+                    
+                    window.getBatchPuttedChars = () => {
+                        try {
+                            return window.__batch_vm.runtime.getTargetForStage().variables[window.__batch_putted_var_id].value;
+                        } catch (e) {
+                            console.error("Error in getBatchPuttedChars:", e);
+                            return null;
+                        }
+                    };
+                }
+                
+                // BATCH FUNCTION 3: Dual state in single call (PERFORMANCE BOOST)
+                window.getBatchDualState = () => {
+                    try {
+                        const charactersCount = window.getBatchCharactersCount();
+                        const puttedCount = window.getBatchPuttedChars ? window.getBatchPuttedChars() : null;
+                        
+                        return {
+                            characters: charactersCount,
+                            putted: puttedCount,
+                            timestamp: Date.now()
+                        };
+                    } catch (e) {
+                        console.error("Error in getBatchDualState:", e);
+                        return null;
+                    }
+                };
+                
+                // Test all functions
+                const testChars = window.getBatchCharactersCount();
+                const testPutted = window.getBatchPuttedChars ? window.getBatchPuttedChars() : null;
+                const testDual = window.getBatchDualState();
+                
+                console.log("⚡ BATCH VERIFICATION FUNCTIONS READY:");
+                console.log("   Characters:", testChars);
+                console.log("   Putted:", testPutted); 
+                console.log("   Dual state:", testDual);
+                
+                return {
+                    success: true,
+                    characters_ready: testChars !== null,
+                    putted_ready: testPutted !== null,
+                    dual_ready: testDual !== null
+                };
+            })();
+            '''
+            
+            # Execute batch setup
+            response = self._send_batch_cdp_command({
+                "method": "Runtime.evaluate",
+                "params": {"expression": batch_setup_js, "returnByValue": True}
+            })
+            
+            if response and 'result' in response:
+                result = response.get('result', {}).get('result', {}).get('value', {})
+                
+                if result.get('success', False):
+                    self.verification_functions_ready = True
+                    chars_ready = result.get('characters_ready', False)
+                    putted_ready = result.get('putted_ready', False)
+                    dual_ready = result.get('dual_ready', False)
+                    
+                    print(f"   ✅ Batch functions setup successful!")
+                    print(f"   📊 Characters function: {'✅' if chars_ready else '❌'}")
+                    print(f"   📊 Putted function: {'✅' if putted_ready else '❌'}")  
+                    print(f"   📊 Dual state function: {'✅' if dual_ready else '❌'}")
+                    
+                    return True
+                else:
+                    reason = result.get('reason', 'unknown')
+                    print(f"   ❌ Batch setup failed: {reason}")
+                    return False
+            else:
+                print("   ❌ No response from batch setup")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error setting up batch functions: {e}")
+            return False
+
+    def _send_batch_cdp_command(self, command):
+        """
+        ⚡ NEW: Send CDP command using persistent batch WebSocket (DEBUG ENHANCED)
+        """
+        try:
+            if not self.session_websocket or not self.batch_verification_active:
+                print(f"   🔍 Batch command failed: WebSocket={bool(self.session_websocket)}, Active={self.batch_verification_active}")
+                return None
+            
+            command_id = random.randint(1, 1000000)
+            command['id'] = command_id
+            
+            print(f"   📤 Sending batch command: {command['method']}")
+            self.session_websocket.send(json.dumps(command))
+            
+            # Reduced timeout for batch operations (faster)
+            max_wait_time = 5  # Increased from 3s for debugging
+            start_time = time.time()
+            
+            while time.time() - start_time < max_wait_time:
+                try:
+                    # Set a short timeout for individual recv calls
+                    self.session_websocket.settimeout(0.5)
+                    response_str = self.session_websocket.recv()
+                    response_data = json.loads(response_str)
+                    
+                    print(f"   📥 Received response for command ID: {response_data.get('id', 'NO_ID')}")
+                    
+                    if response_data.get('id') == command_id:
+                        print(f"   ✅ Batch command successful: {command['method']}")
+                        return response_data
+                        
+                except websocket.WebSocketTimeoutError:
+                    # This is expected for short timeouts, continue waiting
+                    continue
+                except Exception as e:
+                    print(f"   ⚠️ WebSocket recv error: {e}")
+                    break
+            
+            print(f"   ⏰ Batch CDP command timeout after {max_wait_time}s")
+            return None
+            
+        except Exception as e:
+            print(f"   ❌ Batch CDP command error: {e}")
+            # Mark session as failed for health check
+            self.batch_verification_active = False
+            return None
+
+    def check_batch_session_health(self):
+        """
+        🔍 NEW: Check batch session health and auto-reconnect if needed
+        """
+        try:
+            current_time = time.time()
+            
+            # Skip if health check not due
+            if current_time - self.last_health_check < self.health_check_interval:
+                return True
+            
+            self.last_health_check = current_time
+            
+            if not self.batch_verification_active or not self.session_websocket:
+                return False
+            
+            print("🔍 Batch session health check...")
+            
+            # Quick health test
+            test_response = self._send_batch_cdp_command({
+                "method": "Runtime.evaluate",
+                "params": {"expression": "Date.now()", "returnByValue": True}
+            })
+            
+            if test_response:
+                session_duration = current_time - (self.session_start_time or current_time)
+                print(f"   ✅ Batch session healthy (running {session_duration:.1f}s)")
+                return True
+            else:
+                print("   ❌ Batch session unhealthy - attempting reconnect...")
+                return self._attempt_batch_session_reconnect()
+                
+        except Exception as e:
+            print(f"⚠️ Health check error: {e}")
+            return False
+
+    def _attempt_batch_session_reconnect(self):
+        """
+        🔄 NEW: Attempt to reconnect batch session
+        """
+        try:
+            print("🔄 Attempting batch session reconnect...")
+            
+            # Stop current session
+            self.stop_batch_verification_session()
+            time.sleep(1)
+            
+            # Try to restart
+            if self.start_batch_verification_session():
+                print("✅ Batch session reconnected successfully")
+                return True
+            else:
+                print("❌ Batch session reconnect failed")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Reconnect error: {e}")
+            return False
+
     def get_characters_count(self):
         """
-        🔢 ĐẾM SỐ "1" TRONG CHARACTERS ARRAY = NEW PUTTED CHARACTERS
-        Thay thế hoàn toàn get_putted_chars_value()
+        📢 BATCH OPTIMIZED: Get Characters count via batch session or fallback
+        """
+        try:
+            # TRY BATCH FIRST (FAST PATH)
+            if self.batch_verification_active and self.verification_functions_ready:
+                if self.check_batch_session_health():
+                    response = self._send_batch_cdp_command({
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "window.getBatchCharactersCount()", "returnByValue": True}
+                    })
+                    
+                    if response and 'result' in response:
+                        count = response.get('result', {}).get('result', {}).get('value')
+                        if isinstance(count, (int, float)):
+                            return int(count)
+            
+            # FALLBACK TO INDIVIDUAL (SLOW PATH)
+            print("⚠️ Batch unavailable, using individual verification")
+            return self._get_characters_count_individual()
+            
+        except Exception as e:
+            print(f"❌ Error in batch characters count: {e}")
+            return self._get_characters_count_individual()
+
+    def _get_characters_count_individual(self):
+        """
+        📢 FALLBACK: Individual Characters count (original method)
         """
         try:
             if not self.characters_available:
@@ -1294,7 +1710,7 @@ class SprunkiGamePlayer:
             if not ws_url:
                 return None
             
-            ws = websocket.create_connection(ws_url, timeout=10)
+            ws = websocket.create_connection(ws_url, timeout=3)
             
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
@@ -1307,16 +1723,34 @@ class SprunkiGamePlayer:
                 count = response.get('result', {}).get('result', {}).get('value')
                 if isinstance(count, (int, float)):
                     return int(count)
-                else:
-                    print(f"⚠️ Unexpected Characters count type: {type(count)} = {count}")
-                    return None
-            else:
-                print("⚠️ No response when getting Characters count")
-                return None
-                
-        except Exception as e:
-            print(f"❌ Error getting Characters count: {e}")
+            
             return None
+            
+        except Exception as e:
+            print(f"❌ Error getting individual Characters count: {e}")
+            return None
+
+    def _execute_emergency_return_click(self, target_slot):
+        """
+        🚨 OPTIMIZED: Quick emergency return click without full verification cycle
+        Used when normal return seems to have failed
+        """
+        try:
+            center_x, center_y = target_slot['x'], target_slot['y']
+            
+            # Quick click without complex verification
+            pyautogui.moveTo(center_x, center_y, duration=0.1)
+            pyautogui.click(button='left')
+            
+            # Minimal wait for effect
+            time.sleep(0.2)
+            
+            print(f"   ⚡ Emergency click executed at ({center_x}, {center_y})")
+            return True
+            
+        except Exception as e:
+            print(f"   ❌ Emergency click failed: {e}")
+            return False
 
     def get_enabled_list_array(self):
         """
@@ -1392,8 +1826,33 @@ class SprunkiGamePlayer:
 
     def get_putted_chars_value(self):
         """
-        🔢 GET PUTTED CHARACTERS (backup method)
-        Restored from old system as backup for Characters Array
+        📢 BATCH OPTIMIZED: Get Putted Characters via batch session or fallback
+        """
+        try:
+            # TRY BATCH FIRST (FAST PATH)
+            if self.batch_verification_active and self.verification_functions_ready:
+                if self.check_batch_session_health():
+                    response = self._send_batch_cdp_command({
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "window.getBatchPuttedChars()", "returnByValue": True}
+                    })
+                    
+                    if response and 'result' in response:
+                        value = response.get('result', {}).get('result', {}).get('value')
+                        if isinstance(value, (int, float)):
+                            return int(value)
+            
+            # FALLBACK TO INDIVIDUAL (SLOW PATH)  
+            print("⚠️ Batch unavailable, using individual verification")
+            return self._get_putted_chars_individual()
+            
+        except Exception as e:
+            print(f"❌ Error in batch putted chars: {e}")
+            return self._get_putted_chars_individual()
+
+    def _get_putted_chars_individual(self):
+        """
+        📢 FALLBACK: Individual Putted Characters (original method)
         """
         try:
             if not self.putted_chars_available:
@@ -1403,7 +1862,7 @@ class SprunkiGamePlayer:
             if not ws_url:
                 return None
             
-            ws = websocket.create_connection(ws_url, timeout=10)
+            ws = websocket.create_connection(ws_url, timeout=3)
             
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
@@ -1420,18 +1879,49 @@ class SprunkiGamePlayer:
             return None
             
         except Exception as e:
-            print(f"❌ Error getting putted chars: {e}")
+            print(f"❌ Error getting individual putted chars: {e}")
             return None
+
+    def get_dual_counts_batch(self):
+        """
+        🚀 NEW: Get BOTH counts in single batch call (MAJOR PERFORMANCE BOOST)
+        """
+        try:
+            if self.batch_verification_active and self.verification_functions_ready:
+                if self.check_batch_session_health():
+                    response = self._send_batch_cdp_command({
+                        "method": "Runtime.evaluate", 
+                        "params": {"expression": "window.getBatchDualState()", "returnByValue": True}
+                    })
+                    
+                    if response and 'result' in response:
+                        result = response.get('result', {}).get('result', {}).get('value')
+                        if result:
+                            characters_count = result.get('characters')
+                            putted_count = result.get('putted')
+                            return characters_count, putted_count
+            
+            # Fallback to individual calls
+            return self.get_dual_counts_individual()
+            
+        except Exception as e:
+            print(f"❌ Error in batch dual counts: {e}")
+            return self.get_dual_counts_individual()
+
+    def get_dual_counts_individual(self):
+        """
+        🔄 FALLBACK: Individual dual counts (original method)
+        """
+        characters_count = self._get_characters_count_individual()
+        putted_count = self._get_putted_chars_individual()
+        return characters_count, putted_count
 
     def get_dual_counts(self):
         """
-        🔄 GET BOTH VALUES: Characters count + Putted characters
-        Returns: (characters_count, putted_count)
+        🔄 BATCH OPTIMIZED: Get BOTH VALUES using batch optimization
         """
-        characters_count = self.get_characters_count() if self.characters_available else None
-        putted_count = self.get_putted_chars_value() if self.putted_chars_available else None
-        
-        return characters_count, putted_count
+        # Try batch first for maximum performance
+        return self.get_dual_counts_batch()
 
     def get_comprehensive_slot_state(self):
         """
@@ -2514,7 +3004,7 @@ class SprunkiGamePlayer:
                 continue
             
             # Wait for game state to update - REDUCED TIMING
-            verification_wait = 0.6 if dual_verification_enabled else 0.2  # REDUCED from 1.0 and 0.3
+            verification_wait = 0.4 if dual_verification_enabled else 0.15  # REDUCED from 1.0 and 0.15
             print(f"⏳ Waiting {verification_wait}s for game state update (mouse at safe position)...")
             time.sleep(verification_wait)
             
@@ -2545,7 +3035,7 @@ class SprunkiGamePlayer:
                             time.sleep(0.5)  # REDUCED from 0.8
                         else:
                             print("ℹ️ Icon was not placed (no increase in DUAL system), trying next coordinate...")
-                            time.sleep(0.2)  # REDUCED from 0.3
+                            time.sleep(0.1)  # REDUCED from 0.3
             else:
                 # No verification available - assume success if drag executed
                 print(f"✅ ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
@@ -2867,6 +3357,15 @@ class SprunkiGamePlayer:
                 print("⚠️ DUAL verification setup failed, continuing with basic workflow")
             else:
                 print("✅ DUAL verification system ready!")
+
+            # Start batch verification session for performance
+            if progress_callback:
+                progress_callback("⚡ Starting batch verification session...")
+
+            if self.start_batch_verification_session():
+                print("🚀 Batch verification session active - PERFORMANCE MODE!")
+            else:
+                print("⚠️ Batch session failed, using individual verification")
 
             # Prepare game for playing
             self.prepare_game_for_playing()
@@ -3192,7 +3691,7 @@ class SprunkiGamePlayer:
             self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
             
             # Wait and verify with DUAL verification
-            verification_wait = 0.5 if dual_verification_enabled else 0.3  # REDUCED from 0.8
+            verification_wait = 0.3 if dual_verification_enabled else 0.2  # Further reduced
             time.sleep(verification_wait)
             
             if dual_verification_enabled:
@@ -3245,7 +3744,7 @@ class SprunkiGamePlayer:
                 self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method="single")
                 
                 # Wait and verify after entire phase
-                time.sleep(verification_wait + 0.2)  # Slightly longer for multi-coord
+                time.sleep(verification_wait + 0.1)  # Slightly longer for multi-coord
                 if dual_verification_enabled:
                     characters_after, putted_after = self.get_dual_counts()
                     
@@ -3482,37 +3981,32 @@ class SprunkiGamePlayer:
             if progress_callback:
                 progress_callback(f"↺ Smart returning {mode} icon {icon_index + 1}")
 
-            # Enhanced return with validation
+            # Enhanced return with streamlined validation
             return_success = self.corrected_return_icon(target_slot, use_cdp)
 
             if return_success:
-                # Post-return validation for single icon  
-                time.sleep(0.3)
-                validation_state = self.get_comprehensive_slot_state()
-
-                if validation_state and self.characters_available:
-                    characters_count = validation_state.get('characters_count', -1)
-                    
-                    if characters_count == 0:
-                        print(f"✅ Icon {icon_index + 1} return validated: Characters count = 0")
+                # STREAMLINED: Quick validation without extra delays
+                print(f"✅ Icon {icon_index + 1} returned successfully")
+                
+                # Optional: Quick state check without comprehensive validation
+                if self.characters_available:
+                    quick_count = self.get_characters_count()
+                    if quick_count == 0:
+                        print(f"   📊 Validation: Characters count = 0 (perfect)")
                     else:
-                        print(f"⚠️ Icon {icon_index + 1} return validation warning: Characters count = {characters_count}")
-                else:
-                    print(f"✅ Icon {icon_index + 1} returned (basic validation)")
+                        print(f"   ⚠️ Validation: Characters count = {quick_count} (may need cleanup)")
             else:
                 print(f"⚠️ Warning: Failed to return icon {icon_index}")
                 
-                # Emergency cleanup attempt for failed return
+                # STREAMLINED: Quick emergency cleanup only if needed
                 if self.characters_available:
-                    print(f"🚨 Emergency cleanup attempt for icon {icon_index}")
-                    emergency_success = self._emergency_slot_recovery(target_slot.get('index', -1), target_slot, use_cdp)
-                    if emergency_success:
-                        print(f"✅ Emergency cleanup successful for icon {icon_index}")
-                    else:
-                        print(f"💥 Emergency cleanup failed for icon {icon_index}")
+                    emergency_count = self.get_characters_count()
+                    if emergency_count > 0:
+                        print(f"🚨 Quick emergency cleanup attempt...")
+                        self._execute_emergency_return_click(target_slot)
 
-            # Brief stabilization before next icon
-            time.sleep(0.3)
+            # OPTIMIZED: Reduce stabilization delay
+            time.sleep(0.1)  # Reduced from 0.3s to 0.1s
             
             print(f"✅ COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
             print("="*60)
@@ -4747,7 +5241,12 @@ class SprunkiGamePlayer:
         """Stop all processes"""
         self.should_stop = True
         self.is_playing = False
-        
+
+        # 🚀 NEW: Stop batch verification session
+        if self.batch_verification_active:
+            self.stop_batch_verification_session()
+
+
         self.stop_btn.config(state="disabled")
         self.action_var.set("⏹️ ENHANCED Auto stopped")
         self.status_var.set("Stopped")
