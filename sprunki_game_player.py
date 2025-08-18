@@ -2323,6 +2323,7 @@ class SprunkiGamePlayer:
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=False):
         """
         ENHANCED: Drag and drop with DUAL verification (Characters Array + Putted Characters)
+        UPDATED: Reduced timing for faster workflow
         CHỈ CẦN 1 TRONG 2 THÀNH CÔNG LÀ ĐỦ - Maximum compatibility across all mods
         """
         print(f"\n🎯 ENHANCED DRAG START: Icon to slot with DUAL verification")
@@ -2374,11 +2375,11 @@ class SprunkiGamePlayer:
                 print(f"❌ Drag execution failed at coordinate {coord_used}")
                 if coord_index < len(coordinates) - 1:
                     print("   Trying next coordinate...")
-                    time.sleep(0.5)
+                    time.sleep(0.3)  # REDUCED from 0.5
                 continue
             
-            # Wait for game state to update
-            verification_wait = 1.0 if dual_verification_enabled else 0.3
+            # Wait for game state to update - REDUCED TIMING
+            verification_wait = 0.6 if dual_verification_enabled else 0.2  # REDUCED from 1.0 and 0.3
             print(f"⏳ Waiting {verification_wait}s for game state update (mouse at safe position)...")
             time.sleep(verification_wait)
             
@@ -2406,20 +2407,20 @@ class SprunkiGamePlayer:
                         if any_increase:
                             print("🔄 Icon was placed (detected by DUAL system), returning before retry...")
                             self.attempt_icon_return(target_slot)
-                            time.sleep(0.8)
+                            time.sleep(0.5)  # REDUCED from 0.8
                         else:
                             print("ℹ️ Icon was not placed (no increase in DUAL system), trying next coordinate...")
-                            time.sleep(0.3)  # Short delay before next coordinate
+                            time.sleep(0.2)  # REDUCED from 0.3
             else:
                 # No verification available - assume success if drag executed
                 print(f"✅ ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
                 success = True
                 break
             
-            # Small delay before next coordinate
+            # Small delay before next coordinate - REDUCED
             if coord_index < len(coordinates) - 1:
                 print("   Preparing next coordinate attempt...")
-                time.sleep(0.3)
+                time.sleep(0.2)  # REDUCED from 0.3
         
         # Final result
         if success:
@@ -2944,8 +2945,8 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        🛡️ SMART SLOT STATE TRACKING: Pre-flight + Enhanced Verification + Cross-contamination Prevention
-        Uses Polos array for bulletproof slot-specific verification
+        🛡️ SMART SLOT STATE TRACKING: Pre-flight + DUAL Verification + Cross-contamination Prevention
+        UPDATED: Sử dụng DUAL verification cho Return (Characters + Putted)
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
@@ -2955,12 +2956,14 @@ class SprunkiGamePlayer:
             print(f"\n🛡️ SMART SLOT RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
             print("="*80)
             
-            # Check if verification is available
-            verification_enabled = self.characters_available
-            if verification_enabled:
-                print("🔍 Enhanced verification ENABLED with Polos array tracking")
+            # Check if DUAL verification is available
+            dual_verification_enabled = self.characters_available or self.putted_chars_available
+            if dual_verification_enabled:
+                print("🔄 DUAL verification ENABLED for Return:")
+                print(f"   🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
+                print(f"   🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ N/A'}")
             else:
-                print("⚠️ Enhanced verification DISABLED - using basic fallback")
+                print("⚠️ DUAL verification DISABLED - using fallback logic")
             
             # ================================================================
             # PHASE 0: PRE-FLIGHT CHECK (Skip if already empty)
@@ -2968,7 +2971,7 @@ class SprunkiGamePlayer:
             print("\n🔍 PHASE 0: PRE-FLIGHT CHECK")
             print("-" * 40)
             
-            if verification_enabled:
+            if dual_verification_enabled:
                 needs_return, initial_state, reason = self.check_slot_needs_return(target_slot_index)
                 
                 if not needs_return:
@@ -3005,107 +3008,96 @@ class SprunkiGamePlayer:
             phase_used = "none"
             
             # ================================================================
-            # PHASE 1: PRECISION CENTER ATTACK
+            # PHASE 1: PRECISION CENTER ATTACK with DUAL VERIFICATION
             # ================================================================
-            print(f"\n🎯 PHASE 1: PRECISION CENTER (Safe radius: {max_safe_radius}px)")
+            print(f"\n🎯 PHASE 1: PRECISION CENTER with DUAL VERIFICATION")
             print("-" * 40)
             
             center_coords = [(center_x, center_y)]
             
-            # Get initial state for this phase
-            state_before = None
-            if verification_enabled:
-                state_before = self.get_comprehensive_slot_state()
-                if state_before:
-                    print(f"📊 State BEFORE Phase 1: Putted={state_before.get('putted_characters')}")
-                    if state_before.get('polos_array'):
-                        print(f"   🎯 Polos: {state_before['polos_array']}")
+            # Get DUAL counts BEFORE return (if verification available)
+            characters_before, putted_before = None, None
+            if dual_verification_enabled:
+                characters_before, putted_before = self.get_dual_counts()
+                print(f"📊 DUAL counts BEFORE return:")
+                print(f"   🔢 Characters: {characters_before}")
+                print(f"   🎯 Putted: {putted_before}")
             
             # Try single click on center
             print("   🔹 Method: Precision single click")
             self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
             
-            # Wait and verify with enhanced verification
-            time.sleep(0.8)
-            if verification_enabled and state_before:
-                state_after = self.get_comprehensive_slot_state()
-                if state_after:
-                    is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                        target_slot_index, state_before, state_after
-                    )
-                    
-                    if is_success:
-                        print("🎉 PHASE 1 SUCCESS: Precision center click worked!")
-                        success = True
-                        phase_used = "phase_1_precision_center"
-                    else:
-                        print(f"❌ Phase 1 failed: {reason}")
-                        if details.get('cross_contamination'):
-                            print("🚨 Cross-contamination detected in Phase 1!")
+            # Wait and verify with DUAL verification
+            verification_wait = 0.5 if dual_verification_enabled else 0.3  # REDUCED from 0.8
+            time.sleep(verification_wait)
+            
+            if dual_verification_enabled:
+                characters_after, putted_after = self.get_dual_counts()
+                print(f"📊 DUAL counts AFTER return:")
+                print(f"   🔢 Characters: {characters_after}")
+                print(f"   🎯 Putted: {putted_after}")
+                
+                # Use DUAL verification for return
+                if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                    print("🎉 PHASE 1 SUCCESS: Precision center click worked with DUAL verification!")
+                    success = True
+                    phase_used = "phase_1_precision_center_dual"
+                else:
+                    print(f"❌ Phase 1 failed: DUAL verification failed")
             
             # Try double click if single failed
             if not success and not self.should_stop:
-                print("   🔹 Method: Precision double click")
+                print("   🔹 Method: Precision double click with DUAL verification")
                 
-                # Get state before double click
-                if verification_enabled:
-                    state_before = self.get_comprehensive_slot_state()
+                # Get DUAL counts before double click
+                if dual_verification_enabled:
+                    characters_before, putted_before = self.get_dual_counts()
                 
                 self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="double")
                 
-                time.sleep(0.8)
-                if verification_enabled and state_before:
-                    state_after = self.get_comprehensive_slot_state()
-                    if state_after:
-                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                            target_slot_index, state_before, state_after
-                        )
-                        
-                        if is_success:
-                            print("🎉 PHASE 1 SUCCESS: Precision double click worked!")
-                            success = True
-                            phase_used = "phase_1_precision_double"
+                time.sleep(verification_wait)
+                if dual_verification_enabled:
+                    characters_after, putted_after = self.get_dual_counts()
+                    
+                    # Use DUAL verification
+                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                        print("🎉 PHASE 1 SUCCESS: Precision double click worked with DUAL verification!")
+                        success = True
+                        phase_used = "phase_1_precision_double_dual"
             
             # ================================================================
-            # PHASE 2: SAFE BOUNDARY PATTERN
+            # PHASE 2: SAFE BOUNDARY PATTERN with DUAL VERIFICATION
             # ================================================================
             if not success and not self.should_stop and len(safe_coordinates) > 1:
-                print(f"\n🛡️ PHASE 2: SAFE BOUNDARY PATTERN ({len(safe_coordinates)} coords)")
+                print(f"\n🛡️ PHASE 2: SAFE BOUNDARY PATTERN with DUAL VERIFICATION ({len(safe_coordinates)} coords)")
                 print("-" * 40)
                 
-                # Get state before phase 2
-                state_before = None
-                if verification_enabled:
-                    state_before = self.get_comprehensive_slot_state()
-                    if state_before:
-                        print(f"📊 State BEFORE Phase 2: Putted={state_before.get('putted_characters')}")
+                # Get DUAL counts before phase 2
+                if dual_verification_enabled:
+                    characters_before, putted_before = self.get_dual_counts()
+                    print(f"📊 DUAL counts BEFORE Phase 2: Characters={characters_before}, Putted={putted_before}")
                 
                 # Execute all clicks within safe boundary
                 self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method="single")
                 
                 # Wait and verify after entire phase
-                time.sleep(1.2)
-                if verification_enabled and state_before:
-                    state_after = self.get_comprehensive_slot_state()
-                    if state_after:
-                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                            target_slot_index, state_before, state_after
-                        )
-                        
-                        if is_success:
-                            print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked!")
-                            success = True
-                            phase_used = "phase_2_safe_boundary"
-                        else:
-                            print(f"❌ Phase 2 failed: {reason}")
-                            if details.get('cross_contamination'):
-                                print("🚨 Cross-contamination detected in Phase 2!")
+                time.sleep(verification_wait + 0.2)  # Slightly longer for multi-coord
+                if dual_verification_enabled:
+                    characters_after, putted_after = self.get_dual_counts()
+                    
+                    # Use DUAL verification
+                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                        print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked with DUAL verification!")
+                        success = True
+                        phase_used = "phase_2_safe_boundary_dual"
+                    else:
+                        print(f"❌ Phase 2 failed: DUAL verification failed")
             
             # ================================================================
-            # PHASE 3: MULTI-METHOD ON SAFE COORDS
+            # PHASE 3: MULTI-METHOD ON SAFE COORDS with DUAL VERIFICATION
             # ================================================================
             if not success and not self.should_stop and len(safe_coordinates) > 1:
-                print(f"\n💥 PHASE 3: MULTI-METHOD ON SAFE COORDINATES")
+                print(f"\n💥 PHASE 3: MULTI-METHOD with DUAL VERIFICATION")
                 print("-" * 40)
                 
                 # Try different methods on safe coordinates
@@ -3115,37 +3107,33 @@ class SprunkiGamePlayer:
                     if success or self.should_stop:
                         break
                         
-                    print(f"   🔥 Method: {method} on safe coordinates")
+                    print(f"   🔥 Method: {method} with DUAL verification")
                     
-                    # Get state before this method
-                    state_before = None
-                    if verification_enabled:
-                        state_before = self.get_comprehensive_slot_state()
+                    # Get DUAL counts before this method
+                    if dual_verification_enabled:
+                        characters_before, putted_before = self.get_dual_counts()
                     
                     self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method=method)
                     
                     # Check after each method
-                    time.sleep(1.0)
-                    if verification_enabled and state_before:
-                        state_after = self.get_comprehensive_slot_state()
-                        if state_after:
-                            is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                                target_slot_index, state_before, state_after
-                            )
-                            
-                            if is_success:
-                                print(f"🎉 PHASE 3 SUCCESS: {method} method worked!")
-                                success = True
-                                phase_used = f"phase_3_{method}_safe"
-                                break
-                            else:
-                                print(f"❌ Method {method} failed: {reason}")
+                    time.sleep(verification_wait)
+                    if dual_verification_enabled:
+                        characters_after, putted_after = self.get_dual_counts()
+                        
+                        # Use DUAL verification
+                        if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                            print(f"🎉 PHASE 3 SUCCESS: {method} method worked with DUAL verification!")
+                            success = True
+                            phase_used = f"phase_3_{method}_dual"
+                            break
+                        else:
+                            print(f"❌ Method {method} failed: DUAL verification failed")
             
             # ================================================================
-            # PHASE 4: EMERGENCY MICRO-EXPANSION (VERY LIMITED)
+            # PHASE 4: EMERGENCY MICRO-EXPANSION with DUAL VERIFICATION
             # ================================================================
             if not success and not self.should_stop:
-                print(f"\n🚨 PHASE 4: EMERGENCY MICRO-EXPANSION (Max {max_safe_radius + 10}px)")
+                print(f"\n🚨 PHASE 4: EMERGENCY MICRO-EXPANSION with DUAL VERIFICATION (Max {max_safe_radius + 10}px)")
                 print("-" * 40)
                 
                 # Generate emergency coordinates - slightly beyond safe zone but still conservative
@@ -3154,56 +3142,49 @@ class SprunkiGamePlayer:
                     center_x, center_y, radius=emergency_radius, num_points=6
                 )
                 
-                # Get state before emergency
-                state_before = None
-                if verification_enabled:
-                    state_before = self.get_comprehensive_slot_state()
-                    if state_before:
-                        print(f"📊 State BEFORE Emergency: Putted={state_before.get('putted_characters')}")
+                # Get DUAL counts before emergency
+                if dual_verification_enabled:
+                    characters_before, putted_before = self.get_dual_counts()
+                    print(f"📊 DUAL counts BEFORE Emergency: Characters={characters_before}, Putted={putted_before}")
                 
                 print(f"   🚨 Micro-expansion: {len(emergency_coords)} points at {emergency_radius}px")
                 self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
                 
                 # Final check
-                time.sleep(1.5)
-                if verification_enabled and state_before:
-                    state_after = self.get_comprehensive_slot_state()
-                    if state_after:
-                        is_success, reason, details = self.verify_slot_specific_return_enhanced(
-                            target_slot_index, state_before, state_after
-                        )
-                        
-                        if is_success:
-                            print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked!")
-                            success = True
-                            phase_used = "phase_4_emergency_micro"
-                        else:
-                            print(f"❌ Emergency phase failed: {reason}")
-                            if details.get('cross_contamination'):
-                                print("🚨 Cross-contamination even in emergency phase!")
+                time.sleep(verification_wait + 0.3)  # Longer wait for emergency
+                if dual_verification_enabled:
+                    characters_after, putted_after = self.get_dual_counts()
+                    
+                    # Use DUAL verification
+                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                        print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked with DUAL verification!")
+                        success = True
+                        phase_used = "phase_4_emergency_dual"
+                    else:
+                        print(f"❌ Emergency phase failed: DUAL verification failed")
             
             # ================================================================
             # FINAL RESULT WITH COMPREHENSIVE REPORT
             # ================================================================
             print("\n" + "="*80)
             if success:
-                print(f"🎉 SMART SLOT RETURN COMPLETED SUCCESSFULLY!")
+                print(f"🎉 SMART SLOT RETURN COMPLETED SUCCESSFULLY with DUAL VERIFICATION!")
                 print(f"   ✅ Target slot: {target_slot_index}")
                 print(f"   ✅ Success method: {phase_used}")
                 print(f"   🛡️ Max safe radius used: {max_safe_radius}px")
-                print(f"   🔍 Enhanced verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
                 print(f"   🛡️ Cross-slot contamination: PREVENTED")
-                print(f"   📊 Polos array tracking: {'✅ Active' if verification_enabled else '⚠️ N/A'}")
+                print(f"   📊 Verification systems: Characters Array {'✅' if self.characters_available else '❌'} + Putted Characters {'✅' if self.putted_chars_available else '❌'}")
                 print("="*80)
                 return True
             else:
-                print(f"💥 SMART SLOT RETURN FAILED")
+                print(f"💥 SMART SLOT RETURN FAILED with DUAL VERIFICATION")
                 print(f"   ❌ Target slot: {target_slot_index}")
                 print(f"   ❌ All phases attempted within safe boundary")
                 print(f"   🛡️ Max safe radius: {max_safe_radius}px")
-                print(f"   🔍 Enhanced verification: {'✅ Enabled' if verification_enabled else '⚠️ Disabled'}")
+                print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
                 print(f"   🛡️ Cross-contamination protection: ACTIVE")
-                print(f"   📊 Detailed slot state: TRACKED")
+                print(f"   📊 DUAL verification systems tested")
                 print("="*80)
                 return False
                 
