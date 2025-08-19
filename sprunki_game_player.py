@@ -892,8 +892,9 @@ class SprunkiGamePlayer:
                         chrome_exe = path
                         break
                         
-                if not chrome_exe: 
-                    messagebox.showerror("Error", "Google Chrome not found.")
+                if not chrome_exe:
+                    print("❌ CRITICAL ERROR: Google Chrome not found")
+                    print("   💡 Please install Google Chrome or check chrome_paths in config.json")
                     return False
                 
                 # Build Chrome command with debug mode
@@ -928,8 +929,9 @@ class SprunkiGamePlayer:
                         break
                     time.sleep(1)
                     
-                if not game_window: 
-                    messagebox.showerror("Setup Error", "Could not find the game window.")
+                if not game_window:
+                    print("❌ CRITICAL ERROR: Could not find the game window")
+                    print("   💡 Chrome may have failed to start or game page didn't load")
                     return False
                     
                 print(f"🎯 Found game window: '{game_window.title}'. Activating...")
@@ -1011,7 +1013,8 @@ class SprunkiGamePlayer:
                         if attempt < max_retries:
                             print("   -> Preparing for next attempt...")
                         else:
-                            messagebox.showerror("Setup Error", f"Could not find 'Run' button after {max_retries} attempts.")
+                            print(f"❌ CRITICAL ERROR: Could not find 'Run' button after {max_retries} attempts")
+                            print("   💡 Game may not have loaded properly or button detection failed")
                             return False
                             
                 if not run_button_clicked: 
@@ -2292,40 +2295,35 @@ class SprunkiGamePlayer:
             print(f"❌ Visualization error: {e}")
 
     def show_carpet_grid_info(self):
-        """Ultra simplified carpet bombing info"""
+        """Ultra simplified carpet bombing info - print only"""
         try:
-            config_info = f"""🎯 ULTRA SIMPLIFIED CARPET BOMBING:
-
-    📊 STRATEGY: Sequential slot-by-slot progression
-    🎯 EXECUTION: Process slots 0→1→2→...→last sequentially
-    📈 PROGRESSION: 2→3→4→5→6→7... coordinates per slot
-
-    📍 COORDINATE STRATEGY PER SLOT:
-    - Set 1: 2 coords = Center + Horizontal offset
-    - Set 2: 3 coords = Center + Horizontal + Vertical
-    - Set 3: 4 coords = Center + H + V + Diagonal
-    - Set 4: 5 coords = Previous + More diagonals
-    - Set 5+: 6+ coords = Previous + Random scatter
-
-    ⏱️ TIMING:
-    - Inter-click: {self.carpet_bombing_config['inter_click_delay']}s (within slot)
-    - Inter-slot: {self.carpet_bombing_config['inter_slot_delay']}s (between slots)  
-    - Inter-set: {self.carpet_bombing_config['inter_set_delay']}s (between sets)
-    - Max sets: {self.carpet_bombing_config['max_sets']}
-
-    🔄 TERMINATION: Continue until Characters count = 0
-
-    ✅ SIMPLIFIED FEATURES:
-    - No edge detection
-    - No complex grid calculation
-    - No boundary sweeps
-    - Pure sequential slot processing
-    - Progressive coordinate increase"""
-            
-            messagebox.showinfo("Ultra Simplified Carpet Bombing", config_info)
+            print("\n🎯 ULTRA SIMPLIFIED CARPET BOMBING INFO:")
+            print("="*60)
+            print("📊 STRATEGY: Sequential slot-by-slot progression")
+            print("🎯 EXECUTION: Process slots 0→1→2→...→last sequentially")
+            print("📈 PROGRESSION: 2→3→4→5→6→7... coordinates per slot")
+            print("\n📍 COORDINATE STRATEGY PER SLOT:")
+            print("   • Set 1: 2 coords = Center + Horizontal offset")
+            print("   • Set 2: 3 coords = Center + Horizontal + Vertical")
+            print("   • Set 3: 4 coords = Center + H + V + Diagonal")
+            print("   • Set 4: 5 coords = Previous + More diagonals")
+            print("   • Set 5+: 6+ coords = Previous + Random scatter")
+            print(f"\n⏱️ TIMING:")
+            print(f"   • Inter-click: {self.carpet_bombing_config['inter_click_delay']}s (within slot)")
+            print(f"   • Inter-slot: {self.carpet_bombing_config['inter_slot_delay']}s (between slots)")
+            print(f"   • Inter-set: {self.carpet_bombing_config['inter_set_delay']}s (between sets)")
+            print(f"   • Max sets: {self.carpet_bombing_config['max_sets']}")
+            print("\n🔄 TERMINATION: Continue until Characters count = 0")
+            print("\n✅ SIMPLIFIED FEATURES:")
+            print("   • No edge detection")
+            print("   • No complex grid calculation")
+            print("   • No boundary sweeps")
+            print("   • Pure sequential slot processing")
+            print("   • Progressive coordinate increase")
+            print("="*60)
             
         except Exception as e:
-            messagebox.showerror("Config Error", f"Error: {e}")
+            print(f"❌ Config info error: {e}")
 
     def execute_carpet_bombing_waves(self, grid_points, target_description="slots", use_cdp=False):
         """
@@ -4397,8 +4395,8 @@ class SprunkiGamePlayer:
         """
         try:
             if not self.config:
-                print("❌ No config loaded")
-                messagebox.showerror("Error", "No configuration file loaded.")
+                print("❌ CRITICAL ERROR: No config loaded - Cannot continue setup")
+                print("   💡 Please load a JSON configuration file first")
                 return False
 
             # Setup browser using Chrome debug mode
@@ -5983,7 +5981,11 @@ class SprunkiGamePlayer:
     def show_drag_stats(self):
         """Show enhanced drag statistics"""
         stats = self.get_drag_statistics()
-        messagebox.showinfo("Enhanced Drag Statistics", stats)
+        print("\n" + "="*60)
+        print("📊 ENHANCED DRAG STATISTICS:")
+        print("="*60)
+        print(stats)
+        print("="*60)
 
     def test_websocket_connection(self):
         """Test WebSocket connection to Chrome debug"""
@@ -6001,13 +6003,13 @@ class SprunkiGamePlayer:
                 ws.close()
                 
                 if test_response:
-                    messagebox.showinfo("WebSocket Test", 
-                        f"✅ WebSocket connection successful!\n\n"
-                        f"Debug Port: {self.debugging_port}\n"
-                        f"Current URL: {test_response.get('result', {}).get('result', {}).get('value', 'Unknown')}\n"
-                        f"CDP commands working correctly.")
+                    print("✅ WEBSOCKET TEST SUCCESSFUL:")
+                    print(f"   Debug Port: {self.debugging_port}")
+                    print(f"   Current URL: {test_response.get('result', {}).get('result', {}).get('value', 'Unknown')}")
+                    print(f"   CDP commands working correctly")
                 else:
-                    messagebox.showwarning("WebSocket Test", 
+                    print("⚠️ WEBSOCKET TEST WARNING:")
+                    print("   WebSocket connected but CDP commands failed")
                         "⚠️ WebSocket connected but CDP commands failed")
             else:
                 messagebox.showerror("WebSocket Test", 
@@ -6035,17 +6037,15 @@ class SprunkiGamePlayer:
             current_count = self.get_characters_count()
             
             if current_count is not None:
-                messagebox.showinfo("Verification Test", 
-                    f"✅ Characters Array system working!\n\n"
-                    f"Current Characters count: {current_count}\n"
-                    f"JavaScript monitoring: ACTIVE\n"
-                    f"High-performance access: ENABLED\n\n"
-                    f"Ready for drag verification!")
+                print("✅ CHARACTERS ARRAY VERIFICATION TEST:")
+                print(f"   📊 Current Characters count: {current_count}")
+                print(f"   🔧 JavaScript monitoring: ACTIVE")
+                print(f"   ⚡ High-performance access: ENABLED")
+                print(f"   🎯 Status: Ready for drag verification!")
             else:
-                messagebox.showerror("Verification Test", 
-                    "❌ Characters Array test failed!\n\n"
-                    "Could not get Characters count.\n"
-                    "Game may not be loaded or VM not found.")
+                print("❌ CHARACTERS ARRAY VERIFICATION TEST FAILED:")
+                print("   Could not get Characters count")
+                print("   Game may not be loaded or VM not found")
                     
         except Exception as e:
             messagebox.showerror("Verification Test", f"❌ Characters Array test error: {e}")
@@ -6079,17 +6079,18 @@ class SprunkiGamePlayer:
                 status_page = "✅ PASSED" if page_result else "⚠️ FAILED"
                 status_game = "✅ PASSED" if game_result else "⚠️ FAILED"
                 
-                messagebox.showinfo("Smart Verification Test Results", 
-                    f"🔍 SMART VERIFICATION SYSTEM TEST\n\n"
-                    f"📄 Page Verification: {status_page}\n"
-                    f"🎮 Game Verification: {status_game}\n\n"
-                    f"⚙️ Configuration:\n"
-                    f"   • Page verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}\n"
-                    f"   • Game verification: {'✅ Enabled' if self.game_verification_enabled else '❌ Disabled'}\n"
-                    f"   • Page timeout: {getattr(self, 'page_verification_timeout', 'N/A')}s\n"
-                    f"   • Game timeout: {getattr(self, 'game_verification_timeout', 'N/A')}s\n"
-                    f"   • Stabilization wait: {getattr(self, 'stabilization_wait', 'N/A')}s\n\n"
-                    f"🚀 Smart Verification ready to replace fixed 40s waits!")
+                print("🔍 SMART VERIFICATION SYSTEM TEST RESULTS:")
+                print("="*50)
+                print(f"   🔄 Page Verification: {status_page}")
+                print(f"   🎮 Game Verification: {status_game}")
+                print(f"\n⚙️ Configuration:")
+                print(f"   📄 Page verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}")
+                print(f"   🎮 Game verification: {'✅ Enabled' if self.game_verification_enabled else '❌ Disabled'}")
+                print(f"   ⏱️ Page timeout: {getattr(self, 'page_verification_timeout', 'N/A')}s")
+                print(f"   ⏱️ Game timeout: {getattr(self, 'game_verification_timeout', 'N/A')}s")
+                print(f"   🔄 Stabilization wait: {getattr(self, 'stabilization_wait', 'N/A')}s")
+                print(f"\n🚀 Smart Verification ready to replace fixed 40s waits!")
+                print("="*50)
                         
             except Exception as e:
                 messagebox.showerror("Smart Verification Test", f"⌚ Test error: {e}")
@@ -6147,9 +6148,9 @@ class SprunkiGamePlayer:
                 # Check domain support
                 current_url = self.config.get('currentUrl', '').lower()
                 if 'cocrea.world' not in current_url:
-                    messagebox.showerror("Domain Error", 
-                        f"This version is optimized for 'cocrea.world' only!\n\n"
-                        f"Current URL: {current_url}")
+                    print(f"❌ DOMAIN ERROR: This version is optimized for 'cocrea.world' only!")
+                    print(f"   Current URL: {current_url}")
+                    print("   💡 Please use a cocrea.world game URL")
                     return
                 
                 # ================================================================
@@ -6185,28 +6186,28 @@ class SprunkiGamePlayer:
                     horror_info = f"🎪 Horror Mode: NO (All 20 icons available)\n"
                 
                 # Confirmation
-                result = messagebox.askyesno("Confirm ENHANCED Auto", 
-                    f"🎯 ENHANCED WORKFLOW READY\n\n"
-                    f"🎮 Icons: {len(layout['icons'])}\n"
-                    f"🎪 Slots: {len(layout['slots'])}\n"
-                    f"🎼 Remixes: {len(self.remix_library)}\n"
-                    f"{horror_info}\n"
-                    f"⚡ ENHANCED FEATURES:\n"
-                    f"• Chrome Debug Mode (port {self.debugging_port})\n"
-                    f"• Drag Verification via 'Putted characters'\n"
-                    f"• 5-Coordinate Retry System\n"
-                    f"• WebSocket/CDP for advanced control\n"
-                    f"• PyAutoGUI with smart fallback\n"
-                    f"• Real-time game state monitoring\n"
-                    f"• Enhanced statistics tracking\n"
-                    f"• Horror-aware remix generation\n\n"
-                    f"Continue with ENHANCED workflow?")
-                
-                if result:
-                    self.start_full_auto_process()
+                print(f"🎯 ENHANCED WORKFLOW READY:")
+                print(f"   🎮 Icons: {len(layout['icons'])}")
+                print(f"   🎪 Slots: {len(layout['slots'])}")  
+                print(f"   🎼 Remixes: {len(self.remix_library)}")
+                print(f"   {horror_info}")
+                print(f"   ⚡ ENHANCED FEATURES:")
+                print(f"      • Chrome Debug Mode (port {self.debugging_port})")
+                print(f"      • Drag Verification via 'Putted characters'")
+                print(f"      • 5-Coordinate Retry System")
+                print(f"      • WebSocket/CDP for advanced control")
+                print(f"      • PyAutoGUI with smart fallback")
+                print(f"      • Real-time game state monitoring")
+                print(f"      • Enhanced statistics tracking") 
+                print(f"      • Horror-aware remix generation")
+                print(f"✅ AUTO-STARTING ENHANCED WORKFLOW...")
+
+                # Auto-start without user confirmation
+                self.start_full_auto_process()
                 
             except Exception as e:
-                messagebox.showerror("Error", "Cannot load config: " + str(e))
+                print(f"❌ CONFIG LOAD ERROR: {str(e)}")
+                print("   💡 Please check JSON file format and try again")
     
     def calculate_total_steps(self):
         """Calculate total steps for progress"""
@@ -6312,25 +6313,28 @@ class SprunkiGamePlayer:
         # Generate final comprehensive report
         print("\n📋 GENERATING FINAL SUCCESS REPORT...")
         self.cleanup_and_report("Successful_Completion")        
-        messagebox.showinfo("🎉 ENHANCED Auto Completed", 
-            f"ENHANCED {mode_text} workflow completed!\n\n"
-            f"📊 ENHANCED DRAG STATISTICS:\n"
-            f"   • Total attempts: {stats.total_attempts}\n"
-            f"   • Success rate: {success_rate:.1f}%\n"
-            f"   • Average coordinates tried: {avg_coord_retries:.1f}/5\n"
-            f"   • Remixes processed: {len(self.remix_library)}\n\n"
-            f"🔍 VERIFICATION STATISTICS:\n"
-            f"   • Verification enabled: {verification_rate:.1f}%\n"
-            f"   • Verification success: {verification_success_rate:.1f}%\n"
-            f"   • System status: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}\n\n"
-            f"⚡ ENHANCED FEATURES USED:\n"
-            f"   • Chrome Debug Mode (port {self.debugging_port})\n"
-            f"   • Drag verification via 'Putted characters'\n"
-            f"   • 5-coordinate retry system\n"
-            f"   • WebSocket/CDP for advanced control\n"
-            f"   • Smart fallback between methods\n"
-            f"   • Real-time game state monitoring\n\n"
-            f"The workflow is now ENHANCED and super reliable! 🚀✨")
+        print("\n" + "🎉"*20)
+        print("🎉 ENHANCED AUTO COMPLETED SUCCESSFULLY! 🎉") 
+        print("🎉"*20)
+        print(f"\n📊 WORKFLOW SUMMARY:")
+        print(f"   ✅ Mode: ENHANCED {mode_text}")
+        print(f"   📊 Total attempts: {stats.total_attempts}")
+        print(f"   📈 Success rate: {success_rate:.1f}%")
+        print(f"   🎯 Average coordinates tried: {avg_coord_retries:.1f}/5")
+        print(f"   🎼 Remixes processed: {len(self.remix_library)}")
+        print(f"\n🔍 VERIFICATION STATISTICS:")
+        print(f"   📊 Verification enabled: {verification_rate:.1f}%")
+        print(f"   ✅ Verification success: {verification_success_rate:.1f}%")
+        print(f"   🔧 System status: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}")
+        print(f"\n⚡ ENHANCED FEATURES USED:")
+        print(f"   🌐 Chrome Debug Mode (port {self.debugging_port})")
+        print(f"   🔍 Drag verification via 'Putted characters'")
+        print(f"   🎯 5-coordinate retry system")
+        print(f"   📡 WebSocket/CDP for advanced control")
+        print(f"   🔄 Smart fallback between methods")
+        print(f"   📊 Real-time game state monitoring")
+        print(f"\n🚀 The workflow is now ENHANCED and super reliable! ✨")
+        print("="*60)
     
     def stop_all(self):
         """Stop all processes"""
@@ -6363,7 +6367,9 @@ class SprunkiGamePlayer:
     def emergency_stop(self):
         """Emergency stop"""
         self.stop_all()
-        messagebox.showwarning("⚠️ Emergency Stop", "ENHANCED Auto stopped with ESC!")
+        print("\n🚨 EMERGENCY STOP ACTIVATED!")
+        print("⚠️ ENHANCED Auto stopped with ESC key")
+        print("🛑 All operations halted safely")
     
     def run(self):
         """Run application"""

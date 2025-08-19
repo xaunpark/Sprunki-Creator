@@ -8,7 +8,6 @@ import subprocess
 import requests
 from datetime import datetime
 import pyautogui
-from tkinter import messagebox
 import pygetwindow as gw
 import random
 import websocket
@@ -1830,7 +1829,7 @@ class SprunkiJSONGenerator:
                         ublock_path = os.path.join(extensions_dir, subdirs[0])
                 
                 if not ublock_path:
-                    messagebox.showerror("Extension Not Found", "uBlock Origin not found in 'extensions' folder.")
+                    print("❌ Extension Not Found: uBlock Origin not found in 'extensions' folder.")
                     return False
                 
                 print(f"✅ Found AdBlocker: {ublock_path}")
@@ -1843,7 +1842,7 @@ class SprunkiJSONGenerator:
                         break
                         
                 if not chrome_exe: 
-                    messagebox.showerror("Error", "Google Chrome not found.")
+                    print("❌ Error: Google Chrome not found.")
                     return False
                     
                 chrome_cmd = [
@@ -1874,7 +1873,7 @@ class SprunkiJSONGenerator:
                     time.sleep(1)
                     
                 if not game_window: 
-                    messagebox.showerror("Setup Error", "Could not find the game window.")
+                    print("❌ Setup Error: Could not find the game window.")
                     return False
                     
                 print(f"🎯 JSON Generator: Found fresh game window: '{game_window.title}'. Activating...")
@@ -1956,7 +1955,7 @@ class SprunkiJSONGenerator:
                         if attempt < max_retries:
                             print("   -> Preparing for next attempt...")
                         else:
-                            messagebox.showerror("Setup Error", f"Could not find 'Run' button after {max_retries} attempts.")
+                            print(f"❌ Setup Error: Could not find 'Run' button after {max_retries} attempts.")
                             return False
                             
                 if not run_button_clicked: 
@@ -1985,7 +1984,7 @@ class SprunkiJSONGenerator:
                 return True
                 
             except Exception as e:
-                messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
+                print(f"❌ Setup Error: Failed to prepare game: {e}")
                 print(f"⌚ JSON Generator failed to navigate and prepare game: {e}")
                 self.cleanup_chrome_complete()
                 return False
@@ -1997,7 +1996,7 @@ class SprunkiJSONGenerator:
             tabs = response.json()
             target_tab = next((t for t in tabs if t.get('type') == 'page' and 'cocrea.world' in t.get('url', '')), None)
             if not target_tab: 
-                messagebox.showerror("CDP Error", "Could not find cocrea.world tab.")
+                print("❌ CDP Error: Could not find cocrea.world tab.")
                 return None
             self.ws_url = target_tab['webSocketDebuggerUrl']
             return self.ws_url
