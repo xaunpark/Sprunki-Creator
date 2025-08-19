@@ -861,10 +861,41 @@ class SprunkiGamePlayer:
             print(f"❌ Complete cleanup error: {e}")
             return False
 
+    def safe_window_operation(self, window, operation_name, operation_func):
+        """
+        🛡️ NEW: Safe window operation with Windows error handling
+        """
+        try:
+            print(f"   🔄 Attempting {operation_name}...")
+            operation_func()
+            print(f"   ✅ {operation_name} completed")
+            return True
+        except Exception as e:
+            error_msg = str(e).lower()
+            if ("error code from windows: 0" in error_msg or 
+                "operation completed successfully" in error_msg or
+                "the operation completed successfully" in error_msg):
+                print(f"   ✅ {operation_name} completed (Windows quirk - success reported as error)")
+                return True
+            else:
+                print(f"   ⚠️ {operation_name} warning: {e}")
+                print(f"   💡 Continuing anyway - not critical for workflow")
+                return False
+
+    def safe_activate_window(self, window):
+        """🛡️ Safe window activation"""
+        return self.safe_window_operation(window, "window activation", lambda: window.activate())
+
+    def safe_maximize_window(self, window):
+        """🛡️ Safe window maximization"""
+        return self.safe_window_operation(window, "window maximization", lambda: window.maximize())
+
     def navigate_and_prepare_game(self, url):
             """Navigate to game URL using Chrome debug mode with Smart Verification"""
             try:
                 print(f"🌐 Opening game URL with Chrome debug session: {url}")
+                print(f"🔧 Service Mode: Enhanced error handling enabled")
+                print(f"🛡️ Windows API quirks: Will handle 'success as error' cases")
                 
                 # Complete cleanup first
                 self.cleanup_chrome_complete()
@@ -929,17 +960,57 @@ class SprunkiGamePlayer:
                         break
                     time.sleep(1)
                     
-                if not game_window:
+                if not game_window: 
                     print("❌ CRITICAL ERROR: Could not find the game window")
                     print("   💡 Chrome may have failed to start or game page didn't load")
                     return False
                     
                 print(f"🎯 Found game window: '{game_window.title}'. Activating...")
-                game_window.activate()
-                time.sleep(0.5)
-                game_window.maximize()
-                time.sleep(2)
-                
+
+                # 🔧 ENHANCED: Safe window operations with error handling
+                try:
+                    print("   🔄 Attempting to activate window...")
+                    game_window.activate()
+                    print("   ✅ Window activation completed")
+                    time.sleep(0.5)
+                except Exception as e:
+                    # Handle the "Error code from Windows: 0" issue
+                    error_msg = str(e).lower()
+                    if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
+                        print("   ✅ Window activation completed (Windows quirk - success reported as error)")
+                    else:
+                        print(f"   ⚠️ Window activation warning: {e}")
+                        # Continue anyway - not critical
+
+                try:
+                    print("   🔄 Attempting to maximize window...")
+                    game_window.maximize()
+                    print("   ✅ Window maximization completed")
+                    time.sleep(2)
+                except Exception as e:
+                    # Handle the "Error code from Windows: 0" issue
+                    error_msg = str(e).lower()
+                    if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
+                        print("   ✅ Window maximization completed (Windows quirk - success reported as error)")
+                    else:
+                        print(f"   ⚠️ Window maximization warning: {e}")
+                        # Continue anyway - not critical
+                    time.sleep(2)
+
+                print("✅ Window setup completed - ready for game operations")
+
+                # 🔧 WINDOW VERIFICATION: Ensure window is responsive after operations
+                try:
+                    # Test if window is responsive
+                    window_title = game_window.title
+                    window_rect = game_window.rect if hasattr(game_window, 'rect') else None
+                    print(f"✅ Window verification: Title='{window_title}', Responsive=True")
+                except Exception as e:
+                    print(f"⚠️ Window verification warning: {e}")
+                    print("💡 Window may still be functional - continuing")
+
+                print("🎯 Proceeding with game setup...")
+
                 # ================================================================
                 # 🔍 SMART VERIFICATION SYSTEM (REPLACES FIXED 40s WAIT)
                 # ================================================================
@@ -1915,11 +1986,21 @@ class SprunkiGamePlayer:
 
     def get_dual_counts_batch(self):
         """
-        🚀 NEW: Get BOTH counts in single batch call (MAJOR PERFORMANCE BOOST)
+        🚀 FIXED: Get BOTH counts with forced state refresh
         """
         try:
             if self.batch_verification_active and self.verification_functions_ready:
                 if self.check_batch_session_health():
+                    
+                    # Force state refresh before getting counts
+                    refresh_response = self._send_batch_cdp_command({
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "void 0", "returnByValue": True}
+                    })
+                    
+                    # Small delay for state stabilization
+                    time.sleep(0.1)
+                    
                     response = self._send_batch_cdp_command({
                         "method": "Runtime.evaluate", 
                         "params": {"expression": "window.getBatchDualState()", "returnByValue": True}
@@ -5142,16 +5223,26 @@ class SprunkiGamePlayer:
         return remix_library
     
     def create_remix_from_pattern(self, pattern, remix_number, avoid_horror_icon=False):
-        """Create remix from pattern with option to avoid horror icon (index 19)"""
+        """Create remix from pattern with option to avoid horror icon - WORKS WITH LIMITED ICONS"""
         try:
             selected_icons = []
             
-            # Create dynamic icon_groups based on avoid_horror_icon
-            icon_groups_to_use = self.icon_groups.copy()
+            # 🎯 NEW: Create icon_groups based on LIMITED icons (0-19)
+            limited_icon_groups = {
+                'beats': list(range(0, min(5, 20))),      # 0-4 (limited to 20)
+                'effects': list(range(5, min(10, 20))),   # 5-9 (limited to 20)  
+                'melodies': list(range(10, min(15, 20))), # 10-14 (limited to 20)
+                'vocals': list(range(15, min(20, 20)))    # 15-19 (limited to 20)
+            }
+            
+            icon_groups_to_use = limited_icon_groups.copy()
+            
             if avoid_horror_icon:
                 # Remove icon 19 from vocals group (15-19 -> 15-18)
                 icon_groups_to_use['vocals'] = list(range(15, 19))  # Remove index 19
                 print(f"🚨 Avoiding horror icon (19) for normal mode remix")
+            
+            print(f"🎯 Using limited icon groups (0-19): {icon_groups_to_use}")
             
             for group_name, count in [('beats', pattern['beats']), 
                                     ('effects', pattern['effects']),
@@ -5168,7 +5259,7 @@ class SprunkiGamePlayer:
             
             return {
                 'name': remix_name,
-                'description': f"{pattern['description']} ({pattern_counts})",
+                'description': f"{pattern['description']} ({pattern_counts}) [LIMITED 0-19]",
                 'icons': selected_icons,
                 'pattern': pattern['name']
             }
@@ -5224,21 +5315,34 @@ class SprunkiGamePlayer:
     # ================================================================
 
     def showcase_all_icons_corrected(self, mode="Normal", skip_icon_19=False, listen_duration=15, progress_callback=None):
-        """ENHANCED: Showcase all icons with verification system"""
+        """ENHANCED: Showcase all icons with verification system - LIMITED TO FIRST 20 ICONS"""
         try:
             if not self.config:
                 return False
                 
             layout = self.config['layout']
-            icons = layout['icons']
+            all_icons = layout['icons']
             
-            # Determine icon range
+            # LIMIT TO FIRST 20 ICONS (INDEX 0-19)
+            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 19]
+            
+            print(f"\n🎯 ICON LIMITATION APPLIED:")
+            print(f"   📊 Original icons: {len(all_icons)}")
+            print(f"   🎯 Limited to first 20: {len(limited_icons)} (index 0-19)")
+            print(f"   ✅ Filtered out: {len(all_icons) - len(limited_icons)} icons (index 20+)")
+            
+            # Use limited_icons instead of all_icons for range calculation
+            icons = limited_icons
+            
+            # Determine icon range (EXISTING LOGIC PRESERVED)
             if mode == "Normal" and skip_icon_19:
                 icon_range = range(len(icons) - 1)  # 0-18, skip icon 19
+                print(f"   🎪 Normal mode (hasHorror=true): Using icons 0-18, skipping icon 19")
             else:
-                icon_range = range(len(icons))  # 0-19
+                icon_range = range(len(icons))  # 0-19 or 0-18 depending on limited_icons
+                print(f"   🎪 {mode} mode: Using all limited icons 0-{len(icons)-1}")
             
-            print(f"\n🎪 STARTING ENHANCED {mode.upper()} SHOWCASE")
+            print(f"\nðŸŽª STARTING ENHANCED {mode.upper()} SHOWCASE")
             print(f"📊 Will showcase {len(icon_range)} icons with verification system")
             if self.characters_available:
                 print("🔍 Drag verification: ENABLED")
@@ -5256,7 +5360,7 @@ class SprunkiGamePlayer:
                 else:
                     print(f"⚠️ Failed to showcase icon {icon_index}")
             
-            print(f"\n✅ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
+            print(f"\nâœ… ENHANCED {mode.upper()} SHOWCASE COMPLETED")
             print(f"📊 Success: {success_count}/{len(icon_range)} icons")
             print("="*60)
             return success_count == len(icon_range)
@@ -5484,17 +5588,30 @@ class SprunkiGamePlayer:
             return False
 
     def showcase_all_bonus_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
-        """ENHANCED: Showcase bonus with verification system"""
+        """ENHANCED: Showcase bonus with verification system - LIMITED TO FIRST 20"""
         try:
             if not self.config:
                 return False
                 
             layout = self.config['layout']
-            bonus_chars = layout.get('bonus', [])
+            all_bonus_chars = layout.get('bonus', [])
             
-            if not bonus_chars:
-                print(f"ℹ️ No bonus characters for {mode} mode")
+            # LIMIT BONUS TO FIRST 20 (if bonus has indices)
+            limited_bonus = []
+            for bonus in all_bonus_chars:
+                bonus_index = bonus.get('index', 0)  # Default to 0 if no index
+                if bonus_index <= 19:
+                    limited_bonus.append(bonus)
+            
+            print(f"\n🎯 BONUS LIMITATION APPLIED:")
+            print(f"   📊 Original bonus: {len(all_bonus_chars)}")
+            print(f"   🎯 Limited bonus: {len(limited_bonus)} (index ≤19)")
+            
+            if not limited_bonus:
+                print(f"ℹ️ No bonus characters for {mode} mode (after limitation)")
                 return True
+            
+            bonus_chars = limited_bonus
             
             target_slot = self._find_slot_by_index(3)
             if not target_slot:
@@ -5600,20 +5717,31 @@ class SprunkiGamePlayer:
             return False
     
     def trigger_horror_mode_transition_corrected(self, transition_duration=15, progress_callback=None):
-        """ENHANCED: Trigger horror mode with verification system"""
+        """ENHANCED: Trigger horror mode with verification system - WORKS WITH LIMITED ICONS"""
         try:
             if not self.config:
                 return False
                 
             layout = self.config['layout']
-            icons = layout['icons']
+            all_icons = layout['icons']
             
-            if len(icons) < 20:
-                print("❌ Not enough 20 icons to trigger Horror mode")
+            # 🎯 NEW: LIMIT TO FIRST 20 ICONS
+            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 19]
+            icons = limited_icons
+            
+            # Check if icon 19 exists in limited set
+            icon_19_exists = any(icon.get('index') == 19 for icon in icons)
+            
+            if not icon_19_exists:
+                print("❌ Icon 19 not found in limited icon set (0-19)")
                 return False
             
-            # Get icon index 19 (last icon)
-            horror_icon = icons[19]
+            print(f"🎯 HORROR MODE TRIGGER - Using limited icons (0-19)")
+            print(f"   📊 Limited icons available: {len(icons)}")
+            print(f"   👻 Icon 19 found: ✅")
+            
+            # Get icon index 19 from limited set
+            horror_icon = next(icon for icon in icons if icon.get('index') == 19)
             
             # Find slot index 3
             target_slot = self._find_slot_by_index(3)
@@ -5651,9 +5779,7 @@ class SprunkiGamePlayer:
                     progress_callback("👻 Horror Mode activated with verification!")
                 print("✅ ENHANCED HORROR MODE TRANSITION COMPLETED!")
                 
-                # ================================================================
-                # 👻 HORROR MODE STATE VALIDATION
-                # ================================================================
+                # Horror mode state validation (existing code preserved)
                 print("\n👻 HORROR MODE STATE VALIDATION")
                 print("="*50)
                 
@@ -6010,7 +6136,6 @@ class SprunkiGamePlayer:
                 else:
                     print("⚠️ WEBSOCKET TEST WARNING:")
                     print("   WebSocket connected but CDP commands failed")
-                        "⚠️ WebSocket connected but CDP commands failed")
             else:
                 messagebox.showerror("WebSocket Test", 
                     "❌ Could not establish WebSocket connection\n\n"
