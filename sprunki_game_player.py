@@ -967,7 +967,7 @@ class SprunkiGamePlayer:
                     
                 print(f"🎯 Found game window: '{game_window.title}'. Activating...")
 
-                # 🔧 ENHANCED: Safe window operations with error handling
+                # 🔧 ENHANCED: Safe window operations với error handling
                 try:
                     print("   🔄 Attempting to activate window...")
                     game_window.activate()
@@ -996,6 +996,10 @@ class SprunkiGamePlayer:
                         print(f"   ⚠️ Window maximization warning: {e}")
                         # Continue anyway - not critical
                     time.sleep(2)
+
+                # 🔧 NEW: Additional focus ensuring for service mode
+                print("🎯 Ensuring enhanced focus for service mode...")
+                self.ensure_game_focus()
 
                 print("✅ Window setup completed - ready for game operations")
 
@@ -4570,12 +4574,70 @@ class SprunkiGamePlayer:
             print("⚠️ Mouse cleanup warning: " + str(e))
     
     def ensure_game_focus(self):
-        """Ensure game has focus before performing drag"""
+        """🔧 ENHANCED: Ensure game focus với service mode support"""
         try:
-            print("🎯 Ensuring game focus...")
-            time.sleep(0.1)
+            print("🎯 Ensuring game focus for service mode...")
+            
+            # Phase 1: Find và activate Chrome window
+            chrome_windows = gw.getWindowsWithTitle('cocrea.world')
+            if not chrome_windows:
+                chrome_windows = gw.getWindowsWithTitle('Chrome')
+            
+            if chrome_windows:
+                target_window = chrome_windows[0]
+                print(f"   🔍 Found window: {target_window.title[:50]}...")
+                
+                try:
+                    # Activate window với error handling
+                    target_window.activate()
+                    time.sleep(0.3)
+                    
+                    # Bring to foreground
+                    target_window.restore()  # Ensure not minimized
+                    time.sleep(0.2)
+                    
+                    print("   ✅ Window activated successfully")
+                    
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "error code from windows: 0" in error_msg:
+                        print("   ✅ Window activated (Windows quirk)")
+                    else:
+                        print(f"   ⚠️ Window activation warning: {e}")
+            
+            # Phase 2: Force mouse focus
+            pyautogui.moveTo(960, 540, duration=0.2)
+            time.sleep(0.2)
+            
+            # Phase 3: Click to ensure focus
+            pyautogui.click(960, 540)
+            time.sleep(0.3)
+            
+            print("   ✅ Game focus ensured with enhanced method")
+            return True
+            
         except Exception as e:
-            print("⚠️ Focus ensuring warning: " + str(e))
+            print(f"   ❌ Enhanced focus error: {e}")
+            return False
+
+    def _ensure_focus_before_operation(self, operation_name="operation"):
+        """🔧 NEW: Đảm bảo focus trước mọi mouse operation"""
+        try:
+            print(f"🎯 Ensuring focus before {operation_name}...")
+            
+            # Quick focus check và restore
+            success = self.ensure_game_focus()
+            
+            if success:
+                print(f"   ✅ Focus ready for {operation_name}")
+            else:
+                print(f"   ⚠️ Focus uncertain for {operation_name}, continuing anyway")
+            
+            return success
+            
+        except Exception as e:
+            print(f"   ❌ Focus check error for {operation_name}: {e}")
+            return False            
     
     def get_domain_adjustments(self):
         """Get domain-specific adjustments for current config"""
@@ -4664,8 +4726,11 @@ class SprunkiGamePlayer:
         try:
             print("🖱️ Executing PyAutoGUI drag operation...")
             
+            # 🔧 NEW: Ensure focus before drag operation
+            self._ensure_focus_before_operation("drag operation")
+            
             # === APPROACH ICON ===
-            print("📍 Step 1: Moving to icon...")
+            print("🔍 Step 1: Moving to icon...")
             move_duration = (0.4 if is_first_icon else 0.25) * domain_adj['drag_speed_multiplier']
             pyautogui.moveTo(start_x, start_y, duration=move_duration)
             time.sleep(delays['approach'])
@@ -5054,6 +5119,9 @@ class SprunkiGamePlayer:
         """ADDED: Execute single click using PyAutoGUI"""
         try:
             print(f"🖱️ Executing PyAutoGUI single click at ({click_x}, {click_y})")
+            
+            # 🔧 NEW: Ensure focus before click
+            self._ensure_focus_before_operation("single click")
             
             # Move to position with slight variation
             varied_x, varied_y = self.add_position_variation(click_x, click_y, 3)
