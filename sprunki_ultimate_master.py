@@ -133,7 +133,7 @@ class SafeOperationManager:
         
         try:
             # STEP 1: Drag icon
-            self.logger.info(f"🎯 Dragging icon to slot...")
+            self.logger.info(f"🎯 Dragging icon to slot index {target_slot.get('index', 'unknown')} at coords ({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
             drag_success = self.game_player.corrected_drag_and_drop(icon, target_slot)
             
             if not drag_success:
@@ -141,7 +141,8 @@ class SafeOperationManager:
             
             icon_placed = True
             self.active_slots.append(target_slot)
-            self.logger.info(f"✅ Icon placed successfully")
+            self.logger.info(f"✅ Icon placed successfully in slot index {target_slot.get('index', 'unknown')}")
+            self.logger.info(f"✅ Slot {target_slot.get('index', 'unknown')} added to active_slots for cleanup tracking")
             
             # STEP 2: OBS filename setup
             self.logger.info(f"🎬 Setting up OBS filename: {filename}")
@@ -269,17 +270,20 @@ class SafeOperationManager:
             
             # Return icon if placed
             if icon_placed and target_slot:
-                self.logger.info("🔄 Cleanup: Returning icon from slot...")
+                slot_index = target_slot.get('index', 'unknown')
+                self.logger.info(f"🔄 Cleanup: Returning icon from slot index {slot_index}")
+                self.logger.info(f"🔄 Attempting return at coords ({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
                 try:
                     return_success = self.game_player.corrected_return_icon(target_slot)
                     if return_success:
-                        self.logger.info("✅ Icon returned successfully during cleanup")
+                        self.logger.info(f"✅ Icon returned successfully from slot index {slot_index}")
                         if target_slot in self.active_slots:
                             self.active_slots.remove(target_slot)
+                            self.logger.info(f"✅ Slot index {slot_index} removed from active_slots")
                     else:
-                        self.logger.warning("⚠️ Failed to return icon during cleanup")
+                        self.logger.warning(f"⚠️ Failed to return icon from slot index {slot_index}")
                 except Exception as e:
-                    self.logger.error(f"Error returning icon during cleanup: {e}")
+                    self.logger.error(f"Error returning icon from slot index {slot_index}: {e}")
             
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
@@ -366,12 +370,134 @@ class UnifiedProcessingManager:
     def setup_logging(self):
         """Setup logging"""
         self.logger = logging.getLogger('UnifiedProcessingManager')
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)  # Include all log levels
         
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
+        
+        # Store references to file handlers for cleanup
+        self.current_file_handlers = []
+    
+    def _setup_mode_specific_logging(self, project_folder, project_slug, mode):
+        """Setup separate log files for each mode in project folder"""
+        try:
+            # Clear any existing file handlers
+            for handler in self.current_file_handlers:
+                self.logger.removeHandler(handler)
+                handler.close()
+            self.current_file_handlers = []
+            
+            # Create log files based on mode
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            
+            if mode == "master":
+                # Only master log for master mode
+                log_file = os.path.join(project_folder, f"{project_slug}-master.log")
+                file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+                file_handler.setLevel(logging.DEBUG)  # Include all log levels
+                file_handler.setFormatter(formatter)
+                self.logger.addHandler(file_handler)
+                self.current_file_handlers.append(file_handler)
+                self.logger.info(f"📝 Master mode log: {log_file}")
+                
+            elif mode == "individual":
+                # Only individual log for individual mode
+                log_file = os.path.join(project_folder, f"{project_slug}-individual.log")
+                file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+                file_handler.setLevel(logging.DEBUG)  # Include all log levels
+                file_handler.setFormatter(formatter)
+                self.logger.addHandler(file_handler)
+                self.current_file_handlers.append(file_handler)
+                self.logger.info(f"📝 Individual mode log: {log_file}")
+                
+            elif mode == "both":
+                # Both master and individual logs for both mode
+                master_log = os.path.join(project_folder, f"{project_slug}-master.log")
+                individual_log = os.path.join(project_folder, f"{project_slug}-individual.log")
+                
+                # Master log handler
+                master_handler = logging.FileHandler(master_log, mode='w', encoding='utf-8')
+                master_handler.setLevel(logging.DEBUG)  # Include all log levels
+                master_handler.setFormatter(formatter)
+                self.logger.addHandler(master_handler)
+                self.current_file_handlers.append(master_handler)
+                
+                # Individual log handler  
+                individual_handler = logging.FileHandler(individual_log, mode='w', encoding='utf-8')
+                individual_handler.setLevel(logging.DEBUG)  # Include all log levels
+                individual_handler.setFormatter(formatter)
+                self.logger.addHandler(individual_handler)
+                self.current_file_handlers.append(individual_handler)
+                
+                self.logger.info(f"📝 Both mode logs: {master_log}")
+                self.logger.info(f"📝                  {individual_log}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to setup mode-specific logging: {e}")
+    
+    def _switch_to_mode_logging(self, project_folder, project_slug, target_mode):
+        """Switch to specific mode logging for both mode"""
+        try:
+            # Remove all current file handlers
+            for handler in self.current_file_handlers:
+                self.logger.removeHandler(handler)
+                handler.close()
+            self.current_file_handlers = []
+            
+            # Add only the target mode handler
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            
+            if target_mode == "master":
+                log_file = os.path.join(project_folder, f"{project_slug}-master.log")
+                mode_text = "MASTER"
+            else:  # individual
+                log_file = os.path.join(project_folder, f"{project_slug}-individual.log")
+                mode_text = "INDIVIDUAL"
+            
+            file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')  # Append mode
+            file_handler.setLevel(logging.DEBUG)  # Include all log levels
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            self.current_file_handlers.append(file_handler)
+            
+            self.logger.info(f"📝 Switched to {mode_text} mode logging: {os.path.basename(log_file)}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to switch to {target_mode} logging: {e}")
+    
+    def _cleanup_logging_handlers(self):
+        """Cleanup file handlers after processing"""
+        try:
+            for handler in self.current_file_handlers:
+                self.logger.removeHandler(handler)
+                handler.close()
+            self.current_file_handlers = []
+            self.logger.info("📝 Log files closed and finalized")
+        except Exception as e:
+            self.logger.error(f"Failed to cleanup logging handlers: {e}")
+    
+    def _calculate_center_slot_index(self, slots):
+        """Calculate center slot index for showcase"""
+        try:
+            total_slots = len(slots)
+            if total_slots == 0:
+                return 0
+            
+            # Calculate center index (0-based)
+            # For odd numbers: middle slot
+            # For even numbers: slightly left of middle 
+            center_index = (total_slots - 1) // 2
+            
+            self.logger.info(f"📊 Slot calculation: {total_slots} slots → center index {center_index}")
+            self.logger.info(f"   Examples: 7 slots → index 3, 9 slots → index 4, 6 slots → index 2")
+            
+            return center_index
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating center slot: {e}")
+            return 3  # Fallback to hardcoded value
     
     def add_urls(self, urls: List[str]) -> int:
         """Add URLs to processing queue"""
@@ -615,7 +741,7 @@ class UnifiedProcessingManager:
                 
                 # Pause between items
                 if not self.should_stop and i < len(self.queue) - 1:
-                    pause_duration = self.config.pause_between_items
+                    pause_duration = getattr(self.config, 'pause_between_items', 5)
                     self.logger.info(f"Pausing {pause_duration}s before next item...")
                     time.sleep(pause_duration)
             
@@ -674,13 +800,23 @@ class UnifiedProcessingManager:
             if not self.master_controller._initialize_components(item.json_data):
                 raise Exception("Failed to initialize components")
             
-            # Setup project folder
-            if item.mode in ["individual", "both"]:
-                project_folder = os.path.join(self.config.output_base_dir, item.project_slug)
-                os.makedirs(project_folder, exist_ok=True)
-                self.master_controller.obs_controller.current_project_folder = project_folder
-            else:
-                self.master_controller.obs_controller.current_project_folder = self.config.output_base_dir
+            # Setup project folder - ALL MODES now use project-specific folder
+            output_base_dir = getattr(self.config, 'output_base_dir', r"C:\Users\dinht\Videos\SPRUNKI")
+            project_slug = getattr(item, 'project_slug', 'default_project')
+            project_folder = os.path.join(output_base_dir, project_slug)
+            os.makedirs(project_folder, exist_ok=True)
+            self.master_controller.obs_controller.current_project_folder = project_folder
+            
+            self.logger.info(f"📁 All videos will be saved to: {project_folder}")
+            if item.mode == "master":
+                self.logger.info(f"   🎬 Master showcase video: {project_slug}-showcase.mp4")
+            elif item.mode == "individual":
+                self.logger.info(f"   🎯 Individual icon videos: n-1.mp4, h-1.mp4, etc.")
+            elif item.mode == "both":
+                self.logger.info(f"   🎪 Both modes: showcase + individual icons in same folder")
+            
+            # Setup mode-specific logging to project folder
+            self._setup_mode_specific_logging(project_folder, project_slug, item.mode)
             
             # Process based on mode with enhanced handling
             success = False
@@ -721,6 +857,10 @@ class UnifiedProcessingManager:
             
             self.logger.error(f"Video processing error for {item.display_name}: {e}")
             return False
+        
+        finally:
+            # Cleanup file handlers after processing
+            self._cleanup_logging_handlers()
 
     def _process_both_mode_enhanced(self, item: ProcessingItem) -> bool:
         """Enhanced Both mode with proper isolation and comprehensive cleanup"""
@@ -736,6 +876,12 @@ class UnifiedProcessingManager:
             # ================================================================
             # PHASE 1: MASTER MODE (with comprehensive cleanup)
             # ================================================================
+            
+            # Switch to master logging for this phase
+            project_folder = self.master_controller.obs_controller.current_project_folder
+            project_slug = getattr(item, 'project_slug', 'default_project')
+            self._switch_to_mode_logging(project_folder, project_slug, "master")
+            
             self.logger.info("=" * 70)
             self.logger.info("🎬 PHASE 1: MASTER MODE - Full Showcase Recording")
             self.logger.info("=" * 70)
@@ -848,6 +994,10 @@ class UnifiedProcessingManager:
             # ================================================================
             # PHASE 2: INDIVIDUAL MODE (with completely fresh browser)
             # ================================================================
+            
+            # Switch to individual logging for this phase
+            self._switch_to_mode_logging(project_folder, project_slug, "individual")
+            
             self.logger.info("=" * 70)
             self.logger.info("🎭 PHASE 2: INDIVIDUAL MODE - Fresh Browser Session")
             self.logger.info("=" * 70)
@@ -972,7 +1122,7 @@ class UnifiedProcessingManager:
         browser_opened = False
         
         try:
-            master_filename = f"{item.project_slug}-showcase.mp4"
+            master_filename = f"{getattr(item, 'project_slug', 'default_project')}-showcase.mp4"
             self.logger.info(f"Executing master workflow for {item.display_name}")
             
             # STEP 1: OBS Setup
@@ -980,8 +1130,13 @@ class UnifiedProcessingManager:
                 raise Exception("OBS setup failed")
             
             # STEP 2: OBS Filename (make it critical)
+            self.logger.info(f"🎬 Setting OBS output path to: {self.master_controller.obs_controller.current_project_folder}")
+            self.logger.info(f"🎬 Setting OBS filename to: {master_filename}")
             if not self.master_controller.obs_controller.force_obs_filename(master_filename):
                 raise Exception("OBS filename setup failed")  # Changed from warning to exception
+            
+            # Verify OBS setup
+            self.logger.info(f"🎬 OBS configured - Expected output: {os.path.join(self.master_controller.obs_controller.current_project_folder, master_filename)}")
             
             # STEP 3: Game Environment Setup
             self.logger.info("🌐 Setting up game environment...")
@@ -1016,6 +1171,19 @@ class UnifiedProcessingManager:
             
             if not stop_success:
                 raise Exception("Failed to stop recording")
+                
+            # Log actual output path
+            self.logger.info(f"🎬 Master recording stopped successfully")
+            self.logger.info(f"📁 Actual output file path: {output_path}")
+            if output_path:
+                actual_dir = os.path.dirname(output_path)
+                expected_dir = self.master_controller.obs_controller.current_project_folder
+                self.logger.info(f"📁 Expected directory: {expected_dir}")
+                self.logger.info(f"📁 Actual directory: {actual_dir}")
+                if actual_dir != expected_dir:
+                    self.logger.warning(f"⚠️ OUTPUT PATH MISMATCH! File saved to wrong directory!")
+                else:
+                    self.logger.info(f"✅ Output path correct - file saved in project folder")
             
             if not output_path:
                 raise Exception("No output file generated")
@@ -1093,15 +1261,25 @@ class UnifiedProcessingManager:
             if not self.master_controller.game_player.setup_game_environment(first_setup=False):
                 raise Exception("Game environment re-setup failed")
 
+            if not item.json_data or 'layout' not in item.json_data:
+                raise Exception("Invalid JSON data - missing layout")
             layout = item.json_data['layout']
             icons = layout['icons']
             slots = layout['slots']
             game_settings = item.json_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             
-            target_slot = self.master_controller.game_player._find_slot_by_index(3)
+            # Calculate center slot index dynamically
+            center_slot_index = self._calculate_center_slot_index(slots)
+            self.logger.info(f"🎯 Using center slot index {center_slot_index} out of {len(slots)} total slots")
+            
+            target_slot = self.master_controller.game_player._find_slot_by_index(center_slot_index)
             if not target_slot:
-                raise Exception("Could not find target slot")
+                raise Exception(f"Could not find slot at center index {center_slot_index}")
+            
+            # Log detailed slot information
+            self.logger.info(f"🎯 Target slot details: index={center_slot_index}, coords=({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
+            self.logger.info(f"🎯 This is the slot that will receive the icon and be used for return operation")
             
             # 🔥 INITIALIZE SAFE OPERATION MANAGER
             safe_ops = SafeOperationManager(
@@ -1632,8 +1810,20 @@ class SprunkiUltimateMaster:
         
         for frame in [status_frame, info_frame, mode_frame]:
             for widget in frame.winfo_children():
-                if hasattr(widget, 'configure') and widget.winfo_class() in ['Label']:
-                    widget.configure(bg=bg_color)
+                if hasattr(widget, 'configure'):
+                    try:
+                        widget_class = widget.winfo_class()
+                        if widget_class in ['Label', 'Button', 'Frame']:
+                            # Try to set background color safely
+                            try:
+                                widget['bg'] = bg_color
+                            except (KeyError, TypeError, AttributeError):
+                                try:
+                                    widget['background'] = bg_color
+                                except (KeyError, TypeError, AttributeError):
+                                    pass  # Widget doesn't support background color
+                    except Exception:
+                        pass  # Skip problematic widgets
     
     def update_queue_summary(self):
         """Update queue summary display"""
@@ -1735,6 +1925,7 @@ class SprunkiUltimateMaster:
                 self.update_progress_timer()
                 
                 # Setup global hotkeys from config
+                emergency_key = 'esc'  # Default value
                 try:
                     hotkey_config = self.config_manager.get('hotkeys', {})
                     emergency_key = hotkey_config.get('emergency_stop', 'esc')

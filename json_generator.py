@@ -251,7 +251,18 @@ class SprunkiJSONGenerator:
                 // Get slots coordinates
                 const poloSprites = allTargets.filter(t => t.sprite.name.startsWith('Polo '));
                 poloSprites.sort((a, b) => (parseInt(a.sprite.name.match(/\\d+/)?.[0] || '0') - parseInt(b.sprite.name.match(/\\d+/)?.[0] || '0')));
-                const slots = poloSprites.map((s, i) => ({ ...toPixelWithMenu(s.x, s.y), index: i }));
+                
+                // Convert to pixel coordinates first
+                const slotsWithCoords = poloSprites.map(s => ({ ...toPixelWithMenu(s.x, s.y), originalIndex: s.sprite.name }));
+                
+                // Sort by X coordinate (left to right) and reassign index
+                slotsWithCoords.sort((a, b) => a.x - b.x);
+                const slots = slotsWithCoords.map((slot, i) => ({ 
+                    x: slot.x, 
+                    y: slot.y, 
+                    index: i,
+                    originalSprite: slot.originalIndex
+                }));
                 
                 // Find horror icon (index 19) and target slot (index 3)
                 const horrorIconCoords = icons.find(i => i.index === 19);
@@ -421,252 +432,269 @@ class SprunkiJSONGenerator:
         '''
         # Full layout capture JavaScript
         self.js_full_layout = r'''
-        new Promise(async (resolve, reject) => {
-            try {
-                console.log("Starting full layout capture...");
-
-                function findVM() {
-                    if (window.__vm && window.__vm.runtime) return window.__vm;
-                    function getReactKey(el) { return Object.keys(el).find(k => k.startsWith('__react')); }
-                    const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
-                    for (const selector of selectors) {
-                        const elements = document.querySelectorAll(selector);
-                        for (const el of elements) {
-                            const reactKey = getReactKey(el);
-                            if (!reactKey) continue;
-                            let fiber = el[reactKey]; let depth = 0;
-                            while (fiber && depth++ < 100) {
-                                const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
-                                if (props?.vm && props.vm.runtime) { window.__vm = props.vm; return props.vm; }
-                                fiber = fiber.return;
-                            }
-                        }
-                    }
-                    return null;
-                }
-                
-                const toPixelWithMenu = (logicX, logicY) => {
-                    if (logicX === null || logicY === null) return { x: null, y: null };
-                    const stageW = 640; const stageH = 360; const screenW = 1920; const screenH = 1080; const menuWidth = 78;
-                    const viewportW = screenW - menuWidth; const scale = Math.min(viewportW / stageW, screenH / stageH);
-                    const canvasW = stageW * scale; const canvasH = stageH * scale; const leftOffset = menuWidth;
-                    const topOffset = (screenH - canvasH) / 2; const canvasCenterX = leftOffset + (canvasW / 2);
-                    const canvasCenterY = topOffset + (canvasH / 2); const pixelX = canvasCenterX + (logicX * scale);
-                    const pixelY = canvasCenterY - (logicY * scale);
-                    return { x: Math.round(pixelX), y: Math.round(pixelY) };
-                };
-                
-                async function getCustomPageTitle() {
-                    const selectors = ['.style_editableBox__OXulT[data-value]', 'h1.style_title__2vo4r', 'h4.style_editableBox__OXulT', '.style_content__J_Rrs'];
-                    const WAIT_TIMEOUT = 5000; const CHECK_INTERVAL = 250; const startTime = Date.now();
-                    while (Date.now() - startTime < WAIT_TIMEOUT) {
-                        for (const selector of selectors) {
-                            const element = document.querySelector(selector);
-                            if (element) {
-                                if (element.hasAttribute('data-value')) {
-                                    const dataValue = element.getAttribute('data-value').trim();
-                                    if (dataValue) return dataValue;
-                                }
-                                const textContent = (element.textContent || element.innerText || '').trim();
-                                if (textContent) {
-                                    const cleanText = textContent.replace(/\s+/g, ' ').trim();
-                                    if (cleanText) return cleanText;
-                                }
-                            }
-                        }
-                        await new Promise(r => setTimeout(r, CHECK_INTERVAL));
-                    }
-                    return document.title || 'Untitled Game';
-                }
-                
-                // ðŸ—‘ï¸ REMOVED: calculateRecordingArea function - now handled by Python OpenCV
-                // Recording area will be calculated in Python using OpenCV layout analysis
-                
-                // =====================================================
-                // UPDATED: Function getIconsWithHybridLogic (Logic Má»›i)
-                // =====================================================
-                function getIconsWithHybridLogic(allTargets) {
-                    console.log("ðŸŽ¬ Báº¯t Ä‘áº§u quÃ¡ trÃ¬nh láº¥y icons (Logic Hybrid - ChÃ­nh xÃ¡c nháº¥t)...");
-
-                    // BÆ°á»›c 1: Láº¤Y CÃC ICON ÄANG HIá»‚N THá»Š 
-                    console.log("ðŸ“¶ï¸ BÆ°á»›c 1: TÃ¬m cÃ¡c sprite 'Icons' Ä‘ang hiá»ƒn thá»‹...");
-                    const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
-                    console.log(`âœ¦ TÃ¬m tháº¥y ${visibleIcons.length} icons trÃªn mÃ n hÃ¬nh.`);
-
-                    // BÆ°á»›c 2: Táº O "DANH Báº " SPRITE (chá»‰ loáº¡i bá» Stage)
-                    console.log("ðŸ“¶ï¸ BÆ°á»›c 2: Táº¡o 'danh báº¡' gá»“m táº¥t cáº£ cÃ¡c sprite (trá»« Stage) Ä‘á»ƒ tra cá»©u...");
-                    const allSprites = allTargets.filter(t => !t.isStage);
-                    console.log(`âœ¦ 'Danh báº¡' cÃ³ ${allSprites.length} sprite.`);
-
-                    // BÆ°á»›c 3: Sáº®P Xáº¾P ICONS Dá»°A TRÃŠN INDEX Cá»¦A SPRITE TÆ¯Æ NG á»¨NG
-                    console.log("ðŸ“¶ï¸ BÆ°á»›c 3: Sáº¯p xáº¿p icons báº±ng cÃ¡ch liÃªn káº¿t ngÆ°á»£c láº¡i vá»›i sprite gá»‘c...");
-                    visibleIcons.sort((iconA, iconB) => {
-                        // Láº¥y 'chá»‰a khÃ³a' tá»« má»—i icon
-                        const charIndexA = Math.floor(iconA.currentCostume / 3);
-                        const charIndexB = Math.floor(iconB.currentCostume / 3);
-
-                        // DÃ¹ng 'chá»‰a khÃ³a' Ä‘á»ƒ tra cá»©u trong 'danh báº¡'
-                        const linkedSpriteA = allSprites[charIndexA];
-                        const linkedSpriteB = allSprites[charIndexB];
-
-                        // Náº¿u vÃ¬ lÃ½ do nÃ o Ä‘Ã³ khÃ´ng tÃ¬m tháº¥y sprite, khÃ´ng sáº¯p xáº¿p
-                        if (!linkedSpriteA || !linkedSpriteB) {
-                            console.warn(`KhÃ´ng thá»ƒ tÃ¬m tháº¥y sprite liÃªn káº¿t cho index ${charIndexA} hoáº·c ${charIndexB}`);
-                            return 0;
-                        }
-
-                        // Láº¥y 'sá»‘ bÃ¡o danh' (runtime index) cá»§a sprite Ä‘Ã£ liÃªn káº¿t
-                        const runtimeIndexA = allTargets.indexOf(linkedSpriteA);
-                        const runtimeIndexB = allTargets.indexOf(linkedSpriteB);
-
-                        // So sÃ¡nh 'sá»‘ bÃ¡o danh' Ä‘á»ƒ sáº¯p xáº¿p
-                        return runtimeIndexA - runtimeIndexB;
-                    });
-
-                    // BÆ°á»›c 4: Táº O Máº¢NG Káº¾T QUáº¢ CUá»I CÃ™NG
-                    console.log("ðŸ“¶ï¸ BÆ°á»›c 4: Chuyá»ƒn Ä‘á»•i tá»a Ä‘á»™ vÃ  gÃ¡n index tuáº§n tá»± má»›i...");
-                    const finalLayoutIcons = visibleIcons.map((icon, index) => {
-                        const pixelCoords = toPixelWithMenu(icon.x, icon.y);
-                        return {
-                            x: pixelCoords.x,
-                            y: pixelCoords.y,
-                            index: index // GÃ¡n index tuáº§n tá»± 0, 1, 2... sau khi Ä‘Ã£ sáº¯p xáº¿p
-                        };
-                    });
-
-                    console.log("âœ¦ HOÃ€N THÃ€NH! Icons Ä‘Æ°á»£c táº¡o theo logic Hybrid má»›i:");
-                    console.table(finalLayoutIcons);
-                    
-                    return finalLayoutIcons;
-                }
-                // =====================================================
-                // END: UPDATED Function getIconsWithHybridLogic
-                // =====================================================
-
-                const vm = findVM();
-                if (!vm) return reject({ error: 'Cannot find Scratch VM' });
-                
-                const customPageTitle = await getCustomPageTitle();
-                const allTargets = vm.runtime.targets.map(t => t);
-                
-                const icons = getIconsWithHybridLogic(allTargets);
-                
-                const poloSprites = allTargets.filter(t => /^Polo \d+$/.test(t.sprite.name));
-                poloSprites.sort((a, b) => {
-                    const numA = parseInt(a.sprite.name.match(/\d+/)?.[0] || '0');
-                    const numB = parseInt(b.sprite.name.match(/\d+/)?.[0] || '0');
-                    return numA - numB;
-                });
-                const slots = poloSprites.map((s, i) => {
-                    const coords = toPixelWithMenu(s.x, s.y);
-                    return { ...coords, index: i };
-                });
-                
-                // ðŸ†• NEW: Recording area will be calculated in Python using OpenCV
-                // Set to null here, will be overridden by Python
-                const customRecordingArea = null;
-                
-                // =====================================================
-                // NEW: Find Skip Intro Button Logic
-                // =====================================================
-                function findSkipIntroButton(allTargets) {
-                    console.log("ðŸ” Searching for Skip Intro button...");
-                    
+                new Promise(async (resolve, reject) => {
                     try {
-                        // Search for target with name "Intro" and costume "Skip"
-                        const introTarget = allTargets.find(target => {
-                            // Check if target name is "Intro"
-                            if (target.sprite.name !== "Intro") {
-                                return false;
+                        console.log("Starting full layout capture...");
+
+                        function findVM() {
+                            if (window.__vm && window.__vm.runtime) return window.__vm;
+                            function getReactKey(el) { return Object.keys(el).find(k => k.startsWith('__react')); }
+                            const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
+                            for (const selector of selectors) {
+                                const elements = document.querySelectorAll(selector);
+                                for (const el of elements) {
+                                    const reactKey = getReactKey(el);
+                                    if (!reactKey) continue;
+                                    let fiber = el[reactKey]; let depth = 0;
+                                    while (fiber && depth++ < 100) {
+                                        const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
+                                        if (props?.vm && props.vm.runtime) { window.__vm = props.vm; return props.vm; }
+                                        fiber = fiber.return;
+                                    }
+                                }
                             }
-                            
-                            // Check if target has costume with name "Skip"
-                            const hasSkipCostume = target.sprite.costumes.some(costume => 
-                                costume.name === "Skip"
-                            );
-                            
-                            if (hasSkipCostume) {
-                                console.log(`âœ¦ Found Skip Intro target: ${target.sprite.name}`);
-                                console.log(`   - Position: (${target.x}, ${target.y})`);
-                                console.log(`   - Visible: ${target.visible}`);
-                                console.log(`   - Costumes: ${target.sprite.costumes.map(c => c.name).join(', ')}`);
-                                return true;
-                            }
-                            
-                            return false;
-                        });
-                        
-                        if (introTarget) {
-                            // Convert logic coordinates to pixel coordinates
-                            const pixelCoords = toPixelWithMenu(introTarget.x, introTarget.y);
-                            
-                            if (pixelCoords.x !== null && pixelCoords.y !== null) {
-                                console.log(`âœ¦ Skip Intro button found at pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
-                                return {
-                                    x: pixelCoords.x,
-                                    y: pixelCoords.y,
-                                    visible: introTarget.visible,
-                                    targetName: introTarget.sprite.name,
-                                    currentCostume: introTarget.currentCostume,
-                                    costumes: introTarget.sprite.costumes.map(c => c.name)
-                                };
-                            } else {
-                                console.warn("âš ï¸ Skip Intro target found but coordinates conversion failed");
-                                return null;
-                            }
-                        } else {
-                            console.log("âŒ Skip Intro button not found (no target with name 'Intro' and costume 'Skip')");
                             return null;
                         }
                         
-                    } catch (error) {
-                        console.error("âŒ Error while searching for Skip Intro button:", error);
-                        return null;
+                        const toPixelWithMenu = (logicX, logicY) => {
+                            if (logicX === null || logicY === null) return { x: null, y: null };
+                            const stageW = 640; const stageH = 360; const screenW = 1920; const screenH = 1080; const menuWidth = 78;
+                            const viewportW = screenW - menuWidth; const scale = Math.min(viewportW / stageW, screenH / stageH);
+                            const canvasW = stageW * scale; const canvasH = stageH * scale; const leftOffset = menuWidth;
+                            const topOffset = (screenH - canvasH) / 2; const canvasCenterX = leftOffset + (canvasW / 2);
+                            const canvasCenterY = topOffset + (canvasH / 2); const pixelX = canvasCenterX + (logicX * scale);
+                            const pixelY = canvasCenterY - (logicY * scale);
+                            return { x: Math.round(pixelX), y: Math.round(pixelY) };
+                        };
+                        
+                        async function getCustomPageTitle() {
+                            const selectors = ['.style_editableBox__OXulT[data-value]', 'h1.style_title__2vo4r', 'h4.style_editableBox__OXulT', '.style_content__J_Rrs'];
+                            const WAIT_TIMEOUT = 5000; const CHECK_INTERVAL = 250; const startTime = Date.now();
+                            while (Date.now() - startTime < WAIT_TIMEOUT) {
+                                for (const selector of selectors) {
+                                    const element = document.querySelector(selector);
+                                    if (element) {
+                                        if (element.hasAttribute('data-value')) {
+                                            const dataValue = element.getAttribute('data-value').trim();
+                                            if (dataValue) return dataValue;
+                                        }
+                                        const textContent = (element.textContent || element.innerText || '').trim();
+                                        if (textContent) {
+                                            const cleanText = textContent.replace(/\s+/g, ' ').trim();
+                                            if (cleanText) return cleanText;
+                                        }
+                                    }
+                                }
+                                await new Promise(r => setTimeout(r, CHECK_INTERVAL));
+                            }
+                            return document.title || 'Untitled Game';
+                        }
+                        
+                        // 🔍REMOVED: calculateRecordingArea function - now handled by Python OpenCV
+                        // Recording area will be calculated in Python using OpenCV layout analysis
+                        
+                        // =====================================================
+                        // UPDATED: Function getIconsWithHybridLogic (Logic Mới)
+                        // =====================================================
+                        function getIconsWithHybridLogic(allTargets) {
+                            console.log("🎬 Bắt đầu quá trình lấy icons (Logic Hybrid - Chính xác nhất)...");
+
+                            // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ 
+                            console.log("🔶️ Bước 1: Tìm các sprite 'Icons' đang hiện thị...");
+                            const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
+                            console.log(`✦ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
+
+                            // Bước 2: TẠO "DANH BẢ" SPRITE (chỉ loại bỏ Stage)
+                            console.log("🔶️ Bước 2: Tạo 'danh bả' gồm tất cả các sprite (trừ Stage) để tra cứu...");
+                            const allSprites = allTargets.filter(t => !t.isStage);
+                            console.log(`✦ 'Danh bả' có ${allSprites.length} sprite.`);
+
+                            // Bước 3: SẮP XẾP ICONS DỰA TRÊN INDEX CỦA SPRITE TƯƠNG ỨNG
+                            console.log("🔶️ Bước 3: Sắp xếp icons bằng cách liên kết ngược lại với sprite gốc...");
+                            visibleIcons.sort((iconA, iconB) => {
+                                // Lấy 'chìa khóa' từ mỗi icon
+                                const charIndexA = Math.floor(iconA.currentCostume / 3);
+                                const charIndexB = Math.floor(iconB.currentCostume / 3);
+
+                                // Dùng 'chìa khóa' để tra cứu trong 'danh bả'
+                                const linkedSpriteA = allSprites[charIndexA];
+                                const linkedSpriteB = allSprites[charIndexB];
+
+                                // Nếu vì lý do nào đó không tìm thấy sprite, không sắp xếp
+                                if (!linkedSpriteA || !linkedSpriteB) {
+                                    console.warn(`Không thể tìm thấy sprite liên kết cho index ${charIndexA} hoặc ${charIndexB}`);
+                                    return 0;
+                                }
+
+                                // Lấy 'số báo danh' (runtime index) của sprite đã liên kết
+                                const runtimeIndexA = allTargets.indexOf(linkedSpriteA);
+                                const runtimeIndexB = allTargets.indexOf(linkedSpriteB);
+
+                                // So sánh 'số báo danh' để sắp xếp
+                                return runtimeIndexA - runtimeIndexB;
+                            });
+
+                            // Bước 4: TẠO MẢNG KẾT QUẢ CUỐI CÙNG
+                            console.log("🔶️ Bước 4: Chuyển đổi tọa độ và gán index tuần tự mới...");
+                            const finalLayoutIcons = visibleIcons.map((icon, index) => {
+                                const pixelCoords = toPixelWithMenu(icon.x, icon.y);
+                                return {
+                                    x: pixelCoords.x,
+                                    y: pixelCoords.y,
+                                    index: index // Gán index tuần tự 0, 1, 2... sau khi đã sắp xếp
+                                };
+                            });
+
+                            console.log("✦ HOÀN THÀNH! Icons được tạo theo logic Hybrid mới:");
+                            console.table(finalLayoutIcons);
+                            
+                            return finalLayoutIcons;
+                        }
+                        // =====================================================
+                        // END: UPDATED Function getIconsWithHybridLogic
+                        // =====================================================
+
+                        const vm = findVM();
+                        if (!vm) return reject({ error: 'Cannot find Scratch VM' });
+                        
+                        const customPageTitle = await getCustomPageTitle();
+                        const allTargets = vm.runtime.targets.map(t => t);
+                        
+                        const icons = getIconsWithHybridLogic(allTargets);
+                        
+                        // =====================================================
+                        // FIXED: Sắp xếp slots theo tọa độ X (nhất quán với js_get_state_and_coordinates)
+                        // =====================================================
+                        const poloSprites = allTargets.filter(t => /^Polo \d+$/.test(t.sprite.name));
+                        poloSprites.sort((a, b) => {
+                            const numA = parseInt(a.sprite.name.match(/\d+/)?.[0] || '0');
+                            const numB = parseInt(b.sprite.name.match(/\d+/)?.[0] || '0');
+                            return numA - numB;
+                        });
+                        
+                        // Convert to pixel coordinates first
+                        const slotsWithCoords = poloSprites.map(s => {
+                            const coords = toPixelWithMenu(s.x, s.y);
+                            return { ...coords, originalSprite: s.sprite.name };
+                        });
+                        
+                        // Sort by X coordinate (left to right) and reassign index
+                        slotsWithCoords.sort((a, b) => a.x - b.x);
+                        const slots = slotsWithCoords.map((slot, i) => ({ 
+                            x: slot.x, 
+                            y: slot.y, 
+                            index: i,
+                            originalSprite: slot.originalSprite
+                        }));
+                        // =====================================================
+                        // END: FIXED slots sorting
+                        // =====================================================
+                        
+                        // 🎮NEW: Recording area will be calculated in Python using OpenCV
+                        // Set to null here, will be overridden by Python
+                        const customRecordingArea = null;
+                        
+                        // =====================================================
+                        // NEW: Find Skip Intro Button Logic
+                        // =====================================================
+                        function findSkipIntroButton(allTargets) {
+                            console.log("🎯 Searching for Skip Intro button...");
+                            
+                            try {
+                                // Search for target with name "Intro" and costume "Skip"
+                                const introTarget = allTargets.find(target => {
+                                    // Check if target name is "Intro"
+                                    if (target.sprite.name !== "Intro") {
+                                        return false;
+                                    }
+                                    
+                                    // Check if target has costume with name "Skip"
+                                    const hasSkipCostume = target.sprite.costumes.some(costume => 
+                                        costume.name === "Skip"
+                                    );
+                                    
+                                    if (hasSkipCostume) {
+                                        console.log(`✦ Found Skip Intro target: ${target.sprite.name}`);
+                                        console.log(`   - Position: (${target.x}, ${target.y})`);
+                                        console.log(`   - Visible: ${target.visible}`);
+                                        console.log(`   - Costumes: ${target.sprite.costumes.map(c => c.name).join(', ')}`);
+                                        return true;
+                                    }
+                                    
+                                    return false;
+                                });
+                                
+                                if (introTarget) {
+                                    // Convert logic coordinates to pixel coordinates
+                                    const pixelCoords = toPixelWithMenu(introTarget.x, introTarget.y);
+                                    
+                                    if (pixelCoords.x !== null && pixelCoords.y !== null) {
+                                        console.log(`✦ Skip Intro button found at pixel coordinates: (${pixelCoords.x}, ${pixelCoords.y})`);
+                                        return {
+                                            x: pixelCoords.x,
+                                            y: pixelCoords.y,
+                                            visible: introTarget.visible,
+                                            targetName: introTarget.sprite.name,
+                                            currentCostume: introTarget.currentCostume,
+                                            costumes: introTarget.sprite.costumes.map(c => c.name)
+                                        };
+                                    } else {
+                                        console.warn("⚠️ Skip Intro target found but coordinates conversion failed");
+                                        return null;
+                                    }
+                                } else {
+                                    console.log("❌ Skip Intro button not found (no target with name 'Intro' and costume 'Skip')");
+                                    return null;
+                                }
+                                
+                            } catch (error) {
+                                console.error("❌ Error while searching for Skip Intro button:", error);
+                                return null;
+                            }
+                        }
+
+                        // Find Skip Intro button
+                        const skipIntroButton = findSkipIntroButton(allTargets);
+
+                        // Log the result for debugging
+                        if (skipIntroButton) {
+                            console.log("🎯 Skip Intro Button Detection Result:");
+                            console.log(`   - Found: YES`);
+                            console.log(`   - Coordinates: (${skipIntroButton.x}, ${skipIntroButton.y})`);
+                            console.log(`   - Visible: ${skipIntroButton.visible}`);
+                            console.log(`   - Target Name: ${skipIntroButton.targetName}`);
+                            console.log(`   - Available Costumes: ${skipIntroButton.costumes.join(', ')}`);
+                        } else {
+                            console.log("🎯 Skip Intro Button Detection Result:");
+                            console.log(`   - Found: NO`);
+                            console.log(`   - Reason: Target 'Intro' with costume 'Skip' not found in allTargets`);
+                        }
+                        // =====================================================
+                        // END: Find Skip Intro Button Logic
+                        // =====================================================
+
+                        const result = {
+                            timestamp: new Date().toISOString(),
+                            pageTitle: customPageTitle,
+                            currentUrl: window.location.href,
+                            layout: { 
+                                icons: icons, 
+                                slots: slots, 
+                                bonus: [], 
+                                recordingArea: customRecordingArea,  // Will be overridden by Python OpenCV calculation
+                                skipIntroButton: skipIntroButton
+                            }
+                        };
+
+                        console.log("Full layout capture completed!");
+                        resolve(result);
+
+                    } catch(e) {
+                        console.error("Error in full layout capture:", e);
+                        reject({ error: e.toString(), stack: e.stack });
                     }
-                }
-
-                // Find Skip Intro button
-                const skipIntroButton = findSkipIntroButton(allTargets);
-
-                // Log the result for debugging
-                if (skipIntroButton) {
-                    console.log("ðŸ” Skip Intro Button Detection Result:");
-                    console.log(`   - Found: YES`);
-                    console.log(`   - Coordinates: (${skipIntroButton.x}, ${skipIntroButton.y})`);
-                    console.log(`   - Visible: ${skipIntroButton.visible}`);
-                    console.log(`   - Target Name: ${skipIntroButton.targetName}`);
-                    console.log(`   - Available Costumes: ${skipIntroButton.costumes.join(', ')}`);
-                } else {
-                    console.log("ðŸ” Skip Intro Button Detection Result:");
-                    console.log(`   - Found: NO`);
-                    console.log(`   - Reason: Target 'Intro' with costume 'Skip' not found in allTargets`);
-                }
-                // =====================================================
-                // END: Find Skip Intro Button Logic
-                // =====================================================
-
-                const result = {
-                    timestamp: new Date().toISOString(),
-                    pageTitle: customPageTitle,
-                    currentUrl: window.location.href,
-                    layout: { 
-                        icons: icons, 
-                        slots: slots, 
-                        bonus: [], 
-                        recordingArea: customRecordingArea,  // Will be overridden by Python OpenCV calculation
-                        skipIntroButton: skipIntroButton
-                    }
-                };
-
-                console.log("Full layout capture completed!");
-                resolve(result);
-
-            } catch(e) {
-                console.error("Error in full layout capture:", e);
-                reject({ error: e.toString(), stack: e.stack });
-            }
-        });
-        '''
+                });
+                '''
 
     def ensure_window_activation(self, operation_name="operation"):
         """Optimized window activation - avoid excessive maximize calls"""
@@ -835,82 +863,111 @@ class SprunkiJSONGenerator:
             traceback.print_exc()
             return False
         
-    def calculate_recording_area_opencv(self, slot3_x):
-            """TÃ­nh toÃ¡n recording area dá»±a trÃªn káº¿t quáº£ OpenCV vÃ  tá»a Ä‘á»™ slot 3"""
-            try:
-                if not hasattr(self, 'top_line_y') or not hasattr(self, 'bottom_line_y'):
-                    print("âŒ Layout analysis not performed yet - cannot calculate recording area with OpenCV")
-                    print("ðŸ’¡ This usually means the layout analysis step was skipped or failed")
-                    return None
-                    
-                if self.top_line_y is None or self.bottom_line_y is None:
-                    print("âŒ Invalid dividing lines from OpenCV analysis - cannot calculate recording area")
-                    print(f"   Top line: {self.top_line_y}, Bottom line: {self.bottom_line_y}")
-                    return None
-                
-                if slot3_x is None:
-                    print("âŒ Slot 3 X coordinate not available")
-                    return None
-                    
-                print(f"ðŸŽ¯ Calculating recording area with OpenCV method...")
-                print(f"   ðŸ“ Dividing lines detected: Y{self.top_line_y} to Y{self.bottom_line_y}")
-                print(f"   ðŸ“ Slot 3 center X: {slot3_x}")
-                
-                # Step 1: Calculate height (distance between dividing lines)
-                height = self.bottom_line_y - self.top_line_y
-                
-                # Validate height is reasonable
-                if height <= 0:
-                    print(f"âŒ Invalid height calculated: {height} (bottom_line_y: {self.bottom_line_y}, top_line_y: {self.top_line_y})")
-                    return None
-                
-                if height < 100:  # Too small
-                    print(f"âš ï¸ Very small height detected: {height}px - may be inaccurate")
-                elif height > 800:  # Too large  
-                    print(f"âš ï¸ Very large height detected: {height}px - may be inaccurate")
-                
-                # Step 2: Calculate width maintaining 96:83 aspect ratio
-                width = height * (96 / 83)
-                
-                # Step 3: Calculate X coordinate (centered on slot 3)
-                x = slot3_x - (width / 2)
-                
-                # Step 4: Apply boundary constraints (keep within screen)
-                screen_width = 1920  # Fullscreen width
-                original_x = x
-                
-                if x < 0:
-                    x = 0
-                    print(f"   âš ï¸ X adjusted to 0 (was {original_x:.1f} - would be off-screen left)")
-                elif x + width > screen_width:
-                    x = screen_width - width
-                    print(f"   âš ï¸ X adjusted to {x:.1f} (was {original_x:.1f} - would be off-screen right)")
-                
-                # Y coordinate is exactly the top dividing line
-                y = self.top_line_y
-                
-                recording_area = {
-                    'x': int(round(x)),
-                    'y': int(y),
-                    'width': int(round(width)),
-                    'height': int(height),
-                    'aspectRatio': "96:83"
-                }
-                
-                print(f"âœ… OpenCV Recording Area calculated successfully:")
-                print(f"   ðŸ“ Position: ({recording_area['x']}, {recording_area['y']})")
-                print(f"   ðŸ“ Size: {recording_area['width']} x {recording_area['height']}")
-                print(f"   ðŸ“ Aspect Ratio: {recording_area['aspectRatio']}")
-                print(f"   ðŸŽ¯ Perfect fit between dividing lines: Y{self.top_line_y} to Y{self.bottom_line_y}")
-                print(f"   ðŸŽ¯ Centered on slot 3 at X{slot3_x}")
-                
-                return recording_area
-                
-            except Exception as e:
-                print(f"âŒ Error calculating recording area with OpenCV: {e}")
-                import traceback
-                traceback.print_exc()
+    def calculate_recording_area_opencv(self, slot_center_x, center_index, total_slots):
+        """Tính toán recording area dựa trên kết quả OpenCV và tọa độ slot center"""
+        try:
+            if not hasattr(self, 'top_line_y') or not hasattr(self, 'bottom_line_y'):
+                print("⌧ Layout analysis not performed yet - cannot calculate recording area with OpenCV")
+                print("💡 This usually means the layout analysis step was skipped or failed")
                 return None
+                
+            if self.top_line_y is None or self.bottom_line_y is None:
+                print("⌧ Invalid dividing lines from OpenCV analysis - cannot calculate recording area")
+                print(f"   Top line: {self.top_line_y}, Bottom line: {self.bottom_line_y}")
+                return None
+            
+            if slot_center_x is None:
+                print("⌧ Slot center X coordinate not available")
+                return None
+                
+            print(f"🎯 Calculating recording area with OpenCV method...")
+            print(f"   📐 Dividing lines detected: Y{self.top_line_y} to Y{self.bottom_line_y}")
+            print(f"   🎯 Slot center (index {center_index}/{total_slots}): X={slot_center_x}")
+            
+            # Step 1: Calculate height (distance between dividing lines)
+            height = self.bottom_line_y - self.top_line_y
+            
+            # Validate height is reasonable
+            if height <= 0:
+                print(f"⌧ Invalid height calculated: {height} (bottom_line_y: {self.bottom_line_y}, top_line_y: {self.top_line_y})")
+                return None
+            
+            if height < 100:  # Too small
+                print(f"⚠️ Very small height detected: {height}px - may be inaccurate")
+            elif height > 800:  # Too large  
+                print(f"⚠️ Very large height detected: {height}px - may be inaccurate")
+            
+            # Step 2: Calculate width maintaining 96:83 aspect ratio
+            width = height * (96 / 83)
+            
+            # Step 3: Calculate X coordinate (centered on slot center)
+            x = slot_center_x - (width / 2)
+            
+            # Step 4: Apply boundary constraints (keep within screen)
+            screen_width = 1920  # Fullscreen width
+            original_x = x
+            
+            if x < 0:
+                x = 0
+                print(f"   ⚠️ X adjusted to 0 (was {original_x:.1f} - would be off-screen left)")
+            elif x + width > screen_width:
+                x = screen_width - width
+                print(f"   ⚠️ X adjusted to {x:.1f} (was {original_x:.1f} - would be off-screen right)")
+            
+            # Y coordinate is exactly the top dividing line
+            y = self.top_line_y
+            
+            recording_area = {
+                'x': int(round(x)),
+                'y': int(y),
+                'width': int(round(width)),
+                'height': int(height),
+                'aspectRatio': "96:83"
+            }
+            
+            print(f"✅ OpenCV Recording Area calculated successfully:")
+            print(f"   📐 Position: ({recording_area['x']}, {recording_area['y']})")
+            print(f"   📐 Size: {recording_area['width']} x {recording_area['height']}")
+            print(f"   📐 Aspect Ratio: {recording_area['aspectRatio']}")
+            print(f"   🎯 Perfect fit between dividing lines: Y{self.top_line_y} to Y{self.bottom_line_y}")
+            print(f"   🎯 Centered on slot center (index {center_index}) at X{slot_center_x}")
+            
+            return recording_area
+            
+        except Exception as e:
+            print(f"⌧ Error calculating recording area with OpenCV: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def calculate_slot_center_index(self, slots):
+        """Tính toán slot center index dựa trên công thức: (total_slots - 1) // 2"""
+        try:
+            if not slots:
+                print("⌧ No slots available for center calculation")
+                return None, None, 0
+            
+            total_slots = len(slots)
+            center_index = (total_slots - 1) // 2
+            
+            print(f"📊 Slot calculation: {total_slots} slots → center index {center_index}")
+            print(f"   Examples: 7 slots → index 3, 9 slots → index 4, 6 slots → index 2")
+            print(f"🎯 Using center slot index {center_index} out of {total_slots} total slots")
+            
+            # Find slot with center index
+            center_slot = next((slot for slot in slots if slot.get('index') == center_index), None)
+            
+            if center_slot and center_slot.get('x') is not None:
+                center_x = center_slot['x']
+                print(f"🎯 Target slot details: index={center_index}, coords=({center_x}, {center_slot.get('y', 'N/A')})")
+                return center_slot, center_index, total_slots
+            else:
+                print(f"⌧ Center slot (index {center_index}) not found or has invalid coordinates")
+                return None, center_index, total_slots
+                
+        except Exception as e:
+            print(f"⌧ Error calculating slot center: {e}")
+            return None, None, 0
 
     def _execute_verification_js(self, js_code):
         """Execute JavaScript for verification via WebSocket/CDP"""
@@ -2589,12 +2646,17 @@ class SprunkiJSONGenerator:
             except ImportError:
                 print("   ÃƒÂ¢Ã…Â¡ ÃƒÂ¯Ã‚Â¸Ã‚Â psutil not available for process cleanup")
             
-            # Clear cache/cookies only (keep profile intact)
-            print("   🗑️ Clearing cache and cookies only...")
-            try:
-                self.clear_cache_cookies_only()
-            except Exception as e:
-                print(f"   ⚠️ Could not clear cache/cookies: {e}")
+            # Optional minimal cleanup (can be disabled)
+            skip_cleanup = self.chrome_config.get('skip_cache_cleanup', False)
+            if skip_cleanup:
+                print("   ℹ️ Cache cleanup SKIPPED (preserving everything for extensions)")
+                print("   📦 All cookies, sessions, extension data preserved")
+            else:
+                print("   🗑️ Minimal cache clearing only...")
+                try:
+                    self.clear_cache_cookies_only()
+                except Exception as e:
+                    print(f"   ⚠️ Could not clear cache/cookies: {e}")
             
             self.ws_url = None
             
@@ -2624,19 +2686,18 @@ class SprunkiJSONGenerator:
                 print("   ℹ️ Default profile not found")
                 return
                 
-            # Clear specific cache and cookie files only
+            # Clear only temporary cache files, PRESERVE login/extension data
             cache_paths = [
-                os.path.join(default_path, "Cache", "Cache_Data"),
-                os.path.join(default_path, "Code Cache"),
-                os.path.join(default_path, "Cookies"),
-                os.path.join(default_path, "Cookies-journal"),
-                os.path.join(default_path, "Network"),
-                os.path.join(default_path, "Sessions"),
-                os.path.join(default_path, "Session Storage"),
-                os.path.join(default_path, "Local Storage"),
-                os.path.join(default_path, "IndexedDB"),
-                os.path.join(default_path, "Service Worker"),
-                os.path.join(default_path, "GPUCache")
+                os.path.join(default_path, "Cache", "Cache_Data"),  # Browser cache only
+                os.path.join(default_path, "Code Cache"),           # JS compiled cache only  
+                os.path.join(default_path, "GPUCache"),             # GPU cache only
+                # ❌ REMOVED: Cookies - giữ để duy trì login
+                # ❌ REMOVED: Cookies-journal - giữ để duy trì login
+                # ❌ REMOVED: Sessions - giữ để duy trì active sessions
+                # ❌ REMOVED: Local Storage - extensions cần dữ liệu này
+                # ❌ REMOVED: IndexedDB - extensions lưu settings ở đây
+                # ❌ REMOVED: Service Worker - extensions hoạt động qua SW
+                # ❌ REMOVED: Network - giữ để extension hoạt động ngay
             ]
             
             cleared_count = 0
@@ -2652,8 +2713,9 @@ class SprunkiJSONGenerator:
                 except Exception as e:
                     print(f"   ⚠️ Could not clear {cache_path}: {e}")
                     
-            print(f"   🧹 Cache cleanup completed - {cleared_count} items processed")
-            print("   ✅ Profile, extensions, and login data preserved")
+            print(f"   🧹 Minimal cache cleanup completed - {cleared_count} items processed")
+            print("   ✅ Login session, cookies, extensions data preserved")
+            print("   📦 Extensions should work immediately without refresh")
             
         except Exception as e:
             print(f"❌ Cache clearing error: {e}")
@@ -3476,13 +3538,13 @@ class SprunkiJSONGenerator:
                         # ðŸ†• NEW: Calculate recording area using OpenCV even for insufficient icons case
                         print("\nðŸ” Calculating recording area with OpenCV for insufficient icons case...")
                         
-                        # Get slot 3 coordinates
+                        # Get slot center coordinates
                         slots = layout_state.get('layout', {}).get('slots', [])
-                        slot_3 = next((slot for slot in slots if slot.get('index') == 3), None)
-                        
-                        if slot_3 and slot_3.get('x') is not None:
-                            slot3_x = slot_3['x']
-                            opencv_recording_area = self.calculate_recording_area_opencv(slot3_x)
+                        center_slot, center_index, total_slots = self.calculate_slot_center_index(slots)
+
+                        if center_slot and center_slot.get('x') is not None:
+                            slot_center_x = center_slot['x']
+                            opencv_recording_area = self.calculate_recording_area_opencv(slot_center_x, center_index, total_slots)
                             
                             if opencv_recording_area:
                                 layout_state['layout']['recordingArea'] = opencv_recording_area
@@ -3943,16 +4005,16 @@ class SprunkiJSONGenerator:
             print("ðŸ” OPENCV RECORDING AREA CALCULATION")
             print("="*50)
             
-            # Get slot 3 coordinates
+            # Get slot center coordinates
             slots = layout_state.get('layout', {}).get('slots', [])
-            slot_3 = next((slot for slot in slots if slot.get('index') == 3), None)
-            
-            if slot_3 and slot_3.get('x') is not None:
-                slot3_x = slot_3['x']
-                print(f"ðŸ“ Found slot 3 at X coordinate: {slot3_x}")
+            center_slot, center_index, total_slots = self.calculate_slot_center_index(slots)
+
+            if center_slot and center_slot.get('x') is not None:
+                slot_center_x = center_slot['x']
+                print(f"📐 Found slot center (index {center_index}) at X coordinate: {slot_center_x}")
                 
                 # Calculate recording area using OpenCV results
-                opencv_recording_area = self.calculate_recording_area_opencv(slot3_x)
+                opencv_recording_area = self.calculate_recording_area_opencv(slot_center_x, center_index, total_slots)
                 
                 if opencv_recording_area:
                     # Override the recordingArea in layout_state
@@ -3968,9 +4030,9 @@ class SprunkiJSONGenerator:
                     print("âš ï¸ Will proceed without recording area - JSON will still be generated")
                     layout_state['layout']['recordingArea'] = None
             else:
-                print("âŒ Slot 3 coordinates not found - cannot calculate recording area")
-                print("ðŸ’¡ This means the game doesn't have the expected slot structure")
-                print("âš ï¸ Will proceed without recording area")
+                print("⌧ Slot center coordinates not found - cannot calculate recording area")
+                print("💡 This means the game doesn't have the expected slot structure")
+                print("⚠️ Will proceed without recording area")
                 layout_state['layout']['recordingArea'] = None
             
             print("="*50)

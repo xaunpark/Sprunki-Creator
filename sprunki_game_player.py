@@ -21,7 +21,7 @@ from datetime import datetime
 import math
 
 class DragOperationStats:
-    """Class để tracking drag operation statistics"""
+    """Class Ä‘á»ƒ tracking drag operation statistics"""
     def __init__(self):
         self.total_attempts = 0
         self.successful_drags = 0
@@ -57,7 +57,7 @@ class DragOperationStats:
         verification_success_rate = (self.verification_successful / self.verification_enabled) * 100 if self.verification_enabled > 0 else 0
         
         return f"""
-📊 Enhanced Drag Operation Statistics:
+ðŸ“Š Enhanced Drag Operation Statistics:
    Total attempts: {self.total_attempts}
    Successful: {self.successful_drags}
    Failed: {self.failed_drags}
@@ -65,7 +65,7 @@ class DragOperationStats:
    Average retries: {avg_retries:.1f}
    Average coordinate attempts: {avg_coord_retries:.1f}
    
-🔍 Verification Statistics:
+ðŸ” Verification Statistics:
    Verification enabled: {self.verification_enabled} ({verification_rate:.1f}%)
    Verification success rate: {verification_success_rate:.1f}%
         """
@@ -187,11 +187,11 @@ class SprunkiGamePlayer:
         
         # Remix patterns
         self.remix_patterns = [
-            {'name': 'Standard', 'description': 'Chuẩn cân bằng', 'beats': 3, 'effects': 2, 'melodies': 1, 'vocals': 1},
-            {'name': 'Melody Focus', 'description': '1 effect ít hơn, 2 melody', 'beats': 3, 'effects': 1, 'melodies': 2, 'vocals': 1},
-            {'name': 'Effect Heavy', 'description': 'Nhấn mạnh effect', 'beats': 2, 'effects': 3, 'melodies': 1, 'vocals': 1},
-            {'name': 'No Melody', 'description': 'Không melody, thêm vocal', 'beats': 3, 'effects': 2, 'melodies': 0, 'vocals': 2},
-            {'name': 'Beat Power', 'description': '4 beats mạnh, ít effect', 'beats': 4, 'effects': 1, 'melodies': 1, 'vocals': 1}
+            {'name': 'Standard', 'description': 'Chuáº©n cÃ¢n báº±ng', 'beats': 3, 'effects': 2, 'melodies': 1, 'vocals': 1},
+            {'name': 'Melody Focus', 'description': '1 effect Ã­t hÆ¡n, 2 melody', 'beats': 3, 'effects': 1, 'melodies': 2, 'vocals': 1},
+            {'name': 'Effect Heavy', 'description': 'Nháº¥n máº¡nh effect', 'beats': 2, 'effects': 3, 'melodies': 1, 'vocals': 1},
+            {'name': 'No Melody', 'description': 'KhÃ´ng melody, thÃªm vocal', 'beats': 3, 'effects': 2, 'melodies': 0, 'vocals': 2},
+            {'name': 'Beat Power', 'description': '4 beats máº¡nh, Ã­t effect', 'beats': 4, 'effects': 1, 'melodies': 1, 'vocals': 1}
         ]
         
         # Remix library
@@ -215,7 +215,7 @@ class SprunkiGamePlayer:
         self.js_find_skip_intro = '''
         new Promise(async (resolve, reject) => {
             try {
-                console.log("🔍 [GAME PLAYER] Searching for ALL Skip Intro buttons...");
+                console.log("ðŸ” [GAME PLAYER] Searching for ALL Skip Intro buttons...");
                 
                 function findVM() {
                     if (window.__vm && window.__vm.runtime) return window.__vm;
@@ -250,13 +250,13 @@ class SprunkiGamePlayer:
                 
                 const vm = findVM();
                 if (!vm) {
-                    console.log("❌ [GAME PLAYER] VM not found - cannot search for Skip Intro buttons");
+                    console.log("âŒ [GAME PLAYER] VM not found - cannot search for Skip Intro buttons");
                     resolve({ found: false, count: 0, buttons: [], reason: "vm_not_found" });
                     return;
                 }
                 
                 const allTargets = vm.runtime.targets.map(t => t);
-                console.log(`🎯 [GAME PLAYER] Total targets found: ${allTargets.length}`);
+                console.log(`ðŸŽ¯ [GAME PLAYER] Total targets found: ${allTargets.length}`);
                 
                 // Find ALL targets with name "Intro" and costume "Skip"
                 const introTargets = allTargets.filter(target => {
@@ -271,10 +271,10 @@ class SprunkiGamePlayer:
                     return hasSkipCostume;
                 });
                 
-                console.log(`🔍 [GAME PLAYER] Found ${introTargets.length} 'Intro' targets with 'Skip' costume`);
+                console.log(`ðŸ” [GAME PLAYER] Found ${introTargets.length} 'Intro' targets with 'Skip' costume`);
                 
                 if (introTargets.length === 0) {
-                    console.log("ℹ️ [GAME PLAYER] No Skip Intro buttons found");
+                    console.log("â„¹ï¸ [GAME PLAYER] No Skip Intro buttons found");
                     resolve({ found: false, count: 0, buttons: [], reason: "target_not_found" });
                     return;
                 }
@@ -283,7 +283,7 @@ class SprunkiGamePlayer:
                 const skipIntroButtons = [];
                 
                 introTargets.forEach((target, index) => {
-                    console.log(`\\n🎯 [GAME PLAYER] Processing Intro Target ${index + 1}/${introTargets.length}:`);
+                    console.log(`\\nðŸŽ¯ [GAME PLAYER] Processing Intro Target ${index + 1}/${introTargets.length}:`);
                     console.log(`   - Logic Position: (${target.x}, ${target.y})`);
                     console.log(`   - Visible: ${target.visible}`);
                     console.log(`   - Current Costume: ${target.sprite.costumes[target.currentCostume]?.name || 'Unknown'}`);
@@ -303,13 +303,13 @@ class SprunkiGamePlayer:
                         };
                         
                         skipIntroButtons.push(buttonInfo);
-                        console.log(`   ✅ [GAME PLAYER] Converted to pixel: (${pixelCoords.x}, ${pixelCoords.y}) - ${target.visible ? 'VISIBLE' : 'HIDDEN'}`);
+                        console.log(`   âœ… [GAME PLAYER] Converted to pixel: (${pixelCoords.x}, ${pixelCoords.y}) - ${target.visible ? 'VISIBLE' : 'HIDDEN'}`);
                     }
                 });
                 
                 const visibleButtons = skipIntroButtons.filter(btn => btn.visible);
                 
-                console.log(`\\n📊 [GAME PLAYER] BUTTONS SUMMARY: Total: ${skipIntroButtons.length}, Visible: ${visibleButtons.length}`);
+                console.log(`\\nðŸ“Š [GAME PLAYER] BUTTONS SUMMARY: Total: ${skipIntroButtons.length}, Visible: ${visibleButtons.length}`);
                 
                 resolve({
                     found: skipIntroButtons.length > 0,
@@ -320,7 +320,7 @@ class SprunkiGamePlayer:
                 });
                 
             } catch(e) { 
-                console.error("❌ [GAME PLAYER] Error searching for Skip Intro buttons:", e);
+                console.error("âŒ [GAME PLAYER] Error searching for Skip Intro buttons:", e);
                 resolve({ found: false, count: 0, buttons: [], reason: "error", error: e.toString() }); 
             }
         });
@@ -329,19 +329,19 @@ class SprunkiGamePlayer:
         # Setup GUI
         self.setup_gui()
 
-        # ✅ CLEANUP: Remove unused safe zone code  
-        print("🎯 Initialized SIMPLIFIED return system: Precision Center + Carpet Bombing only")
+        # âœ… CLEANUP: Remove unused safe zone code  
+        print("ðŸŽ¯ Initialized SIMPLIFIED return system: Precision Center + Carpet Bombing only")
 
-    def cleanup_unused_safe_zone_code(self):  # ← ĐẶT Ở ĐÂY
+    def cleanup_unused_safe_zone_code(self):  # â† Äáº¶T á»ž ÄÃ‚Y
         """
-        🧹 CLEANUP: Remove unused safe zone related attributes and methods
+        ðŸ§¹ CLEANUP: Remove unused safe zone related attributes and methods
         Call this during initialization to clean up code
         """
         # Remove safe zone cache if exists
         if hasattr(self, 'safe_zone_cache'):
             delattr(self, 'safe_zone_cache')
         
-        print("🧹 Cleaned up unused safe zone code - simplified return only needs carpet bombing")
+        print("ðŸ§¹ Cleaned up unused safe zone code - simplified return only needs carpet bombing")
 
     def load_config(self):
             """Load configuration from config.json like json_generator.py"""
@@ -369,15 +369,15 @@ class SprunkiGamePlayer:
                 # Load verification settings
                 self.load_verification_config()
                 
-                print(f"✅ Game Player configured from config.json:")
+                print(f"âœ… Game Player configured from config.json:")
                 print(f"   Debug port: {self.debugging_port}")
                 print(f"   Page load wait: {self.page_load_wait}s")
                 print(f"   Game load wait: {self.game_load_wait}s")
                 print(f"   Intro skip clicks: {self.intro_skip_clicks}")
-                print(f"   Smart verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}")
+                print(f"   Smart verification: {'âœ… Enabled' if self.page_verification_enabled else 'âŒ Disabled'}")
                 
             except Exception as e:
-                print(f"⚠️ Could not load config, using defaults: {e}")
+                print(f"âš ï¸ Could not load config, using defaults: {e}")
                 # Set defaults
                 self.chrome_paths = [
                     r"C:\Program Files\Google\Chrome\Application\chrome.exe", 
@@ -426,14 +426,14 @@ class SprunkiGamePlayer:
                 self.check_react_components = self.game_verification.get('check_react_components', True)
                 self.check_run_button_dom = self.game_verification.get('check_run_button_dom', True)
                 
-                print(f"✅ Verification config loaded:")
-                print(f"   Page verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}")
-                print(f"   Game verification: {'✅ Enabled' if self.game_verification_enabled else '❌ Disabled'}")
+                print(f"âœ… Verification config loaded:")
+                print(f"   Page verification: {'âœ… Enabled' if self.page_verification_enabled else 'âŒ Disabled'}")
+                print(f"   Game verification: {'âœ… Enabled' if self.game_verification_enabled else 'âŒ Disabled'}")
                 print(f"   Page timeout: {self.page_verification_timeout}s")
                 print(f"   Game timeout: {self.game_verification_timeout}s")
                 
             except Exception as e:
-                print(f"⚠️ Could not load verification config, using defaults: {e}")
+                print(f"âš ï¸ Could not load verification config, using defaults: {e}")
                 # Set defaults if config loading fails
                 self.page_verification_enabled = True
                 self.game_verification_enabled = True
@@ -449,27 +449,27 @@ class SprunkiGamePlayer:
 
     def _execute_edge_reinforcement(self, round_num, use_cdp):
         """
-        🎯 STUB: Edge reinforcement for carpet bombing
+        ðŸŽ¯ STUB: Edge reinforcement for carpet bombing
         """
         try:
-            print(f"   🎯 Edge reinforcement round {round_num}")
+            print(f"   ðŸŽ¯ Edge reinforcement round {round_num}")
             # Simple edge clicks - can be expanded later
             edge_clicks = min(round_num * 2, 10)  # 2-10 clicks based on round
             return edge_clicks
             
         except Exception as e:
-            print(f"❌ Edge reinforcement error: {e}")
+            print(f"âŒ Edge reinforcement error: {e}")
             return 0
 
     def _execute_verification_js(self, js_code):
         """Execute JavaScript for verification via WebSocket/CDP"""
         try:
             ws_url = self._get_websocket_url()
-            if not ws_url:  # ✅ CHECK None trước
-                print("⚠️ WebSocket not available for verification, skipping JS check")
+            if not ws_url:  # âœ… CHECK None trÆ°á»›c
+                print("âš ï¸ WebSocket not available for verification, skipping JS check")
                 return None
             
-            ws = websocket.create_connection(ws_url, timeout=10)  # ← ĐÃ SAFE
+            ws = websocket.create_connection(ws_url, timeout=10)  # â† ÄÃƒ SAFE
             
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
@@ -482,24 +482,24 @@ class SprunkiGamePlayer:
                 result = response.get('result', {}).get('result', {}).get('value')
                 return result
             else:
-                print("⚠️ No response from verification JavaScript")
+                print("âš ï¸ No response from verification JavaScript")
                 return None
                 
         except Exception as e:
-            print(f"⚠️ Error executing verification JavaScript: {e}")
+            print(f"âš ï¸ Error executing verification JavaScript: {e}")
             return None
 
     def verify_page_fully_loaded(self, target_url):
         """
-        🔍 Smart Page Load Verification System
+        ðŸ” Smart Page Load Verification System
         Checks if page is fully loaded before proceeding with image detection
         """
         try:
             if not self.page_verification_enabled:
-                print("🔍 Page verification disabled, assuming page ready")
+                print("ðŸ” Page verification disabled, assuming page ready")
                 return True
             
-            print(f"\n🔍 SMART PAGE VERIFICATION: {target_url}")
+            print(f"\nðŸ” SMART PAGE VERIFICATION: {target_url}")
             print("="*70)
             
             # JavaScript for comprehensive page verification
@@ -579,7 +579,7 @@ class SprunkiGamePlayer:
                 if self.should_stop:
                     return False
                 
-                print(f"🔍 Page verification attempt {attempt}/{max_retries}")
+                print(f"ðŸ” Page verification attempt {attempt}/{max_retries}")
                 
                 # Execute verification JavaScript
                 verification_result = self._execute_verification_js(verification_js)
@@ -591,73 +591,73 @@ class SprunkiGamePlayer:
                     ready_score = verification_result.get('readyScore', 0)
                     is_ready = verification_result.get('isReady', False)
                     
-                    print(f"   📊 Document state: {document_state}")
-                    print(f"   📊 Basic elements: Body={basic_elements.get('hasBody')}, Head={basic_elements.get('hasHead')}, Children={basic_elements.get('bodyChildren', 0)}")
-                    print(f"   📊 Loading spinners: {loading_spinners.get('count', 0)} active")
-                    print(f"   📊 Ready score: {ready_score}/100")
-                    print(f"   📊 Overall assessment: {'✅ READY' if is_ready else '⏳ NOT READY'}")
+                    print(f"   ðŸ“Š Document state: {document_state}")
+                    print(f"   ðŸ“Š Basic elements: Body={basic_elements.get('hasBody')}, Head={basic_elements.get('hasHead')}, Children={basic_elements.get('bodyChildren', 0)}")
+                    print(f"   ðŸ“Š Loading spinners: {loading_spinners.get('count', 0)} active")
+                    print(f"   ðŸ“Š Ready score: {ready_score}/100")
+                    print(f"   ðŸ“Š Overall assessment: {'âœ… READY' if is_ready else 'â³ NOT READY'}")
                     
                     if is_ready:
                         elapsed = time.time() - start_time
-                        print(f"✅ PAGE VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
+                        print(f"âœ… PAGE VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
                         print("="*70)
                         return True
                     else:
                         if loading_spinners.get('count', 0) > 0:
                             spinner_types = ', '.join(loading_spinners.get('types', []))
-                            print(f"   ⏳ Waiting for loading spinners to disappear: {spinner_types}")
+                            print(f"   â³ Waiting for loading spinners to disappear: {spinner_types}")
                         if document_state != 'complete':
-                            print(f"   ⏳ Waiting for document to complete loading...")
+                            print(f"   â³ Waiting for document to complete loading...")
                         if basic_elements.get('bodyChildren', 0) == 0:
-                            print(f"   ⏳ Waiting for page content to render...")
+                            print(f"   â³ Waiting for page content to render...")
                 
                 else:
-                    print(f"   ⚠️ Verification JavaScript failed, using fallback check")
+                    print(f"   âš ï¸ Verification JavaScript failed, using fallback check")
                     # Fallback: Simple document ready check
                     simple_check = self._execute_verification_js("document.readyState")
                     if simple_check == 'complete':
-                        print(f"   ✅ Fallback check passed: document.readyState = complete")
+                        print(f"   âœ… Fallback check passed: document.readyState = complete")
                         return True
                 
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed > self.page_verification_timeout:
-                    print(f"⚠️ Page verification timeout ({self.page_verification_timeout}s exceeded)")
+                    print(f"âš ï¸ Page verification timeout ({self.page_verification_timeout}s exceeded)")
                     print("   Proceeding anyway with image detection...")
                     return True  # Don't fail completely, proceed with image detection
                 
                 # Wait before next attempt
                 if attempt < max_retries:
-                    print(f"   ⏳ Waiting {self.page_verification_interval}s before next check...")
+                    print(f"   â³ Waiting {self.page_verification_interval}s before next check...")
                     time.sleep(self.page_verification_interval)
             
             # All attempts failed, but don't block the workflow
-            print(f"⚠️ Page verification failed after {max_retries} attempts")
+            print(f"âš ï¸ Page verification failed after {max_retries} attempts")
             print("   Proceeding anyway with image detection...")
             return True
             
         except Exception as e:
-            print(f"⚠️ Error in page verification: {e}")
+            print(f"âš ï¸ Error in page verification: {e}")
             print("   Proceeding anyway with image detection...")
             return True  # Don't block workflow on verification errors
 
     def verify_game_components_ready(self):
         """
-        🎮 Smart Game Load Verification System
+        ðŸŽ® Smart Game Load Verification System
         Checks if game components are ready before proceeding with Run button detection
         """
         try:
             if not self.game_verification_enabled:
-                print("🎮 Game verification disabled, assuming game ready")
+                print("ðŸŽ® Game verification disabled, assuming game ready")
                 return True
             
-            print(f"\n🎮 SMART GAME VERIFICATION")
+            print(f"\nðŸŽ® SMART GAME VERIFICATION")
             print("="*70)
             
             # JavaScript for game component verification
             game_verification_js = f"""
             (() => {{
-                // 🆕 EXPANDED: More comprehensive game container selectors
+                // ðŸ†• EXPANDED: More comprehensive game container selectors
                 const selectors = [
                     ".ccw-stage-wrapper", 
                     "#stage-canvas-wrapper", 
@@ -704,7 +704,7 @@ class SprunkiGamePlayer:
                                     dimensions: `${{rect.width}}x${{rect.height}}`
                                 }};
                                 results.gameContainers.push(containerInfo);
-                                console.log(`🎯 Found game container: ${{selector}} - ${{containerInfo.tagName}} - ${{containerInfo.dimensions}} - Visible: ${{containerInfo.visible}}`);
+                                console.log(`ðŸŽ¯ Found game container: ${{selector}} - ${{containerInfo.tagName}} - ${{containerInfo.dimensions}} - Visible: ${{containerInfo.visible}}`);
                             }});
                         }}
                     }} catch (e) {{
@@ -737,14 +737,14 @@ class SprunkiGamePlayer:
                     }}
                     results.reactComponents.found = reactFound;
                     results.reactComponents.count = reactCount;
-                    console.log(`⚛️ React check: Found ${{reactCount}} components`);
+                    console.log(`âš›ï¸ React check: Found ${{reactCount}} components`);
                 }};
                 
                 if ({str(self.check_react_components).lower()}) {{
                     checkReactComponents();
                 }}
                 
-                // 🆕 ENHANCED: More comprehensive Run button detection
+                // ðŸ†• ENHANCED: More comprehensive Run button detection
                 if ({str(self.check_run_button_dom).lower()}) {{
                     const runButtonSelectors = [
                         'button[type="submit"]',
@@ -756,7 +756,7 @@ class SprunkiGamePlayer:
                         'button:contains("Run")',
                         'button:contains("Play")',
                         'button:contains("Start")',
-                        'button:contains("▶")',
+                        'button:contains("â–¶")',
                         '[aria-label*="run"]',
                         '[aria-label*="play"]',
                         '[aria-label*="start"]',
@@ -776,7 +776,7 @@ class SprunkiGamePlayer:
                             const buttons = document.querySelectorAll(selector);
                             for (let button of buttons) {{
                                 const text = (button.textContent || button.value || button.alt || '').toLowerCase();
-                                const hasRunText = text.includes('run') || text.includes('play') || text.includes('start') || text.includes('▶');
+                                const hasRunText = text.includes('run') || text.includes('play') || text.includes('start') || text.includes('â–¶');
                                 const isVisible = button.offsetParent !== null;
                                 
                                 if (hasRunText || selector.includes('run') || selector.includes('play')) {{
@@ -789,7 +789,7 @@ class SprunkiGamePlayer:
                                     
                                     if (hasRunText || isVisible) {{
                                         results.runButtonInDOM = true;
-                                        console.log(`🔘 Found Run button: ${{selector}} - "${{text}}" - Visible: ${{isVisible}}`);
+                                        console.log(`ðŸ”˜ Found Run button: ${{selector}} - "${{text}}" - Visible: ${{isVisible}}`);
                                     }}
                                 }}
                             }}
@@ -798,7 +798,7 @@ class SprunkiGamePlayer:
                         }}
                     }}
                     
-                    console.log(`🔘 Run button search: Found ${{foundButtons.length}} candidates, runButtonInDOM: ${{results.runButtonInDOM}}`);
+                    console.log(`ðŸ”˜ Run button search: Found ${{foundButtons.length}} candidates, runButtonInDOM: ${{results.runButtonInDOM}}`);
                 }}
                 
                 // Assessment with more lenient criteria
@@ -808,8 +808,8 @@ class SprunkiGamePlayer:
                 
                 results.overallReady = gameContainersFound && reactReady && runButtonReady;
                 
-                // 🆕 DETAILED: Log comprehensive results
-                console.log(`🎯 Game Verification Summary:`);
+                // ðŸ†• DETAILED: Log comprehensive results
+                console.log(`ðŸŽ¯ Game Verification Summary:`);
                 console.log(`   - Game containers: ${{results.gameContainers.length}} (need ${{self.min_containers_required}})`);
                 console.log(`   - React components: ${{results.reactComponents.found}} (${{results.reactComponents.count || 0}} found)`);
                 console.log(`   - Run button in DOM: ${{results.runButtonInDOM}}`);
@@ -826,7 +826,7 @@ class SprunkiGamePlayer:
                 if self.should_stop:
                     return False
                 
-                print(f"🎮 Game verification attempt {attempt}/{max_attempts}")
+                print(f"ðŸŽ® Game verification attempt {attempt}/{max_attempts}")
                 
                 # Execute game verification JavaScript
                 game_result = self._execute_verification_js(game_verification_js)
@@ -837,55 +837,55 @@ class SprunkiGamePlayer:
                     run_button_in_dom = game_result.get('runButtonInDOM', False)
                     overall_ready = game_result.get('overallReady', False)
                     
-                    print(f"   🎯 Game containers found: {len(game_containers)}")
+                    print(f"   ðŸŽ¯ Game containers found: {len(game_containers)}")
                     for container in game_containers[:3]:  # Show first 3
                         print(f"      - {container['selector']}: visible={container['visible']}, children={container['hasChildren']}")
                     
                     if self.check_react_components:
                         react_found = react_components.get('found', False)
                         react_count = len(react_components.get('details', []))
-                        print(f"   ⚛️ React components: {'✅ Found' if react_found else '❌ Not found'} ({react_count} detected)")
+                        print(f"   âš›ï¸ React components: {'âœ… Found' if react_found else 'âŒ Not found'} ({react_count} detected)")
                     
                     if self.check_run_button_dom:
-                        print(f"   🔘 Run button in DOM: {'✅ Found' if run_button_in_dom else '❌ Not found'}")
+                        print(f"   ðŸ”˜ Run button in DOM: {'âœ… Found' if run_button_in_dom else 'âŒ Not found'}")
                     
-                    print(f"   🎯 Overall game ready: {'✅ YES' if overall_ready else '❌ NO'}")
+                    print(f"   ðŸŽ¯ Overall game ready: {'âœ… YES' if overall_ready else 'âŒ NO'}")
                     
                     if overall_ready:
                         elapsed = time.time() - start_time
-                        print(f"✅ GAME VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
+                        print(f"âœ… GAME VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
                         print("="*70)
                         return True
                     else:
                         if len(game_containers) < self.min_containers_required:
-                            print(f"   ⏳ Waiting for game containers to load ({len(game_containers)}/{self.min_containers_required})")
+                            print(f"   â³ Waiting for game containers to load ({len(game_containers)}/{self.min_containers_required})")
                         if self.check_react_components and not react_components.get('found'):
-                            print(f"   ⏳ Waiting for React components to initialize")
+                            print(f"   â³ Waiting for React components to initialize")
                         if self.check_run_button_dom and not run_button_in_dom:
-                            print(f"   ⏳ Waiting for Run button to appear in DOM")
+                            print(f"   â³ Waiting for Run button to appear in DOM")
                 
                 else:
-                    print(f"   ⚠️ Game verification JavaScript failed")
+                    print(f"   âš ï¸ Game verification JavaScript failed")
                 
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed > self.game_verification_timeout:
-                    print(f"⚠️ Game verification timeout ({self.game_verification_timeout}s exceeded)")
+                    print(f"âš ï¸ Game verification timeout ({self.game_verification_timeout}s exceeded)")
                     print("   Proceeding anyway with image detection...")
                     return True
                 
                 # Wait before next attempt
                 if attempt < max_attempts:
-                    print(f"   ⏳ Waiting {self.game_verification_interval}s before next check...")
+                    print(f"   â³ Waiting {self.game_verification_interval}s before next check...")
                     time.sleep(self.game_verification_interval)
             
             # All attempts failed, but don't block the workflow
-            print(f"⚠️ Game verification failed after {max_attempts} attempts")
+            print(f"âš ï¸ Game verification failed after {max_attempts} attempts")
             print("   Proceeding anyway with image detection...")
             return True
             
         except Exception as e:
-            print(f"⚠️ Error in game verification: {e}")
+            print(f"âš ï¸ Error in game verification: {e}")
             print("   Proceeding anyway with image detection...")
             return True
 
@@ -930,12 +930,12 @@ class SprunkiGamePlayer:
             
             result = self._execute_verification_js(verification_js)
             if result:
-                print(f"      📊 Page score: {result.get('score', 0)}/100, Spinners: {result.get('loadingSpinners', 'N/A')}")
+                print(f"      ðŸ“Š Page score: {result.get('score', 0)}/100, Spinners: {result.get('loadingSpinners', 'N/A')}")
                 return result.get('ready', False)
             return False
             
         except Exception as e:
-            print(f"   ⚠️ Page check error: {e}")
+            print(f"   âš ï¸ Page check error: {e}")
             return False
 
 
@@ -999,12 +999,12 @@ class SprunkiGamePlayer:
             if result:
                 containers = result.get('gameContainers', 0)
                 has_button = result.get('runButton', False)
-                print(f"      📊 Containers: {containers}, Run button: {'✅' if has_button else '❌'}")
+                print(f"      ðŸ“Š Containers: {containers}, Run button: {'âœ…' if has_button else 'âŒ'}")
                 return result.get('ready', False)
             return False
             
         except Exception as e:
-            print(f"   ⚠️ Game check error: {e}")
+            print(f"   âš ï¸ Game check error: {e}")
             return False
 
     # ================================================================
@@ -1014,51 +1014,38 @@ class SprunkiGamePlayer:
     def cleanup_chrome_complete(self):
         """Complete cleanup: Close Chrome debug entirely and clean all resources + Clear browsing data"""
         try:
-            print("🧹 Complete cleanup: Closing Chrome debug and cleaning resources + browsing data...")
+            print("ðŸ§¹ Complete cleanup: Closing Chrome debug and cleaning resources + browsing data...")
             
-            # 🆕 PHASE 1: Clear browsing data via CDP before closing
+            # ðŸ†• PHASE 1: Minimal browser cache clearing (PRESERVE login/extensions)
             try:
-                print("   🗑️ Phase 1: Clearing browsing data via CDP...")
+                print("   ðŸ—‘ï¸ Phase 1: Minimal cache clearing (preserving login/extensions)...")
                 ws_url = self._get_websocket_url()
                 if ws_url:
                     ws = websocket.create_connection(ws_url, timeout=10)
                     
-                    # Clear browsing data via CDP
-                    clear_data_command = {
-                        "method": "Storage.clearDataForOrigin",
-                        "params": {
-                            "origin": "*",
-                            "storageTypes": "all"
-                        }
-                    }
-                    self._send_cdp_command(ws, clear_data_command)
-                    
-                    # Clear cache via CDP
+                    # Only clear browser cache, NOT cookies or storage
                     clear_cache_command = {
                         "method": "Network.clearBrowserCache"
                     }
                     self._send_cdp_command(ws, clear_cache_command)
                     
-                    # Clear cookies via CDP
-                    clear_cookies_command = {
-                        "method": "Network.clearBrowserCookies"
-                    }
-                    self._send_cdp_command(ws, clear_cookies_command)
+                    # âŒ REMOVED: Storage.clearDataForOrigin - would remove extension data
+                    # âŒ REMOVED: Network.clearBrowserCookies - would remove login sessions
                     
                     ws.close()
-                    print("   ✅ Browsing data cleared via CDP")
+                    print("   âœ… Minimal cache cleared via CDP (login/extensions preserved)")
                 else:
-                    print("   ⚠️ WebSocket not available for data clearing")
+                    print("   âš ï¸ WebSocket not available for cache clearing")
             except Exception as e:
-                print(f"   ⚠️ CDP data clearing failed: {e}")
+                print(f"   âš ï¸ CDP cache clearing failed: {e}")
             
             # PHASE 2: Close windows by title
-            print("   🗂️ Phase 2: Closing Chrome windows...")
+            print("   ðŸ—‚ï¸ Phase 2: Closing Chrome windows...")
             for title_part in ['cocrea.world', 'Chrome']:
                 windows = gw.getWindowsWithTitle(title_part)
                 for window in windows:
                     try:
-                        print(f"   🗂️ Closing window: {window.title}")
+                        print(f"   ðŸ—‚ï¸ Closing window: {window.title}")
                         window.close()
                     except:
                         pass
@@ -1066,10 +1053,10 @@ class SprunkiGamePlayer:
             time.sleep(2)
             
             # PHASE 3: Terminate Chrome process
-            print("   🔥 Phase 3: Terminating Chrome process...")
+            print("   ðŸ”¥ Phase 3: Terminating Chrome process...")
             if hasattr(self, 'chrome_process') and self.chrome_process:
                 try:
-                    print("   🔥 Terminating Chrome process...")
+                    print("   ðŸ”¥ Terminating Chrome process...")
                     self.chrome_process.terminate()
                     self.chrome_process.wait(timeout=5)
                 except:
@@ -1080,7 +1067,7 @@ class SprunkiGamePlayer:
                 self.chrome_process = None
             
             # PHASE 4: Kill leftover Chrome debug processes
-            print("   ⚔️ Phase 4: Killing leftover Chrome debug processes...")
+            print("   âš”ï¸ Phase 4: Killing leftover Chrome debug processes...")
             try:
                 import psutil
                 for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
@@ -1088,61 +1075,65 @@ class SprunkiGamePlayer:
                         if proc.info['name'] and 'chrome' in proc.info['name'].lower():
                             cmdline = proc.info.get('cmdline', [])
                             if cmdline and f'--remote-debugging-port={self.debugging_port}' in ' '.join(cmdline):
-                                print(f"   ⚔️ Killing leftover Chrome debug process: {proc.info['pid']}")
+                                print(f"   âš”ï¸ Killing leftover Chrome debug process: {proc.info['pid']}")
                                 proc.kill()
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
             except ImportError:
-                print("   ⚠️ psutil not available for process cleanup")
+                print("   âš ï¸ psutil not available for process cleanup")
             
-            # 🆕 PHASE 5: Clear cache/cookies only (keep profile intact)
-            print("   🗑️ Phase 5: Clearing cache and cookies only...")
-            try:
-                self.clear_cache_cookies_only()
-            except Exception as e:
-                print(f"   ⚠️ Could not clear cache/cookies: {e}")
+            # ðŸ†• PHASE 5: Optional minimal cleanup (can be disabled)
+            skip_cleanup = self.chrome_config.get('skip_cache_cleanup', False)
+            if skip_cleanup:
+                print("   â„¹ï¸ Phase 5: Cache cleanup SKIPPED (preserving everything for extensions)")
+                print("   ðŸ“¦ All cookies, sessions, extension data preserved")
+            else:
+                print("   ðŸ—‘ï¸ Phase 5: Minimal cache clearing only...")
+                try:
+                    self.clear_cache_cookies_only()
+                except Exception as e:
+                    print(f"   âš ï¸ Could not clear cache/cookies: {e}")
             
             self.ws_url = None
             
-            print("✅ Complete cleanup finished - Chrome debug fully closed + browsing data cleared")
+            print("âœ… Complete cleanup finished - Chrome debug fully closed + browsing data cleared")
             time.sleep(1)
             return True
             
         except Exception as e:
-            print(f"❌ Complete cleanup error: {e}")
+            print(f"âŒ Complete cleanup error: {e}")
             return False
 
     def clear_cache_cookies_only(self):
-        """🆕 Clear only cache and cookies, keep profile/login intact"""
+        """ðŸ†• Clear only cache and cookies, keep profile/login intact"""
         try:
             import shutil
             import glob
             
-            print("🗑️ Clearing cache and cookies only (keeping profile intact)...")
+            print("ðŸ—‘ï¸ Clearing cache and cookies only (keeping profile intact)...")
             
             user_data_path = os.path.join(os.getcwd(), self.user_data_dir)
             if not os.path.exists(user_data_path):
-                print(f"   ℹ️ Profile directory not found: {user_data_path}")
+                print(f"   â„¹ï¸ Profile directory not found: {user_data_path}")
                 return
                 
             default_path = os.path.join(user_data_path, "Default")
             if not os.path.exists(default_path):
-                print("   ℹ️ Default profile not found")
+                print("   â„¹ï¸ Default profile not found")
                 return
                 
-            # Clear specific cache and cookie files only
+            # Clear only temporary cache files, PRESERVE login/extension data
             cache_paths = [
-                os.path.join(default_path, "Cache", "Cache_Data"),
-                os.path.join(default_path, "Code Cache"),
-                os.path.join(default_path, "Cookies"),
-                os.path.join(default_path, "Cookies-journal"),
-                os.path.join(default_path, "Network"),
-                os.path.join(default_path, "Sessions"),
-                os.path.join(default_path, "Session Storage"),
-                os.path.join(default_path, "Local Storage"),
-                os.path.join(default_path, "IndexedDB"),
-                os.path.join(default_path, "Service Worker"),
-                os.path.join(default_path, "GPUCache")
+                os.path.join(default_path, "Cache", "Cache_Data"),  # Browser cache only
+                os.path.join(default_path, "Code Cache"),           # JS compiled cache only  
+                os.path.join(default_path, "GPUCache"),             # GPU cache only
+                # âŒ REMOVED: Cookies - giá»¯ Ä‘á»ƒ duy trÃ¬ login
+                # âŒ REMOVED: Cookies-journal - giá»¯ Ä‘á»ƒ duy trÃ¬ login
+                # âŒ REMOVED: Sessions - giá»¯ Ä‘á»ƒ duy trÃ¬ active sessions
+                # âŒ REMOVED: Local Storage - extensions cáº§n dá»¯ liá»‡u nÃ y
+                # âŒ REMOVED: IndexedDB - extensions lÆ°u settings á»Ÿ Ä‘Ã¢y
+                # âŒ REMOVED: Service Worker - extensions hoáº¡t Ä‘á»™ng qua SW
+                # âŒ REMOVED: Network - giá»¯ Ä‘á»ƒ extension hoáº¡t Ä‘á»™ng ngay
             ]
             
             cleared_count = 0
@@ -1154,29 +1145,30 @@ class SprunkiGamePlayer:
                         elif os.path.isdir(cache_path):
                             shutil.rmtree(cache_path, ignore_errors=True)
                         cleared_count += 1
-                        print(f"   ✅ Cleared: {os.path.basename(cache_path)}")
+                        print(f"   âœ… Cleared: {os.path.basename(cache_path)}")
                 except Exception as e:
-                    print(f"   ⚠️ Could not clear {cache_path}: {e}")
+                    print(f"   âš ï¸ Could not clear {cache_path}: {e}")
                     
-            print(f"   🧹 Cache cleanup completed - {cleared_count} items processed")
-            print("   ✅ Profile, extensions, and login data preserved")
+            print(f"   ðŸ§¹ Minimal cache cleanup completed - {cleared_count} items processed")
+            print("   âœ… Login session, cookies, extensions data preserved")
+            print("   ðŸ“¦ Extensions should work immediately without refresh")
             
         except Exception as e:
-            print(f"❌ Cache clearing error: {e}")
+            print(f"âŒ Cache clearing error: {e}")
 
     def force_clear_chrome_data(self):
-        """🆕 FORCE: Clear Chrome data even when Chrome is not running"""
+        """ðŸ†• FORCE: Clear Chrome data even when Chrome is not running"""
         try:
-            # 🔧 FIX: Import modules ở đầu hàm để tránh "possibly unbound"
+            # ðŸ”§ FIX: Import modules á»Ÿ Ä‘áº§u hÃ m Ä‘á»ƒ trÃ¡nh "possibly unbound"
             import shutil
             import getpass
             
-            print("🗑️ FORCE CLEARING Chrome browsing data...")
+            print("ðŸ—‘ï¸ FORCE CLEARING Chrome browsing data...")
             
             # Method 1: Clear cache/cookies only (keep profile intact)
             self.clear_cache_cookies_only()
             
-            print("   ℹ️ Profile directory preserved for login/extensions")
+            print("   â„¹ï¸ Profile directory preserved for login/extensions")
             
             # Method 2: Clear system Chrome cache (if accessible)
             try:
@@ -1188,60 +1180,60 @@ class SprunkiGamePlayer:
                     f"C:\\Users\\{username}\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\GPUCache",
                 ]
                 
-                print(f"   🔍 Checking {len(chrome_cache_paths)} cache directories for user: {username}")
+                print(f"   ðŸ” Checking {len(chrome_cache_paths)} cache directories for user: {username}")
                 
                 for cache_path in chrome_cache_paths:
                     if os.path.exists(cache_path):
                         try:
                             shutil.rmtree(cache_path, ignore_errors=True)
-                            print(f"   ✅ Cleared cache: {cache_path}")
+                            print(f"   âœ… Cleared cache: {cache_path}")
                         except Exception as cache_error:
-                            print(f"   ⚠️ Cache in use: {cache_path} - {cache_error}")
+                            print(f"   âš ï¸ Cache in use: {cache_path} - {cache_error}")
                     else:
-                        print(f"   ℹ️ Cache not found: {cache_path}")
+                        print(f"   â„¹ï¸ Cache not found: {cache_path}")
                         
             except Exception as e:
-                print(f"   ⚠️ System cache clearing failed: {e}")
+                print(f"   âš ï¸ System cache clearing failed: {e}")
             
-            print("✅ Force clear completed")
+            print("âœ… Force clear completed")
             return True
             
         except Exception as e:
-            print(f"❌ Force clear error: {e}")
+            print(f"âŒ Force clear error: {e}")
             return False
 
     def safe_window_operation(self, window, operation_name, operation_func):
         """
-        🛡️ NEW: Safe window operation with Windows error handling
+        ðŸ›¡ï¸ NEW: Safe window operation with Windows error handling
         """
         try:
-            print(f"   🔄 Attempting {operation_name}...")
+            print(f"   ðŸ”„ Attempting {operation_name}...")
             operation_func()
-            print(f"   ✅ {operation_name} completed")
+            print(f"   âœ… {operation_name} completed")
             return True
         except Exception as e:
             error_msg = str(e).lower()
             if ("error code from windows: 0" in error_msg or 
                 "operation completed successfully" in error_msg or
                 "the operation completed successfully" in error_msg):
-                print(f"   ✅ {operation_name} completed (Windows quirk - success reported as error)")
+                print(f"   âœ… {operation_name} completed (Windows quirk - success reported as error)")
                 return True
             else:
-                print(f"   ⚠️ {operation_name} warning: {e}")
-                print(f"   💡 Continuing anyway - not critical for workflow")
+                print(f"   âš ï¸ {operation_name} warning: {e}")
+                print(f"   ðŸ’¡ Continuing anyway - not critical for workflow")
                 return False
 
     def safe_activate_window(self, window):
-        """🛡️ Safe window activation"""
+        """ðŸ›¡ï¸ Safe window activation"""
         return self.safe_window_operation(window, "window activation", lambda: window.activate())
 
     def safe_maximize_window(self, window):
-        """🛡️ Safe window maximization"""
+        """ðŸ›¡ï¸ Safe window maximization"""
         return self.safe_window_operation(window, "window maximization", lambda: window.maximize())
 
     def wait_for_complete_game_readiness(self, url):
         """
-        🔄 CONTINUOUS MONITORING: Wait for both page + game ready with configurable timeout
+        ðŸ”„ CONTINUOUS MONITORING: Wait for both page + game ready with configurable timeout
         """
         try:
             # Get configuration from config.json
@@ -1254,12 +1246,12 @@ class SprunkiGamePlayer:
             check_interval = continuous_config.get('check_interval_seconds', 10)
             early_exit = continuous_config.get('early_exit_on_success', True)
             
-            print(f"\n🔄 CONTINUOUS GAME READINESS MONITORING")
+            print(f"\nðŸ”„ CONTINUOUS GAME READINESS MONITORING")
             print("="*70)
-            print(f"   ⏰ Maximum timeout: {max_timeout}s")
-            print(f"   🔄 Check interval: {check_interval}s")
-            print(f"   🎯 Target: Both page AND game verification success")
-            print(f"   🚀 Early exit: {'✅ Enabled' if early_exit else '❌ Disabled'}")
+            print(f"   â° Maximum timeout: {max_timeout}s")
+            print(f"   ðŸ”„ Check interval: {check_interval}s")
+            print(f"   ðŸŽ¯ Target: Both page AND game verification success")
+            print(f"   ðŸš€ Early exit: {'âœ… Enabled' if early_exit else 'âŒ Disabled'}")
             print("="*70)
             
             start_time = time.time()
@@ -1271,60 +1263,60 @@ class SprunkiGamePlayer:
                 remaining = max_timeout - elapsed
                 
                 if elapsed >= max_timeout:
-                    print(f"⏰ TIMEOUT REACHED after {max_timeout}s")
-                    print(f"   📊 Total checks performed: {check_count}")
+                    print(f"â° TIMEOUT REACHED after {max_timeout}s")
+                    print(f"   ðŸ“Š Total checks performed: {check_count}")
                     return False
                 
-                print(f"\n🔍 CHECK #{check_count} (Elapsed: {elapsed:.1f}s, Remaining: {remaining:.1f}s)")
+                print(f"\nðŸ” CHECK #{check_count} (Elapsed: {elapsed:.1f}s, Remaining: {remaining:.1f}s)")
                 print("-" * 50)
                 
                 # Phase 1: Page verification
-                print("📄 Checking page load status...")
+                print("ðŸ“„ Checking page load status...")
                 page_ready = self.verify_page_fully_loaded_lightweight(url)
-                page_status = "✅ READY" if page_ready else "⏳ NOT READY"
-                print(f"   📄 Page status: {page_status}")
+                page_status = "âœ… READY" if page_ready else "â³ NOT READY"
+                print(f"   ðŸ“„ Page status: {page_status}")
                 
                 # Phase 2: Game verification  
-                print("🎮 Checking game components status...")
+                print("ðŸŽ® Checking game components status...")
                 game_ready = self.verify_game_components_ready_lightweight()
-                game_status = "✅ READY" if game_ready else "⏳ NOT READY"
-                print(f"   🎮 Game status: {game_status}")
+                game_status = "âœ… READY" if game_ready else "â³ NOT READY"
+                print(f"   ðŸŽ® Game status: {game_status}")
                 
                 # Check if both ready
                 both_ready = page_ready and game_ready
                 
                 if both_ready and early_exit:
-                    print(f"\n🎉 SUCCESS! Both page and game ready after {elapsed:.1f}s")
-                    print(f"   📊 Checks performed: {check_count}")
-                    print(f"   🎯 Early exit - no need to wait full timeout")
+                    print(f"\nðŸŽ‰ SUCCESS! Both page and game ready after {elapsed:.1f}s")
+                    print(f"   ðŸ“Š Checks performed: {check_count}")
+                    print(f"   ðŸŽ¯ Early exit - no need to wait full timeout")
                     print("="*70)
                     return True
                 
                 # Log current status
-                print(f"   📊 Combined status: Page({page_status}) + Game({game_status}) = {'✅ READY' if both_ready else '⏳ WAITING'}")
+                print(f"   ðŸ“Š Combined status: Page({page_status}) + Game({game_status}) = {'âœ… READY' if both_ready else 'â³ WAITING'}")
                 
                 # Calculate next check time
                 if remaining >= check_interval:
-                    print(f"   ⏳ Next check in {check_interval}s...")
+                    print(f"   â³ Next check in {check_interval}s...")
                     time.sleep(check_interval)
                 else:
-                    print(f"   ⏰ Less than {check_interval}s remaining, final check...")
+                    print(f"   â° Less than {check_interval}s remaining, final check...")
                     time.sleep(remaining)
                     break
             
             # Final timeout
-            print(f"\n⏰ TIMEOUT: Max wait time ({max_timeout}s) exceeded")
-            print(f"   📊 Total checks: {check_count}")
-            print(f"   ⚠️ Will proceed with Run button detection anyway")
+            print(f"\nâ° TIMEOUT: Max wait time ({max_timeout}s) exceeded")
+            print(f"   ðŸ“Š Total checks: {check_count}")
+            print(f"   âš ï¸ Will proceed with Run button detection anyway")
             return False
             
         except Exception as e:
-            print(f"❌ Error in continuous monitoring: {e}")
+            print(f"âŒ Error in continuous monitoring: {e}")
             return False
 
     def _calculate_slots_coverage_area(self, slot_indices, all_slots, overlap_margin):
         """
-        🎯 ADDED: Calculate coverage area for slots
+        ðŸŽ¯ ADDED: Calculate coverage area for slots
         """
         try:
             if not all_slots or not slot_indices:
@@ -1353,16 +1345,16 @@ class SprunkiGamePlayer:
             }
             
         except Exception as e:
-            print(f"❌ Error calculating coverage area: {e}")
+            print(f"âŒ Error calculating coverage area: {e}")
             return None
 
     def navigate_and_prepare_game(self, url):
         """Navigate to game URL using Chrome debug mode with Continuous Monitoring + Extension Support"""
         try:
-            print(f"🌐 Opening game URL with Chrome debug session: {url}")
-            print(f"🔧 Service Mode: Enhanced error handling enabled")
-            print(f"🛡️ Windows API quirks: Will handle 'success as error' cases")
-            print(f"🔌 Extension Support: Optimized for extension compatibility")
+            print(f"ðŸŒ Opening game URL with Chrome debug session: {url}")
+            print(f"ðŸ”§ Service Mode: Enhanced error handling enabled")
+            print(f"ðŸ›¡ï¸ Windows API quirks: Will handle 'success as error' cases")
+            print(f"ðŸ”Œ Extension Support: Optimized for extension compatibility")
             
             # Complete cleanup first
             self.cleanup_chrome_complete()
@@ -1379,9 +1371,9 @@ class SprunkiGamePlayer:
                     ublock_path = os.path.join(extensions_dir, subdirs[0])
             
             if not ublock_path:
-                print("⚠️ uBlock Origin not found in 'extensions' folder - continuing without AdBlocker")
+                print("âš ï¸ uBlock Origin not found in 'extensions' folder - continuing without AdBlocker")
             else:
-                print(f"✅ Found AdBlocker: {ublock_path}")
+                print(f"âœ… Found AdBlocker: {ublock_path}")
             
             # Find Chrome executable
             chrome_exe = None
@@ -1391,8 +1383,8 @@ class SprunkiGamePlayer:
                     break
                     
             if not chrome_exe:
-                print("❌ CRITICAL ERROR: Google Chrome not found")
-                print("   💡 Please install Google Chrome or check chrome_paths in config.json")
+                print("âŒ CRITICAL ERROR: Google Chrome not found")
+                print("   ðŸ’¡ Please install Google Chrome or check chrome_paths in config.json")
                 return False
             
             # Build Chrome command with debug mode + EXTENSION-FRIENDLY cleanup flags
@@ -1404,77 +1396,77 @@ class SprunkiGamePlayer:
                 "--window-size=1280,720", 
                 "--remote-allow-origins=*",
                 
-                # 🆕 EXTENSION-SAFE CLEANUP FLAGS
-                "--clear-token-service",                    # ✅ Safe: chỉ clear auth tokens
-                "--clear-key-system-properties",           # ✅ Safe: chỉ clear key system  
-                "--no-default-browser-check",              # ✅ Safe: không ảnh hưởng extensions
-                "--disable-client-side-phishing-detection", # ✅ Safe: không liên quan extensions
+                # ðŸ†• EXTENSION-SAFE CLEANUP FLAGS
+                "--clear-token-service",                    # âœ… Safe: chá»‰ clear auth tokens
+                "--clear-key-system-properties",           # âœ… Safe: chá»‰ clear key system  
+                "--no-default-browser-check",              # âœ… Safe: khÃ´ng áº£nh hÆ°á»Ÿng extensions
+                "--disable-client-side-phishing-detection", # âœ… Safe: khÃ´ng liÃªn quan extensions
                 
-                # 🆕 POPUP & RESTORE FLAGS (EXTENSION-FRIENDLY)
-                "--disable-popup-blocking",                # ✅ GOOD: cho phép popups (tốt cho extensions)
-                "--disable-prompt-on-repost",             # ✅ Safe: chỉ tắt prompt
-                "--disable-hang-monitor",                 # ✅ Safe: chỉ tắt hang detection
-                "--disable-session-crashed-bubble",       # ✅ Safe: tắt crash bubble
-                "--disable-infobars",                     # ✅ Safe: tắt info bars
-                "--no-recovery-component",                # ✅ Safe: tắt crash recovery
+                # ðŸ†• POPUP & RESTORE FLAGS (EXTENSION-FRIENDLY)
+                "--disable-popup-blocking",                # âœ… GOOD: cho phÃ©p popups (tá»‘t cho extensions)
+                "--disable-prompt-on-repost",             # âœ… Safe: chá»‰ táº¯t prompt
+                "--disable-hang-monitor",                 # âœ… Safe: chá»‰ táº¯t hang detection
+                "--disable-session-crashed-bubble",       # âœ… Safe: táº¯t crash bubble
+                "--disable-infobars",                     # âœ… Safe: táº¯t info bars
+                "--no-recovery-component",                # âœ… Safe: táº¯t crash recovery
                 
-                # 🆕 PERFORMANCE FLAGS (EXTENSION-COMPATIBLE)
-                "--disable-backgrounding-occluded-windows", # ✅ Safe: không ảnh hưởng extension background
-                "--disable-renderer-backgrounding",         # ✅ Safe: không throttle renderer
-                "--disable-background-timer-throttling",    # ✅ Safe: không throttle timers
+                # ðŸ†• PERFORMANCE FLAGS (EXTENSION-COMPATIBLE)
+                "--disable-backgrounding-occluded-windows", # âœ… Safe: khÃ´ng áº£nh hÆ°á»Ÿng extension background
+                "--disable-renderer-backgrounding",         # âœ… Safe: khÃ´ng throttle renderer
+                "--disable-background-timer-throttling",    # âœ… Safe: khÃ´ng throttle timers
                 
-                # 🆕 EXTENSION SUPPORT FLAGS
-                "--enable-extensions",                     # ✅ EXPLICIT: đảm bảo extensions enabled
-                "--load-plugins",                          # ✅ SUPPORT: hỗ trợ plugins nếu cần
+                # ðŸ†• EXTENSION SUPPORT FLAGS
+                "--enable-extensions",                     # âœ… EXPLICIT: Ä‘áº£m báº£o extensions enabled
+                "--load-plugins",                          # âœ… SUPPORT: há»— trá»£ plugins náº¿u cáº§n
                 
                 url
             ]
 
-            # 🆕 ENHANCED EXTENSION LOADING
+            # ðŸ†• ENHANCED EXTENSION LOADING
             extension_paths = []
 
             # Add uBlock Origin if available
             if ublock_path:
                 extension_paths.append(ublock_path)
-                print(f"   📦 Adding uBlock Origin: {ublock_path}")
+                print(f"   ðŸ“¦ Adding uBlock Origin: {ublock_path}")
 
-            # 🆕 AUTO-DETECT: Tìm các extensions khác trong profile (nếu có)
+            # ðŸ†• AUTO-DETECT: TÃ¬m cÃ¡c extensions khÃ¡c trong profile (náº¿u cÃ³)
             try:
                 profile_extensions_dir = os.path.join(os.getcwd(), self.user_data_dir, "Default", "Extensions")
                 if os.path.exists(profile_extensions_dir):
                     existing_extensions = os.listdir(profile_extensions_dir)
-                    print(f"   📦 Found {len(existing_extensions)} existing extensions in profile")
+                    print(f"   ðŸ“¦ Found {len(existing_extensions)} existing extensions in profile")
                     
-                    # Log existing extensions (không load thêm, chỉ thông báo)
+                    # Log existing extensions (khÃ´ng load thÃªm, chá»‰ thÃ´ng bÃ¡o)
                     for ext_id in existing_extensions[:3]:  # Show first 3
                         print(f"      - Extension ID: {ext_id}")
                 else:
-                    print("   📦 No existing extensions directory found (fresh profile)")
+                    print("   ðŸ“¦ No existing extensions directory found (fresh profile)")
                     
             except Exception as e:
-                print(f"   ⚠️ Could not check existing extensions: {e}")
+                print(f"   âš ï¸ Could not check existing extensions: {e}")
 
             # Add all extension paths to Chrome command
             if extension_paths:
                 extensions_arg = ",".join(extension_paths)
                 chrome_cmd.insert(-1, f"--load-extension={extensions_arg}")
-                print(f"   ✅ Loading {len(extension_paths)} extensions: {extensions_arg}")
+                print(f"   âœ… Loading {len(extension_paths)} extensions: {extensions_arg}")
             else:
-                print("   ℹ️ No additional extensions to load")
+                print("   â„¹ï¸ No additional extensions to load")
 
-            # 🆕 LOG Chrome flags for verification
-            print("🔧 Chrome startup flags applied:")
-            print("   ✅ Safe cleanup flags: session clearing, popup blocking")  
-            print("   ✅ Restore popup disabled: no 'Chrome didn't shut down correctly'")
-            print("   ✅ Game-friendly: JavaScript, networking, timers enabled")
-            print("   ✅ Automation-optimized: no background throttling")
-            print("   ✅ Extension-compatible: background mode preserved")
-            print(f"   📊 Total flags: {len([f for f in chrome_cmd if f.startswith('--')])} flags")
+            # ðŸ†• LOG Chrome flags for verification
+            print("ðŸ”§ Chrome startup flags applied:")
+            print("   âœ… Safe cleanup flags: session clearing, popup blocking")  
+            print("   âœ… Restore popup disabled: no 'Chrome didn't shut down correctly'")
+            print("   âœ… Game-friendly: JavaScript, networking, timers enabled")
+            print("   âœ… Automation-optimized: no background throttling")
+            print("   âœ… Extension-compatible: background mode preserved")
+            print(f"   ðŸ“Š Total flags: {len([f for f in chrome_cmd if f.startswith('--')])} flags")
             
-            print("🔧 Launching Chrome with debug mode and AdBlocker...")
+            print("ðŸ”§ Launching Chrome with debug mode and AdBlocker...")
             self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            print(f"⏳ Waiting {self.page_load_wait}s for Chrome and AdBlocker to initialize...")
+            print(f"â³ Waiting {self.page_load_wait}s for Chrome and AdBlocker to initialize...")
             time.sleep(self.page_load_wait)
             
             # Find game window
@@ -1489,103 +1481,103 @@ class SprunkiGamePlayer:
                 time.sleep(1)
                 
             if not game_window: 
-                print("❌ CRITICAL ERROR: Could not find the game window")
-                print("   💡 Chrome may have failed to start or game page didn't load")
+                print("âŒ CRITICAL ERROR: Could not find the game window")
+                print("   ðŸ’¡ Chrome may have failed to start or game page didn't load")
                 return False
                 
-            print(f"🎯 Found game window: '{game_window.title}'. Activating...")
+            print(f"ðŸŽ¯ Found game window: '{game_window.title}'. Activating...")
 
-            # 🔧 ENHANCED: Safe window operations với error handling
+            # ðŸ”§ ENHANCED: Safe window operations vá»›i error handling
             try:
-                print("   🔄 Attempting to activate window...")
+                print("   ðŸ”„ Attempting to activate window...")
                 game_window.activate()
-                print("   ✅ Window activation completed")
+                print("   âœ… Window activation completed")
                 time.sleep(0.5)
             except Exception as e:
                 # Handle the "Error code from Windows: 0" issue
                 error_msg = str(e).lower()
                 if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
-                    print("   ✅ Window activation completed (Windows quirk - success reported as error)")
+                    print("   âœ… Window activation completed (Windows quirk - success reported as error)")
                 else:
-                    print(f"   ⚠️ Window activation warning: {e}")
+                    print(f"   âš ï¸ Window activation warning: {e}")
                     # Continue anyway - not critical
 
             try:
-                print("   🔄 Attempting to maximize window...")
+                print("   ðŸ”„ Attempting to maximize window...")
                 game_window.maximize()
-                print("   ✅ Window maximization completed")
+                print("   âœ… Window maximization completed")
                 time.sleep(2)
             except Exception as e:
                 # Handle the "Error code from Windows: 0" issue
                 error_msg = str(e).lower()
                 if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
-                    print("   ✅ Window maximization completed (Windows quirk - success reported as error)")
+                    print("   âœ… Window maximization completed (Windows quirk - success reported as error)")
                 else:
-                    print(f"   ⚠️ Window maximization warning: {e}")
+                    print(f"   âš ï¸ Window maximization warning: {e}")
                     # Continue anyway - not critical
                 time.sleep(2)
 
-            # 🔧 NEW: Additional focus ensuring for service mode
-            print("🎯 Ensuring enhanced focus for service mode...")
-            self.ensure_game_focus_light()  # 🆕 Use SAFE focus method
+            # ðŸ”§ NEW: Additional focus ensuring for service mode
+            print("ðŸŽ¯ Ensuring enhanced focus for service mode...")
+            self.ensure_game_focus_light()  # ðŸ†• Use SAFE focus method
 
-            print("✅ Window setup completed - ready for game operations")
+            print("âœ… Window setup completed - ready for game operations")
 
-            # 🔧 WINDOW VERIFICATION: Ensure window is responsive after operations
+            # ðŸ”§ WINDOW VERIFICATION: Ensure window is responsive after operations
             try:
                 # Test if window is responsive
                 window_title = game_window.title
                 window_rect = game_window.rect if hasattr(game_window, 'rect') else None
-                print(f"✅ Window verification: Title='{window_title}', Responsive=True")
+                print(f"âœ… Window verification: Title='{window_title}', Responsive=True")
             except Exception as e:
-                print(f"⚠️ Window verification warning: {e}")
-                print("💡 Window may still be functional - continuing")
+                print(f"âš ï¸ Window verification warning: {e}")
+                print("ðŸ’¡ Window may still be functional - continuing")
 
-            print("🎯 Proceeding with game setup...")
+            print("ðŸŽ¯ Proceeding with game setup...")
 
             # ================================================================
-            # 🔄 NEW: CONTINUOUS MONITORING SYSTEM (REPLACES SMART VERIFICATION)
+            # ðŸ”„ NEW: CONTINUOUS MONITORING SYSTEM (REPLACES SMART VERIFICATION)
             # ================================================================
-            print(f"\n🔄 STARTING CONTINUOUS MONITORING SYSTEM")
+            print(f"\nðŸ”„ STARTING CONTINUOUS MONITORING SYSTEM")
             print("="*70)
             
             both_ready = self.wait_for_complete_game_readiness(url)
             
             if both_ready:
-                print("✅ CONTINUOUS MONITORING SUCCESS: Both page and game fully ready!")
-                print("🎯 Proceeding immediately to Run button detection...")
+                print("âœ… CONTINUOUS MONITORING SUCCESS: Both page and game fully ready!")
+                print("ðŸŽ¯ Proceeding immediately to Run button detection...")
                 time.sleep(self.stabilization_wait)  # Brief stabilization
             else:
-                print("⚠️ CONTINUOUS MONITORING TIMEOUT: Proceeding with limited reliability...")
-                print("💡 Run button detection may have lower success rate")
+                print("âš ï¸ CONTINUOUS MONITORING TIMEOUT: Proceeding with limited reliability...")
+                print("ðŸ’¡ Run button detection may have lower success rate")
                 time.sleep(3)  # Brief pause before proceeding
             
-            print("🎯 Continuous monitoring completed - starting Run button detection...")
+            print("ðŸŽ¯ Continuous monitoring completed - starting Run button detection...")
             print("="*70)
             
             # ================================================================
-            # 🔧 ENHANCED: CDP-Only Run button detection (NO REFRESH POLICY)
+            # ðŸ”§ ENHANCED: CDP-Only Run button detection (NO REFRESH POLICY)
             # ================================================================
 
             run_button_clicked = False
             max_retries = self.game_config.get('run_button_max_retries', 3)
 
             for attempt in range(1, max_retries + 1):
-                print(f"\n--- 🗯️ Finding 'Run' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
+                print(f"\n--- ðŸ—¯ï¸ Finding 'Run' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
                 
                 if attempt > 1:
-                    # ✅ NO MORE REFRESH - Just wait more patiently
+                    # âœ… NO MORE REFRESH - Just wait more patiently
                     print("   -> Action: Waiting patiently for Run button (NO PAGE REFRESH)")
                     continuous_config = self.app_config.get('continuous_monitoring', {})
                     patient_wait = continuous_config.get('patient_retry_wait_seconds', 30)
-                    print(f"   -> ⏳ Patient wait: {patient_wait}s for dynamic loading...")
+                    print(f"   -> â³ Patient wait: {patient_wait}s for dynamic loading...")
                     time.sleep(patient_wait)
                 else:
                     # First attempt - using continuous monitoring results
                     print("   -> Using continuous monitoring results (optimal timing)")
                 
-                # 🔧 SERVICE MODE FIX: Ensure window activation before clicking Run button
-                print("   -> 🔧 Ensuring window activation for service mode...")
+                # ðŸ”§ SERVICE MODE FIX: Ensure window activation before clicking Run button
+                print("   -> ðŸ”§ Ensuring window activation for service mode...")
                 try:
                     possible_windows = gw.getWindowsWithTitle('cocrea.world')
                     if not possible_windows: 
@@ -1594,16 +1586,16 @@ class SprunkiGamePlayer:
                         target_window = possible_windows[0]
                         target_window.activate()
                         time.sleep(0.5)
-                        print(f"   -> ✅ Window re-activated: '{target_window.title}'")
+                        print(f"   -> âœ… Window re-activated: '{target_window.title}'")
                     else:
-                        print("   -> ⚠️ Could not find window to activate")
+                        print("   -> âš ï¸ Could not find window to activate")
                 except Exception as e:
-                    print(f"   -> ⚠️ Window activation failed: {e}")
+                    print(f"   -> âš ï¸ Window activation failed: {e}")
                 
-                print("   -> 🔍 Searching for 'Run' button via CDP-ONLY...")
+                print("   -> ðŸ” Searching for 'Run' button via CDP-ONLY...")
 
-                # 🔧 SERVICE MODE FIX: Final activation before detector
-                print("   -> 🔧 Final window activation before Run button detection...")
+                # ðŸ”§ SERVICE MODE FIX: Final activation before detector
+                print("   -> ðŸ”§ Final window activation before Run button detection...")
                 try:
                     possible_windows = gw.getWindowsWithTitle('cocrea.world')
                     if not possible_windows: 
@@ -1614,22 +1606,22 @@ class SprunkiGamePlayer:
                         target_window.restore()
                         target_window.maximize()
                         time.sleep(1.0)  # Critical wait
-                        print(f"   -> ✅ Final activation complete: '{target_window.title}'")
+                        print(f"   -> âœ… Final activation complete: '{target_window.title}'")
                     else:
-                        print("   -> ⚠️ Could not find window for final activation")
+                        print("   -> âš ï¸ Could not find window for final activation")
                 except Exception as e:
-                    print(f"   -> ⚠️ Final activation failed: {e}")
+                    print(f"   -> âš ï¸ Final activation failed: {e}")
 
-                # 🚀 CDP-ONLY Run button detection
+                # ðŸš€ CDP-ONLY Run button detection
                 if self._click_run_button_cdp_only():
-                    print(f"🔍 Verifying Run button click had effect...")
+                    print(f"ðŸ” Verifying Run button click had effect...")
                     
                     # Wait for game to start loading
                     time.sleep(3)
                     
                     # Verify game actually started (look for game elements)
                     ws_url = self._get_websocket_url()
-                    if ws_url:  # ✅ Kiểm tra None trước khi sử dụng
+                    if ws_url:  # âœ… Kiá»ƒm tra None trÆ°á»›c khi sá»­ dá»¥ng
                         ws_verify = websocket.create_connection(ws_url, timeout=10)
                         verify_response = self._send_cdp_command(ws_verify, {
                             "method": "Runtime.evaluate",
@@ -1641,48 +1633,48 @@ class SprunkiGamePlayer:
                         if verify_response and 'result' in verify_response:
                             game_loaded = verify_response.get('result', {}).get('result', {}).get('value', False)
                     else:
-                        print("⚠️ WebSocket not available for verification")
+                        print("âš ï¸ WebSocket not available for verification")
                         game_loaded = True  # Assume success if can't verify
                     
                     if game_loaded:
-                        print(f"✅ SUCCESS: Run button effect VERIFIED on attempt {attempt}.")
+                        print(f"âœ… SUCCESS: Run button effect VERIFIED on attempt {attempt}.")
                         run_button_clicked = True
                         break
                     else:
-                        print(f"❌ Run button clicked but no game loading detected")
-                        print(f"🔄 Treating as failure - will retry with patience")
+                        print(f"âŒ Run button clicked but no game loading detected")
+                        print(f"ðŸ”„ Treating as failure - will retry with patience")
                 else:
-                    print(f"❌ FAILED: Run button not found via CDP on attempt {attempt}.")
+                    print(f"âŒ FAILED: Run button not found via CDP on attempt {attempt}.")
                     if attempt < max_retries:
                         print("   -> Will wait patiently and retry (no refresh policy)")
                     else:
-                        print(f"❌ Setup Error: Could not find 'Run' button after {max_retries} patient attempts.")
+                        print(f"âŒ Setup Error: Could not find 'Run' button after {max_retries} patient attempts.")
                         return False
                         
             if not run_button_clicked: 
                 return False
                 
-            print(f"\n⏳ Waiting {self.game_load_wait}s for game to load after clicking Run...")
+            print(f"\nâ³ Waiting {self.game_load_wait}s for game to load after clicking Run...")
             time.sleep(self.game_load_wait)
             
             # ================================================================
-            # 📺 FULLSCREEN BUTTON DETECTION (MODIFIED WITH PATIENT RETRY LOGIC)
+            # ðŸ“º FULLSCREEN BUTTON DETECTION (MODIFIED WITH PATIENT RETRY LOGIC)
             # ================================================================
             fullscreen_clicked = False
             max_retries = 3
 
             for attempt in range(1, max_retries + 1):
-                print(f"\n--- 📺 Finding 'Fullscreen' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
+                print(f"\n--- ðŸ“º Finding 'Fullscreen' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
 
                 if attempt > 1:
                     print("   -> Action: Patient wait for Fullscreen button (NO PAGE REFRESH)")
                     continuous_config = self.app_config.get('continuous_monitoring', {})
                     patient_wait = continuous_config.get('patient_retry_wait_seconds', 30)
-                    print(f"   -> ⏳ Patient wait: {patient_wait}s for fullscreen button...")
+                    print(f"   -> â³ Patient wait: {patient_wait}s for fullscreen button...")
                     time.sleep(patient_wait)
 
                     # Re-maximize window after patient wait, no reload
-                    print("   -> 🔧 Re-activating window after patient wait...")
+                    print("   -> ðŸ”§ Re-activating window after patient wait...")
                     try:
                         possible_windows = gw.getWindowsWithTitle('cocrea.world')
                         if not possible_windows: 
@@ -1693,9 +1685,9 @@ class SprunkiGamePlayer:
                             target_window.restore()
                             target_window.maximize()
                             time.sleep(1.0)
-                            print(f"   -> ✅ Window re-activated after patient wait")
+                            print(f"   -> âœ… Window re-activated after patient wait")
                     except Exception as e:
-                        print(f"   -> ⚠️ Re-activate failed: {e}")
+                        print(f"   -> âš ï¸ Re-activate failed: {e}")
                     
                     # Wait for fullscreen button to stabilize
                     time.sleep(max(self.stabilization_wait, 8))
@@ -1704,53 +1696,53 @@ class SprunkiGamePlayer:
                 fullscreen_success = self._click_fullscreen_button_cdp_only(wait_time=self.fullscreen_wait)
                 
                 if fullscreen_success:
-                    print(f"✅ SUCCESS: Fullscreen button clicked on attempt {attempt}.")
+                    print(f"âœ… SUCCESS: Fullscreen button clicked on attempt {attempt}.")
                     fullscreen_clicked = True
                     time.sleep(2)
                     break # Exit the loop on success
                 else:
-                    print(f"❌ FAILED: Fullscreen button not found or clicked on attempt {attempt}.")
+                    print(f"âŒ FAILED: Fullscreen button not found or clicked on attempt {attempt}.")
                     if attempt == max_retries:
-                        print(f"❌ CRITICAL FAILURE: Could not click Fullscreen button after {max_retries} patient attempts.")
+                        print(f"âŒ CRITICAL FAILURE: Could not click Fullscreen button after {max_retries} patient attempts.")
                         self.cleanup_chrome_complete()
                         return False # Fail the entire process after the last attempt
 
             # Final check after the loop to ensure it was successful
             if not fullscreen_clicked:
-                print("❌ Setup Error: Fullscreen button process failed after all patient retries.")
+                print("âŒ Setup Error: Fullscreen button process failed after all patient retries.")
                 return False
 
             # Press F11 for true fullscreen only after a successful click
-            print("⌨️ Pressing F11 for true fullscreen mode...")
+            print("âŒ¨ï¸ Pressing F11 for true fullscreen mode...")
             pyautogui.press('f11')
             time.sleep(3)
             
-            # 🆕 EXTENSION HEALTH CHECK
-            print("🔍 Verifying extension compatibility after setup...")
+            # ðŸ†• EXTENSION HEALTH CHECK
+            print("ðŸ” Verifying extension compatibility after setup...")
             extension_health = self.check_extension_health()
 
             if extension_health:
-                print("✅ Extensions are working properly with new Chrome flags")
+                print("âœ… Extensions are working properly with new Chrome flags")
             else:
-                print("⚠️ Extensions may have issues, but continuing anyway...")
+                print("âš ï¸ Extensions may have issues, but continuing anyway...")
             
-            print("✅ Game setup completed with Continuous Monitoring System + Extension Support. Ready for automation.")
+            print("âœ… Game setup completed with Continuous Monitoring System + Extension Support. Ready for automation.")
             return True
             
         except Exception as e:
             messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
-            print(f"❌ Failed to navigate and prepare game: {e}")
+            print(f"âŒ Failed to navigate and prepare game: {e}")
             self.cleanup_chrome_complete()
             return False
 
     def check_extension_health(self):
-        """🔍 NEW: Check if extensions are loaded and working"""
+        """ðŸ” NEW: Check if extensions are loaded and working"""
         try:
-            print("🔍 Checking extension health...")
+            print("ðŸ” Checking extension health...")
             
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("   ⚠️ Cannot check extensions - WebSocket not available")
+                print("   âš ï¸ Cannot check extensions - WebSocket not available")
                 return False
             
             ws = websocket.create_connection(ws_url, timeout=10)
@@ -1802,17 +1794,17 @@ class SprunkiGamePlayer:
                 extensions_enabled = result.get('extensionsEnabled', False)
                 ublock_detected = result.get('uBlockDetected', False)
                 
-                print(f"   📊 Extension Health Report:")
-                print(f"      Extensions API: {'✅ Available' if extensions_enabled else '❌ Not Available'}")
-                print(f"      uBlock Origin: {'✅ Working' if ublock_detected else '⚠️ Not Detected'}")
+                print(f"   ðŸ“Š Extension Health Report:")
+                print(f"      Extensions API: {'âœ… Available' if extensions_enabled else 'âŒ Not Available'}")
+                print(f"      uBlock Origin: {'âœ… Working' if ublock_detected else 'âš ï¸ Not Detected'}")
                 
                 return extensions_enabled
             else:
-                print("   ⚠️ Could not get extension health data")
+                print("   âš ï¸ Could not get extension health data")
                 return False
                 
         except Exception as e:
-            print(f"   ❌ Extension health check error: {e}")
+            print(f"   âŒ Extension health check error: {e}")
             return False
 
     def _get_websocket_url(self):
@@ -1824,12 +1816,12 @@ class SprunkiGamePlayer:
             tabs = response.json()
             target_tab = next((t for t in tabs if t.get('type') == 'page' and 'cocrea.world' in t.get('url', '')), None)
             if not target_tab: 
-                print("⚠️ Could not find cocrea.world tab for WebSocket connection")
+                print("âš ï¸ Could not find cocrea.world tab for WebSocket connection")
                 return None
             self.ws_url = target_tab['webSocketDebuggerUrl']
             return self.ws_url
         except Exception as e:
-            print(f"❌ Could not get WebSocket URL: {e}")
+            print(f"âŒ Could not get WebSocket URL: {e}")
             return None
 
     def _send_cdp_command(self, ws, command):
@@ -1869,7 +1861,7 @@ class SprunkiGamePlayer:
             current_time = time.time()
             if hasattr(self, '_last_activation_time'):
                 if current_time - self._last_activation_time < 2.0:  # Skip if within 2 seconds
-                    print(f"🔧 Skipping activation for {operation_name} (recently activated)")
+                    print(f"ðŸ”§ Skipping activation for {operation_name} (recently activated)")
                     return True
             
             possible_windows = gw.getWindowsWithTitle('cocrea.world')
@@ -1884,9 +1876,9 @@ class SprunkiGamePlayer:
                     if not is_active:
                         target_window.activate()
                         time.sleep(0.5)
-                        print(f"🔧 Window activated for {operation_name}")
+                        print(f"ðŸ”§ Window activated for {operation_name}")
                     else:
-                        print(f"✅ Window already active for {operation_name}")
+                        print(f"âœ… Window already active for {operation_name}")
                     
                     # Store last activation time
                     self._last_activation_time = current_time
@@ -1897,23 +1889,23 @@ class SprunkiGamePlayer:
                     target_window.activate()
                     time.sleep(0.5)
                     self._last_activation_time = current_time
-                    print(f"🔧 Window activated (fallback) for {operation_name}")
+                    print(f"ðŸ”§ Window activated (fallback) for {operation_name}")
                     return True
             else:
-                print(f"⚠️ Could not find window for {operation_name}")
+                print(f"âš ï¸ Could not find window for {operation_name}")
                 return False
         except Exception as e:
-            print(f"⚠️ Window activation failed for {operation_name}: {e}")
+            print(f"âš ï¸ Window activation failed for {operation_name}: {e}")
             return False
 
     def _click_run_button_cdp_only(self):
         """Pure CDP implementation for Run button detection and clicking"""
         try:
-            print("🔧 CDP-ONLY: Finding and clicking Run button via DOM...")
+            print("ðŸ”§ CDP-ONLY: Finding and clicking Run button via DOM...")
             
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("❌ CDP-ONLY: WebSocket not available")
+                print("âŒ CDP-ONLY: WebSocket not available")
                 return False
             
             ws = websocket.create_connection(ws_url, timeout=30)
@@ -1922,7 +1914,7 @@ class SprunkiGamePlayer:
             run_button_js = '''
             new Promise((resolve, reject) => {
                 try {
-                    console.log("🔧 CDP-ONLY: Searching for Run button in DOM...");
+                    console.log("ðŸ”§ CDP-ONLY: Searching for Run button in DOM...");
                     
                     // Strategy 1: Specific class from extracted data
                     let runButton = document.querySelector('.style_run-button__VjFSY');
@@ -1959,7 +1951,7 @@ class SprunkiGamePlayer:
                         const allButtons = document.querySelectorAll('button, input[type="submit"], input[type="button"]');
                         for (const btn of allButtons) {
                             const text = (btn.textContent || btn.value || '').trim().toLowerCase();
-                            if (text === 'run' || text === '▶' || text === 'play' || text === 'start') {
+                            if (text === 'run' || text === 'â–¶' || text === 'play' || text === 'start') {
                                 runButton = btn;
                                 strategy = `text_based_${text}`;
                                 break;
@@ -1985,7 +1977,7 @@ class SprunkiGamePlayer:
                     }
                     
                     if (runButton) {
-                        console.log(`🎯 CDP-ONLY: Found Run button via ${strategy}`);
+                        console.log(`ðŸŽ¯ CDP-ONLY: Found Run button via ${strategy}`);
                         console.log(`   Text: "${runButton.textContent || runButton.value || 'No text'}"`);
                         console.log(`   Classes: "${runButton.className || 'No classes'}"`);
                         
@@ -1997,11 +1989,11 @@ class SprunkiGamePlayer:
                             try {
                                 // Attempt 1: Direct click
                                 runButton.click();
-                                console.log("✅ CDP-ONLY: Run button clicked via direct click");
+                                console.log("âœ… CDP-ONLY: Run button clicked via direct click");
                                 resolve({ success: true, method: 'direct_click', strategy: strategy });
                                 
                             } catch (clickError) {
-                                console.log("⚠️ CDP-ONLY: Direct click failed, trying dispatchEvent...");
+                                console.log("âš ï¸ CDP-ONLY: Direct click failed, trying dispatchEvent...");
                                 
                                 try {
                                     // Attempt 2: Dispatch click event
@@ -2013,23 +2005,23 @@ class SprunkiGamePlayer:
                                     });
                                     runButton.dispatchEvent(clickEvent);
                                     
-                                    console.log("✅ CDP-ONLY: Run button clicked via dispatchEvent");
+                                    console.log("âœ… CDP-ONLY: Run button clicked via dispatchEvent");
                                     resolve({ success: true, method: 'dispatch_event', strategy: strategy });
                                     
                                 } catch (dispatchError) {
-                                    console.log("⚠️ CDP-ONLY: DispatchEvent failed, trying focus + click...");
+                                    console.log("âš ï¸ CDP-ONLY: DispatchEvent failed, trying focus + click...");
                                     
                                     try {
                                         // Attempt 3: Focus + click
                                         runButton.focus();
                                         setTimeout(() => {
                                             runButton.click();
-                                            console.log("✅ CDP-ONLY: Run button clicked via focus + click");
+                                            console.log("âœ… CDP-ONLY: Run button clicked via focus + click");
                                             resolve({ success: true, method: 'focus_click', strategy: strategy });
                                         }, 200);
                                         
                                     } catch (focusError) {
-                                        console.error("❌ CDP-ONLY: All click methods failed:", focusError);
+                                        console.error("âŒ CDP-ONLY: All click methods failed:", focusError);
                                         resolve({ success: false, reason: 'all_click_methods_failed', strategy: strategy });
                                     }
                                 }
@@ -2037,12 +2029,12 @@ class SprunkiGamePlayer:
                         }, 1000); // Wait 1s for scroll
                         
                     } else {
-                        console.log("❌ CDP-ONLY: Run button not found in DOM");
+                        console.log("âŒ CDP-ONLY: Run button not found in DOM");
                         resolve({ success: false, reason: 'button_not_found' });
                     }
                     
                 } catch (error) {
-                    console.error("❌ CDP-ONLY: Error finding Run button:", error);
+                    console.error("âŒ CDP-ONLY: Error finding Run button:", error);
                     reject({ success: false, error: error.toString() });
                 }
             });
@@ -2061,19 +2053,19 @@ class SprunkiGamePlayer:
                 if result and result.get('success'):
                     method = result.get('method', 'unknown')
                     strategy = result.get('strategy', 'unknown')
-                    print(f"✅ CDP-ONLY: Run button clicked successfully via {method} (strategy: {strategy})")
+                    print(f"âœ… CDP-ONLY: Run button clicked successfully via {method} (strategy: {strategy})")
                     return True
                 else:
                     reason = result.get('reason', 'unknown') if result else 'no_result'
                     strategy = result.get('strategy', 'unknown') if result else 'none'
-                    print(f"❌ CDP-ONLY: Run button click failed - {reason} (strategy attempted: {strategy})")
+                    print(f"âŒ CDP-ONLY: Run button click failed - {reason} (strategy attempted: {strategy})")
                     return False
             else:
-                print("❌ CDP-ONLY: Failed to execute Run button JavaScript")
+                print("âŒ CDP-ONLY: Failed to execute Run button JavaScript")
                 return False
                 
         except Exception as e:
-            print(f"❌ CDP-ONLY: Run button detection error: {e}")
+            print(f"âŒ CDP-ONLY: Run button detection error: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -2081,11 +2073,11 @@ class SprunkiGamePlayer:
     def _click_fullscreen_button_cdp_only(self, wait_time=15):
         """SVG-aware Fullscreen with RELAXED verification"""
         try:
-            print("🔧 CDP-ONLY: SVG-aware Fullscreen with RELAXED verification...")
+            print("ðŸ”§ CDP-ONLY: SVG-aware Fullscreen with RELAXED verification...")
             
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("❌ CDP-ONLY: WebSocket not available")
+                print("âŒ CDP-ONLY: WebSocket not available")
                 return False
             
             ws = websocket.create_connection(ws_url, timeout=30)
@@ -2094,7 +2086,7 @@ class SprunkiGamePlayer:
             fullscreen_button_js = f'''
             new Promise((resolve, reject) => {{
                 try {{
-                    console.log("🔧 CDP-ONLY: SVG-aware fullscreen with RELAXED verification...");
+                    console.log("ðŸ”§ CDP-ONLY: SVG-aware fullscreen with RELAXED verification...");
                     
                     const maxWaitTime = {wait_time * 1000};
                     const startTime = Date.now();
@@ -2172,7 +2164,7 @@ class SprunkiGamePlayer:
                     
                     function findFullscreenButton() {{
                         const allIcons = document.querySelectorAll('.style_gandi-player-actions-icon__uoqdH');
-                        console.log(`🎯 Analyzing ${{allIcons.length}} action icons...`);
+                        console.log(`ðŸŽ¯ Analyzing ${{allIcons.length}} action icons...`);
                         
                         for (let i = 0; i < allIcons.length; i++) {{
                             const result = analyzeIconBySVG(allIcons[i]);
@@ -2192,7 +2184,7 @@ class SprunkiGamePlayer:
                         if (!candidate) {{
                             const elapsed = Date.now() - startTime;
                             if (elapsed < maxWaitTime) {{
-                                console.log(`🔍 Waiting for fullscreen button... (${{Math.round(elapsed / 1000)}}s)`);
+                                console.log(`ðŸ” Waiting for fullscreen button... (${{Math.round(elapsed / 1000)}}s)`);
                                 setTimeout(attemptFullscreenClick, 1000);
                             }} else {{
                                 resolve({{ success: false, reason: 'no_fullscreen_button_found' }});
@@ -2201,27 +2193,27 @@ class SprunkiGamePlayer:
                         }}
                         
                         const element = candidate.element;
-                        console.log(`🎯 Found fullscreen button: ${{candidate.type}} (${{candidate.pathCount}} paths)`);
+                        console.log(`ðŸŽ¯ Found fullscreen button: ${{candidate.type}} (${{candidate.pathCount}} paths)`);
                         
                         // Get initial states
                         const initialStates = checkFullscreenStates();
-                        console.log("📊 Initial states:", initialStates);
+                        console.log("ðŸ“Š Initial states:", initialStates);
                         
                         // Scroll and click
                         element.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
                         
                         setTimeout(() => {{
-                            console.log("🖱️ Attempting click...");
+                            console.log("ðŸ–±ï¸ Attempting click...");
                             
                             try {{
                                 // Simple click first
                                 element.click();
-                                console.log("✅ Click executed successfully");
+                                console.log("âœ… Click executed successfully");
                                 
                                 // RELAXED verification with multiple checks
                                 setTimeout(() => {{
                                     const newStates = checkFullscreenStates();
-                                    console.log("📊 Post-click states:", newStates);
+                                    console.log("ðŸ“Š Post-click states:", newStates);
                                     
                                     // Multiple success criteria (ANY can indicate success)
                                     const successCriteria = {{
@@ -2245,14 +2237,14 @@ class SprunkiGamePlayer:
                                         }}
                                     }});
                                     
-                                    console.log("✅ Success criteria analysis:", successCriteria);
+                                    console.log("âœ… Success criteria analysis:", successCriteria);
                                     
                                     // RELAXED: Any positive indicator = success
                                     const anySuccess = Object.values(successCriteria).some(criteria => criteria === true);
                                     
                                     if (anySuccess) {{
                                         const activeCriteria = Object.keys(successCriteria).filter(key => successCriteria[key]);
-                                        console.log(`🎉 RELAXED SUCCESS! Criteria met: ${{activeCriteria.join(', ')}}`);
+                                        console.log(`ðŸŽ‰ RELAXED SUCCESS! Criteria met: ${{activeCriteria.join(', ')}}`);
                                         
                                         resolve({{
                                             success: true,
@@ -2264,8 +2256,8 @@ class SprunkiGamePlayer:
                                             states: {{ initial: initialStates, final: newStates }}
                                         }});
                                     }} else {{
-                                        console.log("⚠️ No clear success indicators, but click was executed");
-                                        console.log("🤔 Assuming success due to successful click execution");
+                                        console.log("âš ï¸ No clear success indicators, but click was executed");
+                                        console.log("ðŸ¤” Assuming success due to successful click execution");
                                         
                                         // VERY RELAXED: If click executed without error, assume success
                                         resolve({{
@@ -2282,11 +2274,11 @@ class SprunkiGamePlayer:
                                 }}, 2000); // Wait 2s for effects to take place
                                 
                             }} catch (clickError) {{
-                                console.log(`❌ Click failed: ${{clickError.message}}`);
+                                console.log(`âŒ Click failed: ${{clickError.message}}`);
                                 
                                 // Try backup method
                                 try {{
-                                    console.log("🔄 Trying backup click method...");
+                                    console.log("ðŸ”„ Trying backup click method...");
                                     const rect = element.getBoundingClientRect();
                                     const clickEvent = new MouseEvent('click', {{
                                         view: window,
@@ -2297,11 +2289,11 @@ class SprunkiGamePlayer:
                                     }});
                                     element.dispatchEvent(clickEvent);
                                     
-                                    console.log("✅ Backup click executed");
+                                    console.log("âœ… Backup click executed");
                                     
                                     // Even more relaxed - assume backup worked
                                     setTimeout(() => {{
-                                        console.log("🤷 Backup method completed - assuming success");
+                                        console.log("ðŸ¤· Backup method completed - assuming success");
                                         resolve({{
                                             success: true,
                                             method: 'backup_click_assumed',
@@ -2313,7 +2305,7 @@ class SprunkiGamePlayer:
                                     }}, 1500);
                                     
                                 }} catch (backupError) {{
-                                    console.log(`❌ Backup click also failed: ${{backupError.message}}`);
+                                    console.log(`âŒ Backup click also failed: ${{backupError.message}}`);
                                     resolve({{
                                         success: false,
                                         reason: 'both_click_methods_failed',
@@ -2330,7 +2322,7 @@ class SprunkiGamePlayer:
                     setTimeout(attemptFullscreenClick, 2000);
                     
                 }} catch (error) {{
-                    console.error("❌ Relaxed fullscreen error:", error);
+                    console.error("âŒ Relaxed fullscreen error:", error);
                     reject({{ success: false, error: error.toString() }});
                 }}
             }});
@@ -2353,26 +2345,26 @@ class SprunkiGamePlayer:
                     criteria = result.get('successCriteria', [])
                     assumption = result.get('assumption', None)
                     
-                    print(f"✅ CDP-ONLY: RELAXED Fullscreen SUCCESS!")
-                    print(f"   🎯 Button: {candidate}")
-                    print(f"   🖱️ Method: {method}")
-                    print(f"   ✅ Verified: {verified}")
+                    print(f"âœ… CDP-ONLY: RELAXED Fullscreen SUCCESS!")
+                    print(f"   ðŸŽ¯ Button: {candidate}")
+                    print(f"   ðŸ–±ï¸ Method: {method}")
+                    print(f"   âœ… Verified: {verified}")
                     if criteria:
-                        print(f"   📊 Criteria: {', '.join(criteria)}")
+                        print(f"   ðŸ“Š Criteria: {', '.join(criteria)}")
                     if assumption:
-                        print(f"   🤷 Assumption: {assumption}")
+                        print(f"   ðŸ¤· Assumption: {assumption}")
                     
                     return True
                 else:
                     reason = result.get('reason', 'unknown') if result else 'no_result'
-                    print(f"❌ CDP-ONLY: RELAXED Fullscreen still failed - {reason}")
+                    print(f"âŒ CDP-ONLY: RELAXED Fullscreen still failed - {reason}")
                     return False
             else:
-                print("❌ CDP-ONLY: Failed to execute relaxed JavaScript")
+                print("âŒ CDP-ONLY: Failed to execute relaxed JavaScript")
                 return False
                 
         except Exception as e:
-            print(f"❌ CDP-ONLY: Relaxed Fullscreen error: {e}")
+            print(f"âŒ CDP-ONLY: Relaxed Fullscreen error: {e}")
             return False
 
     def _simulate_click_via_cdp(self, ws, x, y):
@@ -2411,23 +2403,23 @@ class SprunkiGamePlayer:
 
     def setup_dual_verification_system(self):
         """
-        🔄 DUAL VERIFICATION: Setup cả Characters Array + Putted Characters
-        Chỉ cần 1 trong 2 hoạt động là đủ
+        ðŸ”„ DUAL VERIFICATION: Setup cáº£ Characters Array + Putted Characters
+        Chá»‰ cáº§n 1 trong 2 hoáº¡t Ä‘á»™ng lÃ  Ä‘á»§
         """
         try:
-            print("🔄 Setting up DUAL verification system...")
+            print("ðŸ”„ Setting up DUAL verification system...")
             
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("⚠️ WebSocket not available, dual verification disabled")
+                print("âš ï¸ WebSocket not available, dual verification disabled")
                 self.characters_available = False
                 self.putted_chars_available = False
                 return False
             
-            # Setup JavaScript cho CẢ HAI systems
+            # Setup JavaScript cho Cáº¢ HAI systems
             dual_setup_js = '''
             (() => {
-                console.log("🚀 Setting up DUAL verification system...");
+                console.log("ðŸš€ Setting up DUAL verification system...");
                 
                 // VM Finder
                 function findVMInWindow(win) {
@@ -2457,18 +2449,18 @@ class SprunkiGamePlayer:
                 
                 const vm = findVMInWindow(window);
                 if (!vm) {
-                    console.error("❌ Cannot find VM for dual verification");
+                    console.error("âŒ Cannot find VM for dual verification");
                     return { characters: false, putted: false };
                 }
                 
                 const runtime = vm.runtime || vm;
                 const stage = (runtime.targets || []).find(t => t.isStage) || (runtime.targets || [])[0];
                 if (!stage) {
-                    console.error("❌ Cannot find Stage for dual verification");
+                    console.error("âŒ Cannot find Stage for dual verification");
                     return { characters: false, putted: false };
                 }
                 
-                // Store VM và Stage
+                // Store VM vÃ  Stage
                 window.__dual_vm = vm;
                 window.__dual_stage = stage;
                 
@@ -2515,10 +2507,10 @@ class SprunkiGamePlayer:
                     const testChars = window.getCharactersCount();
                     if (testChars !== null) {
                         charactersSuccess = true;
-                        console.log("✅ Characters Array system ready:", testChars);
+                        console.log("âœ… Characters Array system ready:", testChars);
                     }
                 } catch (e) {
-                    console.warn("⚠️ Characters Array setup failed:", e);
+                    console.warn("âš ï¸ Characters Array setup failed:", e);
                 }
                 
                 // SYSTEM 2: Putted Characters (from old code)
@@ -2539,16 +2531,16 @@ class SprunkiGamePlayer:
                         const testPutted = window.getPuttedChars();
                         if (testPutted !== null) {
                             puttedSuccess = true;
-                            console.log("✅ Putted Characters system ready:", testPutted);
+                            console.log("âœ… Putted Characters system ready:", testPutted);
                         }
                     }
                 } catch (e) {
-                    console.warn("⚠️ Putted Characters setup failed:", e);
+                    console.warn("âš ï¸ Putted Characters setup failed:", e);
                 }
                 
-                console.log("🔄 DUAL VERIFICATION SETUP RESULT:");
-                console.log("   Characters Array:", charactersSuccess ? "✅ Ready" : "❌ Failed");
-                console.log("   Putted Characters:", puttedSuccess ? "✅ Ready" : "❌ Failed");
+                console.log("ðŸ”„ DUAL VERIFICATION SETUP RESULT:");
+                console.log("   Characters Array:", charactersSuccess ? "âœ… Ready" : "âŒ Failed");
+                console.log("   Putted Characters:", puttedSuccess ? "âœ… Ready" : "âŒ Failed");
                 
                 return {
                     characters: charactersSuccess,
@@ -2575,70 +2567,70 @@ class SprunkiGamePlayer:
                 has_backup = result.get('hasBackup', False)
                 
                 if has_backup:
-                    print("✅ DUAL verification system setup successful!")
-                    print(f"   Characters Array: {'✅ Ready' if self.characters_available else '❌ Failed'}")
-                    print(f"   Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ Failed'}")
+                    print("âœ… DUAL verification system setup successful!")
+                    print(f"   Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ Failed'}")
+                    print(f"   Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ Failed'}")
                     
-                    # Test cả hai systems
+                    # Test cáº£ hai systems
                     if self.characters_available:
                         test_chars = self.get_characters_count()
-                        print(f"   🧪 Characters test: {test_chars}")
+                        print(f"   ðŸ§ª Characters test: {test_chars}")
                     
                     if self.putted_chars_available:
                         test_putted = self.get_putted_chars_value()
-                        print(f"   🧪 Putted test: {test_putted}")
+                        print(f"   ðŸ§ª Putted test: {test_putted}")
                     
                     self.characters_setup_done = True
                     self.putted_chars_setup_done = True
                     return True
                 else:
-                    print("❌ DUAL verification setup failed - no systems available")
+                    print("âŒ DUAL verification setup failed - no systems available")
                     return False
             else:
-                print("❌ No response from dual verification setup")
+                print("âŒ No response from dual verification setup")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error setting up dual verification: {e}")
+            print(f"âŒ Error setting up dual verification: {e}")
             self.characters_available = False
             self.putted_chars_available = False
             return False
 
     def start_batch_verification_session(self):
         """
-        🚀 NEW: Start batch verification session with persistent WebSocket (FIXED LOGIC)
+        ðŸš€ NEW: Start batch verification session with persistent WebSocket (FIXED LOGIC)
         """
         try:
-            print("🚀 STARTING BATCH VERIFICATION SESSION...")
+            print("ðŸš€ STARTING BATCH VERIFICATION SESSION...")
             print("="*60)
             
             # Get WebSocket URL
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("❌ Cannot get WebSocket URL for batch session")
+                print("âŒ Cannot get WebSocket URL for batch session")
                 return False
             
             # Create persistent WebSocket connection
             self.session_websocket = websocket.create_connection(ws_url, timeout=10)
-            # 🔧 NEW: Set default timeout for operations
+            # ðŸ”§ NEW: Set default timeout for operations
             self.session_websocket.settimeout(5)  # 5 second default timeout
             self.session_websocket_url = ws_url
             self.session_start_time = time.time()
             
-            # 🔧 FIX: Set active BEFORE testing to allow _send_batch_cdp_command to work
+            # ðŸ”§ FIX: Set active BEFORE testing to allow _send_batch_cdp_command to work
             self.batch_verification_active = True
             
-            print(f"✅ Batch WebSocket connected: {ws_url}")
+            print(f"âœ… Batch WebSocket connected: {ws_url}")
             
             # Test connection with active flag set
-            print("🔍 Testing batch WebSocket connection...")
+            print("ðŸ” Testing batch WebSocket connection...")
             test_response = self._send_batch_cdp_command({
                 "method": "Runtime.evaluate",
                 "params": {"expression": "window.location.href", "returnByValue": True}
             })
             
             if not test_response:
-                print("❌ Batch WebSocket test failed - trying simple test...")
+                print("âŒ Batch WebSocket test failed - trying simple test...")
                 
                 # Try simpler test
                 simple_test = self._send_batch_cdp_command({
@@ -2647,47 +2639,47 @@ class SprunkiGamePlayer:
                 })
                 
                 if not simple_test:
-                    print("❌ Even simple batch test failed")
+                    print("âŒ Even simple batch test failed")
                     self.stop_batch_verification_session()
                     return False
                 else:
-                    print("✅ Simple batch test passed, continuing...")
+                    print("âœ… Simple batch test passed, continuing...")
             else:
-                print("✅ Batch WebSocket test successful")
+                print("âœ… Batch WebSocket test successful")
             
             # Setup verification functions
             success = self._setup_batch_verification_functions()
             if success:
                 # Keep batch_verification_active = True (already set above)
-                print("🎯 BATCH VERIFICATION SESSION ACTIVE!")
-                print(f"   📊 Performance: WebSocket reuse enabled")
-                print(f"   ⚡ Speed: Pre-warmed verification functions")
-                print(f"   🛡️ Reliability: Connection health monitoring")
+                print("ðŸŽ¯ BATCH VERIFICATION SESSION ACTIVE!")
+                print(f"   ðŸ“Š Performance: WebSocket reuse enabled")
+                print(f"   âš¡ Speed: Pre-warmed verification functions")
+                print(f"   ðŸ›¡ï¸ Reliability: Connection health monitoring")
                 print("="*60)
                 return True
             else:
-                print("❌ Failed to setup batch verification functions")
+                print("âŒ Failed to setup batch verification functions")
                 self.stop_batch_verification_session()
                 return False
                 
         except Exception as e:
-            print(f"❌ Error starting batch verification session: {e}")
+            print(f"âŒ Error starting batch verification session: {e}")
             self.stop_batch_verification_session()
             return False
 
     def stop_batch_verification_session(self):
         """
-        🛑 NEW: Stop batch verification session and cleanup
+        ðŸ›‘ NEW: Stop batch verification session and cleanup
         """
         try:
-            print("\n🛑 STOPPING BATCH VERIFICATION SESSION...")
+            print("\nðŸ›‘ STOPPING BATCH VERIFICATION SESSION...")
             
             if self.session_websocket:
                 try:
                     self.session_websocket.close()
-                    print("   ✅ Batch WebSocket closed")
+                    print("   âœ… Batch WebSocket closed")
                 except:
-                    print("   ⚠️ WebSocket close warning (already closed)")
+                    print("   âš ï¸ WebSocket close warning (already closed)")
             
             # Reset session state
             self.batch_verification_active = False
@@ -2696,25 +2688,25 @@ class SprunkiGamePlayer:
             self.verification_functions_ready = False
             self.session_start_time = None
             
-            print("✅ Batch verification session stopped")
+            print("âœ… Batch verification session stopped")
             
         except Exception as e:
-            print(f"⚠️ Error stopping batch session: {e}")
+            print(f"âš ï¸ Error stopping batch session: {e}")
             # Force reset
             self.batch_verification_active = False
             self.session_websocket = None
 
     def _setup_batch_verification_functions(self):
         """
-        ⚡ NEW: Setup verification functions once for entire session
+        âš¡ NEW: Setup verification functions once for entire session
         """
         try:
-            print("⚡ Setting up batch verification functions...")
+            print("âš¡ Setting up batch verification functions...")
             
             # Enhanced JavaScript setup for batch operations
             batch_setup_js = '''
             (() => {
-                console.log("⚡ Setting up BATCH verification functions...");
+                console.log("âš¡ Setting up BATCH verification functions...");
                 
                 // VM Finder (same as before)
                 function findVMInWindow(win) {
@@ -2744,14 +2736,14 @@ class SprunkiGamePlayer:
                 
                 const vm = findVMInWindow(window);
                 if (!vm) {
-                    console.error("❌ VM not found for batch verification");
+                    console.error("âŒ VM not found for batch verification");
                     return { success: false, reason: "vm_not_found" };
                 }
                 
                 const runtime = vm.runtime || vm;
                 const stage = (runtime.targets || []).find(t => t.isStage) || (runtime.targets || [])[0];
                 if (!stage) {
-                    console.error("❌ Stage not found for batch verification");
+                    console.error("âŒ Stage not found for batch verification");
                     return { success: false, reason: "stage_not_found" };
                 }
                 
@@ -2832,7 +2824,7 @@ class SprunkiGamePlayer:
                 const testPutted = window.getBatchPuttedChars ? window.getBatchPuttedChars() : null;
                 const testDual = window.getBatchDualState();
                 
-                console.log("⚡ BATCH VERIFICATION FUNCTIONS READY:");
+                console.log("âš¡ BATCH VERIFICATION FUNCTIONS READY:");
                 console.log("   Characters:", testChars);
                 console.log("   Putted:", testPutted); 
                 console.log("   Dual state:", testDual);
@@ -2861,37 +2853,37 @@ class SprunkiGamePlayer:
                     putted_ready = result.get('putted_ready', False)
                     dual_ready = result.get('dual_ready', False)
                     
-                    print(f"   ✅ Batch functions setup successful!")
-                    print(f"   📊 Characters function: {'✅' if chars_ready else '❌'}")
-                    print(f"   📊 Putted function: {'✅' if putted_ready else '❌'}")  
-                    print(f"   📊 Dual state function: {'✅' if dual_ready else '❌'}")
+                    print(f"   âœ… Batch functions setup successful!")
+                    print(f"   ðŸ“Š Characters function: {'âœ…' if chars_ready else 'âŒ'}")
+                    print(f"   ðŸ“Š Putted function: {'âœ…' if putted_ready else 'âŒ'}")  
+                    print(f"   ðŸ“Š Dual state function: {'âœ…' if dual_ready else 'âŒ'}")
                     
                     return True
                 else:
                     reason = result.get('reason', 'unknown')
-                    print(f"   ❌ Batch setup failed: {reason}")
+                    print(f"   âŒ Batch setup failed: {reason}")
                     return False
             else:
-                print("   ❌ No response from batch setup")
+                print("   âŒ No response from batch setup")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error setting up batch functions: {e}")
+            print(f"âŒ Error setting up batch functions: {e}")
             return False
 
     def _send_batch_cdp_command(self, command):
         """
-        ⚡ NEW: Send CDP command using persistent batch WebSocket (DEBUG ENHANCED)
+        âš¡ NEW: Send CDP command using persistent batch WebSocket (DEBUG ENHANCED)
         """
         try:
             if not self.session_websocket or not self.batch_verification_active:
-                print(f"   🔍 Batch command failed: WebSocket={bool(self.session_websocket)}, Active={self.batch_verification_active}")
+                print(f"   ðŸ” Batch command failed: WebSocket={bool(self.session_websocket)}, Active={self.batch_verification_active}")
                 return None
             
             command_id = random.randint(1, 1000000)
             command['id'] = command_id
             
-            print(f"   📤 Sending batch command: {command['method']}")
+            print(f"   ðŸ“¤ Sending batch command: {command['method']}")
             self.session_websocket.send(json.dumps(command))
             
             # Reduced timeout for batch operations (faster)
@@ -2905,31 +2897,31 @@ class SprunkiGamePlayer:
                     response_str = self.session_websocket.recv()
                     response_data = json.loads(response_str)
                     
-                    print(f"   📥 Received response for command ID: {response_data.get('id', 'NO_ID')}")
+                    print(f"   ðŸ“¥ Received response for command ID: {response_data.get('id', 'NO_ID')}")
                     
                     if response_data.get('id') == command_id:
-                        print(f"   ✅ Batch command successful: {command['method']}")
+                        print(f"   âœ… Batch command successful: {command['method']}")
                         return response_data
                         
                 except Exception as timeout_e:
                     if "timeout" in str(timeout_e).lower():
                         continue
                     else:
-                        print(f"   ⚠️ WebSocket recv error: {timeout_e}")
+                        print(f"   âš ï¸ WebSocket recv error: {timeout_e}")
                         break
             
-            print(f"   ⏰ Batch CDP command timeout after {max_wait_time}s")
+            print(f"   â° Batch CDP command timeout after {max_wait_time}s")
             return None
             
         except Exception as e:
-            print(f"   ❌ Batch CDP command error: {e}")
+            print(f"   âŒ Batch CDP command error: {e}")
             # Mark session as failed for health check
             self.batch_verification_active = False
             return None
 
     def check_batch_session_health(self):
         """
-        🔍 NEW: Check batch session health and auto-reconnect if needed
+        ðŸ” NEW: Check batch session health and auto-reconnect if needed
         """
         try:
             current_time = time.time()
@@ -2943,7 +2935,7 @@ class SprunkiGamePlayer:
             if not self.batch_verification_active or not self.session_websocket:
                 return False
             
-            print("🔍 Batch session health check...")
+            print("ðŸ” Batch session health check...")
             
             # Quick health test
             test_response = self._send_batch_cdp_command({
@@ -2953,22 +2945,22 @@ class SprunkiGamePlayer:
             
             if test_response:
                 session_duration = current_time - (self.session_start_time or current_time)
-                print(f"   ✅ Batch session healthy (running {session_duration:.1f}s)")
+                print(f"   âœ… Batch session healthy (running {session_duration:.1f}s)")
                 return True
             else:
-                print("   ❌ Batch session unhealthy - attempting reconnect...")
+                print("   âŒ Batch session unhealthy - attempting reconnect...")
                 return self._attempt_batch_session_reconnect()
                 
         except Exception as e:
-            print(f"⚠️ Health check error: {e}")
+            print(f"âš ï¸ Health check error: {e}")
             return False
 
     def _attempt_batch_session_reconnect(self):
         """
-        🔄 NEW: Attempt to reconnect batch session
+        ðŸ”„ NEW: Attempt to reconnect batch session
         """
         try:
-            print("🔄 Attempting batch session reconnect...")
+            print("ðŸ”„ Attempting batch session reconnect...")
             
             # Stop current session
             self.stop_batch_verification_session()
@@ -2976,19 +2968,19 @@ class SprunkiGamePlayer:
             
             # Try to restart
             if self.start_batch_verification_session():
-                print("✅ Batch session reconnected successfully")
+                print("âœ… Batch session reconnected successfully")
                 return True
             else:
-                print("❌ Batch session reconnect failed")
+                print("âŒ Batch session reconnect failed")
                 return False
                 
         except Exception as e:
-            print(f"❌ Reconnect error: {e}")
+            print(f"âŒ Reconnect error: {e}")
             return False
 
     def get_characters_count(self):
         """
-        📢 BATCH OPTIMIZED: Get Characters count via batch session or fallback
+        ðŸ“¢ BATCH OPTIMIZED: Get Characters count via batch session or fallback
         """
         try:
             # TRY BATCH FIRST (FAST PATH)
@@ -3005,16 +2997,16 @@ class SprunkiGamePlayer:
                             return int(count)
             
             # FALLBACK TO INDIVIDUAL (SLOW PATH)
-            print("⚠️ Batch unavailable, using individual verification")
+            print("âš ï¸ Batch unavailable, using individual verification")
             return self._get_characters_count_individual()
             
         except Exception as e:
-            print(f"❌ Error in batch characters count: {e}")
+            print(f"âŒ Error in batch characters count: {e}")
             return self._get_characters_count_individual()
 
     def _get_characters_count_individual(self):
         """
-        📢 FALLBACK: Individual Characters count (original method)
+        ðŸ“¢ FALLBACK: Individual Characters count (original method)
         """
         try:
             if not self.characters_available:
@@ -3041,12 +3033,12 @@ class SprunkiGamePlayer:
             return None
             
         except Exception as e:
-            print(f"❌ Error getting individual Characters count: {e}")
+            print(f"âŒ Error getting individual Characters count: {e}")
             return None
 
     def _execute_emergency_return_click(self, target_slot):
         """
-        🚨 OPTIMIZED: Quick emergency return click without full verification cycle
+        ðŸš¨ OPTIMIZED: Quick emergency return click without full verification cycle
         Used when normal return seems to have failed
         """
         try:
@@ -3059,16 +3051,16 @@ class SprunkiGamePlayer:
             # Minimal wait for effect
             time.sleep(0.2)
             
-            print(f"   ⚡ Emergency click executed at ({center_x}, {center_y})")
+            print(f"   âš¡ Emergency click executed at ({center_x}, {center_y})")
             return True
             
         except Exception as e:
-            print(f"   ❌ Emergency click failed: {e}")
+            print(f"   âŒ Emergency click failed: {e}")
             return False
 
     def get_enabled_list_array(self):
         """
-        🔍 NEW: Get Enabled List array for cross-validation
+        ðŸ” NEW: Get Enabled List array for cross-validation
         Returns: list of strings ["0","1","0"...] or None if error
         """
         try:
@@ -3104,7 +3096,7 @@ class SprunkiGamePlayer:
                         return null;
                     }
                     
-                    console.log("✅ Found Enabled List array:", enabledVariable.value);
+                    console.log("âœ… Found Enabled List array:", enabledVariable.value);
                     return enabledVariable.value;
                     
                 } catch (e) {
@@ -3125,22 +3117,22 @@ class SprunkiGamePlayer:
                 enabled_value = response.get('result', {}).get('result', {}).get('value')
                 
                 if isinstance(enabled_value, list):
-                    print(f"🔍 Enabled List retrieved: {enabled_value}")
+                    print(f"ðŸ” Enabled List retrieved: {enabled_value}")
                     return enabled_value
                 else:
-                    print(f"⚠️ Unexpected Enabled List type: {type(enabled_value)} = {enabled_value}")
+                    print(f"âš ï¸ Unexpected Enabled List type: {type(enabled_value)} = {enabled_value}")
                     return None
             else:
-                print("⚠️ No response when getting Enabled List")
+                print("âš ï¸ No response when getting Enabled List")
                 return None
                 
         except Exception as e:
-            print(f"❌ Error getting Enabled List: {e}")
+            print(f"âŒ Error getting Enabled List: {e}")
             return None
 
     def get_putted_chars_value(self):
         """
-        📢 BATCH OPTIMIZED: Get Putted Characters via batch session or fallback
+        ðŸ“¢ BATCH OPTIMIZED: Get Putted Characters via batch session or fallback
         """
         try:
             # TRY BATCH FIRST (FAST PATH)
@@ -3157,16 +3149,16 @@ class SprunkiGamePlayer:
                             return int(value)
             
             # FALLBACK TO INDIVIDUAL (SLOW PATH)  
-            print("⚠️ Batch unavailable, using individual verification")
+            print("âš ï¸ Batch unavailable, using individual verification")
             return self._get_putted_chars_individual()
             
         except Exception as e:
-            print(f"❌ Error in batch putted chars: {e}")
+            print(f"âŒ Error in batch putted chars: {e}")
             return self._get_putted_chars_individual()
 
     def _get_putted_chars_individual(self):
         """
-        📢 FALLBACK: Individual Putted Characters (original method)
+        ðŸ“¢ FALLBACK: Individual Putted Characters (original method)
         """
         try:
             if not self.putted_chars_available:
@@ -3193,12 +3185,12 @@ class SprunkiGamePlayer:
             return None
             
         except Exception as e:
-            print(f"❌ Error getting individual putted chars: {e}")
+            print(f"âŒ Error getting individual putted chars: {e}")
             return None
 
     def get_dual_counts_batch(self):
         """
-        🚀 FIXED: Get BOTH counts with None safety
+        ðŸš€ FIXED: Get BOTH counts with None safety
         """
         try:
             if self.batch_verification_active and self.verification_functions_ready:
@@ -3229,12 +3221,12 @@ class SprunkiGamePlayer:
             return self.get_dual_counts_individual()
             
         except Exception as e:
-            print(f"❌ Error in batch dual counts: {e}")
+            print(f"âŒ Error in batch dual counts: {e}")
             return self.get_dual_counts_individual()
 
     def get_dual_counts_individual(self):
         """
-        🔄 FALLBACK: Individual dual counts (original method)
+        ðŸ”„ FALLBACK: Individual dual counts (original method)
         """
         characters_count = self._get_characters_count_individual()
         putted_count = self._get_putted_chars_individual()
@@ -3242,18 +3234,18 @@ class SprunkiGamePlayer:
 
     def get_dual_counts(self):
         """
-        🔄 BATCH OPTIMIZED: Get BOTH VALUES using batch optimization
+        ðŸ”„ BATCH OPTIMIZED: Get BOTH VALUES using batch optimization
         """
         # Try batch first for maximum performance
         return self.get_dual_counts_batch()
 
     def detect_return_mode(self, operation_context="unknown", icons_count=1):
         """
-        🎯 NEW: Detect appropriate return mode based on context
+        ðŸŽ¯ NEW: Detect appropriate return mode based on context
         Returns: RETURN_MODE_INDIVIDUAL or RETURN_MODE_REMIX
         """
         try:
-            print(f"\n🎯 MODE DETECTION: Context='{operation_context}', Icons={icons_count}")
+            print(f"\nðŸŽ¯ MODE DETECTION: Context='{operation_context}', Icons={icons_count}")
             
             # Rule 1: Check operation context (explicit detection)
             if "showcase" in operation_context.lower() or "individual" in operation_context.lower():
@@ -3290,32 +3282,32 @@ class SprunkiGamePlayer:
             self.current_return_mode = detected_mode
             self.active_icons_count = icons_count
             
-            print(f"   📊 Detected mode: {detected_mode.upper()}")
-            print(f"   💡 Reason: {reason}")
-            print(f"   📈 Active icons: {self.active_icons_count}")
+            print(f"   ðŸ“Š Detected mode: {detected_mode.upper()}")
+            print(f"   ðŸ’¡ Reason: {reason}")
+            print(f"   ðŸ“ˆ Active icons: {self.active_icons_count}")
             
             return detected_mode
             
         except Exception as e:
-            print(f"❌ Error in mode detection: {e}")
+            print(f"âŒ Error in mode detection: {e}")
             # Safe fallback to individual mode
             return self.RETURN_MODE_INDIVIDUAL
 
     def set_return_mode_explicit(self, mode, reason="manual_override"):
         """
-        🎯 NEW: Explicitly set return mode (for manual control)
+        ðŸŽ¯ NEW: Explicitly set return mode (for manual control)
         """
         if mode in [self.RETURN_MODE_INDIVIDUAL, self.RETURN_MODE_REMIX]:
-            print(f"🎯 EXPLICIT MODE SET: {mode.upper()} ({reason})")
+            print(f"ðŸŽ¯ EXPLICIT MODE SET: {mode.upper()} ({reason})")
             self.current_return_mode = mode
             return True
         else:
-            print(f"❌ Invalid return mode: {mode}")
+            print(f"âŒ Invalid return mode: {mode}")
             return False
 
     def get_current_return_mode(self):
         """
-        🎯 NEW: Get current return mode with auto-detection fallback
+        ðŸŽ¯ NEW: Get current return mode with auto-detection fallback
         """
         if self.current_return_mode == self.RETURN_MODE_AUTO:
             # Auto-detect based on current state
@@ -3325,11 +3317,11 @@ class SprunkiGamePlayer:
 
     def execute_smart_return_with_mode_detection(self, target_slot, operation_context="unknown", use_cdp=False):
         """
-        🎯 NEW: Smart return router with automatic mode detection
+        ðŸŽ¯ NEW: Smart return router with automatic mode detection
         Routes to appropriate return strategy based on detected mode
         """
         try:
-            print(f"\n🎯 SMART RETURN ROUTER: Starting mode detection...")
+            print(f"\nðŸŽ¯ SMART RETURN ROUTER: Starting mode detection...")
             print("="*70)
             
             # Detect appropriate mode
@@ -3337,64 +3329,64 @@ class SprunkiGamePlayer:
             
             # Route to appropriate strategy
             if detected_mode == self.RETURN_MODE_INDIVIDUAL:
-                print("🎪 ROUTING → Individual Return Strategy (Precision Targeting)")
+                print("ðŸŽª ROUTING â†’ Individual Return Strategy (Precision Targeting)")
                 return self.execute_individual_return_strategy(target_slot, use_cdp)
                 
             elif detected_mode == self.RETURN_MODE_REMIX:
-                print("🎵 ROUTING → Remix Return Strategy (Carpet Bombing)")
+                print("ðŸŽµ ROUTING â†’ Remix Return Strategy (Carpet Bombing)")
                 return self.execute_remix_return_strategy(target_slot, use_cdp)
                 
             else:
-                print(f"⚠️ Unknown mode: {detected_mode}, falling back to individual")
+                print(f"âš ï¸ Unknown mode: {detected_mode}, falling back to individual")
                 return self.execute_individual_return_strategy(target_slot, use_cdp)
                 
         except Exception as e:
-            print(f"❌ Error in smart return router: {e}")
+            print(f"âŒ Error in smart return router: {e}")
             # Fallback to current method
             return self.corrected_return_icon(target_slot, use_cdp)
 
     def execute_individual_return_strategy(self, target_slot, use_cdp=False):
         """
-        🎪 NEW: Individual return strategy (current precision method)
+        ðŸŽª NEW: Individual return strategy (current precision method)
         """
-        print("🎪 EXECUTING INDIVIDUAL RETURN STRATEGY...")
-        print("   🎯 Method: Precision targeting with safe zones")
-        print("   🔍 Verification: Per-operation count monitoring")
+        print("ðŸŽª EXECUTING INDIVIDUAL RETURN STRATEGY...")
+        print("   ðŸŽ¯ Method: Precision targeting with safe zones")
+        print("   ðŸ” Verification: Per-operation count monitoring")
         
         # Use current method for individual operations
         return self.corrected_return_icon(target_slot, use_cdp)
 
     def execute_remix_return_strategy(self, target_slot, use_cdp=False):
         """
-        🎵 ULTRA SIMPLIFIED: Sequential carpet bombing slot by slot
+        ðŸŽµ ULTRA SIMPLIFIED: Sequential carpet bombing slot by slot
         """
         try:
-            print("🎵 ULTRA SIMPLIFIED CARPET BOMBING")
+            print("ðŸŽµ ULTRA SIMPLIFIED CARPET BOMBING")
             print("="*50)
-            print("   🎯 Strategy: Sequential slot-by-slot carpet bombing")
-            print("   📊 Progression: 2→3→4→5... coordinates per slot")
+            print("   ðŸŽ¯ Strategy: Sequential slot-by-slot carpet bombing")
+            print("   ðŸ“Š Progression: 2â†’3â†’4â†’5... coordinates per slot")
             
             # Get current count
             initial_count = self.get_characters_count() if self.characters_available else 0
             if initial_count == 0:
-                print("   ✅ Already clean")
+                print("   âœ… Already clean")
                 return True
             
-            print(f"   📊 Icons to clear: {initial_count}")
+            print(f"   ðŸ“Š Icons to clear: {initial_count}")
             
             # Get ALL slots from config
             if not self.config:
-                print("❌ No config available")
+                print("âŒ No config available")
                 return False
                 
             all_slots = self.config.get('layout', {}).get('slots', [])
             if not all_slots:
-                print("❌ No slots in config")
+                print("âŒ No slots in config")
                 return False
             
             # Sort slots by index for sequential processing
             sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
-            print(f"   🎯 Will process {len(sorted_slots)} slots sequentially")
+            print(f"   ðŸŽ¯ Will process {len(sorted_slots)} slots sequentially")
             
             # Execute progressive carpet bombing sets
             success = self.execute_sequential_carpet_bombing_sets(sorted_slots, initial_count, use_cdp)
@@ -3402,12 +3394,12 @@ class SprunkiGamePlayer:
             return success
             
         except Exception as e:
-            print(f"❌ Error in simplified carpet bombing: {e}")
+            print(f"âŒ Error in simplified carpet bombing: {e}")
             return False
 
     def _determine_adaptive_density(self, icon_count, slot_count):
         """
-        🎨 NEW: Determine optimal grid density based on situation
+        ðŸŽ¨ NEW: Determine optimal grid density based on situation
         """
         try:
             # Density rules based on complexity
@@ -3425,7 +3417,7 @@ class SprunkiGamePlayer:
 
     def _detect_progress_stagnation(self, progress_history, current_wave):
         """
-        📊 NEW: Detect if progress has stagnated (no improvement in recent waves)
+        ðŸ“Š NEW: Detect if progress has stagnated (no improvement in recent waves)
         """
         try:
             if len(progress_history) < 3:
@@ -3446,22 +3438,22 @@ class SprunkiGamePlayer:
 
     def generate_carpet_grid_for_slots(self, slot_indices, density="default"):
         """
-        🎨 NEW: Generate carpet bombing grid covering specified slots
+        ðŸŽ¨ NEW: Generate carpet bombing grid covering specified slots
         Returns: List of (x, y) coordinates for systematic clicking
         """
         try:
-            print(f"\n🎨 GENERATING CARPET GRID")
+            print(f"\nðŸŽ¨ GENERATING CARPET GRID")
             print("="*50)
-            print(f"   🎯 Target slots: {slot_indices}")
-            print(f"   🎨 Density: {density}")
+            print(f"   ðŸŽ¯ Target slots: {slot_indices}")
+            print(f"   ðŸŽ¨ Density: {density}")
             
             if not self.config:
-                print("❌ No config available for grid generation")
+                print("âŒ No config available for grid generation")
                 return []
             
             all_slots = self.config.get('layout', {}).get('slots', [])
             if not all_slots:
-                print("❌ No slots configuration found")
+                print("âŒ No slots configuration found")
                 return []
             
             # Get density setting
@@ -3469,32 +3461,32 @@ class SprunkiGamePlayer:
                                                     self.carpet_grid_config['default_density'])
             overlap_margin = self.carpet_grid_config['overlap_margin']
             
-            print(f"   📐 Grid density: {grid_density}x{grid_density}")
-            print(f"   📏 Overlap margin: {overlap_margin}px")
+            print(f"   ðŸ“ Grid density: {grid_density}x{grid_density}")
+            print(f"   ðŸ“ Overlap margin: {overlap_margin}px")
             
             # Calculate overall coverage area
             coverage_area = self._calculate_slots_coverage_area(slot_indices, all_slots, overlap_margin)
             if not coverage_area:
-                print("❌ Could not calculate coverage area")
+                print("âŒ Could not calculate coverage area")
                 return []
             
             # Generate grid points within coverage area
             grid_points = self._generate_grid_points(coverage_area, grid_density)
             
-            print(f"   ✅ Generated {len(grid_points)} grid points")
-            print(f"   📊 Coverage: {coverage_area['width']}x{coverage_area['height']}px")
+            print(f"   âœ… Generated {len(grid_points)} grid points")
+            print(f"   ðŸ“Š Coverage: {coverage_area['width']}x{coverage_area['height']}px")
             
             return grid_points
             
         except Exception as e:
-            print(f"❌ Error generating carpet grid: {e}")
+            print(f"âŒ Error generating carpet grid: {e}")
             return []
 
 
 
     def _generate_grid_points(self, coverage_area, density):
         """
-        🎯 NEW: Generate systematic grid points within coverage area
+        ðŸŽ¯ NEW: Generate systematic grid points within coverage area
         """
         try:
             grid_points = []
@@ -3529,12 +3521,12 @@ class SprunkiGamePlayer:
             return grid_points
             
         except Exception as e:
-            print(f"❌ Error generating grid points: {e}")
+            print(f"âŒ Error generating grid points: {e}")
             return []
 
     def _optimize_click_sequence(self, points, coverage_area):
         """
-        🔄 NEW: Optimize click sequence for efficiency
+        ðŸ”„ NEW: Optimize click sequence for efficiency
         Options: spiral, row-by-row, center-out
         """
         try:
@@ -3549,84 +3541,84 @@ class SprunkiGamePlayer:
             
             optimized_points = sorted(points, key=distance_from_center)
             
-            print(f"   🔄 Optimized click sequence: center-out pattern")
+            print(f"   ðŸ”„ Optimized click sequence: center-out pattern")
             
             return optimized_points
             
         except Exception as e:
-            print(f"❌ Error optimizing click sequence: {e}")
+            print(f"âŒ Error optimizing click sequence: {e}")
             return points  # Return original if optimization fails
 
     def visualize_carpet_grid(self, slot_indices=None):
         """
-        🎨 NEW: Visualize carpet grid for debugging (optional tool)
+        ðŸŽ¨ NEW: Visualize carpet grid for debugging (optional tool)
         """
         try:
             if slot_indices is None:
                 # Default to first few slots for testing
                 slot_indices = [0, 1, 2, 3]
             
-            print(f"\n🎨 CARPET GRID VISUALIZATION")
+            print(f"\nðŸŽ¨ CARPET GRID VISUALIZATION")
             print("="*50)
             
             grid_points = self.generate_carpet_grid_for_slots(slot_indices, "default")
             
             if grid_points:
-                print(f"📍 Grid Points Generated:")
+                print(f"ðŸ“ Grid Points Generated:")
                 for i, (x, y) in enumerate(grid_points, 1):
                     print(f"   {i:2d}. ({x:4d}, {y:4d})")
                 
                 # Show pattern
-                print(f"\n🎯 Click Pattern (first 9 points):")
+                print(f"\nðŸŽ¯ Click Pattern (first 9 points):")
                 for i in range(min(9, len(grid_points))):
                     x, y = grid_points[i]
                     print(f"   Wave 1, Click {i+1}: ({x}, {y})")
             else:
-                print("❌ No grid points generated")
+                print("âŒ No grid points generated")
                 
         except Exception as e:
-            print(f"❌ Visualization error: {e}")
+            print(f"âŒ Visualization error: {e}")
 
     def show_carpet_grid_info(self):
         """Ultra simplified carpet bombing info - print only"""
         try:
-            print("\n🎯 ULTRA SIMPLIFIED CARPET BOMBING INFO:")
+            print("\nðŸŽ¯ ULTRA SIMPLIFIED CARPET BOMBING INFO:")
             print("="*60)
-            print("📊 STRATEGY: Sequential slot-by-slot progression")
-            print("🎯 EXECUTION: Process slots 0→1→2→...→last sequentially")
-            print("📈 PROGRESSION: 2→3→4→5→6→7... coordinates per slot")
-            print("\n📍 COORDINATE STRATEGY PER SLOT:")
-            print("   • Set 1: 2 coords = Center + Horizontal offset")
-            print("   • Set 2: 3 coords = Center + Horizontal + Vertical")
-            print("   • Set 3: 4 coords = Center + H + V + Diagonal")
-            print("   • Set 4: 5 coords = Previous + More diagonals")
-            print("   • Set 5+: 6+ coords = Previous + Random scatter")
-            print(f"\n⏱️ TIMING:")
-            print(f"   • Inter-click: {self.carpet_bombing_config['inter_click_delay']}s (within slot)")
-            print(f"   • Inter-slot: {self.carpet_bombing_config['inter_slot_delay']}s (between slots)")
-            print(f"   • Inter-set: {self.carpet_bombing_config['inter_set_delay']}s (between sets)")
-            print(f"   • Max sets: {self.carpet_bombing_config['max_sets']}")
-            print("\n🔄 TERMINATION: Continue until Characters count = 0")
-            print("\n✅ SIMPLIFIED FEATURES:")
-            print("   • No edge detection")
-            print("   • No complex grid calculation")
-            print("   • No boundary sweeps")
-            print("   • Pure sequential slot processing")
-            print("   • Progressive coordinate increase")
+            print("ðŸ“Š STRATEGY: Sequential slot-by-slot progression")
+            print("ðŸŽ¯ EXECUTION: Process slots 0â†’1â†’2â†’...â†’last sequentially")
+            print("ðŸ“ˆ PROGRESSION: 2â†’3â†’4â†’5â†’6â†’7... coordinates per slot")
+            print("\nðŸ“ COORDINATE STRATEGY PER SLOT:")
+            print("   â€¢ Set 1: 2 coords = Center + Horizontal offset")
+            print("   â€¢ Set 2: 3 coords = Center + Horizontal + Vertical")
+            print("   â€¢ Set 3: 4 coords = Center + H + V + Diagonal")
+            print("   â€¢ Set 4: 5 coords = Previous + More diagonals")
+            print("   â€¢ Set 5+: 6+ coords = Previous + Random scatter")
+            print(f"\nâ±ï¸ TIMING:")
+            print(f"   â€¢ Inter-click: {self.carpet_bombing_config['inter_click_delay']}s (within slot)")
+            print(f"   â€¢ Inter-slot: {self.carpet_bombing_config['inter_slot_delay']}s (between slots)")
+            print(f"   â€¢ Inter-set: {self.carpet_bombing_config['inter_set_delay']}s (between sets)")
+            print(f"   â€¢ Max sets: {self.carpet_bombing_config['max_sets']}")
+            print("\nðŸ”„ TERMINATION: Continue until Characters count = 0")
+            print("\nâœ… SIMPLIFIED FEATURES:")
+            print("   â€¢ No edge detection")
+            print("   â€¢ No complex grid calculation")
+            print("   â€¢ No boundary sweeps")
+            print("   â€¢ Pure sequential slot processing")
+            print("   â€¢ Progressive coordinate increase")
             print("="*60)
             
         except Exception as e:
-            print(f"❌ Config info error: {e}")
+            print(f"âŒ Config info error: {e}")
 
     def execute_carpet_bombing_waves(self, grid_points, target_description="slots", use_cdp=False):
         """
-        🎯 NEW: Execute carpet bombing in waves with progress monitoring
+        ðŸŽ¯ NEW: Execute carpet bombing in waves with progress monitoring
         """
         try:
-            print(f"\n🎯 CARPET BOMBING EXECUTION")
+            print(f"\nðŸŽ¯ CARPET BOMBING EXECUTION")
             print("="*60)
-            print(f"   🎯 Target: {target_description}")
-            print(f"   📊 Total points: {len(grid_points)}")
+            print(f"   ðŸŽ¯ Target: {target_description}")
+            print(f"   ðŸ“Š Total points: {len(grid_points)}")
             
             wave_size = self.carpet_grid_config['wave_size']
             max_waves = self.carpet_grid_config['max_waves']
@@ -3637,15 +3629,15 @@ class SprunkiGamePlayer:
             waves = [grid_points[i:i+wave_size] for i in range(0, len(grid_points), wave_size)]
             total_waves = min(len(waves), max_waves)
             
-            print(f"   🌊 Total waves: {total_waves} (max: {max_waves})")
-            print(f"   ⏱️ Wave size: {wave_size} clicks")
+            print(f"   ðŸŒŠ Total waves: {total_waves} (max: {max_waves})")
+            print(f"   â±ï¸ Wave size: {wave_size} clicks")
             
             # Get initial state
             initial_count = self.get_characters_count() if self.characters_available else None
-            print(f"   📊 Initial count: {initial_count}")
+            print(f"   ðŸ“Š Initial count: {initial_count}")
             
             if initial_count == 0:
-                print("   ✅ Already clean - no bombing needed")
+                print("   âœ… Already clean - no bombing needed")
                 return True, 0, []
             
             waves_executed = 0
@@ -3655,8 +3647,8 @@ class SprunkiGamePlayer:
                 if self.should_stop:
                     break
                     
-                print(f"\n🌊 WAVE {wave_num}/{total_waves}")
-                print(f"   📍 Points: {len(wave_points)}")
+                print(f"\nðŸŒŠ WAVE {wave_num}/{total_waves}")
+                print(f"   ðŸ“ Points: {len(wave_points)}")
                 
                 # Execute wave
                 wave_success, clicks_in_wave = self._execute_single_wave(
@@ -3667,46 +3659,46 @@ class SprunkiGamePlayer:
                 total_clicks += clicks_in_wave
                 
                 if not wave_success:
-                    print(f"   ❌ Wave {wave_num} failed")
+                    print(f"   âŒ Wave {wave_num} failed")
                     continue
                 
                 # Check progress after wave
                 time.sleep(inter_wave_delay)
                 current_count = self.get_characters_count() if self.characters_available else None
                 
-                print(f"   📊 Count after wave: {current_count}")
+                print(f"   ðŸ“Š Count after wave: {current_count}")
                 
                 if current_count == 0:
-                    print(f"   🎉 SUCCESS! Clean after wave {wave_num}")
+                    print(f"   ðŸŽ‰ SUCCESS! Clean after wave {wave_num}")
                     return True, waves_executed, []
                 elif current_count and initial_count and current_count < initial_count:
-                    print(f"   📈 Progress: {initial_count} → {current_count}")
+                    print(f"   ðŸ“ˆ Progress: {initial_count} â†’ {current_count}")
                 
                 # Continue to next wave
-                print(f"   ⏭️ Continuing to next wave...")
+                print(f"   â­ï¸ Continuing to next wave...")
             
             # Final check
             final_count = self.get_characters_count() if self.characters_available else None
             success = (final_count == 0)
             
-            print(f"\n🎯 CARPET BOMBING COMPLETED")
-            print(f"   🌊 Waves executed: {waves_executed}")
-            print(f"   👆 Total clicks: {total_clicks}")
-            print(f"   📊 Final count: {final_count}")
-            print(f"   🎯 Result: {'✅ SUCCESS' if success else '❌ INCOMPLETE'}")
+            print(f"\nðŸŽ¯ CARPET BOMBING COMPLETED")
+            print(f"   ðŸŒŠ Waves executed: {waves_executed}")
+            print(f"   ðŸ‘† Total clicks: {total_clicks}")
+            print(f"   ðŸ“Š Final count: {final_count}")
+            print(f"   ðŸŽ¯ Result: {'âœ… SUCCESS' if success else 'âŒ INCOMPLETE'}")
             
             return success, waves_executed, [] if success else [f"Still {final_count} icons remaining"]
             
         except Exception as e:
-            print(f"❌ Error in carpet bombing: {e}")
+            print(f"âŒ Error in carpet bombing: {e}")
             return False, 0, [f"Execution error: {str(e)}"]
 
     def _execute_single_wave(self, wave_points, wave_num, use_cdp, inter_click_delay):
         """
-        🌊 NEW: Execute a single wave of clicks
+        ðŸŒŠ NEW: Execute a single wave of clicks
         """
         try:
-            print(f"   🎯 Executing {len(wave_points)} clicks...")
+            print(f"   ðŸŽ¯ Executing {len(wave_points)} clicks...")
             
             clicks_executed = 0
             
@@ -3719,24 +3711,24 @@ class SprunkiGamePlayer:
                 
                 if click_success:
                     clicks_executed += 1
-                    print(f"      {i}/{len(wave_points)}: ({x},{y}) ✅")
+                    print(f"      {i}/{len(wave_points)}: ({x},{y}) âœ…")
                 else:
-                    print(f"      {i}/{len(wave_points)}: ({x},{y}) ❌")
+                    print(f"      {i}/{len(wave_points)}: ({x},{y}) âŒ")
                 
                 # Delay between clicks in same wave
                 if i < len(wave_points):  # Don't delay after last click
                     time.sleep(inter_click_delay)
             
-            print(f"   ✅ Wave completed: {clicks_executed}/{len(wave_points)} clicks")
+            print(f"   âœ… Wave completed: {clicks_executed}/{len(wave_points)} clicks")
             return True, clicks_executed
             
         except Exception as e:
-            print(f"   ❌ Wave execution error: {e}")
+            print(f"   âŒ Wave execution error: {e}")
             return False, 0
 
     def _execute_carpet_click(self, x, y, use_cdp):
         """
-        👆 NEW: Execute single carpet bombing click
+        ðŸ‘† NEW: Execute single carpet bombing click
         """
         try:
             if use_cdp:
@@ -3745,11 +3737,11 @@ class SprunkiGamePlayer:
                 return self._execute_pyautogui_carpet_click(x, y)
                 
         except Exception as e:
-            print(f"      ❌ Click error at ({x},{y}): {e}")
+            print(f"      âŒ Click error at ({x},{y}): {e}")
             return False
 
     def _execute_cdp_carpet_click(self, x, y):
-        """👆 NEW: CDP carpet click"""
+        """ðŸ‘† NEW: CDP carpet click"""
         try:
             if self.batch_verification_active and self.session_websocket:
                 # Use batch WebSocket if available
@@ -3777,7 +3769,7 @@ class SprunkiGamePlayer:
             return False
 
     def _execute_pyautogui_carpet_click(self, x, y):
-        """👆 NEW: PyAutoGUI carpet click"""
+        """ðŸ‘† NEW: PyAutoGUI carpet click"""
         try:
             pyautogui.click(x, y)
             return True
@@ -3786,10 +3778,10 @@ class SprunkiGamePlayer:
 
     def smart_batch_return_all_slots_with_mode(self, use_cdp=False):
         """
-        🔄 ULTRA SIMPLIFIED: Sequential carpet bombing for batch returns
+        ðŸ”„ ULTRA SIMPLIFIED: Sequential carpet bombing for batch returns
         """
         try:
-            print(f"\n🔄 ULTRA SIMPLIFIED BATCH RETURN")
+            print(f"\nðŸ”„ ULTRA SIMPLIFIED BATCH RETURN")
             print("="*50)
             
             # Always use simplified carpet bombing
@@ -3802,15 +3794,15 @@ class SprunkiGamePlayer:
                 return 0, 1, ["Sequential carpet bombing incomplete"]
             
         except Exception as e:
-            print(f"❌ Ultra simplified batch return error: {e}")
+            print(f"âŒ Ultra simplified batch return error: {e}")
             return 0, 1, [f"Error: {str(e)}"]
 
     def _execute_carpet_bombing_strategy(self, icon_count, use_cdp=False):
         """
-        🎵 PHASE 4.3A: Carpet bombing strategy execution
+        ðŸŽµ PHASE 4.3A: Carpet bombing strategy execution
         """
         try:
-            print("🎵 CARPET BOMBING STRATEGY")
+            print("ðŸŽµ CARPET BOMBING STRATEGY")
             print("-" * 40)
             
             # Get active slots for carpet bombing
@@ -3819,7 +3811,7 @@ class SprunkiGamePlayer:
                 # Fallback to estimated slot coverage
                 active_slots = list(range(min(8, icon_count + 1)))
             
-            print(f"   🎯 Target slots: {active_slots}")
+            print(f"   ðŸŽ¯ Target slots: {active_slots}")
             
             # Execute carpet bombing via remix strategy
             dummy_slot = {'x': 999, 'y': 515, 'index': 3}  # Dummy slot for interface compatibility
@@ -3832,15 +3824,15 @@ class SprunkiGamePlayer:
             }
             
         except Exception as e:
-            print(f"❌ Carpet bombing strategy error: {e}")
+            print(f"âŒ Carpet bombing strategy error: {e}")
             return False, {'error': str(e)}
 
     def _execute_precision_strategy(self, icon_count, use_cdp=False):
         """
-        🎪 PHASE 4.3B: Precision strategy execution  
+        ðŸŽª PHASE 4.3B: Precision strategy execution  
         """
         try:
-            print("🎪 PRECISION STRATEGY")
+            print("ðŸŽª PRECISION STRATEGY")
             print("-" * 40)
             
             # Use existing smart batch return for precision operations
@@ -3857,7 +3849,7 @@ class SprunkiGamePlayer:
             }
             
         except Exception as e:
-            print(f"❌ Precision strategy error: {e}")
+            print(f"âŒ Precision strategy error: {e}")
             return False, {'error': str(e)}
 
     def show_current_mode_info(self):
@@ -3866,23 +3858,23 @@ class SprunkiGamePlayer:
             current_mode = self.get_current_return_mode()
             active_count = self.get_characters_count() if self.characters_available else "N/A"
             
-            mode_info = f"""🎯 RETURN MODE INFORMATION:
+            mode_info = f"""ðŸŽ¯ RETURN MODE INFORMATION:
 
-    📊 Current Mode: {current_mode.upper()}
-    📈 Active Icons: {active_count}
-    🎮 Auto-Detection: {'✅ Enabled' if self.current_return_mode == self.RETURN_MODE_AUTO else '❌ Manual Override'}
+    ðŸ“Š Current Mode: {current_mode.upper()}
+    ðŸ“ˆ Active Icons: {active_count}
+    ðŸŽ® Auto-Detection: {'âœ… Enabled' if self.current_return_mode == self.RETURN_MODE_AUTO else 'âŒ Manual Override'}
 
-    🎪 INDIVIDUAL MODE:
+    ðŸŽª INDIVIDUAL MODE:
     - Used for: Single icon operations
     - Strategy: Precision targeting with safe zones
     - Verification: Per-operation count monitoring
 
-    🎵 REMIX MODE:
+    ðŸŽµ REMIX MODE:
     - Used for: Multiple icons batch operations  
     - Strategy: Carpet bombing (Phase 2)
     - Verification: Progressive count monitoring
 
-    🔄 Mode Detection Rules:
+    ðŸ”„ Mode Detection Rules:
     1. Context keywords (showcase/remix/batch)
     2. Icons count threshold (1 vs >1)
     3. Current slot state analysis"""
@@ -3894,33 +3886,33 @@ class SprunkiGamePlayer:
 
     def _execute_precision_fallback_for_remix(self, slot_indices, use_cdp=False):
         """
-        🎯 SIMPLIFIED: Just return false - no precision fallback needed
+        ðŸŽ¯ SIMPLIFIED: Just return false - no precision fallback needed
         """
-        print("🎯 PRECISION FALLBACK DISABLED - Pure carpet bombing only")
+        print("ðŸŽ¯ PRECISION FALLBACK DISABLED - Pure carpet bombing only")
         return False
 
     def _execute_precision_recovery(self, slot_indices, use_cdp=False):
         """
-        🔄 SIMPLIFIED: Just return false - no precision recovery needed  
+        ðŸ”„ SIMPLIFIED: Just return false - no precision recovery needed  
         """
-        print("🔄 PRECISION RECOVERY DISABLED - Pure carpet bombing only")
+        print("ðŸ”„ PRECISION RECOVERY DISABLED - Pure carpet bombing only")
         return False
 
     def execute_smart_return_with_auto_recovery(self, target_slot, operation_context="unknown", max_retries=2, use_cdp=False):
         """
-        🛡️ PHASE 4: Smart return with automatic error recovery
+        ðŸ›¡ï¸ PHASE 4: Smart return with automatic error recovery
         """
         try:
-            print(f"\n🛡️ SMART RETURN WITH AUTO-RECOVERY")
+            print(f"\nðŸ›¡ï¸ SMART RETURN WITH AUTO-RECOVERY")
             print("="*60)
-            print(f"   🎯 Context: {operation_context}")
-            print(f"   🔄 Max retries: {max_retries}")
+            print(f"   ðŸŽ¯ Context: {operation_context}")
+            print(f"   ðŸ”„ Max retries: {max_retries}")
             
             for attempt in range(1, max_retries + 1):
                 if self.should_stop:
                     break
                     
-                print(f"\n🔄 ATTEMPT {attempt}/{max_retries}")
+                print(f"\nðŸ”„ ATTEMPT {attempt}/{max_retries}")
                 
                 # Try primary method
                 success = self.execute_smart_return_with_mode_detection(
@@ -3928,12 +3920,12 @@ class SprunkiGamePlayer:
                 )
                 
                 if success:
-                    print(f"✅ SUCCESS on attempt {attempt}")
+                    print(f"âœ… SUCCESS on attempt {attempt}")
                     return True
                 
                 # If failed and retries available, try recovery
                 if attempt < max_retries:
-                    print(f"⚠️ Attempt {attempt} failed, trying recovery...")
+                    print(f"âš ï¸ Attempt {attempt} failed, trying recovery...")
                     
                     # Recovery strategy based on mode
                     recovery_success = self._attempt_smart_recovery(
@@ -3941,70 +3933,70 @@ class SprunkiGamePlayer:
                     )
                     
                     if recovery_success:
-                        print(f"✅ RECOVERY SUCCESS on attempt {attempt}")
+                        print(f"âœ… RECOVERY SUCCESS on attempt {attempt}")
                         return True
                     else:
-                        print(f"❌ Recovery failed, will retry...")
+                        print(f"âŒ Recovery failed, will retry...")
                         time.sleep(1.0)  # Brief pause before retry
             
-            print(f"❌ ALL ATTEMPTS FAILED after {max_retries} tries")
+            print(f"âŒ ALL ATTEMPTS FAILED after {max_retries} tries")
             return False
             
         except Exception as e:
-            print(f"❌ Error in smart return with recovery: {e}")
+            print(f"âŒ Error in smart return with recovery: {e}")
             return False
 
     def _attempt_smart_recovery(self, target_slot, context, attempt_num, use_cdp):
         """
-        🔄 SIMPLIFIED: Just return false - no smart recovery needed
+        ðŸ”„ SIMPLIFIED: Just return false - no smart recovery needed
         """
-        print("🔄 SMART RECOVERY DISABLED - Pure carpet bombing only")
+        print("ðŸ”„ SMART RECOVERY DISABLED - Pure carpet bombing only")
         return False
 
     def test_carpet_bombing_system(self):
         """
-        🧪 NEW: Comprehensive test of carpet bombing system
+        ðŸ§ª NEW: Comprehensive test of carpet bombing system
         """
         try:
-            print("\n🧪 TESTING CARPET BOMBING SYSTEM")
+            print("\nðŸ§ª TESTING CARPET BOMBING SYSTEM")
             print("="*60)
             
             # Test 1: Mode Detection
-            print("🧪 TEST 1: Mode Detection")
+            print("ðŸ§ª TEST 1: Mode Detection")
             individual_mode = self.detect_return_mode("showcase_icon_test", 1)
             remix_mode = self.detect_return_mode("remix_test", 5)
-            print(f"   Individual detection: {'✅' if individual_mode == self.RETURN_MODE_INDIVIDUAL else '❌'}")
-            print(f"   Remix detection: {'✅' if remix_mode == self.RETURN_MODE_REMIX else '❌'}")
+            print(f"   Individual detection: {'âœ…' if individual_mode == self.RETURN_MODE_INDIVIDUAL else 'âŒ'}")
+            print(f"   Remix detection: {'âœ…' if remix_mode == self.RETURN_MODE_REMIX else 'âŒ'}")
             
             # Test 2: Grid Generation
-            print("\n🧪 TEST 2: Grid Generation")
+            print("\nðŸ§ª TEST 2: Grid Generation")
             test_slots = [0, 1, 2, 3]
             grid_points = self.generate_carpet_grid_for_slots(test_slots, "default")
-            print(f"   Grid generation: {'✅' if len(grid_points) > 0 else '❌'} ({len(grid_points)} points)")
+            print(f"   Grid generation: {'âœ…' if len(grid_points) > 0 else 'âŒ'} ({len(grid_points)} points)")
             
             # Test 3: Configuration Validation
-            print("\n🧪 TEST 3: Configuration Validation")
+            print("\nðŸ§ª TEST 3: Configuration Validation")
             config_valid = all(key in self.carpet_grid_config for key in [
                 'default_density', 'wave_size', 'max_waves'
             ])
-            print(f"   Configuration: {'✅' if config_valid else '❌'}")
+            print(f"   Configuration: {'âœ…' if config_valid else 'âŒ'}")
             
             # Test 4: Integration
-            print("\n🧪 TEST 4: Integration Test")
+            print("\nðŸ§ª TEST 4: Integration Test")
             try:
                 dummy_slot = {'x': 999, 'y': 515, 'index': 3}
                 test_context = "integration_test"
                 # Don't actually execute, just test setup
                 mode = self.detect_return_mode(test_context, 3)
                 integration_ready = (mode in [self.RETURN_MODE_INDIVIDUAL, self.RETURN_MODE_REMIX])
-                print(f"   Integration: {'✅' if integration_ready else '❌'}")
+                print(f"   Integration: {'âœ…' if integration_ready else 'âŒ'}")
             except Exception as e:
-                print(f"   Integration: ❌ ({e})")
+                print(f"   Integration: âŒ ({e})")
             
-            print("\n🎯 CARPET BOMBING SYSTEM TEST COMPLETED")
+            print("\nðŸŽ¯ CARPET BOMBING SYSTEM TEST COMPLETED")
             
         except Exception as e:
-            print(f"❌ Testing error: {e}")
+            print(f"âŒ Testing error: {e}")
 
     def show_carpet_bombing_test_results(self):
         """GUI method to show test results"""
@@ -4030,18 +4022,18 @@ class SprunkiGamePlayer:
 
     def execute_full_carpet_bombing_round(self, grid_points, round_num, expected_clear, use_cdp=False):
         """
-        🌊 ENHANCED: Execute round with edge priority
+        ðŸŒŠ ENHANCED: Execute round with edge priority
         """
         try:
-            print(f"🌊 ENHANCED ROUND {round_num} WITH EDGE PRIORITY")
-            print(f"   📍 Total points: {len(grid_points)}")
-            print(f"   🎯 Expected to clear: {expected_clear}")
+            print(f"ðŸŒŠ ENHANCED ROUND {round_num} WITH EDGE PRIORITY")
+            print(f"   ðŸ“ Total points: {len(grid_points)}")
+            print(f"   ðŸŽ¯ Expected to clear: {expected_clear}")
             
             # PHASE 1: Execute all grid points
             total_clicks = 0
             successful_clicks = 0
             
-            print(f"   🎯 Phase 1: Main grid execution ({len(grid_points)} points)")
+            print(f"   ðŸŽ¯ Phase 1: Main grid execution ({len(grid_points)} points)")
             
             for i, (x, y) in enumerate(grid_points, 1):
                 if self.should_stop:
@@ -4061,30 +4053,30 @@ class SprunkiGamePlayer:
                 if i % 30 == 0:
                     print(f"      Progress: {i}/{len(grid_points)} clicks")
             
-            print(f"   ✅ Phase 1 completed: {successful_clicks}/{total_clicks} clicks")
+            print(f"   âœ… Phase 1 completed: {successful_clicks}/{total_clicks} clicks")
             
             # PHASE 2: EDGE REINFORCEMENT (extra clicks for stubborn edge slots)
             if round_num >= 2:  # Start edge reinforcement from round 2
                 edge_reinforcement_clicks = self._execute_edge_reinforcement(round_num, use_cdp)
                 total_clicks += edge_reinforcement_clicks
                 successful_clicks += edge_reinforcement_clicks
-                print(f"   🎯 Phase 2: Edge reinforcement - {edge_reinforcement_clicks} extra clicks")
+                print(f"   ðŸŽ¯ Phase 2: Edge reinforcement - {edge_reinforcement_clicks} extra clicks")
             
-            print(f"   ✅ Round {round_num} TOTAL: {successful_clicks}/{total_clicks} clicks successful")
+            print(f"   âœ… Round {round_num} TOTAL: {successful_clicks}/{total_clicks} clicks successful")
             
             return successful_clicks > 0
             
         except Exception as e:
-            print(f"❌ Error in enhanced round execution: {e}")
+            print(f"âŒ Error in enhanced round execution: {e}")
             return False
 
     def execute_sequential_carpet_bombing_sets(self, sorted_slots, initial_count, use_cdp=False):
         """
-        🎯 NEW: Execute progressive carpet bombing sets
+        ðŸŽ¯ NEW: Execute progressive carpet bombing sets
         Set 1: 2 coords/slot, Set 2: 3 coords/slot, etc.
         """
         try:
-            print(f"\n🎯 SEQUENTIAL CARPET BOMBING SETS")
+            print(f"\nðŸŽ¯ SEQUENTIAL CARPET BOMBING SETS")
             print("="*60)
             
             max_sets = 6  # Maximum bombing sets
@@ -4094,29 +4086,29 @@ class SprunkiGamePlayer:
                 if self.should_stop:
                     break
                     
-                print(f"\n🎯 CARPET SET {set_num}/{max_sets}")
+                print(f"\nðŸŽ¯ CARPET SET {set_num}/{max_sets}")
                 print("-" * 40)
                 
                 # Check current count before set
                 current_count = self.get_characters_count() if self.characters_available else None
                 if current_count == 0:
-                    print(f"✅ COMPLETE! All clear before set {set_num}")
+                    print(f"âœ… COMPLETE! All clear before set {set_num}")
                     return True
                 
-                print(f"   📊 Icons remaining: {current_count}")
+                print(f"   ðŸ“Š Icons remaining: {current_count}")
                 
                 # Calculate coordinates per slot for this set
                 coords_per_slot = base_coords_per_slot + (set_num - 1)
-                print(f"   📍 Set {set_num}: {coords_per_slot} coordinates per slot")
+                print(f"   ðŸ“ Set {set_num}: {coords_per_slot} coordinates per slot")
                 
                 # Generate coordinate set for all slots
                 coordinate_set = self.generate_simple_coordinate_set(sorted_slots, coords_per_slot, set_num)
                 
                 if not coordinate_set:
-                    print(f"   ❌ Could not generate coordinates for set {set_num}")
+                    print(f"   âŒ Could not generate coordinates for set {set_num}")
                     continue
                 
-                print(f"   📊 Generated {len(coordinate_set)} total coordinates")
+                print(f"   ðŸ“Š Generated {len(coordinate_set)} total coordinates")
                 
                 # Execute sequential clicking for this set
                 set_success = self.execute_sequential_clicking_set(coordinate_set, set_num, use_cdp)
@@ -4125,15 +4117,15 @@ class SprunkiGamePlayer:
                 after_count = self.get_characters_count() if self.characters_available else None
                 progress = (current_count or 0) - (after_count or 0)
                 
-                print(f"   📊 Set {set_num} result: {current_count} → {after_count} (cleared: {progress})")
+                print(f"   ðŸ“Š Set {set_num} result: {current_count} â†’ {after_count} (cleared: {progress})")
                 
                 if after_count == 0:
-                    print(f"🎉 SUCCESS! All icons cleared after set {set_num}")
+                    print(f"ðŸŽ‰ SUCCESS! All icons cleared after set {set_num}")
                     return True
                 elif progress > 0:
-                    print(f"   📈 Progress made, continuing to next set...")
+                    print(f"   ðŸ“ˆ Progress made, continuing to next set...")
                 else:
-                    print(f"   ⚠️ No progress in set {set_num}, but continuing...")
+                    print(f"   âš ï¸ No progress in set {set_num}, but continuing...")
                 
                 # Brief pause between sets
                 time.sleep(0.3)
@@ -4142,24 +4134,24 @@ class SprunkiGamePlayer:
             final_count = self.get_characters_count() if self.characters_available else None
             
             if final_count == 0:
-                print(f"🎉 FINAL SUCCESS! All icons cleared")
+                print(f"ðŸŽ‰ FINAL SUCCESS! All icons cleared")
                 return True
             else:
-                print(f"⚠️ INCOMPLETE after {max_sets} sets: {final_count} icons remaining")
+                print(f"âš ï¸ INCOMPLETE after {max_sets} sets: {final_count} icons remaining")
                 return False
             
         except Exception as e:
-            print(f"❌ Error in sequential carpet bombing: {e}")
+            print(f"âŒ Error in sequential carpet bombing: {e}")
             return False
 
     def generate_simple_coordinate_set(self, sorted_slots, coords_per_slot, set_num):
         """
-        📍 NEW: Generate simple coordinate set - coords_per_slot for each slot
+        ðŸ“ NEW: Generate simple coordinate set - coords_per_slot for each slot
         """
         try:
             coordinate_set = []
             
-            print(f"   📍 Generating {coords_per_slot} coordinates per slot:")
+            print(f"   ðŸ“ Generating {coords_per_slot} coordinates per slot:")
             
             for slot in sorted_slots:
                 slot_index = slot.get('index', -1)
@@ -4182,12 +4174,12 @@ class SprunkiGamePlayer:
             return coordinate_set
             
         except Exception as e:
-            print(f"❌ Error generating coordinate set: {e}")
+            print(f"âŒ Error generating coordinate set: {e}")
             return []
 
     def generate_slot_coordinates(self, center_x, center_y, num_coords, set_num):
         """
-        🎯 NEW: Generate coordinates for single slot using progressive strategy
+        ðŸŽ¯ NEW: Generate coordinates for single slot using progressive strategy
         """
         try:
             coordinates = []
@@ -4239,15 +4231,15 @@ class SprunkiGamePlayer:
             return coordinates[:num_coords]  # Ensure exact count
             
         except Exception as e:
-            print(f"❌ Error generating slot coordinates: {e}")
+            print(f"âŒ Error generating slot coordinates: {e}")
             return [(center_x, center_y)]  # Fallback to center only
 
     def execute_sequential_clicking_set(self, coordinate_set, set_num, use_cdp=False):
         """
-        👆 NEW: Execute clicking in sequential order (slot 0 → slot 1 → slot 2...)
+        ðŸ‘† NEW: Execute clicking in sequential order (slot 0 â†’ slot 1 â†’ slot 2...)
         """
         try:
-            print(f"   👆 Executing sequential clicking for set {set_num}")
+            print(f"   ðŸ‘† Executing sequential clicking for set {set_num}")
             
             # Group coordinates by slot for sequential processing
             slots_coords = {}
@@ -4269,7 +4261,7 @@ class SprunkiGamePlayer:
                     break
                 
                 slot_coords = slots_coords[slot_index]
-                print(f"      🎯 Processing slot {slot_index}: {len(slot_coords)} clicks")
+                print(f"      ðŸŽ¯ Processing slot {slot_index}: {len(slot_coords)} clicks")
                 
                 # Execute all coordinates for this slot
                 for i, coord in enumerate(slot_coords):
@@ -4286,24 +4278,24 @@ class SprunkiGamePlayer:
                 if slot_index != sorted_slot_indices[-1]:  # Not last slot
                     time.sleep(0.1)
             
-            print(f"   ✅ Set {set_num} executed: {successful_clicks}/{total_clicks} clicks successful")
+            print(f"   âœ… Set {set_num} executed: {successful_clicks}/{total_clicks} clicks successful")
             
             return successful_clicks > 0
             
         except Exception as e:
-            print(f"❌ Error executing clicking set: {e}")
+            print(f"âŒ Error executing clicking set: {e}")
             return False
 
     def get_comprehensive_slot_state(self):
         """
-        📊 NEW: Get comprehensive slot state for verification - UPDATED for Characters Array
+        ðŸ“Š NEW: Get comprehensive slot state for verification - UPDATED for Characters Array
         FIXED: None safety checks
         """
         try:
             characters_count = self.get_characters_count()
             
             if characters_count is None:
-                print("⚠️ Could not get Characters count")
+                print("âš ï¸ Could not get Characters count")
                 return None
             
             # Build comprehensive state using Characters Array
@@ -4312,19 +4304,19 @@ class SprunkiGamePlayer:
                 'timestamp': time.time()
             }
             
-            print(f"📊 Comprehensive state captured:")
+            print(f"ðŸ“Š Comprehensive state captured:")
             print(f"   Characters count: {characters_count}")
             
             return state
             
         except Exception as e:
-            print(f"❌ Error getting comprehensive state: {e}")
+            print(f"âŒ Error getting comprehensive state: {e}")
             return None
 
     def verify_slot_specific_return_enhanced(self, target_slot_index, state_before, state_after):
         """
-        🔍 ENHANCED: Slot-specific verification với Characters Array
-        FIXED: Chỉ sử dụng Characters count thay vì Polos và Enabled List
+        ðŸ” ENHANCED: Slot-specific verification vá»›i Characters Array
+        FIXED: Chá»‰ sá»­ dá»¥ng Characters count thay vÃ¬ Polos vÃ  Enabled List
         Returns: (success, reason, details)
         """
         try:
@@ -4334,23 +4326,23 @@ class SprunkiGamePlayer:
             count_before = state_before.get('characters_count')
             count_after = state_after.get('characters_count')
             
-            print(f"\n🔍 ENHANCED SLOT VERIFICATION for Slot {target_slot_index}")
+            print(f"\nðŸ” ENHANCED SLOT VERIFICATION for Slot {target_slot_index}")
             print("-" * 50)
             
             # Characters count check
             expected_count = count_before - 1 if count_before is not None else None
             count_success = (count_after == expected_count)
             
-            print(f"   📊 Characters count: {count_before} → {count_after} (expected: {expected_count}) = {'✅' if count_success else '❌'}")
+            print(f"   ðŸ“Š Characters count: {count_before} â†’ {count_after} (expected: {expected_count}) = {'âœ…' if count_success else 'âŒ'}")
             
-            # Decision logic: Chỉ dựa vào Characters count
+            # Decision logic: Chá»‰ dá»±a vÃ o Characters count
             overall_success = count_success
             
             # Determine reason and build details
             if overall_success:
                 reason = "verified_success"
                 details = {
-                    'characters_change': f"{count_before} → {count_after}",
+                    'characters_change': f"{count_before} â†’ {count_after}",
                     'verification_method': 'characters_array_only',
                     'target_slot': target_slot_index
                 }
@@ -4361,111 +4353,111 @@ class SprunkiGamePlayer:
                     reason = "unknown_failure"
                 
                 details = {
-                    'characters_change': f"{count_before} → {count_after}",
+                    'characters_change': f"{count_before} â†’ {count_after}",
                     'expected_count': expected_count,
                     'verification_method': 'characters_array_only',
                     'target_slot': target_slot_index
                 }
             
-            print(f"   🎯 FINAL RESULT: {'✅ SUCCESS' if overall_success else '❌ FAILED'} ({reason})")
-            print(f"   💡 METHOD: Characters Array count verification only")
+            print(f"   ðŸŽ¯ FINAL RESULT: {'âœ… SUCCESS' if overall_success else 'âŒ FAILED'} ({reason})")
+            print(f"   ðŸ’¡ METHOD: Characters Array count verification only")
             print("-" * 50)
             
             return overall_success, reason, details
             
         except Exception as e:
-            print(f"❌ Enhanced slot verification error: {e}")
+            print(f"âŒ Enhanced slot verification error: {e}")
             return False, f"verification_error: {e}", {}
 
     def check_slot_needs_return(self, target_slot_index):
         """
-        🔍 NEW: Pre-flight check - UPDATED for Characters Array
+        ðŸ” NEW: Pre-flight check - UPDATED for Characters Array
         FIXED: None safety checks
         """
         try:
-            print(f"\n🔍 PRE-FLIGHT CHECK: Slot {target_slot_index}")
+            print(f"\nðŸ” PRE-FLIGHT CHECK: Slot {target_slot_index}")
             
             state = self.get_comprehensive_slot_state()
-            if not state:  # ✅ CHECK None state
+            if not state:  # âœ… CHECK None state
                 return True, None, "cannot_verify_state"
             
-            characters_count = state.get('characters_count', 0)  # ✅ SAFE get with default
+            characters_count = state.get('characters_count', 0)  # âœ… SAFE get with default
             
             if characters_count == 0:
-                print(f"   ✅ No characters on slots (count: {characters_count}) - SKIPPING")
+                print(f"   âœ… No characters on slots (count: {characters_count}) - SKIPPING")
                 return False, state, "no_characters_placed"
             else:
-                print(f"   🎯 Characters on slots (count: {characters_count}) - NEEDS RETURN")
+                print(f"   ðŸŽ¯ Characters on slots (count: {characters_count}) - NEEDS RETURN")
                 return True, state, "characters_need_return"
                 
         except Exception as e:
-            print(f"❌ Pre-flight check error: {e}")
+            print(f"âŒ Pre-flight check error: {e}")
             return True, None, f"error: {e}"
 
     def get_active_slots_queue(self):
         """
-        📋 NEW: Get smart-ordered queue - UPDATED for Characters Array
-        FIXED: Dựa vào Characters count thay vì Polos array
+        ðŸ“‹ NEW: Get smart-ordered queue - UPDATED for Characters Array
+        FIXED: Dá»±a vÃ o Characters count thay vÃ¬ Polos array
         Returns: list of slot indices (simplified for Characters Array system)
         """
         try:
-            print(f"\n📋 BUILDING SMART RETURN QUEUE")
+            print(f"\nðŸ“‹ BUILDING SMART RETURN QUEUE")
             print("-" * 40)
             
             state = self.get_comprehensive_slot_state()
             if not state:
-                print("⚠️ Cannot get slot state, using fallback")
+                print("âš ï¸ Cannot get slot state, using fallback")
                 return []
             
             characters_count = state.get('characters_count', 0)
             
-            print(f"   📊 Characters count: {characters_count}")
+            print(f"   ðŸ“Š Characters count: {characters_count}")
             
             if characters_count == 0:
-                print(f"   ✅ No characters to return")
+                print(f"   âœ… No characters to return")
                 return []
             
             # For Characters Array system, we don't know specific slot indices
             # Just return a simple range based on typical slot usage
             if characters_count > 0:
-                # Return slots in reverse order (high → low) for safety
+                # Return slots in reverse order (high â†’ low) for safety
                 active_slots_estimated = list(range(min(characters_count, 7) - 1, -1, -1))
-                print(f"   📋 Estimated active slots: {active_slots_estimated}")
-                print(f"   💡 Reason: Characters Array doesn't track specific slot indices")
+                print(f"   ðŸ“‹ Estimated active slots: {active_slots_estimated}")
+                print(f"   ðŸ’¡ Reason: Characters Array doesn't track specific slot indices")
                 return active_slots_estimated
             
             return []
             
         except Exception as e:
-            print(f"❌ Error building return queue: {e}")
+            print(f"âŒ Error building return queue: {e}")
             return []
 
     def smart_batch_return_all_slots(self, use_cdp=False):
         """
-        🔄 NEW: Smart batch return all active slots with error recovery
+        ðŸ”„ NEW: Smart batch return all active slots with error recovery
         Returns: (success_count, total_attempted, error_log)
         """
         try:
-            print(f"\n🔄 SMART BATCH RETURN: All Active Slots")
+            print(f"\nðŸ”„ SMART BATCH RETURN: All Active Slots")
             print("="*70)
             
             # Get slots configuration
             if not hasattr(self, 'config') or not self.config:
-                print("❌ No config available for batch return")
+                print("âŒ No config available for batch return")
                 return 0, 0, ["No config available"]
             
             all_slots = self.config.get('layout', {}).get('slots', [])
             if not all_slots:
-                print("❌ No slots configuration found")
+                print("âŒ No slots configuration found")
                 return 0, 0, ["No slots configuration"]
             
             # Get active slots queue
             active_slot_indices = self.get_active_slots_queue()
             if not active_slot_indices:
-                print("✅ No active slots found - all slots already empty")
+                print("âœ… No active slots found - all slots already empty")
                 return 0, 0, []
             
-            print(f"🎯 Will process {len(active_slot_indices)} active slots")
+            print(f"ðŸŽ¯ Will process {len(active_slot_indices)} active slots")
             
             # Initialize tracking
             success_count = 0
@@ -4479,13 +4471,13 @@ class SprunkiGamePlayer:
                     break
                 
                 print(f"\n{'='*50}")
-                print(f"🎯 PROCESSING SLOT {slot_index} ({success_count + 1}/{len(active_slot_indices)})")
+                print(f"ðŸŽ¯ PROCESSING SLOT {slot_index} ({success_count + 1}/{len(active_slot_indices)})")
                 print(f"{'='*50}")
                 
                 # Validate slot index
                 if slot_index >= len(all_slots):
                     error_msg = f"Slot {slot_index}: Invalid slot index (max: {len(all_slots)-1})"
-                    print(f"❌ {error_msg}")
+                    print(f"âŒ {error_msg}")
                     error_log.append(error_msg)
                     continue
                 
@@ -4496,11 +4488,11 @@ class SprunkiGamePlayer:
                 
                 if not needs_return:
                     if reason == "already_empty":
-                        print(f"✅ Slot {slot_index} already empty - skipping")
+                        print(f"âœ… Slot {slot_index} already empty - skipping")
                         success_count += 1  # Count as success since goal achieved
                     else:
                         error_msg = f"Slot {slot_index}: Cannot verify if return needed ({reason})"
-                        print(f"⚠️ {error_msg}")
+                        print(f"âš ï¸ {error_msg}")
                         error_log.append(error_msg)
                     continue
                 
@@ -4513,7 +4505,7 @@ class SprunkiGamePlayer:
                         break
                     
                     if retry > 0:
-                        print(f"🔄 RETRY {retry}/{max_retries-1} for Slot {slot_index}")
+                        print(f"ðŸ”„ RETRY {retry}/{max_retries-1} for Slot {slot_index}")
                         recovery_attempts += 1
                         time.sleep(1.0)  # Brief pause before retry
                     
@@ -4521,18 +4513,18 @@ class SprunkiGamePlayer:
                         return_success = self.corrected_return_icon(target_slot, use_cdp)
                         
                         if return_success:
-                            print(f"✅ Slot {slot_index} returned successfully")
+                            print(f"âœ… Slot {slot_index} returned successfully")
                             success_count += 1
                             break
                         else:
                             error_msg = f"Slot {slot_index}: Return failed on attempt {retry + 1}"
-                            print(f"❌ {error_msg}")
+                            print(f"âŒ {error_msg}")
                             if retry == max_retries - 1:  # Last retry
                                 error_log.append(error_msg)
                             
                     except Exception as e:
                         error_msg = f"Slot {slot_index}: Exception on attempt {retry + 1}: {str(e)}"
-                        print(f"💥 {error_msg}")
+                        print(f"ðŸ’¥ {error_msg}")
                         if retry == max_retries - 1:  # Last retry
                             error_log.append(error_msg)
                 
@@ -4546,30 +4538,30 @@ class SprunkiGamePlayer:
                         post_polos = post_return_state['polos_array']
                         if slot_index < len(post_polos) and post_polos[slot_index] == "1":
                             # Return failed verification!
-                            print(f"🚨 POST-RETURN VERIFICATION FAILED: Slot {slot_index} still shows '1'")
+                            print(f"ðŸš¨ POST-RETURN VERIFICATION FAILED: Slot {slot_index} still shows '1'")
                             error_msg = f"Slot {slot_index}: Post-return verification failed"
                             error_log.append(error_msg)
                             success_count -= 1  # Adjust success count
                             
                             # Attempt emergency recovery
-                            print(f"🚨 EMERGENCY RECOVERY for Slot {slot_index}")
+                            print(f"ðŸš¨ EMERGENCY RECOVERY for Slot {slot_index}")
                             emergency_success = self._emergency_slot_recovery(slot_index, target_slot, use_cdp)
                             if emergency_success:
-                                print(f"✅ Emergency recovery successful for Slot {slot_index}")
+                                print(f"âœ… Emergency recovery successful for Slot {slot_index}")
                                 success_count += 1
                             else:
-                                print(f"💥 Emergency recovery failed for Slot {slot_index}")
+                                print(f"ðŸ’¥ Emergency recovery failed for Slot {slot_index}")
                 
                 # Brief pause between slots to allow game state stabilization
                 if slot_index != active_slot_indices[-1]:  # Not the last slot
-                    print(f"⏳ Stabilization pause before next slot...")
+                    print(f"â³ Stabilization pause before next slot...")
                     time.sleep(0.8)
             
             # ================================================================
             # FINAL BATCH VALIDATION
             # ================================================================
             print(f"\n{'='*70}")
-            print(f"📊 SMART BATCH RETURN COMPLETED")
+            print(f"ðŸ“Š SMART BATCH RETURN COMPLETED")
             print(f"{'='*70}")
             
             # Get final state for validation
@@ -4577,12 +4569,12 @@ class SprunkiGamePlayer:
             final_polos = final_state.get('polos_array') if final_state else None
             final_putted = final_state.get('putted_characters') if final_state else None
             
-            print(f"✅ Successfully returned: {success_count}/{len(active_slot_indices)} slots")
-            print(f"🔄 Recovery attempts: {recovery_attempts}")
-            print(f"❌ Errors encountered: {len(error_log)}")
+            print(f"âœ… Successfully returned: {success_count}/{len(active_slot_indices)} slots")
+            print(f"ðŸ”„ Recovery attempts: {recovery_attempts}")
+            print(f"âŒ Errors encountered: {len(error_log)}")
             
             if final_state:
-                print(f"📊 Final state:")
+                print(f"ðŸ“Š Final state:")
                 print(f"   Putted characters: {final_putted}")
                 if final_polos:
                     print(f"   Polos array: {final_polos}")
@@ -4590,32 +4582,32 @@ class SprunkiGamePlayer:
                     print(f"   Remaining active slots: {remaining_active}")
             
             if error_log:
-                print(f"📋 Error summary:")
+                print(f"ðŸ“‹ Error summary:")
                 for i, error in enumerate(error_log, 1):
                     print(f"   {i}. {error}")
             
             return success_count, len(active_slot_indices), error_log
             
         except Exception as e:
-            print(f"💥 Critical error in smart batch return: {e}")
+            print(f"ðŸ’¥ Critical error in smart batch return: {e}")
             import traceback
             traceback.print_exc()
             return 0, 0, [f"Critical error: {str(e)}"]
 
     def _emergency_slot_recovery(self, slot_index, target_slot, use_cdp):
         """
-        🚨 NEW: Emergency recovery for stuck slots
+        ðŸš¨ NEW: Emergency recovery for stuck slots
         Last resort methods when normal return fails
         """
         try:
-            print(f"🚨 EMERGENCY RECOVERY: Slot {slot_index}")
+            print(f"ðŸš¨ EMERGENCY RECOVERY: Slot {slot_index}")
             print("-" * 30)
             
             center_x, center_y = target_slot['x'], target_slot['y']
             domain_adj = self.get_domain_adjustments()
             
             # Method 1: Rapid-fire center clicks
-            print("   🔥 Method 1: Rapid-fire center clicks")
+            print("   ðŸ”¥ Method 1: Rapid-fire center clicks")
             center_coords = [(center_x, center_y)]
             
             state_before = self.get_comprehensive_slot_state() if self.characters_available else None
@@ -4632,11 +4624,11 @@ class SprunkiGamePlayer:
                         slot_index, state_before, state_after
                     )
                     if is_success:
-                        print("   ✅ Rapid-fire method successful!")
+                        print("   âœ… Rapid-fire method successful!")
                         return True
             
             # Method 2: Hold clicks on expanded area
-            print("   🔥 Method 2: Hold clicks on expanded area")
+            print("   ðŸ”¥ Method 2: Hold clicks on expanded area")
             expanded_coords = self.generate_circle_pattern_coordinates(center_x, center_y, radius=40, num_points=8)
             
             state_before = self.get_comprehensive_slot_state() if self.characters_available else None
@@ -4651,11 +4643,11 @@ class SprunkiGamePlayer:
                         slot_index, state_before, state_after
                     )
                     if is_success:
-                        print("   ✅ Hold clicks method successful!")
+                        print("   âœ… Hold clicks method successful!")
                         return True
             
             # Method 3: Mixed method barrage
-            print("   🔥 Method 3: Mixed method barrage")
+            print("   ðŸ”¥ Method 3: Mixed method barrage")
             
             state_before = self.get_comprehensive_slot_state() if self.characters_available else None
             
@@ -4672,24 +4664,24 @@ class SprunkiGamePlayer:
                         slot_index, state_before, state_after
                     )
                     if is_success:
-                        print("   ✅ Mixed method barrage successful!")
+                        print("   âœ… Mixed method barrage successful!")
                         return True
             
-            print("   💥 All emergency methods failed")
+            print("   ðŸ’¥ All emergency methods failed")
             return False
             
         except Exception as e:
-            print(f"💥 Emergency recovery error: {e}")
+            print(f"ðŸ’¥ Emergency recovery error: {e}")
             return False
 
     def validate_workflow_completion(self):
         """
-        ✅ NEW: Validate workflow completion - UPDATED for Characters Array
-        FIXED: Chỉ sử dụng Characters count validation
+        âœ… NEW: Validate workflow completion - UPDATED for Characters Array
+        FIXED: Chá»‰ sá»­ dá»¥ng Characters count validation
         Returns: (is_complete, remaining_issues, recommendations)
         """
         try:
-            print(f"\n✅ WORKFLOW COMPLETION VALIDATION")
+            print(f"\nâœ… WORKFLOW COMPLETION VALIDATION")
             print("="*50)
             
             state = self.get_comprehensive_slot_state()
@@ -4706,49 +4698,49 @@ class SprunkiGamePlayer:
                 issues.append(f"Characters count = {characters_count} (expected: 0)")
                 recommendations.append("Run additional return operations")
             else:
-                print("✅ Characters count = 0 (perfect)")
+                print("âœ… Characters count = 0 (perfect)")
             
             is_complete = len(issues) == 0
             
-            print(f"\n📊 VALIDATION RESULT: {'✅ COMPLETE' if is_complete else '⚠️ ISSUES FOUND'}")
+            print(f"\nðŸ“Š VALIDATION RESULT: {'âœ… COMPLETE' if is_complete else 'âš ï¸ ISSUES FOUND'}")
             if issues:
-                print("❌ Issues found:")
+                print("âŒ Issues found:")
                 for issue in issues:
                     print(f"   - {issue}")
-                print("💡 Recommendations:")
+                print("ðŸ’¡ Recommendations:")
                 for rec in recommendations:
                     print(f"   - {rec}")
             else:
-                print("🎉 Characters Array validation passed!")
-                print("   ✅ Characters count = 0")
-                print("   ✅ All characters returned successfully")
+                print("ðŸŽ‰ Characters Array validation passed!")
+                print("   âœ… Characters count = 0")
+                print("   âœ… All characters returned successfully")
             
             return is_complete, issues, recommendations
             
         except Exception as e:
-            print(f"❌ Validation error: {e}")
+            print(f"âŒ Validation error: {e}")
             return False, [f"Validation error: {str(e)}"], ["Manual check required"]
 
     def store_target_slot_for_verification(self, target_slot_index):
         """
-        🎯 Helper: Store target slot index for verification tracking
+        ðŸŽ¯ Helper: Store target slot index for verification tracking
         """
         self.last_target_slot_index = target_slot_index
-        print(f"🎯 Stored target slot index: {target_slot_index} for verification")
+        print(f"ðŸŽ¯ Stored target slot index: {target_slot_index} for verification")
 
     def get_index_correction_report(self):
         """
-        📊 Helper: Get report of all index corrections discovered
+        ðŸ“Š Helper: Get report of all index corrections discovered
         """
         if hasattr(self, 'index_corrections') and self.index_corrections:
-            print(f"\n📊 INDEX CORRECTION REPORT:")
+            print(f"\nðŸ“Š INDEX CORRECTION REPORT:")
             print("-" * 40)
             for config_index, actual_index in self.index_corrections.items():
                 offset = actual_index - config_index
-                print(f"   Config {config_index} → Actual {actual_index} (offset: {offset:+d})")
+                print(f"   Config {config_index} â†’ Actual {actual_index} (offset: {offset:+d})")
             return self.index_corrections
         else:
-            print("📊 No index corrections recorded")
+            print("ðŸ“Š No index corrections recorded")
             return {}
 
     def generate_icon_coordinates(self, base_x, base_y, offset=35):
@@ -4764,7 +4756,7 @@ class SprunkiGamePlayer:
             (base_x, base_y + offset)            # 4: Bottom
         ]
         
-        print(f"📍 Generated 5 coordinates for icon at ({base_x}, {base_y}):")
+        print(f"ðŸ“ Generated 5 coordinates for icon at ({base_x}, {base_y}):")
         for i, (x, y) in enumerate(coordinates):
             coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
             print(f"   {i+1}. {coord_names[i]}: ({x}, {y})")
@@ -4784,7 +4776,7 @@ class SprunkiGamePlayer:
             (center_x + offset, center_y)            # 4: Right
         ]
         
-        print(f"🔄 Generated 5 coordinates for return at slot ({center_x}, {center_y}):")
+        print(f"ðŸ”„ Generated 5 coordinates for return at slot ({center_x}, {center_y}):")
         for i, (x, y) in enumerate(coordinates):
             coord_names = ["Center", "Top", "Bottom", "Left", "Right"]
             print(f"   {i+1}. {coord_names[i]}: ({x}, {y})")
@@ -4793,7 +4785,7 @@ class SprunkiGamePlayer:
 
     def generate_circle_pattern_coordinates(self, center_x, center_y, radius=50, num_points=8):
         """
-        🔥 NEW: Generate circle pattern coordinates around slot center
+        ðŸ”¥ NEW: Generate circle pattern coordinates around slot center
         Returns list of (x, y) tuples in circular pattern
         """
         import math
@@ -4810,19 +4802,19 @@ class SprunkiGamePlayer:
             y = center_y + int(radius * math.sin(angle))
             coordinates.append((x, y))
         
-        print(f"🔄 Generated circle pattern: center + {num_points} points at {radius}px radius")
+        print(f"ðŸ”„ Generated circle pattern: center + {num_points} points at {radius}px radius")
         for i, (x, y) in enumerate(coordinates):
             if i == 0:
                 print(f"   CENTER: ({x}, {y})")
             else:
                 angle_deg = (360 * (i-1)) / num_points
-                print(f"   Point {i}: ({x}, {y}) - {angle_deg:.0f}°")
+                print(f"   Point {i}: ({x}, {y}) - {angle_deg:.0f}Â°")
         
         return coordinates
 
     def verify_return_success(self, putted_before, putted_after):
         """
-        ✅ COMPATIBILITY: Simple return verification
+        âœ… COMPATIBILITY: Simple return verification
         """
         try:
             if putted_before is None or putted_after is None:
@@ -4832,16 +4824,16 @@ class SprunkiGamePlayer:
             expected_after = putted_before - 1
             success = (putted_after == expected_after)
             
-            print(f"📊 Return verification: {putted_before} → {putted_after} (expected: {expected_after}) = {'✅' if success else '❌'}")
+            print(f"ðŸ“Š Return verification: {putted_before} â†’ {putted_after} (expected: {expected_after}) = {'âœ…' if success else 'âŒ'}")
             return success
             
         except Exception as e:
-            print(f"❌ Return verification error: {e}")
+            print(f"âŒ Return verification error: {e}")
             return False
 
     def verify_slot_specific_return(self, target_slot_index, putted_before, putted_after):
         """
-        🔍 NEW: Enhanced verification with slot-specific validation
+        ðŸ” NEW: Enhanced verification with slot-specific validation
         Not just check if putted decreased, but validate it's the RIGHT slot
         """
         try:
@@ -4854,21 +4846,21 @@ class SprunkiGamePlayer:
             # TODO: Add more sophisticated validation if needed
             # For now, rely on safe zone to prevent cross-slot contamination
             
-            print(f"✅ Slot {target_slot_index} return verified: {putted_before} → {putted_after}")
+            print(f"âœ… Slot {target_slot_index} return verified: {putted_before} â†’ {putted_after}")
             return True, "verified_success"
             
         except Exception as e:
-            print(f"❌ Slot-specific verification error: {e}")
+            print(f"âŒ Slot-specific verification error: {e}")
             return False, f"verification_error: {e}"
 
     def execute_multi_method_clicks(self, coordinates, use_cdp, domain_adj, method="single"):
         """
-        🔥 NEW: Execute clicks using different methods on coordinate list
+        ðŸ”¥ NEW: Execute clicks using different methods on coordinate list
         Returns True if any click was executed successfully
         """
         successful_clicks = 0
         
-        print(f"🎯 Executing {method} method on {len(coordinates)} coordinates...")
+        print(f"ðŸŽ¯ Executing {method} method on {len(coordinates)} coordinates...")
         
         for i, (click_x, click_y) in enumerate(coordinates):
             if self.should_stop:
@@ -4897,13 +4889,13 @@ class SprunkiGamePlayer:
                 time.sleep(0.1)
                 
             except Exception as e:
-                print(f"   ⚠️ Click {i+1} failed: {e}")
+                print(f"   âš ï¸ Click {i+1} failed: {e}")
         
-        print(f"   ✅ Executed {successful_clicks}/{len(coordinates)} clicks successfully")
+        print(f"   âœ… Executed {successful_clicks}/{len(coordinates)} clicks successfully")
         return successful_clicks > 0
 
     def _execute_double_return_click(self, click_x, click_y, use_cdp, domain_adj):
-        """🔥 NEW: Execute double click"""
+        """ðŸ”¥ NEW: Execute double click"""
         try:
             if use_cdp:
                 success1 = self._execute_cdp_single_click(click_x, click_y)
@@ -4919,7 +4911,7 @@ class SprunkiGamePlayer:
             return False
 
     def _execute_triple_return_click(self, click_x, click_y, use_cdp, domain_adj):
-        """🔥 NEW: Execute triple click"""
+        """ðŸ”¥ NEW: Execute triple click"""
         try:
             success_count = 0
             for _ in range(3):
@@ -4935,7 +4927,7 @@ class SprunkiGamePlayer:
             return False
 
     def _execute_hold_return_click(self, click_x, click_y, use_cdp, domain_adj):
-        """🔥 NEW: Execute hold-and-release click"""
+        """ðŸ”¥ NEW: Execute hold-and-release click"""
         try:
             if use_cdp:
                 ws_url = self._get_websocket_url()
@@ -4962,82 +4954,82 @@ class SprunkiGamePlayer:
 
     def verify_drag_success_dual(self, before_chars, after_chars, before_putted, after_putted):
         """
-        🔄 DUAL VERIFICATION: CHỈ CẦN 1 TRONG 2 TĂNG 1 ĐƠN VỊ
+        ðŸ”„ DUAL VERIFICATION: CHá»ˆ Cáº¦N 1 TRONG 2 TÄ‚NG 1 ÄÆ N Vá»Š
         """
-        print(f"📊 DUAL Drag verification:")
+        print(f"ðŸ“Š DUAL Drag verification:")
         
         # Check Characters Array
         chars_success = False
         if before_chars is not None and after_chars is not None:
             expected_chars = before_chars + 1
             chars_success = (after_chars == expected_chars)
-            print(f"   🔢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
+            print(f"   ðŸ”¢ Characters: {before_chars} â†’ {after_chars} (expected: {expected_chars}) = {'âœ…' if chars_success else 'âŒ'}")
         else:
-            print(f"   🔢 Characters: N/A (not available)")
+            print(f"   ðŸ”¢ Characters: N/A (not available)")
         
         # Check Putted Characters  
         putted_success = False
         if before_putted is not None and after_putted is not None:
             expected_putted = before_putted + 1
             putted_success = (after_putted == expected_putted)
-            print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+            print(f"   ðŸŽ¯ Putted: {before_putted} â†’ {after_putted} (expected: {expected_putted}) = {'âœ…' if putted_success else 'âŒ'}")
         else:
-            print(f"   🎯 Putted: N/A (not available)")
+            print(f"   ðŸŽ¯ Putted: N/A (not available)")
         
-        # DUAL LOGIC: CHỈ CẦN 1 TRONG 2 THÀNH CÔNG
+        # DUAL LOGIC: CHá»ˆ Cáº¦N 1 TRONG 2 THÃ€NH CÃ”NG
         overall_success = chars_success or putted_success
         
         if overall_success:
             successful_method = []
             if chars_success: successful_method.append("Characters Array")
             if putted_success: successful_method.append("Putted Characters")
-            print(f"   🎉 DUAL SUCCESS via: {', '.join(successful_method)}")
+            print(f"   ðŸŽ‰ DUAL SUCCESS via: {', '.join(successful_method)}")
         else:
-            print(f"   ❌ DUAL FAILURE: Both methods failed")
+            print(f"   âŒ DUAL FAILURE: Both methods failed")
         
         return overall_success
 
     def verify_return_success_dual(self, before_chars, after_chars, before_putted, after_putted):
         """
-        🔄 DUAL VERIFICATION: CHỈ CẦN 1 TRONG 2 GIẢM 1 ĐƠN VỊ
+        ðŸ”„ DUAL VERIFICATION: CHá»ˆ Cáº¦N 1 TRONG 2 GIáº¢M 1 ÄÆ N Vá»Š
         FIXED: None safety checks
         """
         try:
-            print(f"📊 DUAL Return verification:")
+            print(f"ðŸ“Š DUAL Return verification:")
             
             # Check Characters Array
             chars_success = False
-            if before_chars is not None and after_chars is not None:  # ✅ CHECK None
+            if before_chars is not None and after_chars is not None:  # âœ… CHECK None
                 expected_chars = before_chars - 1
                 chars_success = (after_chars == expected_chars)
-                print(f"   📢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
+                print(f"   ðŸ“¢ Characters: {before_chars} â†’ {after_chars} (expected: {expected_chars}) = {'âœ…' if chars_success else 'âŒ'}")
             else:
-                print(f"   📢 Characters: N/A (not available)")
+                print(f"   ðŸ“¢ Characters: N/A (not available)")
             
             # Check Putted Characters  
             putted_success = False
-            if before_putted is not None and after_putted is not None:  # ✅ CHECK None
+            if before_putted is not None and after_putted is not None:  # âœ… CHECK None
                 expected_putted = before_putted - 1
                 putted_success = (after_putted == expected_putted)
-                print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
+                print(f"   ðŸŽ¯ Putted: {before_putted} â†’ {after_putted} (expected: {expected_putted}) = {'âœ…' if putted_success else 'âŒ'}")
             else:
-                print(f"   🎯 Putted: N/A (not available)")
+                print(f"   ðŸŽ¯ Putted: N/A (not available)")
             
-            # DUAL LOGIC: CHỈ CẦN 1 TRONG 2 THÀNH CÔNG
+            # DUAL LOGIC: CHá»ˆ Cáº¦N 1 TRONG 2 THÃ€NH CÃ”NG
             overall_success = chars_success or putted_success
             
             if overall_success:
                 successful_method = []
                 if chars_success: successful_method.append("Characters Array")
                 if putted_success: successful_method.append("Putted Characters")
-                print(f"   🎉 DUAL SUCCESS via: {', '.join(successful_method)}")
+                print(f"   ðŸŽ‰ DUAL SUCCESS via: {', '.join(successful_method)}")
             else:
-                print(f"   ❌ DUAL FAILURE: Both methods failed")
+                print(f"   âŒ DUAL FAILURE: Both methods failed")
             
             return overall_success
             
         except Exception as e:
-            print(f"❌ DUAL verification error: {e}")
+            print(f"âŒ DUAL verification error: {e}")
             return False
 
     def _execute_single_return_click(self, click_x, click_y, use_cdp, domain_adj):
@@ -5050,7 +5042,7 @@ class SprunkiGamePlayer:
                 # Try CDP click first
                 success = self._execute_cdp_single_click(click_x, click_y)
                 if not success:
-                    print("⚠️ CDP click failed, falling back to PyAutoGUI")
+                    print("âš ï¸ CDP click failed, falling back to PyAutoGUI")
                     success = self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
                 return success
             else:
@@ -5058,7 +5050,7 @@ class SprunkiGamePlayer:
                 return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
                 
         except Exception as e:
-            print(f"❌ Single return click execution error: {e}")
+            print(f"âŒ Single return click execution error: {e}")
             return False
 
     def _execute_cdp_single_click(self, click_x, click_y):
@@ -5070,7 +5062,7 @@ class SprunkiGamePlayer:
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            print(f"🖱️ Executing CDP single click at ({click_x}, {click_y})")
+            print(f"ðŸ–±ï¸ Executing CDP single click at ({click_x}, {click_y})")
             
             # Move and click
             self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": click_x, "y": click_y}})
@@ -5078,24 +5070,24 @@ class SprunkiGamePlayer:
             self._simulate_click_via_cdp(ws, click_x, click_y)
             
             ws.close()
-            print("✅ CDP single click completed")
+            print("âœ… CDP single click completed")
             return True
             
         except Exception as e:
-            print(f"❌ CDP single click failed: {e}")
+            print(f"âŒ CDP single click failed: {e}")
             return False
 
     def attempt_icon_return(self, target_slot):
         try:
-            print("🔄 Attempting to return icon before retry...")
+            print("ðŸ”„ Attempting to return icon before retry...")
             
             # Get count before return
             count_before = self.get_characters_count() if self.characters_available else None
             
-            # ✅ NO VARIATION: Use exact slot coordinates
+            # âœ… NO VARIATION: Use exact slot coordinates
             center_x, center_y = target_slot['x'], target_slot['y']
             
-            pyautogui.moveTo(center_x, center_y, duration=0.2)  # ← CHÍNH XÁC 100%
+            pyautogui.moveTo(center_x, center_y, duration=0.2)  # â† CHÃNH XÃC 100%
             time.sleep(0.1)
             pyautogui.click(button='left')
             time.sleep(0.5)  # Wait for return animation
@@ -5104,15 +5096,15 @@ class SprunkiGamePlayer:
             if self.characters_available and count_before is not None:
                 count_after = self.get_characters_count()
                 if count_after is not None and count_after < count_before:
-                    print("✅ Icon return verified via Characters Array")
+                    print("âœ… Icon return verified via Characters Array")
                 else:
-                    print("⚠️ Icon return unclear via Characters Array")
+                    print("âš ï¸ Icon return unclear via Characters Array")
             
-            print("✅ Icon return attempt completed")
+            print("âœ… Icon return attempt completed")
             return True
             
         except Exception as e:
-            print(f"⚠️ Icon return attempt failed: {e}")
+            print(f"âš ï¸ Icon return attempt failed: {e}")
             return False
 
     # ================================================================
@@ -5120,129 +5112,152 @@ class SprunkiGamePlayer:
     # ================================================================
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=False):
-        """
-        ENHANCED: Drag and drop with DUAL verification (Characters Array + Putted Characters)
-        UPDATED: Reduced timing for faster workflow
-        CHỈ CẦN 1 TRONG 2 THÀNH CÔNG LÀ ĐỦ - Maximum compatibility across all mods
-        """
-        print(f"\n🎯 ENHANCED DRAG START: Icon to slot with DUAL verification")
-        print("="*60)
+            """
+            ENHANCED: Drag and drop with DUAL verification (Characters Array + Putted Characters)
+            UPDATED: Reduced timing for faster workflow
+            CHá»ˆ Cáº¦N 1 TRONG 2 THÃ€NH CÃ”NG LÃ€ Äá»¦ - Maximum compatibility across all mods
+            """
+            print(f"\nðŸŽ¯ ENHANCED DRAG START: Icon to slot with DUAL verification")
+            print("="*60)
 
-        # Store target slot for verification
-        target_slot_index = target_slot.get('index', -1)
-        self.store_target_slot_for_verification(target_slot_index)
+            # Store target slot for verification
+            target_slot_index = target_slot.get('index', -1)
+            self.store_target_slot_for_verification(target_slot_index)
 
-        # Check if DUAL verification is available
-        dual_verification_enabled = self.characters_available or self.putted_chars_available
-        if dual_verification_enabled:
-            print("🔄 DUAL verification ENABLED:")
-            print(f"   🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
-            print(f"   🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ N/A'}")
-        else:
-            print("⚠️ DUAL verification DISABLED - using fallback logic")
-        
-        # Generate 5 coordinates to try
-        coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
-        
-        domain_adj = self.get_domain_adjustments()
-        success = False
-        coord_used = 0
-
-        # INITIALIZE variables properly
-        characters_before, putted_before = None, None
-        characters_after, putted_after = None, None
-
-        # Try each coordinate until success
-        for coord_index, (start_x, start_y) in enumerate(coordinates):
-            if self.should_stop:
-                break
-                
-            coord_used = coord_index + 1
-            coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
-            print(f"\n🎯 Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
+            # Check if DUAL verification is available
+            dual_verification_enabled = self.characters_available or self.putted_chars_available
+            if dual_verification_enabled:
+                print("ðŸ”„ DUAL verification ENABLED:")
+                print(f"   ðŸ”¢ Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ N/A'}")
+                print(f"   ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ N/A'}")
+            else:
+                print("âš ï¸ DUAL verification DISABLED - using fallback logic")
             
-            # Get DUAL counts BEFORE drag (if verification available)
+            # Generate 5 coordinates to try
+            coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
+            
+            domain_adj = self.get_domain_adjustments()
+            success = False
+            coord_used = 0
+
+            # INITIALIZE variables properly
             characters_before, putted_before = None, None
-            if dual_verification_enabled:
-                characters_before, putted_before = self.get_dual_counts()
-                print(f"📊 DUAL counts BEFORE drag:")
-                print(f"   🔢 Characters: {characters_before}")
-                print(f"   🎯 Putted: {putted_before}")
-            
-            # Execute single drag attempt
-            drag_executed = self._execute_single_drag_attempt(
-                start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj
-            )
-            
-            if not drag_executed:
-                print(f"❌ Drag execution failed at coordinate {coord_used}")
-                if coord_index < len(coordinates) - 1:
-                    print("   Trying next coordinate...")
-                    time.sleep(0.3)  # REDUCED from 0.5
-                continue
-            
-            # Wait for game state to update - REDUCED TIMING
-            verification_wait = 0.4 if dual_verification_enabled else 0.15  # REDUCED from 1.0 and 0.15
-            print(f"⏳ Waiting {verification_wait}s for game state update (mouse at safe position)...")
-            time.sleep(verification_wait)
-            
-            # Get DUAL counts AFTER drag (if verification available)
-            if dual_verification_enabled:
-                characters_after, putted_after = self.get_dual_counts()
-                print(f"📊 DUAL counts AFTER drag:")
-                print(f"   🔢 Characters: {characters_after}")
-                print(f"   🎯 Putted: {putted_after}")
+            characters_after, putted_after = None, None
+
+            # Try each coordinate until success
+            for coord_index, (start_x, start_y) in enumerate(coordinates):
+                if self.should_stop:
+                    break
+                    
+                coord_used = coord_index + 1
+                coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
+                print(f"\nðŸŽ¯ Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
                 
-                # Verify drag success using DUAL system
-                if self.verify_drag_success_dual(characters_before, characters_after, putted_before, putted_after):
-                    print(f"🎉 DUAL VERIFIED SUCCESS at coordinate {coord_used}!")
+                # Get DUAL counts BEFORE drag (if verification available)
+                characters_before, putted_before = None, None
+                if dual_verification_enabled:
+                    characters_before, putted_before = self.get_dual_counts()
+                    print(f"ðŸ“Š DUAL counts BEFORE drag:")
+                    print(f"   ðŸ”¢ Characters: {characters_before}")
+                    print(f"   ðŸŽ¯ Putted: {putted_before}")
+                    
+                    # SMART DETECTION: Check if icon already placed from previous attempt
+                    if coord_index > 0:
+                        if (characters_before is not None and characters_before > 0) or (putted_before is not None and putted_before > 0):
+                            if self.verify_drag_success_dual(self.last_drag_characters_before, characters_before, self.last_drag_putted_before, putted_before):
+                                print(f"ðŸŽ‰ SMART DETECTION: Icon already placed by previous attempt!")
+                                print(f"   ðŸ“Š Evidence: Previous attempt was successful upon re-check.")
+                                print(f"   âœ… Previous coordinate {coord_index} actually succeeded")
+                                print(f"   ðŸŽ¯ Stopping retry loop - SUCCESS!")
+                                success = True
+                                break
+                
+                # Store counts for smart detection in the next loop
+                self.last_drag_characters_before = characters_before
+                self.last_drag_putted_before = putted_before
+
+                # Execute single drag attempt
+                drag_executed = self._execute_single_drag_attempt(
+                    start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj
+                )
+                
+                if not drag_executed:
+                    print(f"âŒ Drag execution failed at coordinate {coord_used}")
+                    if coord_index < len(coordinates) - 1:
+                        print("   Trying next coordinate...")
+                        time.sleep(0.3)
+                    continue
+                
+                # Wait for game state to update - this is now handled by the retry loop
+                
+                # Get DUAL counts AFTER drag (if verification available)
+                if dual_verification_enabled:
+                    
+                    ### Lá»›p 1 - TÄƒng cÆ°á»ng xÃ¡c thá»±c vá»›i vÃ²ng láº·p thá»­ láº¡i ###
+                    verification_success = False
+                    # VÃ²ng láº·p xÃ¡c thá»±c 3 láº§n vá»›i Ä‘á»™ trá»… tÄƒng dáº§n
+                    for verify_attempt in range(1, 4):
+                        # Chá» má»™t chÃºt trÆ°á»›c má»—i láº§n kiá»ƒm tra
+                        wait_time = 0.5 + (verify_attempt * 0.4) # Chá» 0.9s, 1.3s, 1.7s
+                        print(f"â³ Verification attempt {verify_attempt}/3: Waiting {wait_time:.1f}s for game state...")
+                        time.sleep(wait_time)
+
+                        characters_after, putted_after = self.get_dual_counts()
+                        print(f"ðŸ“Š DUAL counts AFTER drag (attempt {verify_attempt}/3):")
+                        print(f"   ðŸ”¢ Characters: {characters_after}")
+                        print(f"   ðŸŽ¯ Putted: {putted_after}")
+                        
+                        # Verify drag success using DUAL system
+                        if self.verify_drag_success_dual(characters_before, characters_after, putted_before, putted_after):
+                            verification_success = True
+                            print(f"ðŸŽ‰ DUAL VERIFIED SUCCESS at coordinate {coord_used} (attempt {verify_attempt})!")
+                            break # ThoÃ¡t khá»i vÃ²ng láº·p xÃ¡c thá»±c khi Ä‘Ã£ thÃ nh cÃ´ng
+                        elif verify_attempt < 3:
+                            print(f"   âš ï¸ Verification attempt {verify_attempt} failed, will try again after a longer wait...")
+                    
+                    if verification_success:
+                        print(f"ðŸŽ‰ ENHANCED DRAG VERIFIED successfully at coordinate {coord_used}!")
+                        success = True
+                        break # ThoÃ¡t khá»i vÃ²ng láº·p thá»­ tá»a Ä‘á»™ (for coord_index...)
+                    else:
+                        print(f"âŒ DUAL VERIFICATION FAILED at coordinate {coord_used} after 3 attempts.")
+                        
+                        ### Lá»›p 2 - Tá»± sá»­a lá»—i báº±ng "tráº£ hÃ ng phÃ²ng há»" ###
+                        print("ðŸ›¡ï¸ SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
+                        # DÃ¹ xÃ¡c thá»±c tháº¥t báº¡i, váº«n cÃ³ kháº£ nÄƒng icon Ä‘Ã£ bá»‹ káº¹t á»Ÿ Ä‘Ã³.
+                        # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá» "phÃ²ng há»".
+                        self.attempt_icon_return(target_slot)
+                        time.sleep(0.8) # Chá» má»™t chÃºt sau khi tráº£ hÃ ng
+                        ### Káº¾T THÃšC: Lá»›p 2 ###
+
+                        if coord_index < len(coordinates) - 1:
+                            print("   Trying next coordinate...")
+                        
+                    ### Káº¾T THÃšC Lá»›p 1 ###
+                else:
+                    # No verification available - assume success if drag executed
+                    print(f"âœ… ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
                     success = True
                     break
-                else:
-                    print(f"❌ DUAL VERIFICATION FAILED at coordinate {coord_used}")
-                    
-                    # Only return icon if ANY value increased (either chars or putted)
-                    characters_increased = (characters_after is not None and characters_before is not None and characters_after > characters_before)
-                    putted_increased = (putted_after is not None and putted_before is not None and putted_after > putted_before)
-                    any_increase = characters_increased or putted_increased
-                    
-                    if coord_index < len(coordinates) - 1:
-                        if any_increase:
-                            print("🔄 Icon was placed (detected by DUAL system), returning before retry...")
-                            self.attempt_icon_return(target_slot)
-                            time.sleep(0.5)  # REDUCED from 0.8
-                        else:
-                            print("ℹ️ Icon was not placed (no increase in DUAL system), trying next coordinate...")
-                            time.sleep(0.1)  # REDUCED from 0.3
+            
+            # Final result
+            if success:
+                print(f"ðŸŽ‰ ENHANCED DRAG COMPLETED SUCCESSFULLY!")
+                print(f"   Coordinate used: {coord_used}/5")
+                print(f"   Verification: {'ðŸ”„ DUAL Enabled' if dual_verification_enabled else 'âš ï¸ Disabled'}")
+                if dual_verification_enabled:
+                    print(f"   Systems: Characters Array {'âœ…' if self.characters_available else 'âŒ'} + Putted Characters {'âœ…' if self.putted_chars_available else 'âŒ'}")
+                print("   Mouse already at safe position")
+                print("="*60)
+                
+                self.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=dual_verification_enabled)
+                return True
             else:
-                # No verification available - assume success if drag executed
-                print(f"✅ ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
-                success = True
-                break
-            
-            # Small delay before next coordinate - REDUCED
-            if coord_index < len(coordinates) - 1:
-                print("   Preparing next coordinate attempt...")
-                time.sleep(0.2)  # REDUCED from 0.3
-        
-        # Final result
-        if success:
-            print(f"🎉 ENHANCED DRAG COMPLETED SUCCESSFULLY!")
-            print(f"   Coordinate used: {coord_used}/5")
-            print(f"   Verification: {'🔄 DUAL Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
-            if dual_verification_enabled:
-                print(f"   Systems: Characters Array {'✅' if self.characters_available else '❌'} + Putted Characters {'✅' if self.putted_chars_available else '❌'}")
-            print("   Mouse already at safe position")
-            print("="*60)
-            
-            self.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=dual_verification_enabled)
-            return True
-        else:
-            print(f"💥 ENHANCED DRAG FAILED - All {len(coordinates)} coordinates attempted")
-            print("="*60)
-            
-            self.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=dual_verification_enabled)
-            return False
+                print(f"ðŸ’¥ ENHANCED DRAG FAILED - All {len(coordinates)} coordinates attempted")
+                print("="*60)
+                
+                self.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=dual_verification_enabled)
+                return False
 
     def _execute_single_drag_attempt(self, start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj):
         """
@@ -5263,7 +5278,7 @@ class SprunkiGamePlayer:
             
             # Extended timing for first icon
             if is_first_icon:
-                print("🎪 First icon - applying extended timing...")
+                print("ðŸŽª First icon - applying extended timing...")
                 time.sleep(delays['approach'])
                 self.ensure_game_focus()
                 time.sleep(domain_adj['extra_focus_time'])
@@ -5275,7 +5290,7 @@ class SprunkiGamePlayer:
                 return self._execute_pyautogui_drag(start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon)
                 
         except Exception as e:
-            print(f"❌ Single drag attempt execution error: {e}")
+            print(f"âŒ Single drag attempt execution error: {e}")
             return False
 
     def intro_skip_via_cdp(self):
@@ -5283,15 +5298,15 @@ class SprunkiGamePlayer:
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("⚠️ Could not get WebSocket URL for enhanced intro skipping, using pyautogui fallback")
+                print("âš ï¸ Could not get WebSocket URL for enhanced intro skipping, using pyautogui fallback")
                 return self.intro_skip_via_pyautogui()
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            print(f"🔍 ENHANCED CDP SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} blind clicks...")
+            print(f"ðŸ” ENHANCED CDP SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} blind clicks...")
             
             # Phase 1: Smart detection and clicks
-            print("📍 Phase 1: Searching for ALL Skip Intro buttons via CDP...")
+            print("ðŸ“ Phase 1: Searching for ALL Skip Intro buttons via CDP...")
             
             smart_clicks_performed = 0
             all_buttons = []
@@ -5311,7 +5326,7 @@ class SprunkiGamePlayer:
                         button_count = skip_result.get('count', 0)
                         visible_count = skip_result.get('visibleCount', 0)
                         
-                        print(f"✅ Found {button_count} Skip Intro buttons (Visible: {visible_count})")
+                        print(f"âœ… Found {button_count} Skip Intro buttons (Visible: {visible_count})")
                         
                         # Click ALL buttons found
                         for i, button in enumerate(all_buttons):
@@ -5320,7 +5335,7 @@ class SprunkiGamePlayer:
                             visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
                             costume_name = button.get('currentCostumeName', 'Unknown')
                             
-                            print(f"🎯 CDP clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
+                            print(f"ðŸŽ¯ CDP clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
                             
                             # Click this specific button via CDP
                             self._simulate_click_via_cdp(ws, x, y)
@@ -5328,20 +5343,20 @@ class SprunkiGamePlayer:
                             
                             smart_clicks_performed += 1
                         
-                        print(f"✅ Smart CDP clicks completed: {smart_clicks_performed} buttons clicked!")
+                        print(f"âœ… Smart CDP clicks completed: {smart_clicks_performed} buttons clicked!")
                     else:
                         reason = skip_result.get('reason', 'unknown') if skip_result else 'no_result'
-                        print(f"ℹ️ No Skip Intro buttons found via CDP - Reason: {reason}")
+                        print(f"â„¹ï¸ No Skip Intro buttons found via CDP - Reason: {reason}")
                 
             except Exception as e:
-                print(f"⚠️ Smart detection failed: {e}, proceeding with blind clicks...")
+                print(f"âš ï¸ Smart detection failed: {e}, proceeding with blind clicks...")
             
             # Phase 2: ALWAYS perform blind clicks for additional assurance
             if smart_clicks_performed > 0:
-                print("🔄 Phase 2: Performing ADDITIONAL blind CDP clicks for protection...")
-                print("   → Ensures intro skipping even if smart clicks had edge cases")
+                print("ðŸ”„ Phase 2: Performing ADDITIONAL blind CDP clicks for protection...")
+                print("   â†’ Ensures intro skipping even if smart clicks had edge cases")
             else:
-                print("🖱️ Phase 2: Performing STANDARD blind CDP clicks (no smart buttons found)...")
+                print("ðŸ–±ï¸ Phase 2: Performing STANDARD blind CDP clicks (no smart buttons found)...")
             
             # Perform blind clicks via CDP
             for i in range(self.intro_skip_clicks):
@@ -5352,30 +5367,30 @@ class SprunkiGamePlayer:
             
             # Summary
             if smart_clicks_performed > 0:
-                print("🎉 ENHANCED CDP SKIP INTRO COMPLETED:")
-                print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons via CDP")
-                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} additional CDP clicks")
-                print("   🛡️ Dual protection ensures maximum success rate")
+                print("ðŸŽ‰ ENHANCED CDP SKIP INTRO COMPLETED:")
+                print(f"   âœ… Smart clicks: {smart_clicks_performed} buttons via CDP")
+                print(f"   âœ… Blind clicks: {self.intro_skip_clicks} additional CDP clicks")
+                print("   ðŸ›¡ï¸ Dual protection ensures maximum success rate")
             else:
-                print("🎉 STANDARD CDP SKIP INTRO COMPLETED:")
-                print("   ⚠️ Smart clicks: N/A (No buttons found)")
-                print(f"   ✅ Blind clicks: {self.intro_skip_clicks} CDP clicks")
-                print("   🔄 Standard method used as fallback")
+                print("ðŸŽ‰ STANDARD CDP SKIP INTRO COMPLETED:")
+                print("   âš ï¸ Smart clicks: N/A (No buttons found)")
+                print(f"   âœ… Blind clicks: {self.intro_skip_clicks} CDP clicks")
+                print("   ðŸ”„ Standard method used as fallback")
             
-            print("✅ CDP intro skipping completed")
+            print("âœ… CDP intro skipping completed")
             return True
             
         except Exception as e:
-            print(f"❌ CDP intro skipping failed: {e}, falling back to pyautogui")
+            print(f"âŒ CDP intro skipping failed: {e}, falling back to pyautogui")
             return self.intro_skip_via_pyautogui()
 
     def intro_skip_via_pyautogui(self):
         """ENHANCED: Multi-target Skip intro using PyAutoGUI with smart detection + blind drags"""
         try:
-            print(f"🔍 ENHANCED PYAUTOGUI SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} wake-up drags...")
+            print(f"ðŸ” ENHANCED PYAUTOGUI SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} wake-up drags...")
             
             # Phase 1: Try smart detection via WebSocket if available
-            print("📍 Phase 1: Attempting smart detection via WebSocket...")
+            print("ðŸ“ Phase 1: Attempting smart detection via WebSocket...")
             
             smart_clicks_performed = 0
             
@@ -5397,7 +5412,7 @@ class SprunkiGamePlayer:
                             all_buttons = skip_result.get('buttons', [])
                             button_count = skip_result.get('count', 0)
                             
-                            print(f"✅ Found {button_count} Skip Intro buttons via WebSocket")
+                            print(f"âœ… Found {button_count} Skip Intro buttons via WebSocket")
                             
                             # Click ALL buttons found using PyAutoGUI
                             for i, button in enumerate(all_buttons):
@@ -5405,7 +5420,7 @@ class SprunkiGamePlayer:
                                 x, y = button['x'], button['y']
                                 visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
                                 
-                                print(f"🎯 PyAutoGUI clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status}")
+                                print(f"ðŸŽ¯ PyAutoGUI clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status}")
                                 
                                 # Click this specific button via PyAutoGUI
                                 pyautogui.moveTo(x, y, duration=0.2)
@@ -5414,26 +5429,26 @@ class SprunkiGamePlayer:
                                 
                                 smart_clicks_performed += 1
                             
-                            print(f"✅ Smart PyAutoGUI clicks completed: {smart_clicks_performed} buttons clicked!")
+                            print(f"âœ… Smart PyAutoGUI clicks completed: {smart_clicks_performed} buttons clicked!")
                         else:
-                            print("ℹ️ No Skip Intro buttons found via WebSocket")
+                            print("â„¹ï¸ No Skip Intro buttons found via WebSocket")
                     
                     ws.close()
                 else:
-                    print("⚠️ WebSocket not available for smart detection")
+                    print("âš ï¸ WebSocket not available for smart detection")
                     
             except Exception as e:
-                print(f"⚠️ Smart detection via WebSocket failed: {e}")
+                print(f"âš ï¸ Smart detection via WebSocket failed: {e}")
             
             # Phase 2: ALWAYS perform aggressive wake-up drags
             if smart_clicks_performed > 0:
-                print("🔄 Phase 2: Performing ADDITIONAL wake-up drags for protection...")
-                print("   → Ensures intro skipping even if smart clicks had edge cases")
+                print("ðŸ”„ Phase 2: Performing ADDITIONAL wake-up drags for protection...")
+                print("   â†’ Ensures intro skipping even if smart clicks had edge cases")
             else:
-                print("⚡ Phase 2: Performing AGGRESSIVE wake-up drags (no smart buttons found)...")
+                print("âš¡ Phase 2: Performing AGGRESSIVE wake-up drags (no smart buttons found)...")
             
             # Aggressive wake-up drags using existing logic
-            print(f"⚡ AGGRESSIVE INTRO SKIPPING: Performing {self.intro_skip_clicks} 'wake-up drags' over 5 seconds...")
+            print(f"âš¡ AGGRESSIVE INTRO SKIPPING: Performing {self.intro_skip_clicks} 'wake-up drags' over 5 seconds...")
             screen_width, screen_height = pyautogui.size()
             center_x, center_y = screen_width // 2, screen_height // 2
             total_duration = 5.0
@@ -5456,32 +5471,32 @@ class SprunkiGamePlayer:
             
             # Summary
             if smart_clicks_performed > 0:
-                print("🎉 ENHANCED PYAUTOGUI SKIP INTRO COMPLETED:")
-                print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons via PyAutoGUI")
-                print(f"   ✅ Wake-up drags: {self.intro_skip_clicks} aggressive drags")
-                print("   🛡️ Dual protection ensures maximum success rate")
+                print("ðŸŽ‰ ENHANCED PYAUTOGUI SKIP INTRO COMPLETED:")
+                print(f"   âœ… Smart clicks: {smart_clicks_performed} buttons via PyAutoGUI")
+                print(f"   âœ… Wake-up drags: {self.intro_skip_clicks} aggressive drags")
+                print("   ðŸ›¡ï¸ Dual protection ensures maximum success rate")
             else:
-                print("🎉 AGGRESSIVE PYAUTOGUI SKIP INTRO COMPLETED:")
-                print("   ⚠️ Smart clicks: N/A (No buttons found)")
-                print(f"   ✅ Wake-up drags: {self.intro_skip_clicks} aggressive drags")
-                print("   ⚡ Aggressive method used as fallback")
+                print("ðŸŽ‰ AGGRESSIVE PYAUTOGUI SKIP INTRO COMPLETED:")
+                print("   âš ï¸ Smart clicks: N/A (No buttons found)")
+                print(f"   âœ… Wake-up drags: {self.intro_skip_clicks} aggressive drags")
+                print("   âš¡ Aggressive method used as fallback")
             
-            print("✅ Aggressive intro skipping sequence completed.")
+            print("âœ… Aggressive intro skipping sequence completed.")
             return True
             
         except Exception as e:
-            print(f"❌ PyAutoGUI intro skipping failed: {e}")
+            print(f"âŒ PyAutoGUI intro skipping failed: {e}")
             return False
 
     def close_game_window(self):
         """Close game window safely"""
-        print("🧹 Safely closing Chrome debug session...")
+        print("ðŸ§¹ Safely closing Chrome debug session...")
         success = self.cleanup_chrome_complete()
         
         if success:
-            print("✅ Chrome debug session closed safely")
+            print("âœ… Chrome debug session closed safely")
         else:
-            print("⚠️ Some issues during Chrome debug cleanup")
+            print("âš ï¸ Some issues during Chrome debug cleanup")
             
         return success
 
@@ -5495,15 +5510,15 @@ class SprunkiGamePlayer:
         """
         try:
             if not self.config:
-                print("❌ CRITICAL ERROR: No config loaded - Cannot continue setup")
-                print("   💡 Please load a JSON configuration file first")
+                print("âŒ CRITICAL ERROR: No config loaded - Cannot continue setup")
+                print("   ðŸ’¡ Please load a JSON configuration file first")
                 return False
 
-            # 🆕 ENHANCED CLEANUP: Clear browsing data before starting
+            # ðŸ†• ENHANCED CLEANUP: Clear browsing data before starting
             if progress_callback:
-                progress_callback("🗑️ Clearing browsing data and preparing fresh session...")
+                progress_callback("ðŸ—‘ï¸ Clearing browsing data and preparing fresh session...")
             
-            print("🗑️ Pre-setup cleanup: Clearing all browsing data...")
+            print("ðŸ—‘ï¸ Pre-setup cleanup: Clearing all browsing data...")
             
             # Complete cleanup first (includes browsing data clearing)
             self.cleanup_chrome_complete()
@@ -5514,82 +5529,82 @@ class SprunkiGamePlayer:
             # Wait for cleanup to complete
             time.sleep(3)
             
-            print("✅ Pre-setup cleanup completed - starting with fresh Chrome session")
+            print("âœ… Pre-setup cleanup completed - starting with fresh Chrome session")
 
             # Setup browser using Chrome debug mode
-            # LUÔN mở Chrome mới cho cả Master và Individual mode
+            # LUÃ”N má»Ÿ Chrome má»›i cho cáº£ Master vÃ  Individual mode
             if progress_callback:
                 if first_setup:
-                    progress_callback("🌐 Opening game in Chrome debug mode (Master)...")
+                    progress_callback("ðŸŒ Opening game in Chrome debug mode (Master)...")
                 else:
-                    progress_callback("🌐 Closing previous session and opening fresh game (Individual)...")
+                    progress_callback("ðŸŒ Closing previous session and opening fresh game (Individual)...")
 
-            print(f"🌐 Opening {'fresh ' if not first_setup else ''}game in Chrome debug mode...")
+            print(f"ðŸŒ Opening {'fresh ' if not first_setup else ''}game in Chrome debug mode...")
 
-            # THÊM: Explicit cleanup cho Individual mode
+            # THÃŠM: Explicit cleanup cho Individual mode
             if not first_setup:
-                print("🧹 Explicitly closing previous Chrome session for Individual mode...")
+                print("ðŸ§¹ Explicitly closing previous Chrome session for Individual mode...")
                 self.cleanup_chrome_complete()
                 time.sleep(3)  # Extra wait for complete cleanup
 
             success = self.navigate_and_prepare_game(self.config['currentUrl'])
             if not success:
-                print("⚠️ Chrome debug launch failed")
+                print("âš ï¸ Chrome debug launch failed")
                 return False
 
             # Skip intros using hybrid approach (CDP preferred, pyautogui fallback)
             if progress_callback:
-                progress_callback("🖱️ Skipping intros...")
+                progress_callback("ðŸ–±ï¸ Skipping intros...")
             
             if not self.intro_skip_via_cdp():
                 print("CDP intro skipping failed, but continuing anyway...")
 
-            # THAY ĐỔI: Setup DUAL verification system (Characters Array + Putted Characters)
+            # THAY Äá»”I: Setup DUAL verification system (Characters Array + Putted Characters)
             if progress_callback:
-                progress_callback("🔄 Setting up DUAL verification system...")
+                progress_callback("ðŸ”„ Setting up DUAL verification system...")
             
             if not self.setup_dual_verification_system():
-                print("⚠️ DUAL verification setup failed, continuing with basic workflow")
+                print("âš ï¸ DUAL verification setup failed, continuing with basic workflow")
             else:
-                print("✅ DUAL verification system ready!")
+                print("âœ… DUAL verification system ready!")
 
             # Start batch verification session for performance
             if progress_callback:
-                progress_callback("⚡ Starting batch verification session...")
+                progress_callback("âš¡ Starting batch verification session...")
 
             if self.start_batch_verification_session():
-                print("🚀 Batch verification session active - PERFORMANCE MODE!")
+                print("ðŸš€ Batch verification session active - PERFORMANCE MODE!")
             else:
-                print("⚠️ Batch session failed, using individual verification")
+                print("âš ï¸ Batch session failed, using individual verification")
 
             # Prepare game for playing
             self.prepare_game_for_playing()
             time.sleep(1)
 
             if progress_callback:
-                progress_callback("✅ Enhanced game environment ready!")
+                progress_callback("âœ… Enhanced game environment ready!")
             
-            print("✅ ENHANCED GAME ENVIRONMENT SETUP COMPLETED!")
-            print("🎯 FEATURES ACTIVE:")
-            print("   🌐 Chrome debug mode for browser management")
-            print("   🎮 PyAutoGUI for precise game automation")
-            print("   📡 WebSocket/CDP for advanced control")
-            print("   🛡️ AdBlocker extension loaded")
+            print("âœ… ENHANCED GAME ENVIRONMENT SETUP COMPLETED!")
+            print("ðŸŽ¯ FEATURES ACTIVE:")
+            print("   ðŸŒ Chrome debug mode for browser management")
+            print("   ðŸŽ® PyAutoGUI for precise game automation")
+            print("   ðŸ“¡ WebSocket/CDP for advanced control")
+            print("   ðŸ›¡ï¸ AdBlocker extension loaded")
             
             # DUAL verification status
             if self.characters_available or self.putted_chars_available:
-                print("   🔄 DUAL verification system ENABLED:")
-                print(f"      🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ Failed'}")
-                print(f"      🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ Failed'}")
-                print("      💡 Only 1 method needs to work = Maximum compatibility!")
+                print("   ðŸ”„ DUAL verification system ENABLED:")
+                print(f"      ðŸ”¢ Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ Failed'}")
+                print(f"      ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ Failed'}")
+                print("      ðŸ’¡ Only 1 method needs to work = Maximum compatibility!")
             else:
-                print("   ⚠️ DUAL verification system DISABLED (fallback mode)")
+                print("   âš ï¸ DUAL verification system DISABLED (fallback mode)")
             
             return True
                 
         except Exception as e:
             error_message = f"An unexpected error occurred during game setup: {e}"
-            print(f"❌ {error_message}")
+            print(f"âŒ {error_message}")
             import traceback
             traceback.print_exc()
             messagebox.showerror("Setup Error", error_message)
@@ -5601,26 +5616,26 @@ class SprunkiGamePlayer:
             pyautogui.mouseUp(button='left')
             pyautogui.mouseUp(button='middle')
             time.sleep(0.1)
-            print("🔄 Mouse state cleaned")
+            print("ðŸ”„ Mouse state cleaned")
         except Exception as e:
-            print("⚠️ Mouse cleanup warning: " + str(e))
+            print("âš ï¸ Mouse cleanup warning: " + str(e))
     
     def ensure_game_focus(self):
-        """🔧 ENHANCED: Ensure game focus với service mode support - SAFE CLICK VERSION"""
+        """ðŸ”§ ENHANCED: Ensure game focus vá»›i service mode support - SAFE CLICK VERSION"""
         try:
-            print("🎯 Ensuring game focus for service mode...")
+            print("ðŸŽ¯ Ensuring game focus for service mode...")
             
-            # Phase 1: Find và activate Chrome window
+            # Phase 1: Find vÃ  activate Chrome window
             chrome_windows = gw.getWindowsWithTitle('cocrea.world')
             if not chrome_windows:
                 chrome_windows = gw.getWindowsWithTitle('Chrome')
             
             if chrome_windows:
                 target_window = chrome_windows[0]
-                print(f"   🔍 Found window: {target_window.title[:50]}...")
+                print(f"   ðŸ” Found window: {target_window.title[:50]}...")
                 
                 try:
-                    # Activate window với error handling
+                    # Activate window vá»›i error handling
                     target_window.activate()
                     time.sleep(0.3)
                     
@@ -5628,53 +5643,53 @@ class SprunkiGamePlayer:
                     target_window.restore()  # Ensure not minimized
                     time.sleep(0.2)
                     
-                    print("   ✅ Window activated successfully")
+                    print("   âœ… Window activated successfully")
                     
                 except Exception as e:
                     error_msg = str(e).lower()
                     if "error code from windows: 0" in error_msg:
-                        print("   ✅ Window activated (Windows quirk)")
+                        print("   âœ… Window activated (Windows quirk)")
                     else:
-                        print(f"   ⚠️ Window activation warning: {e}")
+                        print(f"   âš ï¸ Window activation warning: {e}")
             
-            # 🆕 Phase 2: SAFE MOUSE FOCUS - TRÁNH CLICK VÀO SLOT
-            print("   🎯 Phase 2: Safe mouse focus (avoiding slots/icons)...")
+            # ðŸ†• Phase 2: SAFE MOUSE FOCUS - TRÃNH CLICK VÃ€O SLOT
+            print("   ðŸŽ¯ Phase 2: Safe mouse focus (avoiding slots/icons)...")
             
-            # 🆕 SAFE ZONE: Click vào góc trên bên trái (title bar area)
-            # Tọa độ này sẽ click vào title bar của browser, không phải game area
-            safe_x = 20  # Góc trái, tránh slots ở giữa
-            safe_y = 50   # Title bar area, tránh game canvas
+            # ðŸ†• SAFE ZONE: Click vÃ o gÃ³c trÃªn bÃªn trÃ¡i (title bar area)
+            # Tá»a Ä‘á»™ nÃ y sáº½ click vÃ o title bar cá»§a browser, khÃ´ng pháº£i game area
+            safe_x = 20  # GÃ³c trÃ¡i, trÃ¡nh slots á»Ÿ giá»¯a
+            safe_y = 200   # Title bar area, trÃ¡nh game canvas
             
-            print(f"   🛡️ Using SAFE click position: ({safe_x}, {safe_y}) - Title bar area")
+            print(f"   ðŸ›¡ï¸ Using SAFE click position: ({safe_x}, {safe_y}) - Title bar area")
             pyautogui.moveTo(safe_x, safe_y, duration=0.2)
             time.sleep(0.1)
             
-            # Click vào title bar để focus
+            # Click vÃ o title bar Ä‘á»ƒ focus
             pyautogui.click(safe_x, safe_y)
             time.sleep(0.2)
             
-            # 🆕 Phase 3: Move mouse to NEUTRAL position (bottom right corner)
-            print("   🎯 Phase 3: Moving mouse to neutral position...")
+            # ðŸ†• Phase 3: Move mouse to NEUTRAL position (bottom right corner)
+            print("   ðŸŽ¯ Phase 3: Moving mouse to neutral position...")
             screen_width, screen_height = pyautogui.size()
-            neutral_x = screen_width - 100  # Góc phải dưới
+            neutral_x = screen_width - 100  # GÃ³c pháº£i dÆ°á»›i
             neutral_y = screen_height - 100
             
             pyautogui.moveTo(neutral_x, neutral_y, duration=0.3)
-            print(f"   ✅ Mouse moved to neutral corner: ({neutral_x}, {neutral_y})")
+            print(f"   âœ… Mouse moved to neutral corner: ({neutral_x}, {neutral_y})")
             
-            print("   ✅ Game focus ensured with SAFE method (no slot interference)")
+            print("   âœ… Game focus ensured with SAFE method (no slot interference)")
             return True
             
         except Exception as e:
-            print(f"   ❌ Enhanced focus error: {e}")
+            print(f"   âŒ Enhanced focus error: {e}")
             return False
 
     def ensure_game_focus_light(self):
-        """🪶 LIGHT FOCUS: Chỉ activate window, KHÔNG click (an toàn nhất)"""
+        """ðŸª¶ LIGHT FOCUS: Chá»‰ activate window, KHÃ”NG click (an toÃ n nháº¥t)"""
         try:
-            print("🪶 Light focus: Window activation only...")
+            print("ðŸª¶ Light focus: Window activation only...")
             
-            # Chỉ activate window, không click gì cả
+            # Chá»‰ activate window, khÃ´ng click gÃ¬ cáº£
             chrome_windows = gw.getWindowsWithTitle('cocrea.world')
             if not chrome_windows:
                 chrome_windows = gw.getWindowsWithTitle('Chrome')
@@ -5685,49 +5700,49 @@ class SprunkiGamePlayer:
                     target_window.activate()
                     target_window.restore()
                     time.sleep(0.3)
-                    print("   ✅ Light focus completed - no clicks performed")
+                    print("   âœ… Light focus completed - no clicks performed")
                     return True
                 except Exception as e:
                     error_msg = str(e).lower()
                     if "error code from windows: 0" in error_msg:
-                        print("   ✅ Light focus completed (Windows quirk)")
+                        print("   âœ… Light focus completed (Windows quirk)")
                         return True
                     else:
-                        print(f"   ⚠️ Light focus warning: {e}")
+                        print(f"   âš ï¸ Light focus warning: {e}")
                         return False
             else:
-                print("   ⚠️ No window found for light focus")
+                print("   âš ï¸ No window found for light focus")
                 return False
                 
         except Exception as e:
-            print(f"   ❌ Light focus error: {e}")
+            print(f"   âŒ Light focus error: {e}")
             return False
 
     def _ensure_focus_before_operation(self, operation_name="operation", focus_type="safe"):
-        """🔧 NEW: Đảm bảo focus trước mọi mouse operation với tùy chọn loại focus"""
+        """ðŸ”§ NEW: Äáº£m báº£o focus trÆ°á»›c má»i mouse operation vá»›i tÃ¹y chá»n loáº¡i focus"""
         try:
-            print(f"🎯 Ensuring focus before {operation_name}...")
+            print(f"ðŸŽ¯ Ensuring focus before {operation_name}...")
             
-            # Chọn loại focus dựa trên tham số
+            # Chá»n loáº¡i focus dá»±a trÃªn tham sá»‘
             if focus_type == "light":
-                # Chỉ activate window, không click (an toàn nhất)
+                # Chá»‰ activate window, khÃ´ng click (an toÃ n nháº¥t)
                 success = self.ensure_game_focus_light()
             elif focus_type == "safe":
-                # Activate + click an toàn (tránh slots)
+                # Activate + click an toÃ n (trÃ¡nh slots)
                 success = self.ensure_game_focus()
             else:
                 # Default to safe
                 success = self.ensure_game_focus()
             
             if success:
-                print(f"   ✅ Focus ready for {operation_name} (type: {focus_type})")
+                print(f"   âœ… Focus ready for {operation_name} (type: {focus_type})")
             else:
-                print(f"   ⚠️ Focus uncertain for {operation_name}, continuing anyway")
+                print(f"   âš ï¸ Focus uncertain for {operation_name}, continuing anyway")
             
             return success
             
         except Exception as e:
-            print(f"   ❌ Focus check error for {operation_name}: {e}")
+            print(f"   âŒ Focus check error for {operation_name}: {e}")
             return False        
     
     def get_domain_adjustments(self):
@@ -5754,13 +5769,13 @@ class SprunkiGamePlayer:
             safe_x = screen_width - random.randint(30, 80)
             safe_y = screen_height - random.randint(30, 80)
             
-            print(f"🎯 Moving mouse to safe position: ({safe_x}, {safe_y})")
+            print(f"ðŸŽ¯ Moving mouse to safe position: ({safe_x}, {safe_y})")
             pyautogui.moveTo(safe_x, safe_y, duration=random.uniform(0.3, 0.5))
             time.sleep(0.2)
             
             return True
         except Exception as e:
-            print("⚠️ Safe position movement warning: " + str(e))
+            print("âš ï¸ Safe position movement warning: " + str(e))
             return False
 
     def _execute_cdp_drag(self, start_x, start_y, end_x, end_y, delays, domain_adj):
@@ -5768,20 +5783,20 @@ class SprunkiGamePlayer:
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("⚠️ WebSocket not available, falling back to PyAutoGUI")
+                print("âš ï¸ WebSocket not available, falling back to PyAutoGUI")
                 return self._execute_pyautogui_drag(start_x, start_y, end_x, end_y, delays, domain_adj, False)
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            print("🖱️ Executing CDP drag operation...")
+            print("ðŸ–±ï¸ Executing CDP drag operation...")
             
             # Move to start position
-            print("📍 Step 1: Moving to icon...")
+            print("ðŸ“ Step 1: Moving to icon...")
             self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": start_x, "y": start_y}})
             time.sleep(delays['approach'])
             
             # Focus clicks if needed
-            print("🎯 Step 2: Establishing focus...")
+            print("ðŸŽ¯ Step 2: Establishing focus...")
             if domain_adj['requires_double_click']:
                 self._simulate_click_via_cdp(ws, start_x, start_y)
                 time.sleep(0.15)
@@ -5792,42 +5807,42 @@ class SprunkiGamePlayer:
                 time.sleep(delays['focus'])
             
             # Execute drag
-            print("🤏 Step 3: Executing drag...")
+            print("ðŸ¤ Step 3: Executing drag...")
             self._simulate_drag_via_cdp(ws, start_x, start_y, end_x, end_y)
             time.sleep(delays['post_drop'])
 
             # Move to safe position via CDP
-            print("🎯 Moving to safe position via CDP...")
+            print("ðŸŽ¯ Moving to safe position via CDP...")
             screen_width, screen_height = 1920, 1080  # Assume fullscreen
             safe_x = screen_width - random.randint(30, 80)
             safe_y = screen_height - random.randint(30, 80)
             self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": safe_x, "y": safe_y}})
-            print(f"✅ Mouse moved to safe corner via CDP: ({safe_x}, {safe_y})")
+            print(f"âœ… Mouse moved to safe corner via CDP: ({safe_x}, {safe_y})")
             
             ws.close()
-            print("✅ CDP drag completed!")
+            print("âœ… CDP drag completed!")
             return True
             
         except Exception as e:
-            print(f"❌ CDP drag failed: {e}, falling back to PyAutoGUI")
+            print(f"âŒ CDP drag failed: {e}, falling back to PyAutoGUI")
             return self._execute_pyautogui_drag(start_x, start_y, end_x, end_y, delays, domain_adj, False)
 
     def _execute_pyautogui_drag(self, start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon):
         """Execute drag using PyAutoGUI (original method)"""
         try:
-            print("🖱️ Executing PyAutoGUI drag operation...")
+            print("ðŸ–±ï¸ Executing PyAutoGUI drag operation...")
             
-            # 🔧 SAFE: Ensure focus before drag operation (use light focus để tránh click nhầm)
+            # ðŸ”§ SAFE: Ensure focus before drag operation (use light focus Ä‘á»ƒ trÃ¡nh click nháº§m)
             self._ensure_focus_before_operation("drag operation", focus_type="light")
             
             # === APPROACH ICON ===
-            print("🔍 Step 1: Moving to icon...")
+            print("ðŸ” Step 1: Moving to icon...")
             move_duration = (0.4 if is_first_icon else 0.25) * domain_adj['drag_speed_multiplier']
             pyautogui.moveTo(start_x, start_y, duration=move_duration)
             time.sleep(delays['approach'])
             
             # === ESTABLISH FOCUS ===
-            print("🎯 Step 2: Establishing focus...")
+            print("ðŸŽ¯ Step 2: Establishing focus...")
             if domain_adj['requires_double_click'] or is_first_icon:
                 pyautogui.click()
                 time.sleep(0.15)
@@ -5842,22 +5857,22 @@ class SprunkiGamePlayer:
             time.sleep(0.1)
             
             # === START DRAG ===
-            print("🤏 Step 3: Starting drag - MOUSE DOWN...")
+            print("ðŸ¤ Step 3: Starting drag - MOUSE DOWN...")
             
             # Ensure correct position
             current_pos = pyautogui.position()
             if abs(current_pos.x - start_x) > 10 or abs(current_pos.y - start_y) > 10:
-                print("⚠️ Position drift, correcting...")
+                print("âš ï¸ Position drift, correcting...")
                 pyautogui.moveTo(start_x, start_y, duration=0.2)
                 time.sleep(0.1)
             
             # Mouse down and hold
             pyautogui.mouseDown(button='left')
-            print("🔽 Mouse DOWN - holding...")
+            print("ðŸ”½ Mouse DOWN - holding...")
             time.sleep(delays['hold'])
             
             # === DRAG TO TARGET ===
-            print("🎯 Step 4: Dragging to target...")
+            print("ðŸŽ¯ Step 4: Dragging to target...")
             drag_duration = delays['drag'] * domain_adj['drag_speed_multiplier']
             
             # Smooth drag movement
@@ -5865,317 +5880,146 @@ class SprunkiGamePlayer:
             time.sleep(delays['drop'])
             
             # === RELEASE MOUSE ===
-            print("🔼 Step 5: MOUSE UP - releasing at target...")
+            print("ðŸ”¼ Step 5: MOUSE UP - releasing at target...")
             
             # Final position check
             final_pos = pyautogui.position()
             if abs(final_pos.x - end_x) > 15 or abs(final_pos.y - end_y) > 15:
-                print("⚠️ Final position drift, correcting...")
+                print("âš ï¸ Final position drift, correcting...")
                 pyautogui.moveTo(end_x, end_y, duration=0.1)
                 time.sleep(0.1)
             
             # Release mouse
             pyautogui.mouseUp(button='left')
-            print("✅ Mouse RELEASED - icon dropped!")
+            print("âœ… Mouse RELEASED - icon dropped!")
             time.sleep(delays['post_drop'])
 
-            print("🎯 Moving to safe position immediately...")
+            print("ðŸŽ¯ Moving to safe position immediately...")
             screen_width, screen_height = pyautogui.size()
             safe_x = screen_width - random.randint(30, 80)
             safe_y = screen_height - random.randint(30, 80)
             pyautogui.moveTo(safe_x, safe_y, duration=random.uniform(0.3, 0.5))
-            print(f"✅ Mouse moved to safe corner: ({safe_x}, {safe_y})")
+            print(f"âœ… Mouse moved to safe corner: ({safe_x}, {safe_y})")
             
             return True
             
         except Exception as e:
-            print(f"❌ PyAutoGUI drag failed: {e}")
-            return False
-
-    def execute_carpet_bombing_fallback(self, target_slot, operation_type="return", use_cdp=False):
-        """
-        🎯 UNIVERSAL CARPET BOMBING: Tổng quát cho cả return và remix
-        Thực hiện carpet bombing theo từng đợt với kiểm tra sau mỗi đợt
-        """
-        try:
-            center_x, center_y = target_slot['x'], target_slot['y']
-            target_slot_index = target_slot.get('index', -1)
-            
-            print(f"\n🎯 CARPET BOMBING FALLBACK: {operation_type.upper()}")
-            print("="*60)
-            print(f"   🎯 Target: Slot {target_slot_index} at ({center_x}, {center_y})")
-            print(f"   🔄 Operation: {operation_type}")
-            
-            # Get initial state for verification
-            dual_verification_enabled = self.characters_available or self.putted_chars_available
-            if dual_verification_enabled:
-                initial_chars, initial_putted = self.get_dual_counts()
-                print(f"   📊 Initial state: Characters={initial_chars}, Putted={initial_putted}")
-            else:
-                initial_chars, initial_putted = None, None
-                print(f"   ⚠️ Verification disabled - assuming success after execution")
-            
-            # Configuration
-            max_sets = 6
-            base_coords_per_slot = 2
-            
-            for set_num in range(1, max_sets + 1):
-                if self.should_stop:
-                    break
-                    
-                print(f"\n🎯 CARPET SET {set_num}/{max_sets}")
-                print("-" * 40)
-                
-                # ✅ KHỞI TẠO BIẾN NGAY ĐẦU VÒNG LẶP
-                before_chars, before_putted = None, None
-                after_chars, after_putted = None, None
-                
-                # Calculate coordinates for this set
-                coords_per_slot = base_coords_per_slot + (set_num - 1)
-                print(f"   📍 Coordinates this set: {coords_per_slot}")
-                
-                # Generate carpet coordinates for single slot
-                carpet_coords = self.generate_slot_carpet_coordinates(
-                    center_x, center_y, coords_per_slot, set_num
-                )
-                
-                if not carpet_coords:
-                    print(f"   ❌ Could not generate coordinates for set {set_num}")
-                    continue
-                
-                print(f"   📊 Generated {len(carpet_coords)} carpet coordinates")
-                
-                # Get state before this set
-                if dual_verification_enabled:
-                    before_chars, before_putted = self.get_dual_counts()
-                
-                # Execute carpet bombing for this set
-                success = self.execute_carpet_bombing_set(
-                    carpet_coords, set_num, operation_type, use_cdp
-                )
-                
-                if not success:
-                    print(f"   ❌ Set {set_num} execution failed")
-                    continue
-                
-                # Wait for game state to update
-                time.sleep(0.5)
-                
-                # Check if operation succeeded after this set
-                if dual_verification_enabled:
-                    after_chars, after_putted = self.get_dual_counts()
-                    
-                    print(f"   📊 After set {set_num}: Characters={after_chars}, Putted={after_putted}")
-                    
-                    # Verify based on operation type
-                    operation_success = False
-                    if operation_type == "return":
-                        # ✅ BÂY GIỜ CÁC BIẾN ĐÃ ĐƯỢC KHỞI TẠO AN TOÀN
-                        operation_success = self.verify_return_success_dual(
-                            before_chars, after_chars, before_putted, after_putted
-                        )
-                    elif operation_type == "clear_all":
-                        # Expect zero for clear all
-                        operation_success = (after_chars == 0) if after_chars is not None else False
-                    
-                    if operation_success:
-                        print(f"🎉 CARPET BOMBING SUCCESS after set {set_num}!")
-                        print(f"   ✅ Operation: {operation_type}")
-                        print(f"   📊 Final state: Characters={after_chars}, Putted={after_putted}")
-                        return True
-                    else:
-                        print(f"   🔄 Set {set_num} completed but target not achieved, continuing...")
-                else:
-                    # No verification - assume success after reasonable number of sets
-                    if set_num >= 3:
-                        print(f"🎯 CARPET BOMBING ASSUMED SUCCESS after {set_num} sets (no verification)")
-                        return True
-                
-                # Brief pause between sets
-                time.sleep(0.3)
-            
-            # Final check after all sets
-            if dual_verification_enabled:
-                final_chars, final_putted = self.get_dual_counts()
-                
-                final_success = False
-                if operation_type == "return":
-                    final_success = self.verify_return_success_dual(
-                        initial_chars, final_chars, initial_putted, final_putted
-                    )
-                elif operation_type == "clear_all":
-                    final_success = (final_chars == 0) if final_chars is not None else False
-                
-                if final_success:
-                    print(f"🎉 CARPET BOMBING FINAL SUCCESS!")
-                    print(f"   ✅ Operation: {operation_type}")
-                    print(f"   📊 Final state: Characters={final_chars}, Putted={final_putted}")
-                    return True
-                else:
-                    print(f"💥 CARPET BOMBING FAILED after {max_sets} sets")
-                    print(f"   ❌ Operation: {operation_type}")
-                    print(f"   📊 Final state: Characters={final_chars}, Putted={final_putted}")
-                    return False
-            else:
-                print(f"🎯 CARPET BOMBING COMPLETED ({max_sets} sets executed)")
-                return True
-                
-        except Exception as e:
-            print(f"❌ Error in carpet bombing fallback: {e}")
-            return False
-
-    def generate_slot_carpet_coordinates(self, center_x, center_y, num_coords, set_num):
-        """
-        📍 Generate carpet coordinates for single slot
-        Tạo tọa độ trải thảm cho 1 slot theo pattern mở rộng dần
-        """
-        try:
-            coordinates = []
-            
-            # Always start with center
-            coordinates.append((center_x, center_y))
-            
-            if num_coords >= 2:
-                # Cross pattern first
-                offset = 15 + (set_num * 3)
-                coordinates.extend([
-                    (center_x - offset, center_y),  # Left
-                    (center_x + offset, center_y),  # Right
-                ])
-            
-            if num_coords >= 4:
-                # Add vertical
-                offset = 15 + (set_num * 3)
-                coordinates.extend([
-                    (center_x, center_y - offset),  # Top
-                    (center_x, center_y + offset), # Bottom
-                ])
-            
-            if num_coords >= 6:
-                # Add diagonals
-                offset = 12 + (set_num * 2)
-                coordinates.extend([
-                    (center_x - offset, center_y - offset),  # Top-left
-                    (center_x + offset, center_y - offset),  # Top-right
-                ])
-            
-            if num_coords >= 8:
-                # Add more diagonals
-                offset = 12 + (set_num * 2)
-                coordinates.extend([
-                    (center_x - offset, center_y + offset),  # Bottom-left
-                    (center_x + offset, center_y + offset),  # Bottom-right
-                ])
-            
-            # Fill remaining with circle pattern
-            while len(coordinates) < num_coords:
-                radius = 20 + (len(coordinates) * 5)
-                angle = (len(coordinates) * 45) % 360  # 45-degree steps
-                import math
-                jitter_x = int(radius * math.cos(math.radians(angle)))
-                jitter_y = int(radius * math.sin(math.radians(angle)))
-                coordinates.append((center_x + jitter_x, center_y + jitter_y))
-            
-            return coordinates[:num_coords]
-            
-        except Exception as e:
-            print(f"❌ Error generating carpet coordinates: {e}")
-            return [(center_x, center_y)]  # Fallback to center
-
-    def execute_carpet_bombing_set(self, coordinates, set_num, operation_type, use_cdp=False):
-        """
-        💥 Execute carpet bombing set with inter-click delays
-        """
-        try:
-            print(f"   💥 Executing carpet bombing set {set_num}: {len(coordinates)} clicks")
-            
-            successful_clicks = 0
-            domain_adj = self.get_domain_adjustments()
-            
-            for i, (click_x, click_y) in enumerate(coordinates):
-                if self.should_stop:
-                    break
-                
-                # Execute single click
-                click_success = self._execute_single_return_click(
-                    click_x, click_y, use_cdp, domain_adj
-                )
-                
-                if click_success:
-                    successful_clicks += 1
-                
-                # Small delay between clicks
-                time.sleep(0.03)
-            
-            print(f"   ✅ Set {set_num}: {successful_clicks}/{len(coordinates)} clicks successful")
-            return successful_clicks > 0
-            
-        except Exception as e:
-            print(f"   ❌ Error executing carpet set {set_num}: {e}")
+            print(f"âŒ PyAutoGUI drag failed: {e}")
             return False
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        🎯 SIMPLIFIED RETURN: Only 2 Phases - Precision Center + Carpet Bombing
-        STREAMLINED: Removed safe zone calculations, multi-method, emergency expansion
+        ðŸŽ¯ IMPROVED: 2-Phase Return vá»›i Sequential Carpet Bombing  
+        Phase 1: Precision Click trá»±c tiáº¿p vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
+        Phase 2: Sequential Carpet Bombing (same as remix cleanup)
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             target_slot_index = target_slot.get('index', -1)
-            domain_adj = self.get_domain_adjustments()
             
-            print(f"\n🎯 SIMPLIFIED RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
+            print(f"\nðŸŽ¯ 2-PHASE RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
             print("="*70)
             
             # Check if DUAL verification is available
             dual_verification_enabled = self.characters_available or self.putted_chars_available
             if dual_verification_enabled:
-                print("🔄 DUAL verification ENABLED:")
-                print(f"   📢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
-                print(f"   🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ N/A'}")
+                print("ðŸ”„ DUAL verification ENABLED:")
+                print(f"   ðŸ”¢ Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ N/A'}")
+                print(f"   ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ N/A'}")
             else:
-                print("⚠️ DUAL verification DISABLED - using fallback logic")
+                print("âš ï¸ DUAL verification DISABLED - using fallback logic")
             
             # ================================================================
             # PHASE 0: PRE-FLIGHT CHECK (Skip if already empty)
             # ================================================================
-            print("\n🔍 PHASE 0: PRE-FLIGHT CHECK")
+            print("\nðŸ” PHASE 0: PRE-FLIGHT CHECK")
             print("-" * 40)
             
             if dual_verification_enabled:
                 needs_return, initial_state, reason = self.check_slot_needs_return(target_slot_index)
                 
                 if not needs_return:
-                    print(f"✅ PHASE 0 RESULT: Slot {target_slot_index} doesn't need return ({reason})")
-                    print("🚀 EARLY EXIT: Return operation skipped successfully")
+                    print(f"âœ… PHASE 0 RESULT: Slot {target_slot_index} doesn't need return ({reason})")
+                    print("ðŸš€ EARLY EXIT: Return operation skipped successfully")
                     print("="*70)
                     return True
                 else:
-                    print(f"🎯 PHASE 0 RESULT: Slot {target_slot_index} needs return ({reason})")
+                    print(f"ðŸŽ¯ PHASE 0 RESULT: Slot {target_slot_index} needs return ({reason})")
             else:
-                print("⚠️ Pre-flight check skipped (verification disabled)")
-            
-            success = False
-            phase_used = "none"
+                print("âš ï¸ Pre-flight check skipped (verification disabled)")
             
             # ================================================================
-            # PHASE 1: PRECISION CENTER ATTACK
+            # PHASE 1: PRECISION CLICK vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
             # ================================================================
-            print(f"\n🎯 PHASE 1: PRECISION CENTER")
+            print(f"\nðŸŽ¯ PHASE 1: PRECISION CLICK")
             print("-" * 40)
             
-            center_coords = [(center_x, center_y)]
+            phase1_success = self.execute_precision_return_click(target_slot, use_cdp, dual_verification_enabled)
+            
+            if phase1_success:
+                print("ðŸŽ‰ PHASE 1 SUCCESS: Precision click worked!")
+                print("="*70)
+                return True
+            else:
+                print("âŒ PHASE 1 FAILED: Precision click unsuccessful")
+            
+            # ================================================================
+            # PHASE 2: SEQUENTIAL CARPET BOMBING (same as remix cleanup)
+            # ================================================================
+            if not self.should_stop:
+                print(f"\nðŸ’¥ PHASE 2: SEQUENTIAL CARPET BOMBING")
+                print("-" * 40)
+                print("   ðŸŽ¯ Using SAME logic as remix cleanup...")
+                print("   ðŸ’¥ Progressive slot-by-slot carpet bombing")
+                
+                phase2_success = self.execute_remix_style_sequential_carpet_bombing_for_return(use_cdp)
+                
+                if phase2_success:
+                    print("ðŸŽ‰ PHASE 2 SUCCESS: Sequential carpet bombing worked!")
+                    print("="*70)
+                    return True
+                else:
+                    print("ðŸ’¥ PHASE 2 FAILED: Sequential carpet bombing unsuccessful")
+            
+            # ================================================================
+            # FINAL RESULT
+            # ================================================================
+            print("\n" + "="*70)
+            print(f"ðŸ’¥ 2-PHASE RETURN FAILED - BOTH PHASES EXHAUSTED")
+            print(f"   âŒ Target slot: {target_slot_index}")
+            print(f"   âŒ Phase 1 (Precision Click): FAILED")
+            print(f"   âŒ Phase 2 (Sequential Carpet Bombing): FAILED") 
+            print(f"   ðŸ”„ DUAL verification: {'âœ… Enabled' if dual_verification_enabled else 'âš ï¸ Disabled'}")
+            print("="*70)
+            return False
+                    
+        except Exception as e:
+            print(f"âŒ 2-Phase return error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def execute_precision_return_click(self, target_slot, use_cdp, dual_verification_enabled):
+        """
+        ðŸŽ¯ PHASE 1: Execute precision click trá»±c tiáº¿p vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
+        """
+        try:
+            center_x, center_y = target_slot['x'], target_slot['y']
+            domain_adj = self.get_domain_adjustments()
+            
+            print(f"   ðŸŽ¯ Method: Single precision click at exact coordinates")
+            print(f"   ðŸ“ Target: ({center_x}, {center_y})")
             
             # Get DUAL counts BEFORE return
             characters_before, putted_before = None, None
             if dual_verification_enabled:
                 characters_before, putted_before = self.get_dual_counts()
-                print(f"📊 DUAL counts BEFORE return:")
-                print(f"   📢 Characters: {characters_before}")
-                print(f"   🎯 Putted: {putted_before}")
+                print(f"ðŸ“Š DUAL counts BEFORE return:")
+                print(f"   ðŸ”¢ Characters: {characters_before}")
+                print(f"   ðŸŽ¯ Putted: {putted_before}")
             
-            # Try single click on center
-            print("   🔹 Method: Precision single click")
+            # Execute single precision click
+            center_coords = [(center_x, center_y)]
             self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
             
             # Wait and verify
@@ -6184,86 +6028,84 @@ class SprunkiGamePlayer:
             
             if dual_verification_enabled:
                 characters_after, putted_after = self.get_dual_counts()
-                print(f"📊 DUAL counts AFTER return:")
-                print(f"   📢 Characters: {characters_after}")
-                print(f"   🎯 Putted: {putted_after}")
+                print(f"ðŸ“Š DUAL counts AFTER return:")
+                print(f"   ðŸ”¢ Characters: {characters_after}")
+                print(f"   ðŸŽ¯ Putted: {putted_after}")
                 
                 if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                    print("🎉 PHASE 1 SUCCESS: Precision center click worked!")
-                    success = True
-                    phase_used = "phase_1_precision_center"
+                    print("ðŸŽ‰ PRECISION CLICK SUCCESS: DUAL verification passed!")
+                    return True
                 else:
-                    print(f"❌ Phase 1 failed: DUAL verification failed")
+                    print(f"âŒ Precision click failed: DUAL verification failed")
+                    return False
             else:
                 # No verification - assume success
-                print("✅ Phase 1 assumed success (no verification)")
-                success = True
-                phase_used = "phase_1_assumed"
-            
-            # Try double click if single failed
-            if not success and not self.should_stop and dual_verification_enabled:
-                print("   🔹 Method: Precision double click")
-                
-                characters_before, putted_before = self.get_dual_counts()
-                self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="double")
-                
-                time.sleep(verification_wait)
-                characters_after, putted_after = self.get_dual_counts()
-                
-                if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                    print("🎉 PHASE 1 SUCCESS: Precision double click worked!")
-                    success = True
-                    phase_used = "phase_1_precision_double"
-                else:
-                    print(f"❌ Phase 1 double click also failed")
-            
-            # ================================================================
-            # PHASE 2: CARPET BOMBING FALLBACK
-            # ================================================================
-            if not success and not self.should_stop:
-                print(f"\n💥 PHASE 2: CARPET BOMBING FALLBACK")
-                print("-" * 40)
-                print("   🎯 Precision methods failed, deploying carpet bombing...")
-                print("   💥 Progressive coordinate expansion with set-by-set verification")
-                
-                carpet_success = self.execute_carpet_bombing_fallback(
-                    target_slot, operation_type="return", use_cdp=use_cdp
-                )
-                
-                if carpet_success:
-                    print("🎉 PHASE 2 SUCCESS: Carpet bombing fallback worked!")
-                    success = True
-                    phase_used = "phase_2_carpet_bombing"
-                else:
-                    print("💥 PHASE 2 FAILED: Carpet bombing fallback unsuccessful")
-            
-            # ================================================================
-            # FINAL RESULT
-            # ================================================================
-            print("\n" + "="*70)
-            if success:
-                print(f"🎉 SIMPLIFIED RETURN COMPLETED SUCCESSFULLY!")
-                print(f"   ✅ Target slot: {target_slot_index}")
-                print(f"   ✅ Success method: {phase_used}")
-                print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
-                print(f"   📊 Verification systems: Characters Array {'✅' if self.characters_available else '❌'} + Putted Characters {'✅' if self.putted_chars_available else '❌'}")
-                if "carpet_bombing" in phase_used:
-                    print(f"   💥 Used fallback: CARPET BOMBING (highly reliable)")
-                print("="*70)
+                print("âœ… Precision click assumed success (no verification)")
                 return True
-            else:
-                print(f"💥 SIMPLIFIED RETURN FAILED - BOTH PHASES EXHAUSTED")
-                print(f"   ❌ Target slot: {target_slot_index}")
-                print(f"   ❌ Phase 1 (Precision Center): FAILED")
-                print(f"   ❌ Phase 2 (Carpet Bombing): FAILED") 
-                print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
-                print("="*70)
-                return False
                 
         except Exception as e:
-            print(f"❌ Simplified return error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"âŒ Error in precision return click: {e}")
+            return False
+
+    def execute_remix_style_sequential_carpet_bombing_for_return(self, use_cdp=False):
+        """
+        ðŸ’¥ PHASE 2: REUSE exact logic from remix cleanup for return operation
+        Sequential carpet bombing: slot 0 â†’ slot 1 â†’ slot 2 â†’ ... â†’ cuá»‘i
+        Progressive sets: 2â†’3â†’4â†’5â†’6... coordinates per slot
+        """
+        try:
+            print(f"\nðŸ’¥ SEQUENTIAL CARPET BOMBING FOR RETURN")
+            print("="*60)
+            print("   ðŸ”„ REUSING: Same logic as remix cleanup")
+            print("   ðŸŽ¯ Strategy: Sequential slot-by-slot processing")
+            
+            # Get configuration
+            if not self.config:
+                print("âŒ No config available for carpet bombing")
+                return False
+                    
+            all_slots = self.config.get('layout', {}).get('slots', [])
+            if not all_slots:
+                print("âŒ No slots configuration found")
+                return False
+            
+            # Sort slots for sequential processing (same as remix)
+            sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
+            print(f"   ðŸŽ¯ Will process {len(sorted_slots)} slots sequentially")
+            
+            # Get initial count for verification
+            dual_verification_enabled = self.characters_available or self.putted_chars_available
+            initial_count = None
+            
+            if dual_verification_enabled:
+                characters_count, putted_count = self.get_dual_counts()
+                initial_count = characters_count if characters_count is not None else putted_count
+                
+                if initial_count == 0:
+                    print("   âœ… Already clean - no carpet bombing needed")
+                    return True
+                
+                print(f"   ðŸ“Š Icons to clear: {initial_count}")
+            else:
+                print("   âš ï¸ Verification disabled - assuming carpet bombing needed")
+            
+            # Execute SAME sequential carpet bombing as remix cleanup
+            success = self.execute_sequential_carpet_bombing_sets(
+                sorted_slots, initial_count, use_cdp
+            )
+            
+            if success:
+                print("ðŸŽ‰ SEQUENTIAL CARPET BOMBING SUCCESS!")
+                print("   âœ… Return operation completed via carpet bombing")
+                print("   ðŸ”„ Used SAME reliable logic as remix cleanup")
+            else:
+                print("ðŸ’¥ SEQUENTIAL CARPET BOMBING FAILED")
+                print("   âŒ Even carpet bombing could not clear the slots")
+            
+            return success
+            
+        except Exception as e:
+            print(f"âŒ Error in sequential carpet bombing for return: {e}")
             return False
 
     def _execute_cdp_return(self, center_x, center_y, domain_adj):
@@ -6274,7 +6116,7 @@ class SprunkiGamePlayer:
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            # ✅ NO VARIATION: Use exact coordinates
+            # âœ… NO VARIATION: Use exact coordinates
             # Move and click
             self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": center_x, "y": center_y}})
             time.sleep(0.1)
@@ -6286,11 +6128,11 @@ class SprunkiGamePlayer:
             return_wait = 0.4 * domain_adj['stability_factor']
             time.sleep(return_wait)
             
-            print("✅ CDP return completed")
+            print("âœ… CDP return completed")
             return True
             
         except Exception as e:
-            print(f"❌ CDP return failed: {e}")
+            print(f"âŒ CDP return failed: {e}")
             return False
 
     def _execute_pyautogui_return(self, click_x, click_y, domain_adj):
@@ -6299,13 +6141,13 @@ class SprunkiGamePlayer:
 
     def _execute_pyautogui_single_click(self, click_x, click_y, domain_adj):
         try:
-            print(f"🖱️ Executing PyAutoGUI single click at ({click_x}, {click_y})")
+            print(f"ðŸ–±ï¸ Executing PyAutoGUI single click at ({click_x}, {click_y})")
             
-            # 🔧 SAFE: Ensure focus before click (use light focus để tránh click nhầm)
+            # ðŸ”§ SAFE: Ensure focus before click (use light focus Ä‘á»ƒ trÃ¡nh click nháº§m)
             self._ensure_focus_before_operation("single click", focus_type="light")
             
-            # ✅ NO VARIATION: Use exact coordinates
-            pyautogui.moveTo(click_x, click_y, duration=0.15)  # ← CHÍNH XÁC 100%
+            # âœ… NO VARIATION: Use exact coordinates
+            pyautogui.moveTo(click_x, click_y, duration=0.15)  # â† CHÃNH XÃC 100%
             time.sleep(0.1)
             
             # Single click
@@ -6315,11 +6157,11 @@ class SprunkiGamePlayer:
             click_wait = 0.2 * domain_adj['stability_factor']
             time.sleep(click_wait)
             
-            print("✅ PyAutoGUI single click completed")
+            print("âœ… PyAutoGUI single click completed")
             return True
             
         except Exception as e:
-            print(f"❌ PyAutoGUI single click failed: {e}")
+            print(f"âŒ PyAutoGUI single click failed: {e}")
             return False
 
     # ================================================================
@@ -6330,33 +6172,43 @@ class SprunkiGamePlayer:
         """ENHANCED: Showcase single icon with verification system"""
         try:
             if not self.config:
-                print("❌ No config loaded")
+                print("âŒ No config loaded")
                 return False
                 
             layout = self.config['layout']
             icons = layout['icons']
             
             if icon_index >= len(icons):
-                print(f"❌ Icon index {icon_index} does not exist")
+                print(f"âŒ Icon index {icon_index} does not exist")
                 return False
             
             # Find target slot (index 3)
             target_slot = self._find_slot_by_index(3)
             if not target_slot:
-                print("❌ Could not find slot index 3")
+                print("âŒ Could not find slot index 3")
                 return False
             
             current_icon = icons[icon_index]
-            emoji = "👻" if mode == "Horror" else "🎪"
+            emoji = "ðŸ‘»" if mode == "Horror" else "ðŸŽª"
             
             if progress_callback:
                 progress_callback(f"{emoji} Showcasing {mode} icon {icon_index + 1}")
             
             print(f"\n{emoji} STARTING ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
             print("="*60)
-            
-            # PHASE 1: ENHANCED DRAG & DROP with verification
-            print("🎯 PHASE 1: Enhanced Drag & Drop with verification...")
+
+            # ðŸ†• PHASE 0: FAST SHOWCASE CLEANUP (chá»‰ cho showcase mode)
+            print("ðŸ§¹ PHASE 0: Fast Showcase Cleanup...")
+            if progress_callback:
+                progress_callback(f"ðŸ§¹ Quick cleanup before {mode} icon {icon_index + 1}")
+
+            cleanup_start = time.time()
+            self.execute_fast_showcase_cleanup()
+            cleanup_time = time.time() - cleanup_start
+            print(f"âœ… Fast cleanup completed in {cleanup_time:.1f}s")
+
+            # PHASE 1: ENHANCED DRAG & DROP with verification  
+            print("ðŸŽ¯ PHASE 1: Enhanced Drag & Drop with verification...")
             is_first_icon = (icon_index == 0 and mode == "Normal")
             
             # Use CDP for first icon, PyAutoGUI for others (can be customized)
@@ -6365,28 +6217,28 @@ class SprunkiGamePlayer:
             drag_success = self.corrected_drag_and_drop(current_icon, target_slot, is_first_icon, use_cdp)
             
             if not drag_success:
-                print(f"❌ Failed to drag icon {icon_index} with verification")
+                print(f"âŒ Failed to drag icon {icon_index} with verification")
                 return False
             
             if self.should_stop:
                 return False
             
             # PHASE 2: LISTEN TO MUSIC
-            print(f"🎵 PHASE 2: Listening to music for {listen_duration}s...")
+            print(f"ðŸŽµ PHASE 2: Listening to music for {listen_duration}s...")
             for countdown in range(listen_duration, 0, -1):
                 if self.should_stop:
                     return False
                 if progress_callback:
-                    progress_callback(f"🎵 Listening {mode} icon {icon_index + 1} ({countdown}s)")
+                    progress_callback(f"ðŸŽµ Listening {mode} icon {icon_index + 1} ({countdown}s)")
                 time.sleep(1)
             
             if self.should_stop:
                 return False
             
             # PHASE 3: SMART RETURN WITH AUTO-RECOVERY
-            print("🔄 PHASE 3: Smart returning with auto-recovery...")
+            print("ðŸ”„ PHASE 3: Smart returning with auto-recovery...")
             if progress_callback:
-                progress_callback(f"↺ Smart returning {mode} icon {icon_index + 1}")
+                progress_callback(f"â†º Smart returning {mode} icon {icon_index + 1}")
 
             # PHASE 4: Enhanced return with auto-recovery
             operation_context = f"showcase_{mode}_icon_{icon_index}"
@@ -6396,35 +6248,187 @@ class SprunkiGamePlayer:
 
             if return_success:
                 # STREAMLINED: Quick validation without extra delays
-                print(f"✅ Icon {icon_index + 1} returned successfully")
+                print(f"âœ… Icon {icon_index + 1} returned successfully")
                 
                 # Optional: Quick state check without comprehensive validation
                 if self.characters_available:
                     quick_count = self.get_characters_count()
                     if quick_count == 0:
-                        print(f"   📊 Validation: Characters count = 0 (perfect)")
+                        print(f"   ðŸ“Š Validation: Characters count = 0 (perfect)")
                     else:
-                        print(f"   ⚠️ Validation: Characters count = {quick_count} (may need cleanup)")
+                        print(f"   âš ï¸ Validation: Characters count = {quick_count} (may need cleanup)")
             else:
-                print(f"⚠️ Warning: Failed to return icon {icon_index}")
+                print(f"âš ï¸ Warning: Failed to return icon {icon_index}")
                 
                 # STREAMLINED: Quick emergency cleanup only if needed
                 if self.characters_available:
                     emergency_count = self.get_characters_count()
-                    if emergency_count is not None and emergency_count > 0:  # ✅ Kiểm tra None trước
-                        print(f"🚨 Quick emergency cleanup attempt...")
+                    if emergency_count is not None and emergency_count > 0:  # âœ… Kiá»ƒm tra None trÆ°á»›c
+                        print(f"ðŸš¨ Quick emergency cleanup attempt...")
                         self._execute_emergency_return_click(target_slot)
 
             # OPTIMIZED: Reduce stabilization delay
             time.sleep(0.1)  # Reduced from 0.3s to 0.1s
             
-            print(f"✅ COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
+            print(f"âœ… COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
             print("="*60)
             return True
             
         except Exception as e:
-            print("❌ Error in enhanced showcase icon " + str(icon_index) + ": " + str(e))
+            print("âŒ Error in enhanced showcase icon " + str(icon_index) + ": " + str(e))
             return False
+
+    def execute_fast_showcase_cleanup(self):
+            """
+            ðŸš€ FAST: Optimized carpet bombing cho showcase mode
+            - Early exit náº¿u Ä‘Ã£ clean
+            - Reduced timing cho UX mÆ°á»£t mÃ   
+            - Limited sets (chá»‰ 2-3 sets thay vÃ¬ 6)
+            - Faster delays
+            """
+            try:
+                print(f"\nðŸ§¹ FAST SHOWCASE CLEANUP (Intelligent Safety Net)")
+                print("-" * 40)
+                
+                ### Lá»›p 3 - "Kiá»ƒm tra trÆ°á»›c, dá»n dáº¹p sau" ###
+                
+                # BÆ°á»›c 1: LuÃ´n kiá»ƒm tra state trÆ°á»›c tiÃªn
+                dual_verification_enabled = self.characters_available or self.putted_chars_available
+                initial_count = None
+
+                if dual_verification_enabled:
+                    characters_count, putted_count = self.get_dual_counts()
+                    initial_count = characters_count if characters_count is not None else putted_count
+                    
+                    # BÆ°á»›c 2: Ra quyáº¿t Ä‘á»‹nh
+                    if initial_count == 0:
+                        print("   âœ… Board is already clean. Skipping cleanup.")
+                        print("   âš¡ Fast exit executed in ~0.2s.")
+                        return True # ÄÃ¢y lÃ  lá»‘i thoÃ¡t nhanh, giÃºp tÄƒng tá»‘c Ä‘á»™
+                    
+                    print(f"   âš ï¸ Board is not clean! Found {initial_count} icon(s). Activating safety net...")
+                else:
+                    print("   âš ï¸ Verification disabled - proceeding with precautionary carpet bombing.")
+                
+                ### Káº¾T THÃšC Lá»›p 3 ###
+
+                # Pháº§n code carpet bombing dÆ°á»›i Ä‘Ã¢y chá»‰ Ä‘Æ°á»£c thá»±c thi Náº¾U bÃ n cá» khÃ´ng sáº¡ch.
+                print("   ðŸŽ¯ Activating full cleanup logic...")
+
+                # Get configuration
+                if not self.config:
+                    print("   âŒ No config - skipping")
+                    return True
+                        
+                all_slots = self.config.get('layout', {}).get('slots', [])
+                if not all_slots:
+                    print("   âŒ No slots - skipping")
+                    return True
+                
+                # Sort slots for sequential processing
+                sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
+                
+                # ðŸš€ SHOWCASE-OPTIMIZED SETTINGS
+                showcase_config = {
+                    'max_sets': 3,
+                    'base_coords_per_slot': 2,
+                    'inter_click_delay': 0.02,
+                    'inter_slot_delay': 0.8,
+                    'inter_set_delay': 0.2
+                }
+                
+                print(f"   âš¡ FAST mode: {showcase_config['max_sets']} sets, {len(sorted_slots)} slots")
+                print(f"   â±ï¸ Estimated time: ~{self.estimate_cleanup_time(len(sorted_slots), showcase_config)}s")
+                
+                # Execute fast carpet bombing
+                success = self.execute_fast_carpet_bombing_sets(
+                    sorted_slots, initial_count, showcase_config, use_cdp=False
+                )
+                
+                if success:
+                    print("   âœ… Fast cleanup completed!")
+                else:
+                    print("   âš ï¸ Fast cleanup incomplete - continuing anyway")
+                
+                return True  # LuÃ´n tráº£ vá» True Ä‘á»ƒ khÃ´ng block showcase
+                
+            except Exception as e:
+                print(f"   âŒ Fast cleanup error: {e}")
+                return True  # LuÃ´n tráº£ vá» True Ä‘á»ƒ khÃ´ng block showcase
+
+    def execute_fast_carpet_bombing_sets(self, sorted_slots, initial_count, config, use_cdp=False):
+        """
+        âš¡ Execute fast carpet bombing with reduced timing for showcase
+        """
+        try:
+            max_sets = config['max_sets']
+            base_coords = config['base_coords_per_slot']
+            
+            for set_num in range(1, max_sets + 1):
+                if self.should_stop:
+                    break
+                    
+                print(f"   ðŸ’¥ Fast set {set_num}/{max_sets}")
+                
+                # Check if already clean
+                if self.characters_available or self.putted_chars_available:
+                    current_chars, current_putted = self.get_dual_counts()
+                    current_count = current_chars if current_chars is not None else current_putted
+                    
+                    if current_count == 0:
+                        print(f"   âœ… Clean after set {set_num} - early exit!")
+                        return True
+                
+                # Generate coordinates for this set
+                coords_per_slot = base_coords + (set_num - 1)
+                
+                # Execute all slots in this set
+                for slot in sorted_slots:
+                    if self.should_stop:
+                        break
+                        
+                    # Generate coordinates for this slot
+                    slot_coords = self.generate_slot_coordinates(
+                        slot['x'], slot['y'], coords_per_slot, set_num
+                    )
+                    
+                    # Execute clicks for this slot
+                    for coord_x, coord_y in slot_coords:
+                        self._execute_single_return_click(
+                            coord_x, coord_y, use_cdp, self.get_domain_adjustments()
+                        )
+                        time.sleep(config['inter_click_delay'])
+                    
+                    # Fast inter-slot delay
+                    time.sleep(config['inter_slot_delay'])
+                
+                # Fast inter-set delay
+                time.sleep(config['inter_set_delay'])
+            
+            return True
+            
+        except Exception as e:
+            print(f"   âŒ Fast carpet bombing error: {e}")
+            return False
+
+    def estimate_cleanup_time(self, num_slots, config):
+        """
+        â±ï¸ Estimate cleanup time for user feedback
+        """
+        try:
+            sets = config['max_sets']
+            avg_coords_per_slot = 2.5  # Average of 2,3,4 coords
+            
+            # Calculate components
+            click_time = num_slots * avg_coords_per_slot * config['inter_click_delay'] * sets
+            slot_delays = (num_slots - 1) * config['inter_slot_delay'] * sets  
+            set_delays = (sets - 1) * config['inter_set_delay']
+            
+            total = click_time + slot_delays + set_delays
+            return round(total, 1)
+            
+        except:
+            return 5  # Fallback estimate
 
     # ================================================================
     # == EXISTING GAME LOGIC (kept as-is with small adaptations) ==
@@ -6470,12 +6474,12 @@ class SprunkiGamePlayer:
         try:
             selected_icons = []
             
-            # 🎯 NEW: Create icon_groups based on LIMITED icons (0-19)
+            # ðŸŽ¯ NEW: Create icon_groups based on LIMITED icons (0-18)
             limited_icon_groups = {
-                'beats': list(range(0, min(5, 20))),      # 0-4 (limited to 20)
-                'effects': list(range(5, min(10, 20))),   # 5-9 (limited to 20)  
-                'melodies': list(range(10, min(15, 20))), # 10-14 (limited to 20)
-                'vocals': list(range(15, min(20, 20)))    # 15-19 (limited to 20)
+                'beats': list(range(0, min(5, 19))),      # 0-4
+                'effects': list(range(5, min(10, 19))),   # 5-9
+                'melodies': list(range(10, min(15, 19))), # 10-14
+                'vocals': list(range(15, min(19, 19)))    # 15-18
             }
             
             icon_groups_to_use = limited_icon_groups.copy()
@@ -6483,9 +6487,9 @@ class SprunkiGamePlayer:
             if avoid_horror_icon:
                 # Remove icon 19 from vocals group (15-19 -> 15-18)
                 icon_groups_to_use['vocals'] = list(range(15, 19))  # Remove index 19
-                print(f"🚨 Avoiding horror icon (19) for normal mode remix")
+                print(f"ðŸš¨ Avoiding horror icon (19) for normal mode remix")
             
-            print(f"🎯 Using limited icon groups (0-19): {icon_groups_to_use}")
+            print(f"ðŸŽ¯ Using limited icon groups (0-19): {icon_groups_to_use}")
             
             for group_name, count in [('beats', pattern['beats']), 
                                     ('effects', pattern['effects']),
@@ -6526,36 +6530,36 @@ class SprunkiGamePlayer:
     def prepare_game_for_playing(self):
         """Prepare game for playing with enhanced setup"""
         try:
-            print("🎯 Preparing game for enhanced workflow...")
+            print("ðŸŽ¯ Preparing game for enhanced workflow...")
             
             # Clean mouse state
             self.ensure_mouse_released()
             
             # Warm-up first icon
-            if self.config is not None:  # ✅ Kiểm tra config không None
+            if self.config is not None:  # âœ… Kiá»ƒm tra config khÃ´ng None
                 layout = self.config['layout']
                 if layout['icons']:
                     first_icon = layout['icons'][0]
-                    print("🎯 Warming up first icon...")
+                    print("ðŸŽ¯ Warming up first icon...")
                     
-                    # ✅ DI CHUYỂN TẤT CẢ CODE VÀO TRONG KHỐI IF
-                    warm_x, warm_y = first_icon['x'], first_icon['y']  # ← Bây giờ an toàn
+                    # âœ… DI CHUYá»‚N Táº¤T Cáº¢ CODE VÃ€O TRONG KHá»I IF
+                    warm_x, warm_y = first_icon['x'], first_icon['y']  # â† BÃ¢y giá» an toÃ n
                     
                     pyautogui.moveTo(warm_x, warm_y, duration=random.uniform(0.3, 0.5))
                     self.smart_delay(0.3, 0.1)
                     
-                    # Micro-movement - CŨNG CHÍNH XÁC
-                    offset_x, offset_y = warm_x + 8, warm_y + 8  # ← Bây giờ an toàn
+                    # Micro-movement - CÅ¨NG CHÃNH XÃC
+                    offset_x, offset_y = warm_x + 8, warm_y + 8  # â† BÃ¢y giá» an toÃ n
                     pyautogui.moveTo(offset_x, offset_y, duration=0.15)
                     self.smart_delay(0.2, 0.05)
-                    pyautogui.moveTo(warm_x, warm_y, duration=0.15)  # ← Bây giờ an toàn
+                    pyautogui.moveTo(warm_x, warm_y, duration=0.15)  # â† BÃ¢y giá» an toÃ n
                     self.smart_delay(0.3, 0.1)
                 else:
-                    print("⚠️ No icons available for warm-up")
+                    print("âš ï¸ No icons available for warm-up")
             else:
-                print("⚠️ Config not loaded, skipping warm-up")
+                print("âš ï¸ Config not loaded, skipping warm-up")
             
-            print("✅ Game preparation completed with enhanced workflow!")
+            print("âœ… Game preparation completed with enhanced workflow!")
             
         except Exception as e:
             print("Error in game preparation: " + str(e))
@@ -6576,10 +6580,10 @@ class SprunkiGamePlayer:
             # LIMIT TO FIRST 20 ICONS (INDEX 0-19)
             limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 19]
             
-            print(f"\n🎯 ICON LIMITATION APPLIED:")
-            print(f"   📊 Original icons: {len(all_icons)}")
-            print(f"   🎯 Limited to first 20: {len(limited_icons)} (index 0-19)")
-            print(f"   ✅ Filtered out: {len(all_icons) - len(limited_icons)} icons (index 20+)")
+            print(f"\nðŸŽ¯ ICON LIMITATION APPLIED:")
+            print(f"   ðŸ“Š Original icons: {len(all_icons)}")
+            print(f"   ðŸŽ¯ Limited to first 20: {len(limited_icons)} (index 0-19)")
+            print(f"   âœ… Filtered out: {len(all_icons) - len(limited_icons)} icons (index 20+)")
             
             # Use limited_icons instead of all_icons for range calculation
             icons = limited_icons
@@ -6587,17 +6591,17 @@ class SprunkiGamePlayer:
             # Determine icon range (EXISTING LOGIC PRESERVED)
             if mode == "Normal" and skip_icon_19:
                 icon_range = range(len(icons) - 1)  # 0-18, skip icon 19
-                print(f"   🎪 Normal mode (hasHorror=true): Using icons 0-18, skipping icon 19")
+                print(f"   ðŸŽª Normal mode (hasHorror=true): Using icons 0-18, skipping icon 19")
             else:
                 icon_range = range(len(icons))  # 0-19 or 0-18 depending on limited_icons
-                print(f"   🎪 {mode} mode: Using all limited icons 0-{len(icons)-1}")
+                print(f"   ðŸŽª {mode} mode: Using all limited icons 0-{len(icons)-1}")
             
-            print(f"\nðŸŽª STARTING ENHANCED {mode.upper()} SHOWCASE")
-            print(f"📊 Will showcase {len(icon_range)} icons with verification system")
+            print(f"\nÃ°Å¸Å½Âª STARTING ENHANCED {mode.upper()} SHOWCASE")
+            print(f"ðŸ“Š Will showcase {len(icon_range)} icons with verification system")
             if self.characters_available:
-                print("🔍 Drag verification: ENABLED")
+                print("ðŸ” Drag verification: ENABLED")
             else:
-                print("⚠️ Drag verification: DISABLED (fallback mode)")
+                print("âš ï¸ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
             success_count = 0
@@ -6608,15 +6612,15 @@ class SprunkiGamePlayer:
                 if self.showcase_single_icon_corrected(icon_index, mode, listen_duration, progress_callback):
                     success_count += 1
                 else:
-                    print(f"⚠️ Failed to showcase icon {icon_index}")
+                    print(f"âš ï¸ Failed to showcase icon {icon_index}")
             
-            print(f"\nâœ… ENHANCED {mode.upper()} SHOWCASE COMPLETED")
-            print(f"📊 Success: {success_count}/{len(icon_range)} icons")
+            print(f"\nÃ¢Å“â€¦ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
+            print(f"ðŸ“Š Success: {success_count}/{len(icon_range)} icons")
             print("="*60)
             return success_count == len(icon_range)
             
         except Exception as e:
-            print("❌ Error in enhanced " + mode + " showcase: " + str(e))
+            print("âŒ Error in enhanced " + mode + " showcase: " + str(e))
             return False
 
     def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
@@ -6632,38 +6636,38 @@ class SprunkiGamePlayer:
             remix_name = remix_data.get('name', 'Unknown Remix')
             remix_icons = remix_data.get('icons', [])
             
-            emoji = "🎵" if mode == "Test" else ("👻" if mode == "Horror" else "🎪")
+            emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             
             print(f"\n{emoji} STARTING ENHANCED REMIX: {remix_name}")
             if self.characters_available:
-                print("🔍 Verification system ENABLED for all drags")
+                print("ðŸ” Verification system ENABLED for all drags")
             else:
-                print("⚠️ Verification system DISABLED - using fallback")
+                print("âš ï¸ Verification system DISABLED - using fallback")
             print("="*60)
             
             # Phase 1: Drag all icons to slots with verification
-            print("🎯 PHASE 1: Dragging all icons to slots with verification...")
+            print("ðŸŽ¯ PHASE 1: Dragging all icons to slots with verification...")
             for slot_position, icon_index in enumerate(remix_icons):
                 if self.should_stop:
                     return False
                 
                 # Validate indices
                 if icon_index >= len(icons) or slot_position >= len(slots):
-                    print(f"⚠️ Invalid index: icon {icon_index} or slot {slot_position}")
+                    print(f"âš ï¸ Invalid index: icon {icon_index} or slot {slot_position}")
                     continue
                 
                 current_icon = icons[icon_index]
                 target_slot = slots[slot_position]
                 
                 if progress_callback:
-                    progress_callback(f"{emoji} {remix_name}: Icon {icon_index} → Slot {slot_position}")
+                    progress_callback(f"{emoji} {remix_name}: Icon {icon_index} â†’ Slot {slot_position}")
                 
-                print(f"  🎯 Dragging icon {icon_index} to slot {slot_position} with verification...")
+                print(f"  ðŸŽ¯ Dragging icon {icon_index} to slot {slot_position} with verification...")
                 
                 # Use enhanced drag with verification
                 use_cdp = False  # Can be customized
                 if not self.corrected_drag_and_drop(current_icon, target_slot, False, use_cdp):
-                    print(f"  ❌ Failed to drag icon {icon_index} with verification")
+                    print(f"  âŒ Failed to drag icon {icon_index} with verification")
                     continue
                 
                 # Short delay between drags
@@ -6673,50 +6677,50 @@ class SprunkiGamePlayer:
                 return False
             
             # Phase 2: Listen to remix music
-            print(f"🎶 PHASE 2: Enjoying remix for {listen_duration}s...")
+            print(f"ðŸŽ¶ PHASE 2: Enjoying remix for {listen_duration}s...")
             if progress_callback:
-                progress_callback(f"🎶 Enjoying {remix_name}")
+                progress_callback(f"ðŸŽ¶ Enjoying {remix_name}")
             
             for countdown in range(listen_duration, 0, -1):
                 if self.should_stop:
                     return False
                 if progress_callback:
-                    progress_callback(f"🎶 Enjoying {remix_name} ({countdown}s)")
+                    progress_callback(f"ðŸŽ¶ Enjoying {remix_name} ({countdown}s)")
                 time.sleep(1)
             
             if self.should_stop:
                 return False
             
             # Phase 3: Smart batch return with mode detection
-            print("🔄 PHASE 3: Smart batch returning with mode detection...")
+            print("ðŸ”„ PHASE 3: Smart batch returning with mode detection...")
             if progress_callback:
-                progress_callback(f"🧹 Smart cleanup {remix_name}")
+                progress_callback(f"ðŸ§¹ Smart cleanup {remix_name}")
 
             # Set explicit remix mode for batch operations
             self.set_return_mode_explicit(self.RETURN_MODE_REMIX, f"remix_cleanup_{len(remix_icons)}_icons")
 
-            print(f"  🔄 Using mode-aware batch return for {len(remix_icons)} icons...")
+            print(f"  ðŸ”„ Using mode-aware batch return for {len(remix_icons)} icons...")
 
             # Use smart batch return with mode awareness
             success_count, total_attempted, error_log = self.smart_batch_return_all_slots_with_mode(use_cdp=False)
 
             if success_count == total_attempted:
-                print(f"  ✅ Smart batch return: {success_count}/{total_attempted} icons returned successfully")
+                print(f"  âœ… Smart batch return: {success_count}/{total_attempted} icons returned successfully")
             else:
-                print(f"  ⚠️ Smart batch return: {success_count}/{total_attempted} icons returned")
+                print(f"  âš ï¸ Smart batch return: {success_count}/{total_attempted} icons returned")
                 if error_log:
-                    print(f"  📋 Errors: {len(error_log)} issues encountered")
+                    print(f"  ðŸ“‹ Errors: {len(error_log)} issues encountered")
                     # Continue anyway, don't fail the entire remix
 
             # Brief stabilization pause
             time.sleep(0.5)
             
-            print(f"✅ COMPLETED ENHANCED REMIX: {remix_name}")
+            print(f"âœ… COMPLETED ENHANCED REMIX: {remix_name}")
             print("="*60)
             return True
             
         except Exception as e:
-            print("❌ Error in enhanced remix " + remix_data.get('name', 'Unknown') + ": " + str(e))
+            print("âŒ Error in enhanced remix " + remix_data.get('name', 'Unknown') + ": " + str(e))
             return False
 
     def execute_full_showcase_workflow_corrected(self, progress_callback=None):
@@ -6729,16 +6733,16 @@ class SprunkiGamePlayer:
             has_horror = game_settings.get('hasHorror', False)
             has_bonus = game_settings.get('hasBonus', False)
             
-            print("\n🎪 STARTING ENHANCED FULL SHOWCASE WORKFLOW")
+            print("\nðŸŽª STARTING ENHANCED FULL SHOWCASE WORKFLOW")
             if self.characters_available:
-                print("🔍 Drag verification system: ENABLED")
+                print("ðŸ” Drag verification system: ENABLED")
             else:
-                print("⚠️ Drag verification system: DISABLED (fallback mode)")
+                print("âš ï¸ Drag verification system: DISABLED (fallback mode)")
             print("="*60)
             
             # === NORMAL MODE ===
             if progress_callback:
-                progress_callback("🎪 Starting Enhanced Normal Mode...")
+                progress_callback("ðŸŽª Starting Enhanced Normal Mode...")
             
             # Normal icons (skip icon 19 if horror mode exists)
             if not self.showcase_all_icons_corrected("Normal", skip_icon_19=has_horror, progress_callback=progress_callback):
@@ -6773,68 +6777,68 @@ class SprunkiGamePlayer:
                     return False
             
             if progress_callback:
-                progress_callback("🎉 Enhanced full showcase workflow completed!")
+                progress_callback("ðŸŽ‰ Enhanced full showcase workflow completed!")
 
-            print("\n🎉 ENHANCED FULL SHOWCASE WORKFLOW COMPLETED!")
+            print("\nðŸŽ‰ ENHANCED FULL SHOWCASE WORKFLOW COMPLETED!")
             print(self.get_drag_statistics())
 
             # ================================================================
-            # 🧹 FINAL SMART CLEANUP & VALIDATION
+            # ðŸ§¹ FINAL SMART CLEANUP & VALIDATION
             # ================================================================
-            print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
+            print("\nðŸ§¹ FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
             print("="*70)
 
             try:
                 # Smart batch cleanup validation - ensure all slots are clean
-                print("🔄 Phase 1: Smart batch cleanup validation...")
+                print("ðŸ”„ Phase 1: Smart batch cleanup validation...")
                 cleanup_success_count, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
                 
                 if cleanup_total == 0:
-                    print("✅ No cleanup needed - all slots already clean")
+                    print("âœ… No cleanup needed - all slots already clean")
                 elif cleanup_success_count == cleanup_total:
-                    print(f"✅ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned perfectly")
+                    print(f"âœ… Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned perfectly")
                 else:
-                    print(f"⚠️ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned")
+                    print(f"âš ï¸ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned")
                     if cleanup_errors:
-                        print(f"   📋 Cleanup issues: {len(cleanup_errors)} errors")
+                        print(f"   ðŸ“‹ Cleanup issues: {len(cleanup_errors)} errors")
                         for error in cleanup_errors[:2]:  # Show first 2 errors
                             print(f"      - {error}")
                 
                 # Comprehensive workflow validation
-                print("\n🔍 Phase 2: Comprehensive workflow validation...")
+                print("\nðŸ” Phase 2: Comprehensive workflow validation...")
                 is_complete, remaining_issues, recommendations = self.validate_workflow_completion()
                 
                 if is_complete:
-                    print("✅ WORKFLOW VALIDATION: PERFECT COMPLETION! 🎉")
-                    print("   🛡️ All slots clean")
-                    print("   📊 State consistency verified")
-                    print("   🎯 Cross-contamination: NONE")
+                    print("âœ… WORKFLOW VALIDATION: PERFECT COMPLETION! ðŸŽ‰")
+                    print("   ðŸ›¡ï¸ All slots clean")
+                    print("   ðŸ“Š State consistency verified")
+                    print("   ðŸŽ¯ Cross-contamination: NONE")
                 else:
-                    print(f"⚠️ WORKFLOW VALIDATION: {len(remaining_issues)} issues detected")
-                    print("📋 Issues found:")
+                    print(f"âš ï¸ WORKFLOW VALIDATION: {len(remaining_issues)} issues detected")
+                    print("ðŸ“‹ Issues found:")
                     for issue in remaining_issues[:3]:  # Show first 3 issues
-                        print(f"   ❌ {issue}")
+                        print(f"   âŒ {issue}")
                     
                     if recommendations:
-                        print("💡 Recommendations:")
+                        print("ðŸ’¡ Recommendations:")
                         for rec in recommendations[:2]:  # Show first 2 recommendations
-                            print(f"   💡 {rec}")
+                            print(f"   ðŸ’¡ {rec}")
                 
                 # Enhanced summary
-                print("\n📊 ENHANCED WORKFLOW SUMMARY:")
+                print("\nðŸ“Š ENHANCED WORKFLOW SUMMARY:")
                 summary = self.get_enhanced_workflow_summary()
                 print(summary)
                 
             except Exception as e:
-                print(f"⚠️ Error during final validation: {e}")
-                print("📊 Basic statistics:")
+                print(f"âš ï¸ Error during final validation: {e}")
+                print("ðŸ“Š Basic statistics:")
                 print(self.get_drag_statistics())
 
             print("="*70)
             return True
             
         except Exception as e:
-            print("❌ Error in enhanced full showcase workflow: " + str(e))
+            print("âŒ Error in enhanced full showcase workflow: " + str(e))
             return False
 
     def showcase_all_bonus_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
@@ -6850,15 +6854,15 @@ class SprunkiGamePlayer:
             limited_bonus = []
             for bonus in all_bonus_chars:
                 bonus_index = bonus.get('index', 0)  # Default to 0 if no index
-                if bonus_index <= 19:
+                if bonus_index <= 18:
                     limited_bonus.append(bonus)
             
-            print(f"\n🎯 BONUS LIMITATION APPLIED:")
-            print(f"   📊 Original bonus: {len(all_bonus_chars)}")
-            print(f"   🎯 Limited bonus: {len(limited_bonus)} (index ≤19)")
+            print(f"\nðŸŽ¯ BONUS LIMITATION APPLIED:")
+            print(f"   ðŸ“Š Original bonus: {len(all_bonus_chars)}")
+            print(f"   ðŸŽ¯ Limited bonus: {len(limited_bonus)} (index â‰¤19)")
             
             if not limited_bonus:
-                print(f"ℹ️ No bonus characters for {mode} mode (after limitation)")
+                print(f"â„¹ï¸ No bonus characters for {mode} mode (after limitation)")
                 return True
             
             bonus_chars = limited_bonus
@@ -6867,13 +6871,13 @@ class SprunkiGamePlayer:
             if not target_slot:
                 return False
             
-            emoji = "🎁" if mode == "Normal" else "👻"
+            emoji = "ðŸŽ" if mode == "Normal" else "ðŸ‘»"
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} BONUS SHOWCASE")
-            print(f"📊 Will showcase {len(bonus_chars)} bonus characters")
+            print(f"ðŸ“Š Will showcase {len(bonus_chars)} bonus characters")
             if self.characters_available:
-                print("🔍 Drag verification: ENABLED")
+                print("ðŸ” Drag verification: ENABLED")
             else:
-                print("⚠️ Drag verification: DISABLED (fallback mode)")
+                print("âš ï¸ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
             success_count = 0
@@ -6889,53 +6893,53 @@ class SprunkiGamePlayer:
                 # Drag bonus to slot with enhanced verification
                 use_cdp = False  # Can be customized
                 if not self.corrected_drag_and_drop(bonus_char, target_slot, False, use_cdp):
-                    print(f"❌ Failed to drag bonus {bonus_index} with verification")
+                    print(f"âŒ Failed to drag bonus {bonus_index} with verification")
                     continue
                 
                 if self.should_stop:
                     break
                 
                 # Listen to music
-                print(f"🎵 Listening to bonus {bonus_index + 1} for {listen_duration}s...")
+                print(f"ðŸŽµ Listening to bonus {bonus_index + 1} for {listen_duration}s...")
                 for countdown in range(listen_duration, 0, -1):
                     if self.should_stop:
                         break
                     if progress_callback:
-                        progress_callback(f"🎵 Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
+                        progress_callback(f"ðŸŽµ Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
                     time.sleep(1)
                 
                 if self.should_stop:
                     break
                 
                 # Return bonus
-                print(f"🔄 Returning bonus {bonus_index + 1}...")
+                print(f"ðŸ”„ Returning bonus {bonus_index + 1}...")
                 self.corrected_return_icon(target_slot, use_cdp)
                 time.sleep(0.2)
                 success_count += 1
             
-            print(f"\n✅ ENHANCED {mode.upper()} BONUS SHOWCASE COMPLETED")
-            print(f"📊 Success: {success_count}/{len(bonus_chars)} characters")
+            print(f"\nâœ… ENHANCED {mode.upper()} BONUS SHOWCASE COMPLETED")
+            print(f"ðŸ“Š Success: {success_count}/{len(bonus_chars)} characters")
             print("="*60)
             return success_count == len(bonus_chars)
             
         except Exception as e:
-            print("❌ Error in enhanced " + mode + " bonus showcase: " + str(e))
+            print("âŒ Error in enhanced " + mode + " bonus showcase: " + str(e))
             return False
     
     def play_all_remixes_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
         """ENHANCED: Play all remixes with verification system"""
         try:
             if not self.remix_library:
-                print("ℹ️ No remixes in library")
+                print("â„¹ï¸ No remixes in library")
                 return True
             
-            emoji = "🎵" if mode == "Test" else ("👻" if mode == "Horror" else "🎪")
+            emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} REMIX SESSION")
-            print(f"📊 Will play {len(self.remix_library)} remixes")
+            print(f"ðŸ“Š Will play {len(self.remix_library)} remixes")
             if self.characters_available:
-                print("🔍 Drag verification: ENABLED for all remix drags")
+                print("ðŸ” Drag verification: ENABLED for all remix drags")
             else:
-                print("⚠️ Drag verification: DISABLED (fallback mode)")
+                print("âš ï¸ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
             success_count = 0
@@ -6951,19 +6955,19 @@ class SprunkiGamePlayer:
                 if self.play_complete_remix_corrected(remix, mode, listen_duration, progress_callback):
                     success_count += 1
                 else:
-                    print(f"⚠️ Failed to play remix: {remix['name']}")
+                    print(f"âš ï¸ Failed to play remix: {remix['name']}")
                 
                 # Delay between remixes
                 if remix_index < len(self.remix_library) - 1 and not self.should_stop:
                     time.sleep(2.0)
             
-            print(f"\n✅ ENHANCED {mode.upper()} REMIX SESSION COMPLETED")
-            print(f"📊 Success: {success_count}/{len(self.remix_library)} remixes")
+            print(f"\nâœ… ENHANCED {mode.upper()} REMIX SESSION COMPLETED")
+            print(f"ðŸ“Š Success: {success_count}/{len(self.remix_library)} remixes")
             print("="*60)
             return success_count == len(self.remix_library)
             
         except Exception as e:
-            print("❌ Error in enhanced " + mode + " remix session: " + str(e))
+            print("âŒ Error in enhanced " + mode + " remix session: " + str(e))
             return False
     
     def trigger_horror_mode_transition_corrected(self, transition_duration=15, progress_callback=None):
@@ -6978,20 +6982,20 @@ class SprunkiGamePlayer:
             layout = self.config['layout']
             all_icons = layout['icons']
             
-            # 🎯 NEW: LIMIT TO FIRST 20 ICONS
-            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 19]
+            # ðŸŽ¯ NEW: LIMIT TO FIRST 20 ICONS
+            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 18]
             icons = limited_icons
             
             # Check if icon 19 exists in limited set
             icon_19_exists = any(icon.get('index') == 19 for icon in icons)
             
             if not icon_19_exists:
-                print("❌ Icon 19 not found in limited icon set (0-19)")
+                print("âŒ Icon 19 not found in limited icon set (0-19)")
                 return False
             
-            print(f"🎯 HORROR MODE TRIGGER - Using limited icons (0-19)")
-            print(f"   📊 Limited icons available: {len(icons)}")
-            print(f"   👻 Icon 19 found: ✅")
+            print(f"ðŸŽ¯ HORROR MODE TRIGGER - Using limited icons (0-19)")
+            print(f"   ðŸ“Š Limited icons available: {len(icons)}")
+            print(f"   ðŸ‘» Icon 19 found: âœ…")
             
             # Get icon index 19 from limited set
             horror_icon = next(icon for icon in icons if icon.get('index') == 19)
@@ -7002,62 +7006,62 @@ class SprunkiGamePlayer:
                 return False
             
             if progress_callback:
-                progress_callback("👻 Triggering Horror Mode with verification...")
+                progress_callback("ðŸ‘» Triggering Horror Mode with verification...")
             
-            print("\n👻 TRIGGERING ENHANCED HORROR MODE TRANSITION...")
+            print("\nðŸ‘» TRIGGERING ENHANCED HORROR MODE TRANSITION...")
             if self.characters_available:
-                print("🔍 Using verification for horror icon drag")
+                print("ðŸ” Using verification for horror icon drag")
             else:
-                print("⚠️ Verification disabled - using fallback")
+                print("âš ï¸ Verification disabled - using fallback")
             print("="*60)
             
             # ================================================================
             # PHASE 1: DRAG ICON 19 TO SLOT 3 (trigger horror mode)
             # ================================================================
-            print("🎯 PHASE 1: Dragging horror icon (19) to slot 3 with verification...")
+            print("ðŸŽ¯ PHASE 1: Dragging horror icon (19) to slot 3 with verification...")
             use_cdp = False  # Can be customized
             if not self.corrected_drag_and_drop(horror_icon, target_slot, False, use_cdp):
-                print("❌ Failed to trigger horror mode with verification")
+                print("âŒ Failed to trigger horror mode with verification")
                 return False
             
             # ================================================================
             # PHASE 2: WAIT FOR TRANSFORMATION
             # ================================================================
-            print(f"⏳ PHASE 2: Waiting for horror transformation ({transition_duration}s)...")
+            print(f"â³ PHASE 2: Waiting for horror transformation ({transition_duration}s)...")
             for countdown in range(transition_duration, 0, -1):
                 if self.should_stop:
                     return False
                 if progress_callback:
-                    progress_callback(f"👻 Horror mode transition... ({countdown}s)")
+                    progress_callback(f"ðŸ‘» Horror mode transition... ({countdown}s)")
                 time.sleep(1)
             
             if self.should_stop:
                 return False
             
-            print("✅ ENHANCED HORROR MODE TRANSITION COMPLETED!")
+            print("âœ… ENHANCED HORROR MODE TRANSITION COMPLETED!")
             
             # ================================================================
-            # PHASE 3: 🆕 RETURN ICON 19 FROM SLOT 3 (clear slot for showcase)
+            # PHASE 3: ðŸ†• RETURN ICON 19 FROM SLOT 3 (clear slot for showcase)
             # ================================================================
-            print("\n🔄 PHASE 3: RETURNING ICON 19 FROM SLOT 3 (prepare for showcase)")
+            print("\nðŸ”„ PHASE 3: RETURNING ICON 19 FROM SLOT 3 (prepare for showcase)")
             print("="*60)
-            print("   💡 Reason: Slot 3 must be empty for horror showcase to work")
-            print("   🎯 Target: Return Icon 19 from Slot 3 back to icon area")
+            print("   ðŸ’¡ Reason: Slot 3 must be empty for horror showcase to work")
+            print("   ðŸŽ¯ Target: Return Icon 19 from Slot 3 back to icon area")
             
             if progress_callback:
-                progress_callback("🔄 Returning horror trigger icon for showcase...")
+                progress_callback("ðŸ”„ Returning horror trigger icon for showcase...")
             
             # Check current state before return
             dual_verification_enabled = self.characters_available or self.putted_chars_available
             if dual_verification_enabled:
                 before_chars, before_putted = self.get_dual_counts()
-                print(f"   📊 BEFORE return: Characters={before_chars}, Putted={before_putted}")
+                print(f"   ðŸ“Š BEFORE return: Characters={before_chars}, Putted={before_putted}")
                 
                 if before_chars == 0 and before_putted == 0:
-                    print("   ✅ Slot already empty - no return needed")
-                    print("   🎯 Horror mode ready for showcase immediately")
+                    print("   âœ… Slot already empty - no return needed")
+                    print("   ðŸŽ¯ Horror mode ready for showcase immediately")
                 else:
-                    print(f"   🎯 Slot occupied - returning icon 19...")
+                    print(f"   ðŸŽ¯ Slot occupied - returning icon 19...")
                     
                     # Use enhanced return with all fallback methods
                     return_success = self.corrected_return_icon(target_slot, use_cdp)
@@ -7066,20 +7070,20 @@ class SprunkiGamePlayer:
                         # Verify return worked
                         time.sleep(1.0)  # Wait for state update
                         after_chars, after_putted = self.get_dual_counts()
-                        print(f"   📊 AFTER return: Characters={after_chars}, Putted={after_putted}")
+                        print(f"   ðŸ“Š AFTER return: Characters={after_chars}, Putted={after_putted}")
                         
                         if after_chars == 0 and after_putted == 0:
-                            print("   ✅ RETURN SUCCESSFUL: Slot 3 is now empty")
-                            print("   🎯 Horror mode ready for showcase")
+                            print("   âœ… RETURN SUCCESSFUL: Slot 3 is now empty")
+                            print("   ðŸŽ¯ Horror mode ready for showcase")
                         else:
-                            print("   ⚠️ RETURN UNCLEAR: State may not be fully cleared")
-                            print("   🎯 Proceeding with showcase anyway")
+                            print("   âš ï¸ RETURN UNCLEAR: State may not be fully cleared")
+                            print("   ðŸŽ¯ Proceeding with showcase anyway")
                     else:
-                        print("   ❌ RETURN FAILED: Using emergency methods...")
+                        print("   âŒ RETURN FAILED: Using emergency methods...")
                         
                         # Emergency cleanup attempts
                         for emergency_attempt in range(3):
-                            print(f"   🚨 Emergency return attempt {emergency_attempt + 1}/3")
+                            print(f"   ðŸš¨ Emergency return attempt {emergency_attempt + 1}/3")
                             
                             # Multiple clicks on slot 3
                             emergency_coords = [
@@ -7097,24 +7101,24 @@ class SprunkiGamePlayer:
                             # Check if emergency worked
                             emergency_chars, emergency_putted = self.get_dual_counts()
                             if emergency_chars == 0 and emergency_putted == 0:
-                                print(f"   ✅ EMERGENCY SUCCESS: Slot cleared on attempt {emergency_attempt + 1}")
+                                print(f"   âœ… EMERGENCY SUCCESS: Slot cleared on attempt {emergency_attempt + 1}")
                                 break
                         else:
-                            print("   💥 ALL EMERGENCY ATTEMPTS FAILED")
-                            print("   ⚠️ Proceeding with showcase - may have slot conflicts")
+                            print("   ðŸ’¥ ALL EMERGENCY ATTEMPTS FAILED")
+                            print("   âš ï¸ Proceeding with showcase - may have slot conflicts")
             else:
-                print("   ⚠️ Verification disabled - assuming icon return needed")
-                print("   🔄 Performing blind return attempt...")
+                print("   âš ï¸ Verification disabled - assuming icon return needed")
+                print("   ðŸ”„ Performing blind return attempt...")
                 
                 # Blind return attempt
                 self.corrected_return_icon(target_slot, use_cdp)
                 time.sleep(1.0)
-                print("   ✅ Blind return completed")
+                print("   âœ… Blind return completed")
             
             # ================================================================
             # HORROR MODE STATE VALIDATION (existing code with better logging)
             # ================================================================
-            print("\n👻 HORROR MODE STATE VALIDATION")
+            print("\nðŸ‘» HORROR MODE STATE VALIDATION")
             print("="*50)
             
             try:
@@ -7124,99 +7128,99 @@ class SprunkiGamePlayer:
                 if horror_state and dual_verification_enabled:
                     characters_count = horror_state.get('characters_count', 0)
                     
-                    print(f"📊 Final horror mode state:")
+                    print(f"ðŸ“Š Final horror mode state:")
                     print(f"   Characters count: {characters_count}")
                     
                     # Expect 0 after return (slot should be empty for showcase)
                     if characters_count == 0:
-                        print("✅ Horror mode properly prepared - slot empty for showcase")
-                        print("🎯 Ready to showcase all horror icons (0-19)")
+                        print("âœ… Horror mode properly prepared - slot empty for showcase")
+                        print("ðŸŽ¯ Ready to showcase all horror icons (0-19)")
                     else:
-                        print(f"⚠️ Horror mode state: {characters_count} icons still on slots")
-                        print("🎯 Proceeding anyway - showcase will handle conflicts")
+                        print(f"âš ï¸ Horror mode state: {characters_count} icons still on slots")
+                        print("ðŸŽ¯ Proceeding anyway - showcase will handle conflicts")
                 else:
-                    print("⚠️ Cannot validate horror mode state (verification disabled)")
-                    print("🎯 Assuming horror mode ready")
+                    print("âš ï¸ Cannot validate horror mode state (verification disabled)")
+                    print("ðŸŽ¯ Assuming horror mode ready")
                 
             except Exception as e:
-                print(f"⚠️ Error validating horror mode state: {e}")
-                print("🎯 Assuming horror mode ready")
+                print(f"âš ï¸ Error validating horror mode state: {e}")
+                print("ðŸŽ¯ Assuming horror mode ready")
             
             print("="*50)
             
             # Final confirmation
             if progress_callback:
-                progress_callback("👻 Horror Mode ready for showcase!")
+                progress_callback("ðŸ‘» Horror Mode ready for showcase!")
             
-            print("🎉 ENHANCED HORROR MODE FULLY PREPARED!")
-            print("   ✅ Phase 1: Horror trigger completed")
-            print("   ✅ Phase 2: Transformation completed") 
-            print("   ✅ Phase 3: Icon return completed")
-            print("   🎯 Ready for horror showcase (icons 0-19)")
+            print("ðŸŽ‰ ENHANCED HORROR MODE FULLY PREPARED!")
+            print("   âœ… Phase 1: Horror trigger completed")
+            print("   âœ… Phase 2: Transformation completed") 
+            print("   âœ… Phase 3: Icon return completed")
+            print("   ðŸŽ¯ Ready for horror showcase (icons 0-19)")
             
             time.sleep(1.0)
             return True
             
         except Exception as e:
-            print("❌ Error triggering enhanced horror mode: " + str(e))
+            print("âŒ Error triggering enhanced horror mode: " + str(e))
             return False
     
     def execute_remix_only_workflow_corrected(self, progress_callback=None):
         """ENHANCED: Remix-only workflow with verification system"""
         try:
             if progress_callback:
-                progress_callback("🎵 Starting enhanced remix-only workflow...")
+                progress_callback("ðŸŽµ Starting enhanced remix-only workflow...")
             
-            print("\n🎵 STARTING ENHANCED REMIX-ONLY WORKFLOW")
+            print("\nðŸŽµ STARTING ENHANCED REMIX-ONLY WORKFLOW")
             if self.characters_available:
-                print("🔍 Drag verification: ENABLED for all remixes")
+                print("ðŸ” Drag verification: ENABLED for all remixes")
             else:
-                print("⚠️ Drag verification: DISABLED (fallback mode)")
+                print("âš ï¸ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
             success = self.play_all_remixes_corrected("Test", progress_callback=progress_callback)
             
             if success:
                 if progress_callback:
-                    progress_callback("🎉 Enhanced remix-only workflow completed!")
-                print("\n🎉 ENHANCED REMIX-ONLY WORKFLOW COMPLETED!")
+                    progress_callback("ðŸŽ‰ Enhanced remix-only workflow completed!")
+                print("\nðŸŽ‰ ENHANCED REMIX-ONLY WORKFLOW COMPLETED!")
                 
                 # ================================================================
-                # 🧹 REMIX-ONLY SMART CLEANUP & VALIDATION
+                # ðŸ§¹ REMIX-ONLY SMART CLEANUP & VALIDATION
                 # ================================================================
-                print("\n🧹 REMIX-ONLY SMART CLEANUP & VALIDATION")
+                print("\nðŸ§¹ REMIX-ONLY SMART CLEANUP & VALIDATION")
                 print("="*60)
                 
                 try:
                     # Smart cleanup for remix-only mode
-                    print("🔄 Smart batch cleanup for remix-only mode...")
+                    print("ðŸ”„ Smart batch cleanup for remix-only mode...")
                     cleanup_success_count, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
                     
                     if cleanup_total == 0:
-                        print("✅ No remix cleanup needed - all slots clean")
+                        print("âœ… No remix cleanup needed - all slots clean")
                     elif cleanup_success_count == cleanup_total:
-                        print(f"✅ Remix cleanup: {cleanup_success_count}/{cleanup_total} perfect")
+                        print(f"âœ… Remix cleanup: {cleanup_success_count}/{cleanup_total} perfect")
                     else:
-                        print(f"⚠️ Remix cleanup: {cleanup_success_count}/{cleanup_total} with issues")
+                        print(f"âš ï¸ Remix cleanup: {cleanup_success_count}/{cleanup_total} with issues")
                     
                     # Remix-specific validation
                     is_complete, remaining_issues, recommendations = self.validate_workflow_completion()
                     
                     if is_complete:
-                        print("✅ REMIX VALIDATION: PERFECT! All remixes cleaned properly")
+                        print("âœ… REMIX VALIDATION: PERFECT! All remixes cleaned properly")
                     else:
-                        print(f"⚠️ REMIX VALIDATION: {len(remaining_issues)} cleanup issues")
+                        print(f"âš ï¸ REMIX VALIDATION: {len(remaining_issues)} cleanup issues")
                         for issue in remaining_issues[:2]:
                             print(f"   - {issue}")
                     
                     # Enhanced remix summary
-                    print("\n📊 ENHANCED REMIX WORKFLOW STATS:")
+                    print("\nðŸ“Š ENHANCED REMIX WORKFLOW STATS:")
                     summary = self.get_enhanced_workflow_summary()
                     print(summary)
                     
                 except Exception as e:
-                    print(f"⚠️ Error during remix validation: {e}")
-                    print("📊 Basic remix statistics:")
+                    print(f"âš ï¸ Error during remix validation: {e}")
+                    print("ðŸ“Š Basic remix statistics:")
                     print(self.get_drag_statistics())
                 
                 print("="*60)
@@ -7224,7 +7228,7 @@ class SprunkiGamePlayer:
             return success
             
         except Exception as e:
-            print("❌ Error in enhanced remix-only workflow: " + str(e))
+            print("âŒ Error in enhanced remix-only workflow: " + str(e))
             return False
 
     # ================================================================
@@ -7272,26 +7276,26 @@ class SprunkiGamePlayer:
         self.status_var = StringVar()
         self.status_var.set("Config not loaded")
         self.action_var = StringVar()
-        self.action_var.set("🚀 Ready for ENHANCED workflow with Smart Verification...")
+        self.action_var.set("ðŸš€ Ready for ENHANCED workflow with Smart Verification...")
         
         # Header
         Label(self.root, text="Sprunki Game Player", font=("Arial", 16, "bold")).pack(pady=10)
-        Label(self.root, text="🎮 ENHANCED: Chrome Debug + Characters Array Verification + Smart Page Verification 🚀", 
+        Label(self.root, text="ðŸŽ® ENHANCED: Chrome Debug + Characters Array Verification + Smart Page Verification ðŸš€", 
             font=("Arial", 12), fg="green").pack()
         
         # Enhanced workflow info
         enhanced_info_frame = Frame(self.root, bg="#E8F5E8", relief="ridge", bd=1)
         enhanced_info_frame.pack(fill="x", padx=10, pady=5)
         
-        Label(enhanced_info_frame, text="⚡ ENHANCED WORKFLOW:", 
+        Label(enhanced_info_frame, text="âš¡ ENHANCED WORKFLOW:", 
             font=("Arial", 10, "bold"), bg="#E8F5E8", fg="#2E7D32").pack(anchor="w", padx=10, pady=(5,2))
         
-        enhanced_features = """✅ Characters Array Verification: Count "1" values in Characters Array for accurate state
-        ✅ 5-Coordinate Retry: Center → Left → Right → Top → Bottom positions for each icon
-        ✅ Smart Fallback: Auto-fallback to PyAutoGUI if CDP verification fails
-        ✅ Enhanced Statistics: Track verification success rate and coordinate usage
-        ✅ Game-Aware: Real-time monitoring of Characters Array state
-        ✅ Intelligent Retry: Return icon and retry at different coordinate if verification fails"""
+        enhanced_features = """âœ… Characters Array Verification: Count "1" values in Characters Array for accurate state
+        âœ… 5-Coordinate Retry: Center â†’ Left â†’ Right â†’ Top â†’ Bottom positions for each icon
+        âœ… Smart Fallback: Auto-fallback to PyAutoGUI if CDP verification fails
+        âœ… Enhanced Statistics: Track verification success rate and coordinate usage
+        âœ… Game-Aware: Real-time monitoring of Characters Array state
+        âœ… Intelligent Retry: Return icon and retry at different coordinate if verification fails"""
         
         Label(enhanced_info_frame, text=enhanced_features, justify="left",
             font=("Arial", 8), fg="#1B5E20", bg="#E8F5E8").pack(anchor="w", padx=15, pady=(0,5))
@@ -7300,15 +7304,15 @@ class SprunkiGamePlayer:
         verification_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
         verification_frame.pack(fill="x", padx=10, pady=5)
         
-        Label(verification_frame, text="🔢 CHARACTERS ARRAY SYSTEM:", 
+        Label(verification_frame, text="ðŸ”¢ CHARACTERS ARRAY SYSTEM:", 
             font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
         
-        verification_text = """🔢 Characters Array Monitoring: Real-time tracking of character placement state
-        🎯 Count-Based Verification: Count "1" values in array = number of icons on slots
-        ⚡ Stable Across Mods: Works reliably on all game modifications
-        🎮 High Performance: Direct VM access with optimized JavaScript functions
-        📊 Accurate State: No dependency on unreliable Putted Characters or Polos Array
-        🔄 Real-Time Updates: Instant detection of drag/return operations"""
+        verification_text = """ðŸ”¢ Characters Array Monitoring: Real-time tracking of character placement state
+        ðŸŽ¯ Count-Based Verification: Count "1" values in array = number of icons on slots
+        âš¡ Stable Across Mods: Works reliably on all game modifications
+        ðŸŽ® High Performance: Direct VM access with optimized JavaScript functions
+        ðŸ“Š Accurate State: No dependency on unreliable Putted Characters or Polos Array
+        ðŸ”„ Real-Time Updates: Instant detection of drag/return operations"""
         
         Label(verification_frame, text=verification_text, justify="left",
             font=("Arial", 8), fg="#0D47A1", bg="#E3F2FD").pack(anchor="w", padx=15, pady=(0,5))
@@ -7317,15 +7321,15 @@ class SprunkiGamePlayer:
         detection_frame = Frame(self.root, bg="#FFF3E0", relief="ridge", bd=1)
         detection_frame.pack(fill="x", padx=10, pady=5)
         
-        Label(detection_frame, text="🖼️ ENHANCED IMAGE DETECTION:", 
+        Label(detection_frame, text="ðŸ–¼ï¸ ENHANCED IMAGE DETECTION:", 
             font=("Arial", 10, "bold"), bg="#FFF3E0", fg="#E65100").pack(anchor="w", padx=10, pady=(5,2))
         
-        detection_text = """🎯 Smart Auto-Scroll: Automatic PageDown if Run/Fullscreen buttons not in viewport
-        🔍 Multi-Scale Detection: Test multiple scale factors for button recognition
-        🎪 Domain-Optimized: Specific adjustments for cocrea.world game timing
-        🔍 Template Matching: Advanced CV2 image matching with confidence thresholds
-        🔄 Retry Logic: Multiple attempts with different scroll positions
-        ⚙️ Config-Driven: All detection parameters configurable via config.json"""
+        detection_text = """ðŸŽ¯ Smart Auto-Scroll: Automatic PageDown if Run/Fullscreen buttons not in viewport
+        ðŸ” Multi-Scale Detection: Test multiple scale factors for button recognition
+        ðŸŽª Domain-Optimized: Specific adjustments for cocrea.world game timing
+        ðŸ” Template Matching: Advanced CV2 image matching with confidence thresholds
+        ðŸ”„ Retry Logic: Multiple attempts with different scroll positions
+        âš™ï¸ Config-Driven: All detection parameters configurable via config.json"""
         
         Label(detection_frame, text=detection_text, justify="left",
             font=("Arial", 8), fg="#BF360C", bg="#FFF3E0").pack(anchor="w", padx=15, pady=(0,5))
@@ -7334,87 +7338,87 @@ class SprunkiGamePlayer:
         mode_frame = Frame(self.root)
         mode_frame.pack(pady=10)
         
-        Label(mode_frame, text="🎯 Select play mode:", font=("Arial", 11, "bold")).pack()
+        Label(mode_frame, text="ðŸŽ¯ Select play mode:", font=("Arial", 11, "bold")).pack()
         
-        Radiobutton(mode_frame, text="🔀 Showcase + Remix (ENHANCED)", 
+        Radiobutton(mode_frame, text="ðŸ”€ Showcase + Remix (ENHANCED)", 
                 variable=self.mode, value=1, font=("Arial", 10)).pack(anchor="w")
         
-        Radiobutton(mode_frame, text="🎵 Remix Only (ENHANCED)", 
+        Radiobutton(mode_frame, text="ðŸŽµ Remix Only (ENHANCED)", 
                 variable=self.mode, value=2, font=("Arial", 10)).pack(anchor="w")
         
         # Debug frame with Characters Array System
         debug_frame = Frame(self.root, bg="#E3F2FD", relief="ridge", bd=1)
         debug_frame.pack(fill="x", padx=10, pady=5)
         
-        Label(debug_frame, text="🔧 DEBUG TOOLS:", 
+        Label(debug_frame, text="ðŸ”§ DEBUG TOOLS:", 
             font=("Arial", 10, "bold"), bg="#E3F2FD", fg="#1565C0").pack(anchor="w", padx=10, pady=(5,2))
         
         debug_buttons = Frame(debug_frame, bg="#E3F2FD")
         debug_buttons.pack(fill="x", padx=10, pady=(0,5))
         
-        Button(debug_buttons, text="📊 Enhanced Stats", 
+        Button(debug_buttons, text="ðŸ“Š Enhanced Stats", 
             command=self.show_drag_stats, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left")
         
-        Button(debug_buttons, text="🌐 Test WebSocket", 
+        Button(debug_buttons, text="ðŸŒ Test WebSocket", 
             command=self.test_websocket_connection, bg="#FF9800", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
         
-        Button(debug_buttons, text="🔢 Test Characters Array", 
+        Button(debug_buttons, text="ðŸ”¢ Test Characters Array", 
             command=self.test_verification_system, bg="#9C27B0", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
         
-        Button(debug_buttons, text="⚡ Test Smart Verification", 
+        Button(debug_buttons, text="âš¡ Test Smart Verification", 
             command=self.test_smart_verification_system, bg="#2196F3", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
 
-        Button(debug_buttons, text="🎯 Check Mode", 
+        Button(debug_buttons, text="ðŸŽ¯ Check Mode", 
             command=self.show_current_mode_info, bg="#607D8B", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
 
-        Button(debug_buttons, text="🎨 Grid Info", 
+        Button(debug_buttons, text="ðŸŽ¨ Grid Info", 
             command=self.show_carpet_grid_info, bg="#795548", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
 
-        Button(debug_buttons, text="🧪 Test Carpet", 
+        Button(debug_buttons, text="ðŸ§ª Test Carpet", 
             command=self.show_carpet_bombing_test_results, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
 
         # Remix info display
         self.display_remix_library_info()
         
         # Main button
-        Button(self.root, text="🔢 Load JSON & Start ENHANCED Auto with Characters Array Verification", 
+        Button(self.root, text="ðŸ”¢ Load JSON & Start ENHANCED Auto with Characters Array Verification", 
             command=self.load_config_and_start, 
             bg="#4CAF50", fg="white", font=("Arial", 12, "bold")).pack(pady=15)
         
         # Status
-        Label(self.root, text="📊 Status:").pack(pady=(20,5))
+        Label(self.root, text="ðŸ“Š Status:").pack(pady=(20,5))
         Label(self.root, textvariable=self.status_var, fg="blue").pack()
         
         # Instructions with Characters Array System
         instruction_text = """
-    🎯 ENHANCED WORKFLOW WITH CHARACTERS ARRAY VERIFICATION:
+    ðŸŽ¯ ENHANCED WORKFLOW WITH CHARACTERS ARRAY VERIFICATION:
 
-    🔢 CHARACTERS ARRAY SYSTEM:
+    ðŸ”¢ CHARACTERS ARRAY SYSTEM:
     1. Characters Array Monitoring: Real-time tracking of character placement array
     2. Count-Based Verification: Count "1" values = accurate number of placed icons
     3. Stable Across Mods: Works reliably on all game modifications (no Putted Characters bugs)
     4. High Performance: Direct VM access with optimized JavaScript functions
 
-    ⚡ 5-COORDINATE STRATEGY (UNCHANGED):
+    âš¡ 5-COORDINATE STRATEGY (UNCHANGED):
     - Coordinate 1: Center (original icon position)
     - Coordinate 2: Left (icon_x - 15, icon_y)
     - Coordinate 3: Right (icon_x + 15, icon_y)  
     - Coordinate 4: Top (icon_x, icon_y - 15)
     - Coordinate 5: Bottom (icon_x, icon_y + 15)
 
-    🖼️ IMAGE DETECTION (PRESERVED):
+    ðŸ–¼ï¸ IMAGE DETECTION (PRESERVED):
     - Original Run button & Fullscreen detection logic kept exactly as-is
     - Auto-scroll capability for buttons outside viewport
     - Multi-scale template matching with confidence thresholds
     - Domain-specific timing adjustments for cocrea.world
 
-    🚀 NEW WORKFLOW:
-    Page Load → Smart Verification → Game Verification → ✅ Verification Success
-    → 3s Stabilization → Start Image Detection (Run Button) → Game Load
-    → Image Detection (Fullscreen Button) → F11 Fullscreen → Characters Array Setup
-    → Ready for Automation with Characters Array Verification
+    ðŸš€ NEW WORKFLOW:
+    Page Load â†’ Smart Verification â†’ Game Verification â†’ âœ… Verification Success
+    â†’ 3s Stabilization â†’ Start Image Detection (Run Button) â†’ Game Load
+    â†’ Image Detection (Fullscreen Button) â†’ F11 Fullscreen â†’ Characters Array Setup
+    â†’ Ready for Automation with Characters Array Verification
 
-    🎮 BENEFITS:
+    ðŸŽ® BENEFITS:
     - Replaces unreliable Putted Characters with stable Characters Array
     - Works consistently across all game mods and versions
     - Real-time accurate state monitoring
@@ -7425,13 +7429,13 @@ class SprunkiGamePlayer:
             font=("Arial", 8), bg="#f0f0f0").pack(pady=10, padx=10, fill="x")
         
         # Control buttons
-        self.stop_btn = Button(self.root, text="🛑 Stop Enhanced Auto", 
+        self.stop_btn = Button(self.root, text="ðŸ›‘ Stop Enhanced Auto", 
                             command=self.stop_all, state="disabled",
                             bg="#f44336", fg="white", font=("Arial", 12, "bold"))
         self.stop_btn.pack(pady=10)
         
         # Progress
-        Label(self.root, text="📈 Progress:").pack(pady=(10,5))
+        Label(self.root, text="ðŸ“ˆ Progress:").pack(pady=(10,5))
         self.progress = Progressbar(self.root, length=500, mode='determinate')
         self.progress.pack(pady=5)
         
@@ -7440,18 +7444,18 @@ class SprunkiGamePlayer:
             font=("Arial", 10, "bold")).pack(pady=5)
         
         # Domain support with Characters Array System
-        domains_text = f"🌐 Enhanced for: cocrea.world (Chrome Debug + Characters Array Verification + Image Detection)"
+        domains_text = f"ðŸŒ Enhanced for: cocrea.world (Chrome Debug + Characters Array Verification + Image Detection)"
         Label(self.root, text=domains_text, fg="gray", font=("Arial", 9)).pack(pady=5)
         
         # Hotkey
-        Label(self.root, text="⌨️ ESC = Emergency stop", 
+        Label(self.root, text="âŒ¨ï¸ ESC = Emergency stop", 
             fg="red", font=("Arial", 10, "bold")).pack(pady=5)
     
     def show_drag_stats(self):
         """Show enhanced drag statistics"""
         stats = self.get_drag_statistics()
         print("\n" + "="*60)
-        print("📊 ENHANCED DRAG STATISTICS:")
+        print("ðŸ“Š ENHANCED DRAG STATISTICS:")
         print("="*60)
         print(stats)
         print("="*60)
@@ -7472,32 +7476,32 @@ class SprunkiGamePlayer:
                 ws.close()
                 
                 if test_response:
-                    print("✅ WEBSOCKET TEST SUCCESSFUL:")
+                    print("âœ… WEBSOCKET TEST SUCCESSFUL:")
                     print(f"   Debug Port: {self.debugging_port}")
                     print(f"   Current URL: {test_response.get('result', {}).get('result', {}).get('value', 'Unknown')}")
                     print(f"   CDP commands working correctly")
                 else:
-                    print("⚠️ WEBSOCKET TEST WARNING:")
+                    print("âš ï¸ WEBSOCKET TEST WARNING:")
                     print("   WebSocket connected but CDP commands failed")
             else:
                 messagebox.showerror("WebSocket Test", 
-                    "❌ Could not establish WebSocket connection\n\n"
+                    "âŒ Could not establish WebSocket connection\n\n"
                     "Make sure Chrome debug mode is running")
         except Exception as e:
-            messagebox.showerror("WebSocket Test", f"❌ WebSocket test failed: {e}")
+            messagebox.showerror("WebSocket Test", f"âŒ WebSocket test failed: {e}")
 
     def test_verification_system(self):
         """Test Characters Array verification system"""
         try:
             if not self.characters_setup_done:
                 messagebox.showinfo("Verification Test", 
-                    "🔢 Characters Array system not setup yet.\n\n"
+                    "ðŸ”¢ Characters Array system not setup yet.\n\n"
                     "Load a JSON file and start the workflow to initialize verification.")
                 return
             
             if not self.characters_available:
                 messagebox.showwarning("Verification Test", 
-                    "⚠️ Characters Array system is disabled.\n\n"
+                    "âš ï¸ Characters Array system is disabled.\n\n"
                     "WebSocket connection may not be available.")
                 return
             
@@ -7505,25 +7509,25 @@ class SprunkiGamePlayer:
             current_count = self.get_characters_count()
             
             if current_count is not None:
-                print("✅ CHARACTERS ARRAY VERIFICATION TEST:")
-                print(f"   📊 Current Characters count: {current_count}")
-                print(f"   🔧 JavaScript monitoring: ACTIVE")
-                print(f"   ⚡ High-performance access: ENABLED")
-                print(f"   🎯 Status: Ready for drag verification!")
+                print("âœ… CHARACTERS ARRAY VERIFICATION TEST:")
+                print(f"   ðŸ“Š Current Characters count: {current_count}")
+                print(f"   ðŸ”§ JavaScript monitoring: ACTIVE")
+                print(f"   âš¡ High-performance access: ENABLED")
+                print(f"   ðŸŽ¯ Status: Ready for drag verification!")
             else:
-                print("❌ CHARACTERS ARRAY VERIFICATION TEST FAILED:")
+                print("âŒ CHARACTERS ARRAY VERIFICATION TEST FAILED:")
                 print("   Could not get Characters count")
                 print("   Game may not be loaded or VM not found")
                     
         except Exception as e:
-            messagebox.showerror("Verification Test", f"❌ Characters Array test error: {e}")
+            messagebox.showerror("Verification Test", f"âŒ Characters Array test error: {e}")
 
     def test_smart_verification_system(self):
             """Test Smart Verification System"""
             try:
                 if not hasattr(self, 'page_verification_enabled'):
                     messagebox.showinfo("Smart Verification Test", 
-                        "🔍 Smart Verification system not initialized yet.\n\n"
+                        "ðŸ” Smart Verification system not initialized yet.\n\n"
                         "Load a JSON file and start the workflow to initialize verification.")
                     return
                 
@@ -7531,48 +7535,48 @@ class SprunkiGamePlayer:
                 ws_url = self._get_websocket_url()
                 if not ws_url:
                     messagebox.showerror("Smart Verification Test", 
-                        "⌚ WebSocket connection not available.\n\n"
+                        "âŒš WebSocket connection not available.\n\n"
                         "Make sure Chrome debug mode is running.")
                     return
                 
                 # Test page verification
-                print("🔍 Testing Smart Page Verification...")
+                print("ðŸ” Testing Smart Page Verification...")
                 page_result = self.verify_page_fully_loaded("test")
                 
                 # Test game verification  
-                print("🎮 Testing Smart Game Verification...")
+                print("ðŸŽ® Testing Smart Game Verification...")
                 game_result = self.verify_game_components_ready()
                 
                 # Show results
-                status_page = "✅ PASSED" if page_result else "⚠️ FAILED"
-                status_game = "✅ PASSED" if game_result else "⚠️ FAILED"
+                status_page = "âœ… PASSED" if page_result else "âš ï¸ FAILED"
+                status_game = "âœ… PASSED" if game_result else "âš ï¸ FAILED"
                 
-                print("🔍 SMART VERIFICATION SYSTEM TEST RESULTS:")
+                print("ðŸ” SMART VERIFICATION SYSTEM TEST RESULTS:")
                 print("="*50)
-                print(f"   🔄 Page Verification: {status_page}")
-                print(f"   🎮 Game Verification: {status_game}")
-                print(f"\n⚙️ Configuration:")
-                print(f"   📄 Page verification: {'✅ Enabled' if self.page_verification_enabled else '❌ Disabled'}")
-                print(f"   🎮 Game verification: {'✅ Enabled' if self.game_verification_enabled else '❌ Disabled'}")
-                print(f"   ⏱️ Page timeout: {getattr(self, 'page_verification_timeout', 'N/A')}s")
-                print(f"   ⏱️ Game timeout: {getattr(self, 'game_verification_timeout', 'N/A')}s")
-                print(f"   🔄 Stabilization wait: {getattr(self, 'stabilization_wait', 'N/A')}s")
-                print(f"\n🚀 Smart Verification ready to replace fixed 40s waits!")
+                print(f"   ðŸ”„ Page Verification: {status_page}")
+                print(f"   ðŸŽ® Game Verification: {status_game}")
+                print(f"\nâš™ï¸ Configuration:")
+                print(f"   ðŸ“„ Page verification: {'âœ… Enabled' if self.page_verification_enabled else 'âŒ Disabled'}")
+                print(f"   ðŸŽ® Game verification: {'âœ… Enabled' if self.game_verification_enabled else 'âŒ Disabled'}")
+                print(f"   â±ï¸ Page timeout: {getattr(self, 'page_verification_timeout', 'N/A')}s")
+                print(f"   â±ï¸ Game timeout: {getattr(self, 'game_verification_timeout', 'N/A')}s")
+                print(f"   ðŸ”„ Stabilization wait: {getattr(self, 'stabilization_wait', 'N/A')}s")
+                print(f"\nðŸš€ Smart Verification ready to replace fixed 40s waits!")
                 print("="*50)
                         
             except Exception as e:
-                messagebox.showerror("Smart Verification Test", f"⌚ Test error: {e}")
+                messagebox.showerror("Smart Verification Test", f"âŒš Test error: {e}")
 
     def display_remix_library_info(self):
         info_frame = Frame(self.root)
         info_frame.pack(pady=10)
         
-        Label(info_frame, text="🎼 Remix Library:", font=("Arial", 11, "bold")).pack()
+        Label(info_frame, text="ðŸŽ¼ Remix Library:", font=("Arial", 11, "bold")).pack()
         
         if not self.remix_library:
-            remix_summary = "📋 Will generate library when loading JSON with ENHANCED workflow"
+            remix_summary = "ðŸ“‹ Will generate library when loading JSON with ENHANCED workflow"
         else:
-            remix_summary = f"📋 {len(self.remix_library)} remixes with ENHANCED verification\n"
+            remix_summary = f"ðŸ“‹ {len(self.remix_library)} remixes with ENHANCED verification\n"
             for i, remix in enumerate(self.remix_library):
                 remix_summary += f"{i+1}. {remix['name']}: {remix['description']}\n"
         
@@ -7585,7 +7589,7 @@ class SprunkiGamePlayer:
     def update_remix_display(self):
         if hasattr(self, 'remix_display_var'):
             if self.remix_library:
-                remix_summary = f"📋 {len(self.remix_library)} remixes with ENHANCED verification\n"
+                remix_summary = f"ðŸ“‹ {len(self.remix_library)} remixes with ENHANCED verification\n"
                 for i, remix in enumerate(self.remix_library):
                     remix_summary += f"{i+1}. {remix['name']}: {remix['description']}\n"
                 self.remix_display_var.set(remix_summary)
@@ -7616,9 +7620,9 @@ class SprunkiGamePlayer:
                 # Check domain support
                 current_url = self.config.get('currentUrl', '').lower()
                 if 'cocrea.world' not in current_url:
-                    print(f"❌ DOMAIN ERROR: This version is optimized for 'cocrea.world' only!")
+                    print(f"âŒ DOMAIN ERROR: This version is optimized for 'cocrea.world' only!")
                     print(f"   Current URL: {current_url}")
-                    print("   💡 Please use a cocrea.world game URL")
+                    print("   ðŸ’¡ Please use a cocrea.world game URL")
                     return
                 
                 # Check hasHorror setting for remix generation
@@ -7637,38 +7641,38 @@ class SprunkiGamePlayer:
                 # Enhanced confirmation with horror info and verification status
                 horror_info = ""
                 if has_horror:
-                    horror_info = f"👻 Horror Mode: YES (Icon 19 avoided in normal remixes)\n"
+                    horror_info = f"ðŸ‘» Horror Mode: YES (Icon 19 avoided in normal remixes)\n"
                 else:
-                    horror_info = f"🎪 Horror Mode: NO (All 20 icons available)\n"
+                    horror_info = f"ðŸŽª Horror Mode: NO (All 20 icons available)\n"
                 
                 # Confirmation
-                print(f"🎯 ENHANCED WORKFLOW READY:")
-                print(f"   🎮 Icons: {len(layout['icons'])}")
-                print(f"   🎪 Slots: {len(layout['slots'])}")  
-                print(f"   🎼 Remixes: {len(self.remix_library)}")
+                print(f"ðŸŽ¯ ENHANCED WORKFLOW READY:")
+                print(f"   ðŸŽ® Icons: {len(layout['icons'])}")
+                print(f"   ðŸŽª Slots: {len(layout['slots'])}")  
+                print(f"   ðŸŽ¼ Remixes: {len(self.remix_library)}")
                 print(f"   {horror_info}")
-                print(f"   ⚡ ENHANCED FEATURES:")
-                print(f"      • Chrome Debug Mode (port {self.debugging_port})")
-                print(f"      • Drag Verification via 'Putted characters'")
-                print(f"      • 5-Coordinate Retry System")
-                print(f"      • WebSocket/CDP for advanced control")
-                print(f"      • PyAutoGUI with smart fallback")
-                print(f"      • Real-time game state monitoring")
-                print(f"      • Enhanced statistics tracking") 
-                print(f"      • Horror-aware remix generation")
-                print(f"✅ AUTO-STARTING ENHANCED WORKFLOW...")
+                print(f"   âš¡ ENHANCED FEATURES:")
+                print(f"      â€¢ Chrome Debug Mode (port {self.debugging_port})")
+                print(f"      â€¢ Drag Verification via 'Putted characters'")
+                print(f"      â€¢ 5-Coordinate Retry System")
+                print(f"      â€¢ WebSocket/CDP for advanced control")
+                print(f"      â€¢ PyAutoGUI with smart fallback")
+                print(f"      â€¢ Real-time game state monitoring")
+                print(f"      â€¢ Enhanced statistics tracking") 
+                print(f"      â€¢ Horror-aware remix generation")
+                print(f"âœ… AUTO-STARTING ENHANCED WORKFLOW...")
 
                 # Auto-start without user confirmation
                 self.start_full_auto_process()
                 
             except Exception as e:
-                print(f"❌ CONFIG LOAD ERROR: {str(e)}")
-                print("   💡 Please check JSON file format and try again")
+                print(f"âŒ CONFIG LOAD ERROR: {str(e)}")
+                print("   ðŸ’¡ Please check JSON file format and try again")
     
     def calculate_total_steps(self):
         """Calculate total steps for progress"""
-        if self.config is None:  # ✅ Kiểm tra config không None
-            return 10  # Trả về số bước mặc định nếu không có config
+        if self.config is None:  # âœ… Kiá»ƒm tra config khÃ´ng None
+            return 10  # Tráº£ vá» sá»‘ bÆ°á»›c máº·c Ä‘á»‹nh náº¿u khÃ´ng cÃ³ config
         
         layout = self.config['layout']
         game_settings = self.config.get('gameSettings', {})
@@ -7712,10 +7716,10 @@ class SprunkiGamePlayer:
         self.progress['maximum'] = total_steps
         self.progress['value'] = 0
         
-        print(f"🎯 Starting ENHANCED Auto with {total_steps} steps")
-        print(f"🎼 Processing {len(self.remix_library)} remixes with ENHANCED verification")
-        print(f"🌐 Using Chrome debug port: {self.debugging_port}")
-        print(f"🔍 Drag verification system will be setup during initialization")
+        print(f"ðŸŽ¯ Starting ENHANCED Auto with {total_steps} steps")
+        print(f"ðŸŽ¼ Processing {len(self.remix_library)} remixes with ENHANCED verification")
+        print(f"ðŸŒ Using Chrome debug port: {self.debugging_port}")
+        print(f"ðŸ” Drag verification system will be setup during initialization")
         
         # Start auto thread
         self.auto_thread = threading.Thread(target=self.full_auto_loop_corrected, daemon=True)
@@ -7727,7 +7731,7 @@ class SprunkiGamePlayer:
     def full_auto_loop_corrected(self):
         """Main enhanced auto loop"""
         try:
-            print("🔧 Starting ENHANCED auto loop...")
+            print("ðŸ”§ Starting ENHANCED auto loop...")
             
             def update_action(message):
                 self.action_var.set(message)
@@ -7743,10 +7747,10 @@ class SprunkiGamePlayer:
             
             # Execute workflow based on mode
             if self.mode.get() == 1:  # Showcase + Remix
-                print("🎪 Starting ENHANCED full showcase workflow...")
+                print("ðŸŽª Starting ENHANCED full showcase workflow...")
                 success = self.execute_full_showcase_workflow_corrected(progress_callback=update_action)
             else:  # Remix only
-                print("🎵 Starting ENHANCED remix-only workflow...")
+                print("ðŸŽµ Starting ENHANCED remix-only workflow...")
                 success = self.execute_remix_only_workflow_corrected(progress_callback=update_action)
             
             # Show completion
@@ -7768,31 +7772,31 @@ class SprunkiGamePlayer:
         verification_success_rate = (stats.verification_successful / stats.verification_enabled * 100) if stats.verification_enabled > 0 else 0
         avg_coord_retries = sum(stats.coordinate_retries) / len(stats.coordinate_retries) if stats.coordinate_retries else 0
         
-        self.action_var.set("🎉 ENHANCED Auto completed!")
+        self.action_var.set("ðŸŽ‰ ENHANCED Auto completed!")
         # Generate final comprehensive report
-        print("\n📋 GENERATING FINAL SUCCESS REPORT...")
+        print("\nðŸ“‹ GENERATING FINAL SUCCESS REPORT...")
         self.cleanup_and_report("Successful_Completion")        
-        print("\n" + "🎉"*20)
-        print("🎉 ENHANCED AUTO COMPLETED SUCCESSFULLY! 🎉") 
-        print("🎉"*20)
-        print(f"\n📊 WORKFLOW SUMMARY:")
-        print(f"   ✅ Mode: ENHANCED {mode_text}")
-        print(f"   📊 Total attempts: {stats.total_attempts}")
-        print(f"   📈 Success rate: {success_rate:.1f}%")
-        print(f"   🎯 Average coordinates tried: {avg_coord_retries:.1f}/5")
-        print(f"   🎼 Remixes processed: {len(self.remix_library)}")
-        print(f"\n🔍 VERIFICATION STATISTICS:")
-        print(f"   📊 Verification enabled: {verification_rate:.1f}%")
-        print(f"   ✅ Verification success: {verification_success_rate:.1f}%")
-        print(f"   🔧 System status: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}")
-        print(f"\n⚡ ENHANCED FEATURES USED:")
-        print(f"   🌐 Chrome Debug Mode (port {self.debugging_port})")
-        print(f"   🔍 Drag verification via 'Putted characters'")
-        print(f"   🎯 5-coordinate retry system")
-        print(f"   📡 WebSocket/CDP for advanced control")
-        print(f"   🔄 Smart fallback between methods")
-        print(f"   📊 Real-time game state monitoring")
-        print(f"\n🚀 The workflow is now ENHANCED and super reliable! ✨")
+        print("\n" + "ðŸŽ‰"*20)
+        print("ðŸŽ‰ ENHANCED AUTO COMPLETED SUCCESSFULLY! ðŸŽ‰") 
+        print("ðŸŽ‰"*20)
+        print(f"\nðŸ“Š WORKFLOW SUMMARY:")
+        print(f"   âœ… Mode: ENHANCED {mode_text}")
+        print(f"   ðŸ“Š Total attempts: {stats.total_attempts}")
+        print(f"   ðŸ“ˆ Success rate: {success_rate:.1f}%")
+        print(f"   ðŸŽ¯ Average coordinates tried: {avg_coord_retries:.1f}/5")
+        print(f"   ðŸŽ¼ Remixes processed: {len(self.remix_library)}")
+        print(f"\nðŸ” VERIFICATION STATISTICS:")
+        print(f"   ðŸ“Š Verification enabled: {verification_rate:.1f}%")
+        print(f"   âœ… Verification success: {verification_success_rate:.1f}%")
+        print(f"   ðŸ”§ System status: {'âœ… ACTIVE' if self.characters_available else 'âš ï¸ DISABLED'}")
+        print(f"\nâš¡ ENHANCED FEATURES USED:")
+        print(f"   ðŸŒ Chrome Debug Mode (port {self.debugging_port})")
+        print(f"   ðŸ” Drag verification via 'Putted characters'")
+        print(f"   ðŸŽ¯ 5-coordinate retry system")
+        print(f"   ðŸ“¡ WebSocket/CDP for advanced control")
+        print(f"   ðŸ”„ Smart fallback between methods")
+        print(f"   ðŸ“Š Real-time game state monitoring")
+        print(f"\nðŸš€ The workflow is now ENHANCED and super reliable! âœ¨")
         print("="*60)
         
     def stop_all(self):
@@ -7800,25 +7804,25 @@ class SprunkiGamePlayer:
         self.should_stop = True
         self.is_playing = False
 
-        # 🚀 NEW: Stop batch verification session
+        # ðŸš€ NEW: Stop batch verification session
         if self.batch_verification_active:
             self.stop_batch_verification_session()
 
         self.stop_btn.config(state="disabled")
-        self.action_var.set("ℹ️ ENHANCED Auto stopped")
+        self.action_var.set("â„¹ï¸ ENHANCED Auto stopped")
         self.status_var.set("Stopped")
         
         if self.drag_stats.total_attempts > 0:
             print("\n" + "="*50)
-            print("📊 FINAL ENHANCED AUTO STATISTICS:")
+            print("ðŸ“Š FINAL ENHANCED AUTO STATISTICS:")
             print(self.get_drag_statistics())
             print("="*50)
             
             # Enhanced cleanup and reporting on stop
             self.cleanup_and_report("Manual_Stop")
 
-        # 🆕 CLEAR BROWSING DATA ON STOP
-        print("🗑️ Clearing browsing data on stop...")
+        # ðŸ†• CLEAR BROWSING DATA ON STOP
+        print("ðŸ—‘ï¸ Clearing browsing data on stop...")
         self.cleanup_chrome_complete()  # This now includes browsing data clearing
 
         try:
@@ -7829,9 +7833,9 @@ class SprunkiGamePlayer:
     def emergency_stop(self):
         """Emergency stop"""
         self.stop_all()
-        print("\n🚨 EMERGENCY STOP ACTIVATED!")
-        print("⚠️ ENHANCED Auto stopped with ESC key")
-        print("🛑 All operations halted safely")
+        print("\nðŸš¨ EMERGENCY STOP ACTIVATED!")
+        print("âš ï¸ ENHANCED Auto stopped with ESC key")
+        print("ðŸ›‘ All operations halted safely")
     
     def run(self):
         """Run application"""
@@ -7849,7 +7853,7 @@ class SprunkiGamePlayer:
 
     def get_enhanced_workflow_summary(self):
             """
-            📊 NEW: Get comprehensive workflow summary with smart features
+            ðŸ“Š NEW: Get comprehensive workflow summary with smart features
             FIXED: Distinguish between Polos (icon placement) and Enabled (UI state)
             """
             try:
@@ -7861,23 +7865,23 @@ class SprunkiGamePlayer:
                 verification_rate = (stats.verification_enabled / stats.total_attempts * 100) if stats.total_attempts > 0 else 0
                 
                 summary = f"""
-    📊 ENHANCED WORKFLOW SUMMARY:
+    ðŸ“Š ENHANCED WORKFLOW SUMMARY:
     {'='*60}
-    🎯 DRAG OPERATIONS:
-    • Total attempts: {stats.total_attempts}
-    • Success rate: {success_rate:.1f}%
-    • Verification enabled: {verification_rate:.1f}%
-    • Average coordinate retries: {sum(stats.coordinate_retries) / len(stats.coordinate_retries) if stats.coordinate_retries else 0:.1f}/5
+    ðŸŽ¯ DRAG OPERATIONS:
+    â€¢ Total attempts: {stats.total_attempts}
+    â€¢ Success rate: {success_rate:.1f}%
+    â€¢ Verification enabled: {verification_rate:.1f}%
+    â€¢ Average coordinate retries: {sum(stats.coordinate_retries) / len(stats.coordinate_retries) if stats.coordinate_retries else 0:.1f}/5
 
-    🛡️ SMART FEATURES ACTIVE:
-    • ✅ Polos array tracking (PRIMARY)
-    • ✅ Cross-contamination prevention  
-    • ✅ Pre-flight slot checking
-    • ✅ Smart batch return sequencing
-    • ✅ Emergency recovery protocols
-    • ✅ Real-time state validation
+    ðŸ›¡ï¸ SMART FEATURES ACTIVE:
+    â€¢ âœ… Polos array tracking (PRIMARY)
+    â€¢ âœ… Cross-contamination prevention  
+    â€¢ âœ… Pre-flight slot checking
+    â€¢ âœ… Smart batch return sequencing
+    â€¢ âœ… Emergency recovery protocols
+    â€¢ âœ… Real-time state validation
 
-    🔍 CURRENT SLOT STATE:"""
+    ðŸ” CURRENT SLOT STATE:"""
 
                 if current_state:
                     putted = current_state.get('putted_characters', 'N/A')
@@ -7885,86 +7889,86 @@ class SprunkiGamePlayer:
                     enabled = current_state.get('enabled_list', [])
                     
                     summary += f"""
-    • Putted characters: {putted}
-    • Active slots (Polos): {sum(1 for x in polos if x == "1") if polos else 'N/A'}
-    • PRIMARY consistency: {'✅ Good' if current_state.get('putted_polos_match', True) else '⚠️ Issue'}
-    • Polos array: {polos if len(str(polos)) < 50 else f'{len(polos)} slots'}
-    • Enabled List: {enabled if len(str(enabled)) < 50 else f'{len(enabled)} slots'} (UI state)"""
+    â€¢ Putted characters: {putted}
+    â€¢ Active slots (Polos): {sum(1 for x in polos if x == "1") if polos else 'N/A'}
+    â€¢ PRIMARY consistency: {'âœ… Good' if current_state.get('putted_polos_match', True) else 'âš ï¸ Issue'}
+    â€¢ Polos array: {polos if len(str(polos)) < 50 else f'{len(polos)} slots'}
+    â€¢ Enabled List: {enabled if len(str(enabled)) < 50 else f'{len(enabled)} slots'} (UI state)"""
                 else:
-                    summary += "\n• ⚠️ Current state unavailable"
+                    summary += "\nâ€¢ âš ï¸ Current state unavailable"
 
                 summary += f"""
 
-    ⚡ SYSTEM STATUS:
-    • Verification system: {'✅ ACTIVE' if self.characters_available else '⚠️ DISABLED'}
-    • WebSocket connection: {'✅ Ready' if self._get_websocket_url() else '❌ Failed'}
-    • Configuration: {'✅ Loaded' if hasattr(self, 'config') and self.config else '❌ Missing'}
+    âš¡ SYSTEM STATUS:
+    â€¢ Verification system: {'âœ… ACTIVE' if self.characters_available else 'âš ï¸ DISABLED'}
+    â€¢ WebSocket connection: {'âœ… Ready' if self._get_websocket_url() else 'âŒ Failed'}
+    â€¢ Configuration: {'âœ… Loaded' if hasattr(self, 'config') and self.config else 'âŒ Missing'}
 
-    ℹ️ ARRAY UNDERSTANDING:
-    • Polos Array = Icon placement state (PRIMARY for verification)
-    • Enabled List = UI availability state (informational only)
+    â„¹ï¸ ARRAY UNDERSTANDING:
+    â€¢ Polos Array = Icon placement state (PRIMARY for verification)
+    â€¢ Enabled List = UI availability state (informational only)
 
     {'='*60}
-    🎉 ENHANCED SPRUNKI GAME PLAYER READY!
+    ðŸŽ‰ ENHANCED SPRUNKI GAME PLAYER READY!
     """
                 
                 return summary
                 
             except Exception as e:
-                return f"❌ Error generating workflow summary: {e}"
+                return f"âŒ Error generating workflow summary: {e}"
 
     def log_comprehensive_session_report(self, session_type="Unknown"):
         """
-        📋 NEW: Generate comprehensive session report for debugging
+        ðŸ“‹ NEW: Generate comprehensive session report for debugging
         """
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             report = f"""
     {'='*80}
-    📋 COMPREHENSIVE SESSION REPORT
+    ðŸ“‹ COMPREHENSIVE SESSION REPORT
     {'='*80}
-    ⏰ Session: {session_type} at {timestamp}
+    â° Session: {session_type} at {timestamp}
 
-    🎯 DRAG OPERATIONS SUMMARY:
+    ðŸŽ¯ DRAG OPERATIONS SUMMARY:
     {self.get_drag_statistics()}
 
-    🔍 CURRENT SYSTEM STATE:
+    ðŸ” CURRENT SYSTEM STATE:
     {self.get_enhanced_workflow_summary()}
 
-    🛡️ SMART FEATURES STATUS:
-    • Pre-flight slot checking: {'✅ Active' if self.characters_available else '❌ Disabled'}
-    • Cross-contamination prevention: {'✅ Active' if self.characters_available else '❌ Disabled'}
-    • Smart batch return: ✅ Available
-    • Emergency recovery: ✅ Available
-    • Real-time validation: {'✅ Active' if self.characters_available else '❌ Disabled'}
+    ðŸ›¡ï¸ SMART FEATURES STATUS:
+    â€¢ Pre-flight slot checking: {'âœ… Active' if self.characters_available else 'âŒ Disabled'}
+    â€¢ Cross-contamination prevention: {'âœ… Active' if self.characters_available else 'âŒ Disabled'}
+    â€¢ Smart batch return: âœ… Available
+    â€¢ Emergency recovery: âœ… Available
+    â€¢ Real-time validation: {'âœ… Active' if self.characters_available else 'âŒ Disabled'}
 
-    📊 FINAL STATE VALIDATION:
+    ðŸ“Š FINAL STATE VALIDATION:
     """
             
             # Get final validation
             is_complete, issues, recommendations = self.validate_workflow_completion()
             
             if is_complete:
-                report += "   ✅ PERFECT COMPLETION - No issues detected\n"
+                report += "   âœ… PERFECT COMPLETION - No issues detected\n"
             else:
-                report += f"   ⚠️ {len(issues)} ISSUES DETECTED:\n"
+                report += f"   âš ï¸ {len(issues)} ISSUES DETECTED:\n"
                 for i, issue in enumerate(issues, 1):
                     report += f"      {i}. {issue}\n"
                 
-                report += f"   💡 RECOMMENDATIONS:\n"
+                report += f"   ðŸ’¡ RECOMMENDATIONS:\n"
                 for i, rec in enumerate(recommendations, 1):
                     report += f"      {i}. {rec}\n"
             
             report += f"""
-    🔧 SYSTEM DIAGNOSTICS:
-    • Configuration: {'✅ Loaded' if hasattr(self, 'config') and self.config else '❌ Missing'}
-    • WebSocket: {'✅ Ready' if self._get_websocket_url() else '❌ Failed'}
-    • Verification Setup: {'✅ Done' if self.putted_chars_setup_done else '❌ Missing'}
-    • Browser State: {'✅ Active' if hasattr(self, 'chrome_process') and self.chrome_process else '❌ Closed'}
+    ðŸ”§ SYSTEM DIAGNOSTICS:
+    â€¢ Configuration: {'âœ… Loaded' if hasattr(self, 'config') and self.config else 'âŒ Missing'}
+    â€¢ WebSocket: {'âœ… Ready' if self._get_websocket_url() else 'âŒ Failed'}
+    â€¢ Verification Setup: {'âœ… Done' if self.putted_chars_setup_done else 'âŒ Missing'}
+    â€¢ Browser State: {'âœ… Active' if hasattr(self, 'chrome_process') and self.chrome_process else 'âŒ Closed'}
 
     {'='*80}
-    🎉 ENHANCED SPRUNKI AUTOMATION SYSTEM REPORT COMPLETE
+    ðŸŽ‰ ENHANCED SPRUNKI AUTOMATION SYSTEM REPORT COMPLETE
     {'='*80}
     """
             
@@ -7983,70 +7987,70 @@ class SprunkiGamePlayer:
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(report)
                 
-                print(f"📄 Session report saved: {filepath}")
+                print(f"ðŸ“„ Session report saved: {filepath}")
                 
             except Exception as e:
-                print(f"⚠️ Could not save session report: {e}")
+                print(f"âš ï¸ Could not save session report: {e}")
             
             return report
             
         except Exception as e:
-            error_report = f"❌ Error generating session report: {e}"
+            error_report = f"âŒ Error generating session report: {e}"
             print(error_report)
             return error_report
 
     def cleanup_and_report(self, session_type="Workflow"):
         """
-        🧹 NEW: Enhanced cleanup with comprehensive reporting
+        ðŸ§¹ NEW: Enhanced cleanup with comprehensive reporting
         """
         try:
-            print(f"\n🧹 ENHANCED CLEANUP & REPORTING: {session_type}")
+            print(f"\nðŸ§¹ ENHANCED CLEANUP & REPORTING: {session_type}")
             print("="*60)
             
             # Final smart cleanup
             if self.characters_available:
-                print("🔄 Final smart batch cleanup...")
+                print("ðŸ”„ Final smart batch cleanup...")
                 cleanup_success, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
                 
                 if cleanup_total > 0:
-                    print(f"   ✅ Cleaned {cleanup_success}/{cleanup_total} slots")
+                    print(f"   âœ… Cleaned {cleanup_success}/{cleanup_total} slots")
                     if cleanup_errors:
-                        print(f"   ⚠️ {len(cleanup_errors)} cleanup issues")
+                        print(f"   âš ï¸ {len(cleanup_errors)} cleanup issues")
             
             # Generate comprehensive report
-            print("\n📋 Generating comprehensive session report...")
+            print("\nðŸ“‹ Generating comprehensive session report...")
             session_report = self.log_comprehensive_session_report(session_type)
             
             # Close browser if needed
             if hasattr(self, 'chrome_process') and self.chrome_process:
-                print("\n🌐 Closing browser...")
+                print("\nðŸŒ Closing browser...")
                 self.close_game_window()
             
-            print(f"✅ Enhanced cleanup completed for: {session_type}")
+            print(f"âœ… Enhanced cleanup completed for: {session_type}")
             
         except Exception as e:
-            print(f"❌ Error during enhanced cleanup: {e}")
+            print(f"âŒ Error during enhanced cleanup: {e}")
 
 if __name__ == "__main__":
-    print("🚀 Starting ENHANCED Sprunki Game Player...")
-    print("⚡ ENHANCED FEATURES:")
-    print("   🌐 Chrome Debug Mode: Single browser with remote debugging")
-    print("   🔍 Drag Verification: Real-time 'Putted characters' monitoring")
-    print("   🎯 5-Coordinate Retry: Center → Left → Right → Top → Bottom")
-    print("   📡 WebSocket/CDP: Advanced browser control and JavaScript injection")
-    print("   🎮 PyAutoGUI: Reliable coordinate-based automation with smart fallback")
-    print("   🛡️ AdBlocker: Automatic uBlock Origin extension loading")
-    print("   ⚙️ Config Integration: All settings from config.json")
-    print("   📊 Enhanced Statistics: Verification rates and coordinate usage")
-    print("   🧹 Smart Cleanup: Auto-return icons on verification failure")
-    print("   🎯 Session Sharing: Can reuse browser from JSON generation")
+    print("ðŸš€ Starting ENHANCED Sprunki Game Player...")
+    print("âš¡ ENHANCED FEATURES:")
+    print("   ðŸŒ Chrome Debug Mode: Single browser with remote debugging")
+    print("   ðŸ” Drag Verification: Real-time 'Putted characters' monitoring")
+    print("   ðŸŽ¯ 5-Coordinate Retry: Center â†’ Left â†’ Right â†’ Top â†’ Bottom")
+    print("   ðŸ“¡ WebSocket/CDP: Advanced browser control and JavaScript injection")
+    print("   ðŸŽ® PyAutoGUI: Reliable coordinate-based automation with smart fallback")
+    print("   ðŸ›¡ï¸ AdBlocker: Automatic uBlock Origin extension loading")
+    print("   âš™ï¸ Config Integration: All settings from config.json")
+    print("   ðŸ“Š Enhanced Statistics: Verification rates and coordinate usage")
+    print("   ðŸ§¹ Smart Cleanup: Auto-return icons on verification failure")
+    print("   ðŸŽ¯ Session Sharing: Can reuse browser from JSON generation")
     print("="*70)
     
     app = SprunkiGamePlayer()
     
-    print("\n🎮 ENHANCED Auto Player ready!")
-    print("📊 Features: Drag Verification + 5-Coordinate Retry + Chrome Debug")
-    print("🎼 Ultra-reliable automation with game state monitoring")
-    print("⚡ Optimized for 95%+ success rate with intelligent fallback")
+    print("\nðŸŽ® ENHANCED Auto Player ready!")
+    print("ðŸ“Š Features: Drag Verification + 5-Coordinate Retry + Chrome Debug")
+    print("ðŸŽ¼ Ultra-reliable automation with game state monitoring")
+    print("âš¡ Optimized for 95%+ success rate with intelligent fallback")
     
     app.run()
