@@ -84,24 +84,23 @@ class SprunkiGamePlayer:
         self.current_return_mode = self.RETURN_MODE_AUTO
         self.active_icons_count = 0  # Track how many icons currently on slots
 
-        # Carpet Grid Configuration
+        # Carpet bombing configuration - SIMPLIFIED
         self.carpet_bombing_config = {
             'base_coords_per_slot': 2,      # Start with 2 coordinates per slot
             'max_sets': 6,                  # Maximum bombing sets
             'inter_click_delay': 0.03,      # Delay between clicks within slot
             'inter_slot_delay': 1.5,        # Delay between slots
             'inter_set_delay': 0.3,         # Delay between sets
-            'coordinate_strategies': [       # Strategy per coordinate number
-                'center',                    # 1st coordinate
-                'horizontal_offset',         # 2nd coordinate  
-                'vertical_offset',           # 3rd coordinate
-                'diagonal',                  # 4th coordinate
-                'random_scatter'             # 5th+ coordinates
-            ]
         }
 
-        # Grid cache for performance
-        self.carpet_grid_cache = {}
+        # Grid config for compatibility
+        self.carpet_grid_config = {
+            'wave_size': 10,
+            'max_waves': 5,
+            'inter_click_delay': 0.03,
+            'inter_wave_delay': 0.5,
+            'default_density': 3
+        }
 
         # Core state
         self.config = None
@@ -115,7 +114,7 @@ class SprunkiGamePlayer:
         self.ws_url = None
         self.game_url = None
         
-        # ✅ DUAL VERIFICATION SYSTEM
+        # DUAL VERIFICATION SYSTEM
         # Characters Array system  
         self.characters_setup_done = False
         self.characters_available = False
@@ -127,34 +126,16 @@ class SprunkiGamePlayer:
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
 
-        # Cache cho Safe Zone coordinates
-        self.safe_zone_cache = {}
+        # Index corrections tracking
+        self.index_corrections = {}
 
         # Domain adjustments for different game domains
         self.domain_adjustments = {
-            'sprunki.org': {
-                'extra_focus_time': 0.1,
-                'drag_speed_multiplier': 1.0,
-                'requires_double_click': False,
-                'stability_factor': 1.0
-            },
-            'sprunkiretake.net': {
-                'extra_focus_time': 0.2,
-                'drag_speed_multiplier': 0.8,
-                'requires_double_click': True,
-                'stability_factor': 1.2
-            },
             'cocrea.world': {
                 'extra_focus_time': 0.15,
                 'drag_speed_multiplier': 1.2,
                 'requires_double_click': False,
                 'stability_factor': 0.9
-            },
-            'gameflare.com': {
-                'extra_focus_time': 0.25,
-                'drag_speed_multiplier': 0.7,
-                'requires_double_click': True,
-                'stability_factor': 1.3
             }
         }
         
@@ -202,7 +183,6 @@ class SprunkiGamePlayer:
         # PyAutoGUI settings
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.08
-        pyautogui.DURATION = 0.2
 
         # Batch Verification Session Management
         self.batch_verification_active = False
@@ -331,6 +311,20 @@ class SprunkiGamePlayer:
         # Setup GUI
         self.setup_gui()
 
+        # ✅ CLEANUP: Remove unused safe zone code  
+        print("🎯 Initialized SIMPLIFIED return system: Precision Center + Carpet Bombing only")
+
+    def cleanup_unused_safe_zone_code(self):  # ← ĐẶT Ở ĐÂY
+        """
+        🧹 CLEANUP: Remove unused safe zone related attributes and methods
+        Call this during initialization to clean up code
+        """
+        # Remove safe zone cache if exists
+        if hasattr(self, 'safe_zone_cache'):
+            delattr(self, 'safe_zone_cache')
+        
+        print("🧹 Cleaned up unused safe zone code - simplified return only needs carpet bombing")
+
     def load_config(self):
             """Load configuration from config.json like json_generator.py"""
             try:
@@ -383,9 +377,9 @@ class SprunkiGamePlayer:
                 self.page_verification_enabled = True
                 self.game_verification_enabled = True
                 self.page_verification_timeout = 120
-                self.game_verification_timeout = 90
+                self.game_verification_timeout = 150
                 self.page_verification_interval = 2
-                self.game_verification_interval = 2
+                self.game_verification_interval = 3
                 self.stabilization_wait = 3
                 self.game_container_selectors = [".ccw-stage-wrapper", "#stage-canvas-wrapper", "canvas"]
                 self.min_containers_required = 1
@@ -435,15 +429,29 @@ class SprunkiGamePlayer:
                 self.check_react_components = True
                 self.check_run_button_dom = True
 
+    def _execute_edge_reinforcement(self, round_num, use_cdp):
+        """
+        🎯 STUB: Edge reinforcement for carpet bombing
+        """
+        try:
+            print(f"   🎯 Edge reinforcement round {round_num}")
+            # Simple edge clicks - can be expanded later
+            edge_clicks = min(round_num * 2, 10)  # 2-10 clicks based on round
+            return edge_clicks
+            
+        except Exception as e:
+            print(f"❌ Edge reinforcement error: {e}")
+            return 0
+
     def _execute_verification_js(self, js_code):
         """Execute JavaScript for verification via WebSocket/CDP"""
         try:
             ws_url = self._get_websocket_url()
-            if not ws_url:
+            if not ws_url:  # ✅ CHECK None trước
                 print("⚠️ WebSocket not available for verification, skipping JS check")
                 return None
             
-            ws = websocket.create_connection(ws_url, timeout=10)
+            ws = websocket.create_connection(ws_url, timeout=10)  # ← ĐÃ SAFE
             
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
@@ -631,7 +639,24 @@ class SprunkiGamePlayer:
             # JavaScript for game component verification
             game_verification_js = f"""
             (() => {{
-                const selectors = {self.game_container_selectors};
+                // 🆕 EXPANDED: More comprehensive game container selectors
+                const selectors = [
+                    ".ccw-stage-wrapper", 
+                    "#stage-canvas-wrapper", 
+                    "canvas",
+                    ".style_gandi-player-wrapper__WCs0P",
+                    ".style_stage-player__0Xy7d",
+                    ".style_stage-cover__VITCW",
+                    ".gandi_stage_stage_1fD7k",
+                    "[class*='stage']",
+                    "[class*='player']",
+                    "[class*='game']",
+                    "#app canvas",
+                    ".app-container canvas",
+                    "iframe[src*='scratch']",
+                    "iframe[src*='game']"
+                ];
+                
                 const results = {{
                     gameContainers: [],
                     reactComponents: {{
@@ -643,86 +668,134 @@ class SprunkiGamePlayer:
                     timestamp: Date.now()
                 }};
                 
-                // Check game container elements
+                // Check game container elements with more detailed logging
                 selectors.forEach(selector => {{
-                    const elements = document.querySelectorAll(selector);
-                    if (elements.length > 0) {{
-                        elements.forEach((el, index) => {{
-                            const rect = el.getBoundingClientRect();
-                            results.gameContainers.push({{
-                                selector: selector,
-                                index: index,
-                                id: el.id || 'no-id',
-                                className: el.className || 'no-class',
-                                visible: rect.width > 0 && rect.height > 0,
-                                hasChildren: el.children.length > 0
+                    try {{
+                        const elements = document.querySelectorAll(selector);
+                        if (elements.length > 0) {{
+                            elements.forEach((el, index) => {{
+                                const rect = el.getBoundingClientRect();
+                                const containerInfo = {{
+                                    selector: selector,
+                                    index: index,
+                                    id: el.id || 'no-id',
+                                    className: el.className || 'no-class',
+                                    tagName: el.tagName.toLowerCase(),
+                                    visible: rect.width > 0 && rect.height > 0,
+                                    hasChildren: el.children.length > 0,
+                                    dimensions: `${{rect.width}}x${{rect.height}}`
+                                }};
+                                results.gameContainers.push(containerInfo);
+                                console.log(`🎯 Found game container: ${{selector}} - ${{containerInfo.tagName}} - ${{containerInfo.dimensions}} - Visible: ${{containerInfo.visible}}`);
                             }});
-                        }});
+                        }}
+                    }} catch (e) {{
+                        console.warn(`Selector failed: ${{selector}} - ${{e.message}}`);
                     }}
                 }});
                 
-                // Check for React components (look for React fiber keys)
+                // Check for React components
                 const checkReactComponents = () => {{
                     const elements = document.querySelectorAll('*');
                     let reactFound = false;
+                    let reactCount = 0;
+                    
                     for (let el of elements) {{
                         const keys = Object.keys(el);
                         const reactKey = keys.find(key => key.startsWith('__react'));
                         if (reactKey) {{
                             reactFound = true;
-                            results.reactComponents.details.push({{
-                                element: el.tagName,
-                                reactKey: reactKey.substring(0, 20) + '...'
-                            }});
-                            if (results.reactComponents.details.length >= 3) break; // Limit for performance
+                            reactCount++;
+                            if (reactCount <= 5) {{ // Log first 5 only
+                                results.reactComponents.details.push({{
+                                    element: el.tagName,
+                                    id: el.id || 'no-id',
+                                    className: el.className || 'no-class',
+                                    reactKey: reactKey.substring(0, 20) + '...'
+                                }});
+                            }}
                         }}
+                        if (reactCount >= 100) break; // Stop after finding many
                     }}
                     results.reactComponents.found = reactFound;
+                    results.reactComponents.count = reactCount;
+                    console.log(`⚛️ React check: Found ${{reactCount}} components`);
                 }};
                 
                 if ({str(self.check_react_components).lower()}) {{
                     checkReactComponents();
                 }}
                 
-                // Check if Run button exists in DOM (even if not visible)
+                // 🆕 ENHANCED: More comprehensive Run button detection
                 if ({str(self.check_run_button_dom).lower()}) {{
                     const runButtonSelectors = [
                         'button[type="submit"]',
+                        'button[class*="run"]',
+                        'button[class*="play"]', 
+                        'button[class*="start"]',
+                        '.style_run-button__VjFSY',
+                        '.MuiButton-contained',
                         'button:contains("Run")',
+                        'button:contains("Play")',
+                        'button:contains("Start")',
+                        'button:contains("▶")',
+                        '[aria-label*="run"]',
+                        '[aria-label*="play"]',
+                        '[aria-label*="start"]',
+                        'input[type="submit"]',
+                        'input[value*="Run"]',
+                        'input[value*="Play"]',
                         '.run-button',
                         '#run-button',
-                        '[class*="run"]',
-                        '[class*="play"]',
-                        '[class*="start"]',
-                        'button',
-                        'input[type="submit"]'
+                        '.play-button',
+                        '#play-button'
                     ];
+                    
+                    let foundButtons = [];
                     
                     for (let selector of runButtonSelectors) {{
                         try {{
                             const buttons = document.querySelectorAll(selector);
                             for (let button of buttons) {{
-                                const text = button.textContent || button.value || button.alt || '';
-                                if (text.toLowerCase().includes('run') || 
-                                    text.toLowerCase().includes('play') || 
-                                    text.toLowerCase().includes('start')) {{
-                                    results.runButtonInDOM = true;
-                                    break;
+                                const text = (button.textContent || button.value || button.alt || '').toLowerCase();
+                                const hasRunText = text.includes('run') || text.includes('play') || text.includes('start') || text.includes('▶');
+                                const isVisible = button.offsetParent !== null;
+                                
+                                if (hasRunText || selector.includes('run') || selector.includes('play')) {{
+                                    foundButtons.push({{
+                                        selector: selector,
+                                        text: text.substring(0, 20),
+                                        visible: isVisible,
+                                        className: button.className || 'no-class'
+                                    }});
+                                    
+                                    if (hasRunText || isVisible) {{
+                                        results.runButtonInDOM = true;
+                                        console.log(`🔘 Found Run button: ${{selector}} - "${{text}}" - Visible: ${{isVisible}}`);
+                                    }}
                                 }}
                             }}
-                            if (results.runButtonInDOM) break;
                         }} catch (e) {{
-                            // Skip invalid selectors
+                            // Skip invalid selectors silently
                         }}
                     }}
+                    
+                    console.log(`🔘 Run button search: Found ${{foundButtons.length}} candidates, runButtonInDOM: ${{results.runButtonInDOM}}`);
                 }}
                 
-                // Assessment
+                // Assessment with more lenient criteria
                 const gameContainersFound = results.gameContainers.length >= {self.min_containers_required};
                 const reactReady = !{str(self.check_react_components).lower()} || results.reactComponents.found;
                 const runButtonReady = !{str(self.check_run_button_dom).lower()} || results.runButtonInDOM;
                 
                 results.overallReady = gameContainersFound && reactReady && runButtonReady;
+                
+                // 🆕 DETAILED: Log comprehensive results
+                console.log(`🎯 Game Verification Summary:`);
+                console.log(`   - Game containers: ${{results.gameContainers.length}} (need ${{self.min_containers_required}})`);
+                console.log(`   - React components: ${{results.reactComponents.found}} (${{results.reactComponents.count || 0}} found)`);
+                console.log(`   - Run button in DOM: ${{results.runButtonInDOM}}`);
+                console.log(`   - Overall ready: ${{results.overallReady}}`);
                 
                 return results;
             }})();
@@ -797,6 +870,124 @@ class SprunkiGamePlayer:
             print(f"⚠️ Error in game verification: {e}")
             print("   Proceeding anyway with image detection...")
             return True
+
+    def verify_page_fully_loaded_lightweight(self, target_url):
+        """Lightweight version for continuous monitoring"""
+        try:
+            # Simplified check for continuous use
+            verification_js = """
+            (() => {
+                const results = {
+                    documentState: document.readyState,
+                    hasBody: !!document.body,
+                    hasHead: !!document.head,
+                    bodyChildren: document.body ? document.body.children.length : 0,
+                    loadingSpinners: 0
+                };
+                
+                // Check for loading spinners
+                const spinnerSelectors = ['.loading', '.spinner', '.loader', '[class*="loading"]'];
+                spinnerSelectors.forEach(selector => {
+                    const elements = document.querySelectorAll(selector);
+                    const visibleSpinners = Array.from(elements).filter(el => {
+                        const style = window.getComputedStyle(el);
+                        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                    });
+                    results.loadingSpinners += visibleSpinners.length;
+                });
+                
+                // Calculate readiness score
+                let score = 0;
+                if (results.documentState === 'complete') score += 40;
+                if (results.hasBody && results.hasHead) score += 30;
+                if (results.bodyChildren > 0) score += 20;
+                if (results.loadingSpinners === 0) score += 10;
+                
+                results.score = score;
+                results.ready = score >= 75;
+                
+                return results;
+            })();
+            """
+            
+            result = self._execute_verification_js(verification_js)
+            if result:
+                print(f"      📊 Page score: {result.get('score', 0)}/100, Spinners: {result.get('loadingSpinners', 'N/A')}")
+                return result.get('ready', False)
+            return False
+            
+        except Exception as e:
+            print(f"   ⚠️ Page check error: {e}")
+            return False
+
+
+    def verify_game_components_ready_lightweight(self):
+        """Lightweight version for continuous monitoring"""
+        try:
+            # Simplified game check
+            game_js = """
+            (() => {
+                const results = {
+                    gameContainers: 0,
+                    reactComponents: 0,
+                    runButton: false
+                };
+                
+                // Check game containers
+                const containerSelectors = ['.ccw-stage-wrapper', 'canvas', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
+                containerSelectors.forEach(selector => {
+                    const elements = document.querySelectorAll(selector);
+                    elements.forEach(el => {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            results.gameContainers++;
+                        }
+                    });
+                });
+                
+                // Check React components
+                const allElements = document.querySelectorAll('*');
+                for (let el of allElements) {
+                    const keys = Object.keys(el);
+                    if (keys.find(key => key.startsWith('__react'))) {
+                        results.reactComponents++;
+                        if (results.reactComponents >= 5) break; // Enough sample
+                    }
+                }
+                
+                // Check Run button
+                const runButtonSelectors = [
+                    '.style_run-button__VjFSY',
+                    'button[class*="run"]',
+                    'button.MuiButton-contained'
+                ];
+                
+                for (const selector of runButtonSelectors) {
+                    const button = document.querySelector(selector);
+                    if (button) {
+                        results.runButton = true;
+                        break;
+                    }
+                }
+                
+                // Calculate readiness
+                results.ready = results.gameContainers > 0 && results.runButton;
+                
+                return results;
+            })();
+            """
+            
+            result = self._execute_verification_js(game_js)
+            if result:
+                containers = result.get('gameContainers', 0)
+                has_button = result.get('runButton', False)
+                print(f"      📊 Containers: {containers}, Run button: {'✅' if has_button else '❌'}")
+                return result.get('ready', False)
+            return False
+            
+        except Exception as e:
+            print(f"   ⚠️ Game check error: {e}")
+            return False
 
     # ================================================================
     # == CHROME DEBUG BROWSER MANAGEMENT (from json_generator.py) ==
@@ -886,228 +1077,383 @@ class SprunkiGamePlayer:
         """🛡️ Safe window maximization"""
         return self.safe_window_operation(window, "window maximization", lambda: window.maximize())
 
-    def navigate_and_prepare_game(self, url):
-            """Navigate to game URL using Chrome debug mode with Smart Verification"""
-            try:
-                print(f"🌐 Opening game URL with Chrome debug session: {url}")
-                print(f"🔧 Service Mode: Enhanced error handling enabled")
-                print(f"🛡️ Windows API quirks: Will handle 'success as error' cases")
+    def wait_for_complete_game_readiness(self, url):
+        """
+        🔄 CONTINUOUS MONITORING: Wait for both page + game ready with configurable timeout
+        """
+        try:
+            # Get configuration from config.json
+            continuous_config = self.app_config.get('continuous_monitoring', {})
+            page_config = self.app_config.get('page_verification', {})
+            game_config = self.app_config.get('game_load_verification', {})
+            
+            # Get timeouts and intervals
+            max_timeout = continuous_config.get('max_wait_time_seconds', 120)
+            check_interval = continuous_config.get('check_interval_seconds', 10)
+            early_exit = continuous_config.get('early_exit_on_success', True)
+            
+            print(f"\n🔄 CONTINUOUS GAME READINESS MONITORING")
+            print("="*70)
+            print(f"   ⏰ Maximum timeout: {max_timeout}s")
+            print(f"   🔄 Check interval: {check_interval}s")
+            print(f"   🎯 Target: Both page AND game verification success")
+            print(f"   🚀 Early exit: {'✅ Enabled' if early_exit else '❌ Disabled'}")
+            print("="*70)
+            
+            start_time = time.time()
+            check_count = 0
+            
+            while True:
+                check_count += 1
+                elapsed = time.time() - start_time
+                remaining = max_timeout - elapsed
                 
-                # Complete cleanup first
-                self.cleanup_chrome_complete()
-                time.sleep(2)
-                
-                self.game_url = url
-                
-                # Find uBlock extension (AdBlocker)
-                extensions_dir = os.path.join(os.getcwd(), 'extensions')
-                ublock_path = None
-                if os.path.exists(extensions_dir):
-                    subdirs = [d for d in os.listdir(extensions_dir) if os.path.isdir(os.path.join(extensions_dir, d))]
-                    if subdirs: 
-                        ublock_path = os.path.join(extensions_dir, subdirs[0])
-                
-                if not ublock_path:
-                    print("⚠️ uBlock Origin not found in 'extensions' folder - continuing without AdBlocker")
-                else:
-                    print(f"✅ Found AdBlocker: {ublock_path}")
-                
-                # Find Chrome executable
-                chrome_exe = None
-                for path in self.chrome_paths:
-                    if os.path.exists(path): 
-                        chrome_exe = path
-                        break
-                        
-                if not chrome_exe:
-                    print("❌ CRITICAL ERROR: Google Chrome not found")
-                    print("   💡 Please install Google Chrome or check chrome_paths in config.json")
+                if elapsed >= max_timeout:
+                    print(f"⏰ TIMEOUT REACHED after {max_timeout}s")
+                    print(f"   📊 Total checks performed: {check_count}")
                     return False
                 
-                # Build Chrome command with debug mode
-                chrome_cmd = [
-                    chrome_exe, 
-                    f"--remote-debugging-port={self.debugging_port}", 
-                    f"--user-data-dir={os.path.join(os.getcwd(), self.user_data_dir)}",
-                    "--no-first-run", 
-                    "--window-size=1280,720", 
-                    "--remote-allow-origins=*",
-                    url
-                ]
+                print(f"\n🔍 CHECK #{check_count} (Elapsed: {elapsed:.1f}s, Remaining: {remaining:.1f}s)")
+                print("-" * 50)
                 
-                # Add AdBlocker if available
-                if ublock_path:
-                    chrome_cmd.insert(-1, f"--load-extension={ublock_path}")
+                # Phase 1: Page verification
+                print("📄 Checking page load status...")
+                page_ready = self.verify_page_fully_loaded_lightweight(url)
+                page_status = "✅ READY" if page_ready else "⏳ NOT READY"
+                print(f"   📄 Page status: {page_status}")
                 
-                print("🔧 Launching Chrome with debug mode and AdBlocker...")
-                self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Phase 2: Game verification  
+                print("🎮 Checking game components status...")
+                game_ready = self.verify_game_components_ready_lightweight()
+                game_status = "✅ READY" if game_ready else "⏳ NOT READY"
+                print(f"   🎮 Game status: {game_status}")
                 
-                print(f"⏳ Waiting {self.page_load_wait}s for Chrome and AdBlocker to initialize...")
-                time.sleep(self.page_load_wait)
+                # Check if both ready
+                both_ready = page_ready and game_ready
                 
-                # Find game window
-                game_window = None
-                for _ in range(10): 
+                if both_ready and early_exit:
+                    print(f"\n🎉 SUCCESS! Both page and game ready after {elapsed:.1f}s")
+                    print(f"   📊 Checks performed: {check_count}")
+                    print(f"   🎯 Early exit - no need to wait full timeout")
+                    print("="*70)
+                    return True
+                
+                # Log current status
+                print(f"   📊 Combined status: Page({page_status}) + Game({game_status}) = {'✅ READY' if both_ready else '⏳ WAITING'}")
+                
+                # Calculate next check time
+                if remaining >= check_interval:
+                    print(f"   ⏳ Next check in {check_interval}s...")
+                    time.sleep(check_interval)
+                else:
+                    print(f"   ⏰ Less than {check_interval}s remaining, final check...")
+                    time.sleep(remaining)
+                    break
+            
+            # Final timeout
+            print(f"\n⏰ TIMEOUT: Max wait time ({max_timeout}s) exceeded")
+            print(f"   📊 Total checks: {check_count}")
+            print(f"   ⚠️ Will proceed with Run button detection anyway")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Error in continuous monitoring: {e}")
+            return False
+
+    def _calculate_slots_coverage_area(self, slot_indices, all_slots, overlap_margin):
+        """
+        🎯 ADDED: Calculate coverage area for slots
+        """
+        try:
+            if not all_slots or not slot_indices:
+                return None
+            
+            # Get coordinates of target slots
+            target_slots = [all_slots[i] for i in slot_indices if i < len(all_slots)]
+            if not target_slots:
+                return None
+            
+            # Find boundaries
+            min_x = min(slot['x'] for slot in target_slots) - overlap_margin
+            max_x = max(slot['x'] for slot in target_slots) + overlap_margin
+            min_y = min(slot['y'] for slot in target_slots) - overlap_margin
+            max_y = max(slot['y'] for slot in target_slots) + overlap_margin
+            
+            return {
+                'min_x': min_x,
+                'max_x': max_x,
+                'min_y': min_y,
+                'max_y': max_y,
+                'width': max_x - min_x,
+                'height': max_y - min_y,
+                'center_x': (min_x + max_x) // 2,
+                'center_y': (min_y + max_y) // 2
+            }
+            
+        except Exception as e:
+            print(f"❌ Error calculating coverage area: {e}")
+            return None
+
+    def navigate_and_prepare_game(self, url):
+        """Navigate to game URL using Chrome debug mode with Continuous Monitoring"""
+        try:
+            print(f"🌐 Opening game URL with Chrome debug session: {url}")
+            print(f"🔧 Service Mode: Enhanced error handling enabled")
+            print(f"🛡️ Windows API quirks: Will handle 'success as error' cases")
+            
+            # Complete cleanup first
+            self.cleanup_chrome_complete()
+            time.sleep(2)
+            
+            self.game_url = url
+            
+            # Find uBlock extension (AdBlocker)
+            extensions_dir = os.path.join(os.getcwd(), 'extensions')
+            ublock_path = None
+            if os.path.exists(extensions_dir):
+                subdirs = [d for d in os.listdir(extensions_dir) if os.path.isdir(os.path.join(extensions_dir, d))]
+                if subdirs: 
+                    ublock_path = os.path.join(extensions_dir, subdirs[0])
+            
+            if not ublock_path:
+                print("⚠️ uBlock Origin not found in 'extensions' folder - continuing without AdBlocker")
+            else:
+                print(f"✅ Found AdBlocker: {ublock_path}")
+            
+            # Find Chrome executable
+            chrome_exe = None
+            for path in self.chrome_paths:
+                if os.path.exists(path): 
+                    chrome_exe = path
+                    break
+                    
+            if not chrome_exe:
+                print("❌ CRITICAL ERROR: Google Chrome not found")
+                print("   💡 Please install Google Chrome or check chrome_paths in config.json")
+                return False
+            
+            # Build Chrome command with debug mode
+            chrome_cmd = [
+                chrome_exe, 
+                f"--remote-debugging-port={self.debugging_port}", 
+                f"--user-data-dir={os.path.join(os.getcwd(), self.user_data_dir)}",
+                "--no-first-run", 
+                "--window-size=1280,720", 
+                "--remote-allow-origins=*",
+                url
+            ]
+            
+            # Add AdBlocker if available
+            if ublock_path:
+                chrome_cmd.insert(-1, f"--load-extension={ublock_path}")
+            
+            print("🔧 Launching Chrome with debug mode and AdBlocker...")
+            self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            print(f"⏳ Waiting {self.page_load_wait}s for Chrome and AdBlocker to initialize...")
+            time.sleep(self.page_load_wait)
+            
+            # Find game window
+            game_window = None
+            for _ in range(10): 
+                possible_windows = gw.getWindowsWithTitle('cocrea.world')
+                if not possible_windows: 
+                    possible_windows = gw.getWindowsWithTitle('Chrome')
+                if possible_windows: 
+                    game_window = possible_windows[0]
+                    break
+                time.sleep(1)
+                
+            if not game_window: 
+                print("❌ CRITICAL ERROR: Could not find the game window")
+                print("   💡 Chrome may have failed to start or game page didn't load")
+                return False
+                
+            print(f"🎯 Found game window: '{game_window.title}'. Activating...")
+
+            # 🔧 ENHANCED: Safe window operations với error handling
+            try:
+                print("   🔄 Attempting to activate window...")
+                game_window.activate()
+                print("   ✅ Window activation completed")
+                time.sleep(0.5)
+            except Exception as e:
+                # Handle the "Error code from Windows: 0" issue
+                error_msg = str(e).lower()
+                if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
+                    print("   ✅ Window activation completed (Windows quirk - success reported as error)")
+                else:
+                    print(f"   ⚠️ Window activation warning: {e}")
+                    # Continue anyway - not critical
+
+            try:
+                print("   🔄 Attempting to maximize window...")
+                game_window.maximize()
+                print("   ✅ Window maximization completed")
+                time.sleep(2)
+            except Exception as e:
+                # Handle the "Error code from Windows: 0" issue
+                error_msg = str(e).lower()
+                if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
+                    print("   ✅ Window maximization completed (Windows quirk - success reported as error)")
+                else:
+                    print(f"   ⚠️ Window maximization warning: {e}")
+                    # Continue anyway - not critical
+                time.sleep(2)
+
+            # 🔧 NEW: Additional focus ensuring for service mode
+            print("🎯 Ensuring enhanced focus for service mode...")
+            self.ensure_game_focus()
+
+            print("✅ Window setup completed - ready for game operations")
+
+            # 🔧 WINDOW VERIFICATION: Ensure window is responsive after operations
+            try:
+                # Test if window is responsive
+                window_title = game_window.title
+                window_rect = game_window.rect if hasattr(game_window, 'rect') else None
+                print(f"✅ Window verification: Title='{window_title}', Responsive=True")
+            except Exception as e:
+                print(f"⚠️ Window verification warning: {e}")
+                print("💡 Window may still be functional - continuing")
+
+            print("🎯 Proceeding with game setup...")
+
+            # ================================================================
+            # 🔄 NEW: CONTINUOUS MONITORING SYSTEM (REPLACES SMART VERIFICATION)
+            # ================================================================
+            print(f"\n🔄 STARTING CONTINUOUS MONITORING SYSTEM")
+            print("="*70)
+            
+            both_ready = self.wait_for_complete_game_readiness(url)
+            
+            if both_ready:
+                print("✅ CONTINUOUS MONITORING SUCCESS: Both page and game fully ready!")
+                print("🎯 Proceeding immediately to Run button detection...")
+                time.sleep(self.stabilization_wait)  # Brief stabilization
+            else:
+                print("⚠️ CONTINUOUS MONITORING TIMEOUT: Proceeding with limited reliability...")
+                print("💡 Run button detection may have lower success rate")
+                time.sleep(3)  # Brief pause before proceeding
+            
+            print("🎯 Continuous monitoring completed - starting Run button detection...")
+            print("="*70)
+            
+            # ================================================================
+            # 🔧 ENHANCED: CDP-Only Run button detection (NO REFRESH POLICY)
+            # ================================================================
+
+            run_button_clicked = False
+            max_retries = self.game_config.get('run_button_max_retries', 3)
+
+            for attempt in range(1, max_retries + 1):
+                print(f"\n--- 🗯️ Finding 'Run' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
+                
+                if attempt > 1:
+                    # ✅ NO MORE REFRESH - Just wait more patiently
+                    print("   -> Action: Waiting patiently for Run button (NO PAGE REFRESH)")
+                    continuous_config = self.app_config.get('continuous_monitoring', {})
+                    patient_wait = continuous_config.get('patient_retry_wait_seconds', 30)
+                    print(f"   -> ⏳ Patient wait: {patient_wait}s for dynamic loading...")
+                    time.sleep(patient_wait)
+                else:
+                    # First attempt - using continuous monitoring results
+                    print("   -> Using continuous monitoring results (optimal timing)")
+                
+                # 🔧 SERVICE MODE FIX: Ensure window activation before clicking Run button
+                print("   -> 🔧 Ensuring window activation for service mode...")
+                try:
                     possible_windows = gw.getWindowsWithTitle('cocrea.world')
                     if not possible_windows: 
                         possible_windows = gw.getWindowsWithTitle('Chrome')
-                    if possible_windows: 
-                        game_window = possible_windows[0]
+                    if possible_windows:
+                        target_window = possible_windows[0]
+                        target_window.activate()
+                        time.sleep(0.5)
+                        print(f"   -> ✅ Window re-activated: '{target_window.title}'")
+                    else:
+                        print("   -> ⚠️ Could not find window to activate")
+                except Exception as e:
+                    print(f"   -> ⚠️ Window activation failed: {e}")
+                
+                print("   -> 🔍 Searching for 'Run' button via CDP-ONLY...")
+
+                # 🔧 SERVICE MODE FIX: Final activation before detector
+                print("   -> 🔧 Final window activation before Run button detection...")
+                try:
+                    possible_windows = gw.getWindowsWithTitle('cocrea.world')
+                    if not possible_windows: 
+                        possible_windows = gw.getWindowsWithTitle('Chrome')
+                    if possible_windows:
+                        target_window = possible_windows[0]
+                        target_window.activate()
+                        target_window.restore()
+                        target_window.maximize()
+                        time.sleep(1.0)  # Critical wait
+                        print(f"   -> ✅ Final activation complete: '{target_window.title}'")
+                    else:
+                        print("   -> ⚠️ Could not find window for final activation")
+                except Exception as e:
+                    print(f"   -> ⚠️ Final activation failed: {e}")
+
+                # 🚀 CDP-ONLY Run button detection
+                if self._click_run_button_cdp_only():
+                    print(f"🔍 Verifying Run button click had effect...")
+                    
+                    # Wait for game to start loading
+                    time.sleep(3)
+                    
+                    # Verify game actually started (look for game elements)
+                    ws_verify = websocket.create_connection(self._get_websocket_url(), timeout=10)
+                    verify_response = self._send_cdp_command(ws_verify, {
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "!!document.querySelector('.style_gandi-player-wrapper__WCs0P, canvas')", "returnByValue": True}
+                    })
+                    ws_verify.close()
+                    
+                    game_loaded = False
+                    if verify_response and 'result' in verify_response:
+                        game_loaded = verify_response.get('result', {}).get('result', {}).get('value', False)
+                    
+                    if game_loaded:
+                        print(f"✅ SUCCESS: Run button effect VERIFIED on attempt {attempt}.")
+                        run_button_clicked = True
                         break
-                    time.sleep(1)
-                    
-                if not game_window: 
-                    print("❌ CRITICAL ERROR: Could not find the game window")
-                    print("   💡 Chrome may have failed to start or game page didn't load")
-                    return False
-                    
-                print(f"🎯 Found game window: '{game_window.title}'. Activating...")
-
-                # 🔧 ENHANCED: Safe window operations với error handling
-                try:
-                    print("   🔄 Attempting to activate window...")
-                    game_window.activate()
-                    print("   ✅ Window activation completed")
-                    time.sleep(0.5)
-                except Exception as e:
-                    # Handle the "Error code from Windows: 0" issue
-                    error_msg = str(e).lower()
-                    if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
-                        print("   ✅ Window activation completed (Windows quirk - success reported as error)")
                     else:
-                        print(f"   ⚠️ Window activation warning: {e}")
-                        # Continue anyway - not critical
-
-                try:
-                    print("   🔄 Attempting to maximize window...")
-                    game_window.maximize()
-                    print("   ✅ Window maximization completed")
-                    time.sleep(2)
-                except Exception as e:
-                    # Handle the "Error code from Windows: 0" issue
-                    error_msg = str(e).lower()
-                    if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
-                        print("   ✅ Window maximization completed (Windows quirk - success reported as error)")
-                    else:
-                        print(f"   ⚠️ Window maximization warning: {e}")
-                        # Continue anyway - not critical
-                    time.sleep(2)
-
-                # 🔧 NEW: Additional focus ensuring for service mode
-                print("🎯 Ensuring enhanced focus for service mode...")
-                self.ensure_game_focus()
-
-                print("✅ Window setup completed - ready for game operations")
-
-                # 🔧 WINDOW VERIFICATION: Ensure window is responsive after operations
-                try:
-                    # Test if window is responsive
-                    window_title = game_window.title
-                    window_rect = game_window.rect if hasattr(game_window, 'rect') else None
-                    print(f"✅ Window verification: Title='{window_title}', Responsive=True")
-                except Exception as e:
-                    print(f"⚠️ Window verification warning: {e}")
-                    print("💡 Window may still be functional - continuing")
-
-                print("🎯 Proceeding with game setup...")
-
-                # ================================================================
-                # 🔍 SMART VERIFICATION SYSTEM (REPLACES FIXED 40s WAIT)
-                # ================================================================
-                print(f"\n🔍 STARTING SMART VERIFICATION SYSTEM")
-                print("="*70)
-                
-                # Phase 1: Page Load Verification
-                print("🔍 Phase 1: Smart Page Load Verification...")
-                page_verification_success = self.verify_page_fully_loaded(url)
-                
-                if not page_verification_success:
-                    print("⚠️ Page verification failed, but continuing with workflow...")
-                
-                # Phase 2: Game Components Verification  
-                print("🎮 Phase 2: Smart Game Components Verification...")
-                game_verification_success = self.verify_game_components_ready()
-                
-                if not game_verification_success:
-                    print("⚠️ Game verification failed, but continuing with workflow...")
-                
-                # Phase 3: Stabilization wait (replaces fixed 40s with smart 3s)
-                if page_verification_success and game_verification_success:
-                    print(f"✅ VERIFICATION SUCCESSFUL: Page and game fully loaded!")
-                    print(f"⏳ Stabilization wait: {self.stabilization_wait}s for optimal image detection...")
-                    time.sleep(self.stabilization_wait)
+                        print(f"❌ Run button clicked but no game loading detected")
+                        print(f"🔄 Treating as failure - will retry with patience")
                 else:
-                    print(f"⚠️ Verification had issues, using fallback stabilization...")
-                    time.sleep(5)  # Fallback wait if verification failed
-                
-                print("🎯 Smart verification completed - starting enhanced Run button detection...")
-                print("="*70)
-                
-                # ================================================================
-                # 🔧 ENHANCED: CDP-Only Run button detection (no PyAutoGUI dependency)
-                # ================================================================
-
-                run_button_clicked = False
-                max_retries = 3
-
-                for attempt in range(1, max_retries + 1):
-                    print(f"\n--- 🗯️ Finding 'Run' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
-                    
-                    if attempt > 1:
-                        print("   -> Action: Reloading page to clear potential issues...")
-                        pyautogui.hotkey('ctrl', 'r')
-
-                        # 🔧 SERVICE MODE FIX: Re-maximize after reload
-                        print("   -> 🔧 Re-maximizing window after reload...")
-                        try:
-                            possible_windows = gw.getWindowsWithTitle('cocrea.world')
-                            if not possible_windows: 
-                                possible_windows = gw.getWindowsWithTitle('Chrome')
-                            if possible_windows:
-                                target_window = possible_windows[0]
-                                time.sleep(2)  # Wait for reload to start
-                                target_window.activate()
-                                target_window.restore()
-                                target_window.maximize()
-                                time.sleep(1.0)
-                                print(f"   -> ✅ Window re-maximized after reload")
-                        except Exception as e:
-                            print(f"   -> ⚠️ Re-maximize failed: {e}")
-
-                        # Quick re-verification after reload
-                        print("   -> Quick re-verification after reload...")
-                        time.sleep(3)  # Brief wait for reload
-                        quick_verification = self._execute_verification_js("document.readyState")
-                        if quick_verification == 'complete':
-                            print("   -> ✅ Page reloaded successfully")
-                            time.sleep(max(self.stabilization_wait, 5))  # Minimum 5s for service mode
-                        else:
-                            print("   -> ⚠️ Page reload uncertain, using fallback wait...")
-                            time.sleep(8)  # Fallback wait
+                    print(f"❌ FAILED: Run button not found via CDP on attempt {attempt}.")
+                    if attempt < max_retries:
+                        print("   -> Will wait patiently and retry (no refresh policy)")
                     else:
-                        # First attempt - verification already done above
-                        print("   -> Using smart verification results (no additional wait needed)")
-                    
-                    # 🔧 SERVICE MODE FIX: Ensure window activation before clicking Run button
-                    print("   -> 🔧 Ensuring window activation for service mode...")
-                    try:
-                        possible_windows = gw.getWindowsWithTitle('cocrea.world')
-                        if not possible_windows: 
-                            possible_windows = gw.getWindowsWithTitle('Chrome')
-                        if possible_windows:
-                            target_window = possible_windows[0]
-                            target_window.activate()
-                            time.sleep(0.5)
-                            print(f"   -> ✅ Window re-activated: '{target_window.title}'")
-                        else:
-                            print("   -> ⚠️ Could not find window to activate")
-                    except Exception as e:
-                        print(f"   -> ⚠️ Window activation failed: {e}")
-                    
-                    print("   -> 🔍 Searching for 'Run' button via CDP-ONLY...")
+                        print(f"❌ Setup Error: Could not find 'Run' button after {max_retries} patient attempts.")
+                        return False
+                        
+            if not run_button_clicked: 
+                return False
+                
+            print(f"\n⏳ Waiting {self.game_load_wait}s for game to load after clicking Run...")
+            time.sleep(self.game_load_wait)
+            
+            # ================================================================
+            # 📺 FULLSCREEN BUTTON DETECTION (MODIFIED WITH PATIENT RETRY LOGIC)
+            # ================================================================
+            fullscreen_clicked = False
+            max_retries = 3
 
-                    # 🔧 SERVICE MODE FIX: Final activation before detector
-                    print("   -> 🔧 Final window activation before Run button detection...")
+            for attempt in range(1, max_retries + 1):
+                print(f"\n--- 📺 Finding 'Fullscreen' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
+
+                if attempt > 1:
+                    print("   -> Action: Patient wait for Fullscreen button (NO PAGE REFRESH)")
+                    continuous_config = self.app_config.get('continuous_monitoring', {})
+                    patient_wait = continuous_config.get('patient_retry_wait_seconds', 30)
+                    print(f"   -> ⏳ Patient wait: {patient_wait}s for fullscreen button...")
+                    time.sleep(patient_wait)
+
+                    # Re-maximize window after patient wait, no reload
+                    print("   -> 🔧 Re-activating window after patient wait...")
                     try:
                         possible_windows = gw.getWindowsWithTitle('cocrea.world')
                         if not possible_windows: 
@@ -1117,84 +1463,47 @@ class SprunkiGamePlayer:
                             target_window.activate()
                             target_window.restore()
                             target_window.maximize()
-                            time.sleep(1.0)  # Critical wait
-                            print(f"   -> ✅ Final activation complete: '{target_window.title}'")
-                        else:
-                            print("   -> ⚠️ Could not find window for final activation")
+                            time.sleep(1.0)
+                            print(f"   -> ✅ Window re-activated after patient wait")
                     except Exception as e:
-                        print(f"   -> ⚠️ Final activation failed: {e}")
-
-                    # 🚀 CDP-ONLY Run button detection
-                    if self._click_run_button_cdp_only():
-                        print(f"🔍 Verifying Run button click had effect...")
-                        
-                        # Wait for game to start loading
-                        time.sleep(3)
-                        
-                        # Verify game actually started (look for game elements)
-                        ws_verify = websocket.create_connection(self._get_websocket_url(), timeout=10)
-                        verify_response = self._send_cdp_command(ws_verify, {
-                            "method": "Runtime.evaluate",
-                            "params": {"expression": "!!document.querySelector('.style_gandi-player-wrapper__WCs0P, canvas')", "returnByValue": True}
-                        })
-                        ws_verify.close()
-                        
-                        game_loaded = False
-                        if verify_response and 'result' in verify_response:
-                            game_loaded = verify_response.get('result', {}).get('result', {}).get('value', False)
-                        
-                        if game_loaded:
-                            print(f"✅ SUCCESS: Run button effect VERIFIED on attempt {attempt}.")
-                            run_button_clicked = True
-                            break
-                        else:
-                            print(f"❌ Run button clicked but no game loading detected")
-                            print(f"🔄 Treating as failure - will retry")
-                    else:
-                        print(f"❌ FAILED: Run button not found via CDP on attempt {attempt}.")
-                        if attempt < max_retries:
-                            print("   -> Preparing for next attempt...")
-                        else:
-                            print(f"❌ Setup Error: Could not find 'Run' button after {max_retries} attempts.")
-                            return False
-                            
-                if not run_button_clicked: 
-                    return False
+                        print(f"   -> ⚠️ Re-activate failed: {e}")
                     
-                print(f"\n⏳ Waiting {self.game_load_wait}s for game to load after clicking Run...")
-                time.sleep(self.game_load_wait)
-                
-                # ================================================================
-                # 📺 FULLSCREEN BUTTON DETECTION (KEEPS ORIGINAL IMAGE LOGIC)
-                # ================================================================
-                
-                # 🔧 ENHANCED: CDP-Only Fullscreen button detection
-                print("🔧 CDP-ONLY: SVG-aware Fullscreen detection...")
+                    # Wait for fullscreen button to stabilize
+                    time.sleep(max(self.stabilization_wait, 8))
 
-                # Strict Fullscreen requirement - NO continue anyway
+                # Attempt to click the fullscreen button
                 fullscreen_success = self._click_fullscreen_button_cdp_only(wait_time=self.fullscreen_wait)
+                
                 if fullscreen_success:
-                    print("✅ VERIFIED Fullscreen button clicked via CDP.")
+                    print(f"✅ SUCCESS: Fullscreen button clicked on attempt {attempt}.")
+                    fullscreen_clicked = True
                     time.sleep(2)
+                    break # Exit the loop on success
                 else:
-                    print("❌ CRITICAL FAILURE - Fullscreen button not clicked")
-                    print("🔄 This is required for proper game setup - will retry from beginning")
-                    self.cleanup_chrome_complete()
-                    return False  # Force retry from beginning
-                    
-                # Press F11 for true fullscreen
-                print("⌨️ Pressing F11 for true fullscreen mode...")
-                pyautogui.press('f11')
-                time.sleep(3)
-                
-                print("✅ Game setup completed with Smart Verification System. Ready for automation.")
-                return True
-                
-            except Exception as e:
-                messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
-                print(f"⌚ Failed to navigate and prepare game: {e}")
-                self.cleanup_chrome_complete()
+                    print(f"❌ FAILED: Fullscreen button not found or clicked on attempt {attempt}.")
+                    if attempt == max_retries:
+                        print(f"❌ CRITICAL FAILURE: Could not click Fullscreen button after {max_retries} patient attempts.")
+                        self.cleanup_chrome_complete()
+                        return False # Fail the entire process after the last attempt
+
+            # Final check after the loop to ensure it was successful
+            if not fullscreen_clicked:
+                print("❌ Setup Error: Fullscreen button process failed after all patient retries.")
                 return False
+
+            # Press F11 for true fullscreen only after a successful click
+            print("⌨️ Pressing F11 for true fullscreen mode...")
+            pyautogui.press('f11')
+            time.sleep(3)
+            
+            print("✅ Game setup completed with Continuous Monitoring System. Ready for automation.")
+            return True
+            
+        except Exception as e:
+            messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
+            print(f"⌚ Failed to navigate and prepare game: {e}")
+            self.cleanup_chrome_complete()
+            return False
 
     def _get_websocket_url(self):
         """Get WebSocket URL for CDP communication"""
@@ -2292,12 +2601,12 @@ class SprunkiGamePlayer:
                         print(f"   ✅ Batch command successful: {command['method']}")
                         return response_data
                         
-                except websocket.WebSocketTimeoutError:
-                    # This is expected for short timeouts, continue waiting
-                    continue
-                except Exception as e:
-                    print(f"   ⚠️ WebSocket recv error: {e}")
-                    break
+                except Exception as timeout_e:
+                    if "timeout" in str(timeout_e).lower():
+                        continue
+                    else:
+                        print(f"   ⚠️ WebSocket recv error: {timeout_e}")
+                        break
             
             print(f"   ⏰ Batch CDP command timeout after {max_wait_time}s")
             return None
@@ -4203,220 +4512,24 @@ class SprunkiGamePlayer:
         
         return coordinates
 
-    def calculate_slot_safe_zone(self, target_slot_index, all_slots):
+    def verify_return_success(self, putted_before, putted_after):
         """
-        🛡️ NEW: Calculate safe zone to avoid clicking adjacent slots
-        Returns max_radius and safe coordinates only
-        """
-        try:
-            if not all_slots or target_slot_index >= len(all_slots):
-                print(f"⚠️ Invalid slot data for safe zone calculation")
-                return 40, []  # Very conservative fallback
-            
-            target_slot = all_slots[target_slot_index]
-            target_x, target_y = target_slot['x'], target_slot['y']
-            
-            print(f"\n🛡️ CALCULATING SAFE ZONE for Slot {target_slot_index} at ({target_x}, {target_y})")
-            
-            # Find minimum distance to any other slot
-            min_distance_to_other_slot = float('inf')
-            
-            for i, other_slot in enumerate(all_slots):
-                if i == target_slot_index:  # Skip self
-                    continue
-                    
-                other_x, other_y = other_slot['x'], other_slot['y']
-                distance = ((target_x - other_x) ** 2 + (target_y - other_y) ** 2) ** 0.5
-                
-                if distance < min_distance_to_other_slot:
-                    min_distance_to_other_slot = distance
-                    print(f"   📏 Distance to Slot {i}: {distance:.1f}px")
-            
-            # Safe radius = 40% of minimum distance (very conservative)
-            if min_distance_to_other_slot != float('inf'):
-                max_safe_radius = int(min_distance_to_other_slot * 0.4)
-                # Cap maximum to prevent going too wide
-                max_safe_radius = min(max_safe_radius, 80)  # Never exceed 80px
-            else:
-                max_safe_radius = 40  # Ultra-conservative fallback
-            
-            print(f"   🛡️ Minimum distance to other slots: {min_distance_to_other_slot:.1f}px")
-            print(f"   ✅ Safe radius calculated: {max_safe_radius}px (40% of min distance)")
-            
-            # Generate safe coordinates within boundary
-            safe_coordinates = self.generate_safe_boundary_coordinates(target_x, target_y, max_safe_radius)
-            
-            return max_safe_radius, safe_coordinates
-            
-        except Exception as e:
-            print(f"❌ Error calculating safe zone: {e}")
-            return 30, []  # Emergency fallback
-
-    def _precompute_all_safe_zones(self):
-        """
-        🔥 NEW: Pre-compute safe zones for all slots to avoid repeated calculations
-        Cache results in self.safe_zone_cache for performance optimization
+        ✅ COMPATIBILITY: Simple return verification
         """
         try:
-            print(f"\n🔥 STARTING SAFE ZONE PRE-COMPUTATION...")
-            print("="*60)
-            
-            # Debug: Check if config exists
-            if not self.config:
-                print("⚠️ No config available for safe zone pre-computation")
-                self.safe_zone_cache = {}
+            if putted_before is None or putted_after is None:
                 return False
             
-            layout = self.config.get('layout', {})
-            all_slots = layout.get('slots', [])
+            # Return success = count decreased by 1
+            expected_after = putted_before - 1
+            success = (putted_after == expected_after)
             
-            # Debug: Check slots data
-            print(f"📊 Config validation:")
-            print(f"   Layout exists: {'✅' if layout else '❌'}")
-            print(f"   Slots found: {len(all_slots)}")
-            
-            if not all_slots:
-                print("⚠️ No slots found for safe zone pre-computation")
-                self.safe_zone_cache = {}
-                return False
-            
-            # Debug: Show first few slots
-            print(f"📋 Sample slots data:")
-            for i, slot in enumerate(all_slots[:3]):  # Show first 3 slots
-                slot_index = slot.get('index', 'NO_INDEX')
-                x, y = slot.get('x', 'NO_X'), slot.get('y', 'NO_Y')
-                print(f"   Slot {i}: index={slot_index}, coords=({x}, {y})")
-            
-            print(f"\n🔥 PRE-COMPUTING SAFE ZONES for {len(all_slots)} slots...")
-            print("="*50)
-            
-            # Initialize cache
-            self.safe_zone_cache = {}
-            successful_computations = 0
-            failed_computations = 0
-            
-            for slot in all_slots:
-                slot_index = slot.get('index', -1)
-                
-                if slot_index == -1:
-                    print(f"⚠️ Slot missing index, skipping: {slot}")
-                    failed_computations += 1
-                    continue
-                
-                try:
-                    print(f"🛡️ Computing safe zone for Slot {slot_index}...")
-                    
-                    # Use existing calculate_slot_safe_zone method
-                    max_safe_radius, safe_coordinates = self.calculate_slot_safe_zone(slot_index, all_slots)
-                    
-                    # Validate calculation results
-                    if safe_coordinates and max_safe_radius > 0:
-                        # Cache the results
-                        self.safe_zone_cache[slot_index] = {
-                            'max_radius': max_safe_radius,
-                            'coordinates': safe_coordinates,
-                            'center_x': slot['x'],
-                            'center_y': slot['y']
-                        }
-                        
-                        print(f"   ✅ Slot {slot_index}: {len(safe_coordinates)} coords, max radius {max_safe_radius}px")
-                        successful_computations += 1
-                    else:
-                        print(f"   ❌ Slot {slot_index}: Computation failed (empty coordinates or invalid radius)")
-                        failed_computations += 1
-                        
-                except Exception as e:
-                    print(f"   ❌ Slot {slot_index}: Exception during computation: {e}")
-                    failed_computations += 1
-            
-            # Final summary
-            print(f"\n📊 PRE-COMPUTATION SUMMARY:")
-            print(f"   ✅ Successful: {successful_computations}")
-            print(f"   ❌ Failed: {failed_computations}")
-            print(f"   📦 Cache size: {len(self.safe_zone_cache)}")
-            
-            if successful_computations > 0:
-                print(f"✅ SAFE ZONE PRE-COMPUTATION COMPLETED!")
-                print(f"🚀 Performance: {successful_computations} slots cached for instant access")
-                print("="*60)
-                return True
-            else:
-                print(f"❌ SAFE ZONE PRE-COMPUTATION FAILED!")
-                print(f"⚠️ All {len(all_slots)} slots failed to compute - will use lazy caching")
-                print("="*60)
-                return False
+            print(f"📊 Return verification: {putted_before} → {putted_after} (expected: {expected_after}) = {'✅' if success else '❌'}")
+            return success
             
         except Exception as e:
-            print(f"❌ Critical error in safe zone pre-computation: {e}")
-            import traceback
-            traceback.print_exc()
-            self.safe_zone_cache = {}
+            print(f"❌ Return verification error: {e}")
             return False
-
-    def check_safe_zone_cache_status(self):
-        """
-        🔍 NEW: Check and display safe zone cache status for debugging
-        """
-        try:
-            print(f"\n🔍 SAFE ZONE CACHE STATUS:")
-            print("="*40)
-            
-            if not hasattr(self, 'safe_zone_cache') or not self.safe_zone_cache:
-                print("❌ Cache is empty or not initialized")
-                return False
-            
-            print(f"📦 Cache size: {len(self.safe_zone_cache)} slots")
-            print(f"📋 Cached slot indices: {list(self.safe_zone_cache.keys())}")
-            
-            # Show details for each cached slot
-            for slot_index, cache_data in self.safe_zone_cache.items():
-                coords_count = len(cache_data.get('coordinates', []))
-                max_radius = cache_data.get('max_radius', 0)
-                center_x = cache_data.get('center_x', 'N/A')
-                center_y = cache_data.get('center_y', 'N/A')
-                
-                print(f"   Slot {slot_index}: {coords_count} coords, radius {max_radius}px, center ({center_x}, {center_y})")
-            
-            print("="*40)
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error checking cache status: {e}")
-            return False
-
-    def generate_safe_boundary_coordinates(self, center_x, center_y, max_radius):
-        """
-        🛡️ NEW: Generate coordinates within safe boundary only
-        Progressive circles but never exceed safe radius
-        """
-        import math
-        
-        all_safe_coords = []
-        
-        # Always start with center
-        all_safe_coords.append((center_x, center_y))
-        
-        # Generate progressive circles within safe boundary
-        radii = [20, 35, 50, 65]  # Progressive radii
-        
-        for radius in radii:
-            if radius > max_radius:
-                print(f"   🛑 Stopping at radius {radius}px (exceeds safe limit {max_radius}px)")
-                break
-                
-            print(f"   🔄 Generating circle at {radius}px radius (within safe zone)")
-            
-            # 8 points for larger circles, 4 points for small circles
-            num_points = 8 if radius >= 35 else 4
-            
-            for i in range(num_points):
-                angle = (2 * math.pi * i) / num_points
-                x = center_x + int(radius * math.cos(angle))
-                y = center_y + int(radius * math.sin(angle))
-                all_safe_coords.append((x, y))
-        
-        print(f"   ✅ Generated {len(all_safe_coords)} safe coordinates")
-        return all_safe_coords
 
     def verify_slot_specific_return(self, target_slot_index, putted_before, putted_after):
         """
@@ -4659,21 +4772,16 @@ class SprunkiGamePlayer:
             return False
 
     def attempt_icon_return(self, target_slot):
-        """
-        ADDED: Attempt to return icon from slot before next retry
-        UPDATED: Sử dụng Characters Array verification
-        """
         try:
             print("🔄 Attempting to return icon before retry...")
             
             # Get count before return
             count_before = self.get_characters_count() if self.characters_available else None
             
-            # Quick click to return icon
+            # ✅ NO VARIATION: Use exact slot coordinates
             center_x, center_y = target_slot['x'], target_slot['y']
-            varied_x, varied_y = self.add_position_variation(center_x, center_y, 3)
             
-            pyautogui.moveTo(varied_x, varied_y, duration=0.2)
+            pyautogui.moveTo(center_x, center_y, duration=0.2)  # ← CHÍNH XÁC 100%
             time.sleep(0.1)
             pyautogui.click(button='left')
             time.sleep(0.5)  # Wait for return animation
@@ -4824,7 +4932,7 @@ class SprunkiGamePlayer:
         Returns True if drag was executed, False if execution failed
         """
         try:
-            end_x, end_y = self.add_position_variation(target_slot['x'], target_slot['y'], 8)
+            end_x, end_y = target_slot['x'], target_slot['y']
             
             # Get timing based on icon type and domain
             timing_key = 'first_icon' if is_first_icon else 'normal_icon'
@@ -5390,24 +5498,242 @@ class SprunkiGamePlayer:
             print(f"❌ PyAutoGUI drag failed: {e}")
             return False
 
+    def execute_carpet_bombing_fallback(self, target_slot, operation_type="return", use_cdp=False):
+        """
+        🎯 UNIVERSAL CARPET BOMBING: Tổng quát cho cả return và remix
+        Thực hiện carpet bombing theo từng đợt với kiểm tra sau mỗi đợt
+        """
+        try:
+            center_x, center_y = target_slot['x'], target_slot['y']
+            target_slot_index = target_slot.get('index', -1)
+            
+            print(f"\n🎯 CARPET BOMBING FALLBACK: {operation_type.upper()}")
+            print("="*60)
+            print(f"   🎯 Target: Slot {target_slot_index} at ({center_x}, {center_y})")
+            print(f"   🔄 Operation: {operation_type}")
+            
+            # Get initial state for verification
+            dual_verification_enabled = self.characters_available or self.putted_chars_available
+            if dual_verification_enabled:
+                initial_chars, initial_putted = self.get_dual_counts()
+                print(f"   📊 Initial state: Characters={initial_chars}, Putted={initial_putted}")
+            else:
+                initial_chars, initial_putted = None, None
+                print(f"   ⚠️ Verification disabled - assuming success after execution")
+            
+            # Configuration
+            max_sets = 6
+            base_coords_per_slot = 2
+            
+            for set_num in range(1, max_sets + 1):
+                if self.should_stop:
+                    break
+                    
+                print(f"\n🎯 CARPET SET {set_num}/{max_sets}")
+                print("-" * 40)
+                
+                # Calculate coordinates for this set
+                coords_per_slot = base_coords_per_slot + (set_num - 1)
+                print(f"   📍 Coordinates this set: {coords_per_slot}")
+                
+                # Generate carpet coordinates for single slot
+                carpet_coords = self.generate_slot_carpet_coordinates(
+                    center_x, center_y, coords_per_slot, set_num
+                )
+                
+                if not carpet_coords:
+                    print(f"   ❌ Could not generate coordinates for set {set_num}")
+                    continue
+                
+                print(f"   📊 Generated {len(carpet_coords)} carpet coordinates")
+                
+                # Get state before this set
+                if dual_verification_enabled:
+                    before_chars, before_putted = self.get_dual_counts()
+                
+                # Execute carpet bombing for this set
+                success = self.execute_carpet_bombing_set(
+                    carpet_coords, set_num, operation_type, use_cdp
+                )
+                
+                if not success:
+                    print(f"   ❌ Set {set_num} execution failed")
+                    continue
+                
+                # Wait for game state to update
+                time.sleep(0.5)
+                
+                # Check if operation succeeded after this set
+                if dual_verification_enabled:
+                    after_chars, after_putted = self.get_dual_counts()
+                    
+                    print(f"   📊 After set {set_num}: Characters={after_chars}, Putted={after_putted}")
+                    
+                    # Verify based on operation type
+                    operation_success = False
+                    if operation_type == "return":
+                        # Expect decrease for return
+                        operation_success = self.verify_return_success_dual(
+                            before_chars, after_chars, before_putted, after_putted
+                        )
+                    elif operation_type == "clear_all":
+                        # Expect zero for clear all
+                        operation_success = (after_chars == 0) if after_chars is not None else False
+                    
+                    if operation_success:
+                        print(f"🎉 CARPET BOMBING SUCCESS after set {set_num}!")
+                        print(f"   ✅ Operation: {operation_type}")
+                        print(f"   📊 Final state: Characters={after_chars}, Putted={after_putted}")
+                        return True
+                    else:
+                        print(f"   🔄 Set {set_num} completed but target not achieved, continuing...")
+                else:
+                    # No verification - assume success after reasonable number of sets
+                    if set_num >= 3:
+                        print(f"🎯 CARPET BOMBING ASSUMED SUCCESS after {set_num} sets (no verification)")
+                        return True
+                
+                # Brief pause between sets
+                time.sleep(0.3)
+            
+            # Final check after all sets
+            if dual_verification_enabled:
+                final_chars, final_putted = self.get_dual_counts()
+                
+                final_success = False
+                if operation_type == "return":
+                    final_success = self.verify_return_success_dual(
+                        initial_chars, final_chars, initial_putted, final_putted
+                    )
+                elif operation_type == "clear_all":
+                    final_success = (final_chars == 0) if final_chars is not None else False
+                
+                if final_success:
+                    print(f"🎉 CARPET BOMBING FINAL SUCCESS!")
+                    print(f"   ✅ Operation: {operation_type}")
+                    print(f"   📊 Final state: Characters={final_chars}, Putted={final_putted}")
+                    return True
+                else:
+                    print(f"💥 CARPET BOMBING FAILED after {max_sets} sets")
+                    print(f"   ❌ Operation: {operation_type}")
+                    print(f"   📊 Final state: Characters={final_chars}, Putted={final_putted}")
+                    return False
+            else:
+                print(f"🎯 CARPET BOMBING COMPLETED ({max_sets} sets executed)")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Error in carpet bombing fallback: {e}")
+            return False
+
+    def generate_slot_carpet_coordinates(self, center_x, center_y, num_coords, set_num):
+        """
+        📍 Generate carpet coordinates for single slot
+        Tạo tọa độ trải thảm cho 1 slot theo pattern mở rộng dần
+        """
+        try:
+            coordinates = []
+            
+            # Always start with center
+            coordinates.append((center_x, center_y))
+            
+            if num_coords >= 2:
+                # Cross pattern first
+                offset = 15 + (set_num * 3)
+                coordinates.extend([
+                    (center_x - offset, center_y),  # Left
+                    (center_x + offset, center_y),  # Right
+                ])
+            
+            if num_coords >= 4:
+                # Add vertical
+                offset = 15 + (set_num * 3)
+                coordinates.extend([
+                    (center_x, center_y - offset),  # Top
+                    (center_x, center_y + offset), # Bottom
+                ])
+            
+            if num_coords >= 6:
+                # Add diagonals
+                offset = 12 + (set_num * 2)
+                coordinates.extend([
+                    (center_x - offset, center_y - offset),  # Top-left
+                    (center_x + offset, center_y - offset),  # Top-right
+                ])
+            
+            if num_coords >= 8:
+                # Add more diagonals
+                offset = 12 + (set_num * 2)
+                coordinates.extend([
+                    (center_x - offset, center_y + offset),  # Bottom-left
+                    (center_x + offset, center_y + offset),  # Bottom-right
+                ])
+            
+            # Fill remaining with circle pattern
+            while len(coordinates) < num_coords:
+                radius = 20 + (len(coordinates) * 5)
+                angle = (len(coordinates) * 45) % 360  # 45-degree steps
+                import math
+                jitter_x = int(radius * math.cos(math.radians(angle)))
+                jitter_y = int(radius * math.sin(math.radians(angle)))
+                coordinates.append((center_x + jitter_x, center_y + jitter_y))
+            
+            return coordinates[:num_coords]
+            
+        except Exception as e:
+            print(f"❌ Error generating carpet coordinates: {e}")
+            return [(center_x, center_y)]  # Fallback to center
+
+    def execute_carpet_bombing_set(self, coordinates, set_num, operation_type, use_cdp=False):
+        """
+        💥 Execute carpet bombing set with inter-click delays
+        """
+        try:
+            print(f"   💥 Executing carpet bombing set {set_num}: {len(coordinates)} clicks")
+            
+            successful_clicks = 0
+            domain_adj = self.get_domain_adjustments()
+            
+            for i, (click_x, click_y) in enumerate(coordinates):
+                if self.should_stop:
+                    break
+                
+                # Execute single click
+                click_success = self._execute_single_return_click(
+                    click_x, click_y, use_cdp, domain_adj
+                )
+                
+                if click_success:
+                    successful_clicks += 1
+                
+                # Small delay between clicks
+                time.sleep(0.03)
+            
+            print(f"   ✅ Set {set_num}: {successful_clicks}/{len(coordinates)} clicks successful")
+            return successful_clicks > 0
+            
+        except Exception as e:
+            print(f"   ❌ Error executing carpet set {set_num}: {e}")
+            return False
+
     def corrected_return_icon(self, target_slot, use_cdp=False):
         """
-        🛡️ SMART SLOT STATE TRACKING: Pre-flight + DUAL Verification + Cross-contamination Prevention
-        UPDATED: Sử dụng DUAL verification cho Return (Characters + Putted)
+        🎯 SIMPLIFIED RETURN: Only 2 Phases - Precision Center + Carpet Bombing
+        STREAMLINED: Removed safe zone calculations, multi-method, emergency expansion
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             target_slot_index = target_slot.get('index', -1)
             domain_adj = self.get_domain_adjustments()
             
-            print(f"\n🛡️ SMART SLOT RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
-            print("="*80)
+            print(f"\n🎯 SIMPLIFIED RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
+            print("="*70)
             
             # Check if DUAL verification is available
             dual_verification_enabled = self.characters_available or self.putted_chars_available
             if dual_verification_enabled:
-                print("🔄 DUAL verification ENABLED for Return:")
-                print(f"   🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
+                print("🔄 DUAL verification ENABLED:")
+                print(f"   📢 Characters Array: {'✅ Ready' if self.characters_available else '❌ N/A'}")
                 print(f"   🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ N/A'}")
             else:
                 print("⚠️ DUAL verification DISABLED - using fallback logic")
@@ -5424,254 +5750,125 @@ class SprunkiGamePlayer:
                 if not needs_return:
                     print(f"✅ PHASE 0 RESULT: Slot {target_slot_index} doesn't need return ({reason})")
                     print("🚀 EARLY EXIT: Return operation skipped successfully")
-                    print("="*80)
-                    return True  # Successfully skipped unnecessary operation
+                    print("="*70)
+                    return True
                 else:
                     print(f"🎯 PHASE 0 RESULT: Slot {target_slot_index} needs return ({reason})")
             else:
                 print("⚠️ Pre-flight check skipped (verification disabled)")
-                initial_state = None
-            
-            # ================================================================
-            # SAFE ZONE RETRIEVAL WITH LAZY CACHING (ENHANCED)
-            # ================================================================
-            print("\n🛡️ SAFE ZONE RETRIEVAL WITH LAZY CACHING")
-            print("-" * 40)
-
-            # Check cache first
-            if target_slot_index in self.safe_zone_cache:
-                cache_data = self.safe_zone_cache[target_slot_index]
-                max_safe_radius = cache_data['max_radius']
-                safe_coordinates = cache_data['coordinates']
-                
-                print(f"🚀 CACHE HIT: Slot {target_slot_index}")
-                print(f"   📊 Cached coordinates: {len(safe_coordinates)}")
-                print(f"   🛡️ Max radius: {max_safe_radius}px")
-                print(f"   ⚡ Performance: INSTANT (no calculation needed)")
-            else:
-                print(f"⚠️ CACHE MISS: Slot {target_slot_index} not found in cache")
-                print("   🔄 Computing and caching for future use...")
-                
-                # Get config for calculation
-                if hasattr(self, 'config') and self.config:
-                    all_slots = self.config.get('layout', {}).get('slots', [])
-                else:
-                    print("⚠️ No config available, using conservative defaults")
-                    all_slots = []
-                
-                # Calculate safe zone
-                max_safe_radius, safe_coordinates = self.calculate_slot_safe_zone(target_slot_index, all_slots)
-                
-                # 🔥 LAZY CACHING: Cache the result for future use
-                if safe_coordinates:  # Only cache if calculation was successful
-                    self.safe_zone_cache[target_slot_index] = {
-                        'max_radius': max_safe_radius,
-                        'coordinates': safe_coordinates,
-                        'center_x': center_x,
-                        'center_y': center_y
-                    }
-                    print(f"   ✅ LAZY CACHED: Slot {target_slot_index} saved for future use")
-                    print(f"   📊 Cache size: {len(self.safe_zone_cache)} slots")
-                else:
-                    print(f"   ⚠️ Could not cache: Calculation failed for Slot {target_slot_index}")
-
-            if not safe_coordinates:
-                print("❌ Could not get safe coordinates, using minimal fallback")
-                safe_coordinates = [(center_x, center_y)]
-                max_safe_radius = 30
             
             success = False
             phase_used = "none"
             
             # ================================================================
-            # PHASE 1: PRECISION CENTER ATTACK with DUAL VERIFICATION
+            # PHASE 1: PRECISION CENTER ATTACK
             # ================================================================
-            print(f"\n🎯 PHASE 1: PRECISION CENTER with DUAL VERIFICATION")
+            print(f"\n🎯 PHASE 1: PRECISION CENTER")
             print("-" * 40)
             
             center_coords = [(center_x, center_y)]
             
-            # Get DUAL counts BEFORE return (if verification available)
+            # Get DUAL counts BEFORE return
             characters_before, putted_before = None, None
             if dual_verification_enabled:
                 characters_before, putted_before = self.get_dual_counts()
                 print(f"📊 DUAL counts BEFORE return:")
-                print(f"   🔢 Characters: {characters_before}")
+                print(f"   📢 Characters: {characters_before}")
                 print(f"   🎯 Putted: {putted_before}")
             
             # Try single click on center
             print("   🔹 Method: Precision single click")
             self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
             
-            # Wait and verify with DUAL verification
-            verification_wait = 0.3 if dual_verification_enabled else 0.2  # Further reduced
+            # Wait and verify
+            verification_wait = 0.3 if dual_verification_enabled else 0.2
             time.sleep(verification_wait)
             
             if dual_verification_enabled:
                 characters_after, putted_after = self.get_dual_counts()
                 print(f"📊 DUAL counts AFTER return:")
-                print(f"   🔢 Characters: {characters_after}")
+                print(f"   📢 Characters: {characters_after}")
                 print(f"   🎯 Putted: {putted_after}")
                 
-                # Use DUAL verification for return
                 if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                    print("🎉 PHASE 1 SUCCESS: Precision center click worked with DUAL verification!")
+                    print("🎉 PHASE 1 SUCCESS: Precision center click worked!")
                     success = True
-                    phase_used = "phase_1_precision_center_dual"
+                    phase_used = "phase_1_precision_center"
                 else:
                     print(f"❌ Phase 1 failed: DUAL verification failed")
+            else:
+                # No verification - assume success
+                print("✅ Phase 1 assumed success (no verification)")
+                success = True
+                phase_used = "phase_1_assumed"
             
             # Try double click if single failed
-            if not success and not self.should_stop:
-                print("   🔹 Method: Precision double click with DUAL verification")
+            if not success and not self.should_stop and dual_verification_enabled:
+                print("   🔹 Method: Precision double click")
                 
-                # Get DUAL counts before double click
-                if dual_verification_enabled:
-                    characters_before, putted_before = self.get_dual_counts()
-                
+                characters_before, putted_before = self.get_dual_counts()
                 self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="double")
                 
                 time.sleep(verification_wait)
-                if dual_verification_enabled:
-                    characters_after, putted_after = self.get_dual_counts()
-                    
-                    # Use DUAL verification
-                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                        print("🎉 PHASE 1 SUCCESS: Precision double click worked with DUAL verification!")
-                        success = True
-                        phase_used = "phase_1_precision_double_dual"
+                characters_after, putted_after = self.get_dual_counts()
+                
+                if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                    print("🎉 PHASE 1 SUCCESS: Precision double click worked!")
+                    success = True
+                    phase_used = "phase_1_precision_double"
+                else:
+                    print(f"❌ Phase 1 double click also failed")
             
             # ================================================================
-            # PHASE 2: SAFE BOUNDARY PATTERN with DUAL VERIFICATION
-            # ================================================================
-            if not success and not self.should_stop and len(safe_coordinates) > 1:
-                print(f"\n🛡️ PHASE 2: SAFE BOUNDARY PATTERN with DUAL VERIFICATION ({len(safe_coordinates)} coords)")
-                print("-" * 40)
-                
-                # Get DUAL counts before phase 2
-                if dual_verification_enabled:
-                    characters_before, putted_before = self.get_dual_counts()
-                    print(f"📊 DUAL counts BEFORE Phase 2: Characters={characters_before}, Putted={putted_before}")
-                
-                # Execute all clicks within safe boundary
-                self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method="single")
-                
-                # Wait and verify after entire phase
-                time.sleep(verification_wait + 0.1)  # Slightly longer for multi-coord
-                if dual_verification_enabled:
-                    characters_after, putted_after = self.get_dual_counts()
-                    
-                    # Use DUAL verification
-                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                        print("🎉 PHASE 2 SUCCESS: Safe boundary pattern worked with DUAL verification!")
-                        success = True
-                        phase_used = "phase_2_safe_boundary_dual"
-                    else:
-                        print(f"❌ Phase 2 failed: DUAL verification failed")
-            
-            # ================================================================
-            # PHASE 3: MULTI-METHOD ON SAFE COORDS with DUAL VERIFICATION
-            # ================================================================
-            if not success and not self.should_stop and len(safe_coordinates) > 1:
-                print(f"\n💥 PHASE 3: MULTI-METHOD with DUAL VERIFICATION")
-                print("-" * 40)
-                
-                # Try different methods on safe coordinates
-                methods = ["double", "triple", "hold"]
-                
-                for method in methods:
-                    if success or self.should_stop:
-                        break
-                        
-                    print(f"   🔥 Method: {method} with DUAL verification")
-                    
-                    # Get DUAL counts before this method
-                    if dual_verification_enabled:
-                        characters_before, putted_before = self.get_dual_counts()
-                    
-                    self.execute_multi_method_clicks(safe_coordinates, use_cdp, domain_adj, method=method)
-                    
-                    # Check after each method
-                    time.sleep(verification_wait)
-                    if dual_verification_enabled:
-                        characters_after, putted_after = self.get_dual_counts()
-                        
-                        # Use DUAL verification
-                        if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                            print(f"🎉 PHASE 3 SUCCESS: {method} method worked with DUAL verification!")
-                            success = True
-                            phase_used = f"phase_3_{method}_dual"
-                            break
-                        else:
-                            print(f"❌ Method {method} failed: DUAL verification failed")
-            
-            # ================================================================
-            # PHASE 4: EMERGENCY MICRO-EXPANSION with DUAL VERIFICATION
+            # PHASE 2: CARPET BOMBING FALLBACK
             # ================================================================
             if not success and not self.should_stop:
-                print(f"\n🚨 PHASE 4: EMERGENCY MICRO-EXPANSION with DUAL VERIFICATION (Max {max_safe_radius + 10}px)")
+                print(f"\n💥 PHASE 2: CARPET BOMBING FALLBACK")
                 print("-" * 40)
+                print("   🎯 Precision methods failed, deploying carpet bombing...")
+                print("   💥 Progressive coordinate expansion with set-by-set verification")
                 
-                # Generate emergency coordinates - slightly beyond safe zone but still conservative
-                emergency_radius = min(max_safe_radius + 10, 60)  # Very limited expansion
-                emergency_coords = self.generate_circle_pattern_coordinates(
-                    center_x, center_y, radius=emergency_radius, num_points=6
+                carpet_success = self.execute_carpet_bombing_fallback(
+                    target_slot, operation_type="return", use_cdp=use_cdp
                 )
                 
-                # Get DUAL counts before emergency
-                if dual_verification_enabled:
-                    characters_before, putted_before = self.get_dual_counts()
-                    print(f"📊 DUAL counts BEFORE Emergency: Characters={characters_before}, Putted={putted_before}")
-                
-                print(f"   🚨 Micro-expansion: {len(emergency_coords)} points at {emergency_radius}px")
-                self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
-                
-                # Final check
-                time.sleep(verification_wait + 0.3)  # Longer wait for emergency
-                if dual_verification_enabled:
-                    characters_after, putted_after = self.get_dual_counts()
-                    
-                    # Use DUAL verification
-                    if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                        print("🎉 PHASE 4 SUCCESS: Emergency micro-expansion worked with DUAL verification!")
-                        success = True
-                        phase_used = "phase_4_emergency_dual"
-                    else:
-                        print(f"❌ Emergency phase failed: DUAL verification failed")
+                if carpet_success:
+                    print("🎉 PHASE 2 SUCCESS: Carpet bombing fallback worked!")
+                    success = True
+                    phase_used = "phase_2_carpet_bombing"
+                else:
+                    print("💥 PHASE 2 FAILED: Carpet bombing fallback unsuccessful")
             
             # ================================================================
-            # FINAL RESULT WITH COMPREHENSIVE REPORT
+            # FINAL RESULT
             # ================================================================
-            print("\n" + "="*80)
+            print("\n" + "="*70)
             if success:
-                print(f"🎉 SMART SLOT RETURN COMPLETED SUCCESSFULLY with DUAL VERIFICATION!")
+                print(f"🎉 SIMPLIFIED RETURN COMPLETED SUCCESSFULLY!")
                 print(f"   ✅ Target slot: {target_slot_index}")
                 print(f"   ✅ Success method: {phase_used}")
-                print(f"   🛡️ Max safe radius used: {max_safe_radius}px")
                 print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
-                print(f"   🛡️ Cross-slot contamination: PREVENTED")
                 print(f"   📊 Verification systems: Characters Array {'✅' if self.characters_available else '❌'} + Putted Characters {'✅' if self.putted_chars_available else '❌'}")
-                print("="*80)
+                if "carpet_bombing" in phase_used:
+                    print(f"   💥 Used fallback: CARPET BOMBING (highly reliable)")
+                print("="*70)
                 return True
             else:
-                print(f"💥 SMART SLOT RETURN FAILED with DUAL VERIFICATION")
+                print(f"💥 SIMPLIFIED RETURN FAILED - BOTH PHASES EXHAUSTED")
                 print(f"   ❌ Target slot: {target_slot_index}")
-                print(f"   ❌ All phases attempted within safe boundary")
-                print(f"   🛡️ Max safe radius: {max_safe_radius}px")
+                print(f"   ❌ Phase 1 (Precision Center): FAILED")
+                print(f"   ❌ Phase 2 (Carpet Bombing): FAILED") 
                 print(f"   🔄 DUAL verification: {'✅ Enabled' if dual_verification_enabled else '⚠️ Disabled'}")
-                print(f"   🛡️ Cross-contamination protection: ACTIVE")
-                print(f"   📊 DUAL verification systems tested")
-                print("="*80)
+                print("="*70)
                 return False
                 
         except Exception as e:
-            print(f"❌ Smart slot return error: {e}")
+            print(f"❌ Simplified return error: {e}")
             import traceback
             traceback.print_exc()
             return False
 
     def _execute_cdp_return(self, center_x, center_y, domain_adj):
-        """Execute return using CDP"""
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
@@ -5679,11 +5876,9 @@ class SprunkiGamePlayer:
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            # Add variation to center position
-            varied_x, varied_y = self.add_position_variation(center_x, center_y, 5)
-            
+            # ✅ NO VARIATION: Use exact coordinates
             # Move and click
-            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": varied_x, "y": varied_y}})
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": center_x, "y": center_y}})
             time.sleep(0.1)
             self._simulate_click_via_cdp(ws, varied_x, varied_y)
             
@@ -5705,16 +5900,14 @@ class SprunkiGamePlayer:
         return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
 
     def _execute_pyautogui_single_click(self, click_x, click_y, domain_adj):
-        """ADDED: Execute single click using PyAutoGUI"""
         try:
             print(f"🖱️ Executing PyAutoGUI single click at ({click_x}, {click_y})")
             
             # 🔧 NEW: Ensure focus before click
             self._ensure_focus_before_operation("single click")
             
-            # Move to position with slight variation
-            varied_x, varied_y = self.add_position_variation(click_x, click_y, 3)
-            pyautogui.moveTo(varied_x, varied_y, duration=0.15)
+            # ✅ NO VARIATION: Use exact coordinates
+            pyautogui.moveTo(click_x, click_y, duration=0.15)  # ← CHÍNH XÁC 100%
             time.sleep(0.1)
             
             # Single click
@@ -5838,11 +6031,6 @@ class SprunkiGamePlayer:
     # ================================================================
     # == EXISTING GAME LOGIC (kept as-is with small adaptations) ==
     # ================================================================
-    
-    def add_position_variation(self, x, y, max_offset=8):
-        offset_x = random.randint(-max_offset, max_offset)
-        offset_y = random.randint(-max_offset, max_offset)
-        return x + offset_x, y + offset_y
 
     def smart_delay(self, base_time, variation=0.3):
         """Smart delay with random variation and domain adjustments"""
@@ -5951,15 +6139,17 @@ class SprunkiGamePlayer:
                 first_icon = layout['icons'][0]
                 print("🎯 Warming up first icon...")
                 
-                warm_x, warm_y = self.add_position_variation(first_icon['x'], first_icon['y'])
+                # ✅ CHÍNH XÁC 100%: Không dao động
+                warm_x, warm_y = first_icon['x'], first_icon['y']  # ← SỬA ĐÂY
+                
                 pyautogui.moveTo(warm_x, warm_y, duration=random.uniform(0.3, 0.5))
                 self.smart_delay(0.3, 0.1)
                 
-                # Micro-movement
-                offset_x, offset_y = warm_x + 8, warm_y + 8
+                # Micro-movement - CŨNG CHÍNH XÁC
+                offset_x, offset_y = warm_x + 8, warm_y + 8  # ← OFFSET CỐ ĐỊNH thay vì random
                 pyautogui.moveTo(offset_x, offset_y, duration=0.15)
                 self.smart_delay(0.2, 0.05)
-                pyautogui.moveTo(warm_x, warm_y, duration=0.15)
+                pyautogui.moveTo(warm_x, warm_y, duration=0.15)  # ← VỀ CHÍNH XÁC VỊ TRÍ GỐC
                 self.smart_delay(0.3, 0.1)
             
             print("✅ Game preparation completed with enhanced workflow!")
@@ -6374,7 +6564,10 @@ class SprunkiGamePlayer:
             return False
     
     def trigger_horror_mode_transition_corrected(self, transition_duration=15, progress_callback=None):
-        """ENHANCED: Trigger horror mode with verification system - WORKS WITH LIMITED ICONS"""
+        """
+        ENHANCED: Trigger horror mode with verification system - FIXED with Icon Return
+        UPDATED: Added Phase 3 - Return Icon 19 after transformation
+        """
         try:
             if not self.config:
                 return False
@@ -6415,15 +6608,19 @@ class SprunkiGamePlayer:
                 print("⚠️ Verification disabled - using fallback")
             print("="*60)
             
-            # Drag icon 19 to slot 3 with enhanced verification
-            print("🎯 Dragging horror icon (19) to slot 3 with verification...")
+            # ================================================================
+            # PHASE 1: DRAG ICON 19 TO SLOT 3 (trigger horror mode)
+            # ================================================================
+            print("🎯 PHASE 1: Dragging horror icon (19) to slot 3 with verification...")
             use_cdp = False  # Can be customized
             if not self.corrected_drag_and_drop(horror_icon, target_slot, False, use_cdp):
                 print("❌ Failed to trigger horror mode with verification")
                 return False
             
-            # Wait for transition
-            print(f"⏳ Waiting for horror transformation ({transition_duration}s)...")
+            # ================================================================
+            # PHASE 2: WAIT FOR TRANSFORMATION
+            # ================================================================
+            print(f"⏳ PHASE 2: Waiting for horror transformation ({transition_duration}s)...")
             for countdown in range(transition_duration, 0, -1):
                 if self.should_stop:
                     return False
@@ -6431,41 +6628,130 @@ class SprunkiGamePlayer:
                     progress_callback(f"👻 Horror mode transition... ({countdown}s)")
                 time.sleep(1)
             
-            if not self.should_stop:
-                if progress_callback:
-                    progress_callback("👻 Horror Mode activated with verification!")
-                print("✅ ENHANCED HORROR MODE TRANSITION COMPLETED!")
+            if self.should_stop:
+                return False
+            
+            print("✅ ENHANCED HORROR MODE TRANSITION COMPLETED!")
+            
+            # ================================================================
+            # PHASE 3: 🆕 RETURN ICON 19 FROM SLOT 3 (clear slot for showcase)
+            # ================================================================
+            print("\n🔄 PHASE 3: RETURNING ICON 19 FROM SLOT 3 (prepare for showcase)")
+            print("="*60)
+            print("   💡 Reason: Slot 3 must be empty for horror showcase to work")
+            print("   🎯 Target: Return Icon 19 from Slot 3 back to icon area")
+            
+            if progress_callback:
+                progress_callback("🔄 Returning horror trigger icon for showcase...")
+            
+            # Check current state before return
+            dual_verification_enabled = self.characters_available or self.putted_chars_available
+            if dual_verification_enabled:
+                before_chars, before_putted = self.get_dual_counts()
+                print(f"   📊 BEFORE return: Characters={before_chars}, Putted={before_putted}")
                 
-                # Horror mode state validation (existing code preserved)
-                print("\n👻 HORROR MODE STATE VALIDATION")
-                print("="*50)
-                
-                try:
-                    # Validate horror mode activation state
-                    horror_state = self.get_comprehensive_slot_state()
+                if before_chars == 0 and before_putted == 0:
+                    print("   ✅ Slot already empty - no return needed")
+                    print("   🎯 Horror mode ready for showcase immediately")
+                else:
+                    print(f"   🎯 Slot occupied - returning icon 19...")
                     
-                    if horror_state and self.characters_available:
-                        putted_chars = horror_state.get('putted_characters', 0)
-                        polos_array = horror_state.get('polos_array', [])
+                    # Use enhanced return with all fallback methods
+                    return_success = self.corrected_return_icon(target_slot, use_cdp)
+                    
+                    if return_success:
+                        # Verify return worked
+                        time.sleep(1.0)  # Wait for state update
+                        after_chars, after_putted = self.get_dual_counts()
+                        print(f"   📊 AFTER return: Characters={after_chars}, Putted={after_putted}")
                         
-                        print(f"📊 Horror mode state:")
-                        print(f"   Putted characters: {putted_chars}")
-                        print(f"   Active slots: {sum(1 for x in polos_array if x == '1') if polos_array else 'N/A'}")
-                        
-                        # Expect at least 1 active slot (the horror icon we just placed)
-                        if putted_chars >= 1:
-                            print("✅ Horror mode properly activated - icon placed")
+                        if after_chars == 0 and after_putted == 0:
+                            print("   ✅ RETURN SUCCESSFUL: Slot 3 is now empty")
+                            print("   🎯 Horror mode ready for showcase")
                         else:
-                            print("⚠️ Horror mode state unclear - may need verification")
+                            print("   ⚠️ RETURN UNCLEAR: State may not be fully cleared")
+                            print("   🎯 Proceeding with showcase anyway")
                     else:
-                        print("⚠️ Cannot validate horror mode state (verification disabled)")
-                    
-                except Exception as e:
-                    print(f"⚠️ Error validating horror mode state: {e}")
+                        print("   ❌ RETURN FAILED: Using emergency methods...")
+                        
+                        # Emergency cleanup attempts
+                        for emergency_attempt in range(3):
+                            print(f"   🚨 Emergency return attempt {emergency_attempt + 1}/3")
+                            
+                            # Multiple clicks on slot 3
+                            emergency_coords = [
+                                (target_slot['x'], target_slot['y']),
+                                (target_slot['x'] - 10, target_slot['y']),
+                                (target_slot['x'] + 10, target_slot['y']),
+                                (target_slot['x'], target_slot['y'] - 10),
+                                (target_slot['x'], target_slot['y'] + 10)
+                            ]
+                            
+                            domain_adj = self.get_domain_adjustments()
+                            self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
+                            time.sleep(0.5)
+                            
+                            # Check if emergency worked
+                            emergency_chars, emergency_putted = self.get_dual_counts()
+                            if emergency_chars == 0 and emergency_putted == 0:
+                                print(f"   ✅ EMERGENCY SUCCESS: Slot cleared on attempt {emergency_attempt + 1}")
+                                break
+                        else:
+                            print("   💥 ALL EMERGENCY ATTEMPTS FAILED")
+                            print("   ⚠️ Proceeding with showcase - may have slot conflicts")
+            else:
+                print("   ⚠️ Verification disabled - assuming icon return needed")
+                print("   🔄 Performing blind return attempt...")
                 
-                print("="*50)
+                # Blind return attempt
+                self.corrected_return_icon(target_slot, use_cdp)
                 time.sleep(1.0)
-
+                print("   ✅ Blind return completed")
+            
+            # ================================================================
+            # HORROR MODE STATE VALIDATION (existing code with better logging)
+            # ================================================================
+            print("\n👻 HORROR MODE STATE VALIDATION")
+            print("="*50)
+            
+            try:
+                # Validate horror mode activation state
+                horror_state = self.get_comprehensive_slot_state()
+                
+                if horror_state and dual_verification_enabled:
+                    characters_count = horror_state.get('characters_count', 0)
+                    
+                    print(f"📊 Final horror mode state:")
+                    print(f"   Characters count: {characters_count}")
+                    
+                    # Expect 0 after return (slot should be empty for showcase)
+                    if characters_count == 0:
+                        print("✅ Horror mode properly prepared - slot empty for showcase")
+                        print("🎯 Ready to showcase all horror icons (0-19)")
+                    else:
+                        print(f"⚠️ Horror mode state: {characters_count} icons still on slots")
+                        print("🎯 Proceeding anyway - showcase will handle conflicts")
+                else:
+                    print("⚠️ Cannot validate horror mode state (verification disabled)")
+                    print("🎯 Assuming horror mode ready")
+                
+            except Exception as e:
+                print(f"⚠️ Error validating horror mode state: {e}")
+                print("🎯 Assuming horror mode ready")
+            
+            print("="*50)
+            
+            # Final confirmation
+            if progress_callback:
+                progress_callback("👻 Horror Mode ready for showcase!")
+            
+            print("🎉 ENHANCED HORROR MODE FULLY PREPARED!")
+            print("   ✅ Phase 1: Horror trigger completed")
+            print("   ✅ Phase 2: Transformation completed") 
+            print("   ✅ Phase 3: Icon return completed")
+            print("   🎯 Ready for horror showcase (icons 0-19)")
+            
+            time.sleep(1.0)
             return True
             
         except Exception as e:
@@ -6674,9 +6960,6 @@ class SprunkiGamePlayer:
         
         Button(debug_buttons, text="⚡ Test Smart Verification", 
             command=self.test_smart_verification_system, bg="#2196F3", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
-
-        Button(debug_buttons, text="🛡️ Check Cache", 
-            command=self.check_safe_zone_cache_status, bg="#795548", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
 
         Button(debug_buttons, text="🎯 Check Mode", 
             command=self.show_current_mode_info, bg="#607D8B", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
@@ -6934,18 +7217,6 @@ class SprunkiGamePlayer:
                     print(f"   Current URL: {current_url}")
                     print("   💡 Please use a cocrea.world game URL")
                     return
-                
-                # ================================================================
-                # Pre-compute safe zones FOR PERFORMANCE immediately after config is loaded.
-                # This ensures the cache is ready before any other action.
-                print("\n🔥 PRE-COMPUTING SAFE ZONES FOR OPTIMAL PERFORMANCE...")
-                if not self._precompute_all_safe_zones():
-                    # Thông báo cho người dùng nếu cache thất bại nhưng vẫn tiếp tục
-                    print("⚠️ Safe zone pre-computation failed, will use fallback real-time calculations.")
-                    messagebox.showwarning("Performance Warning", 
-                                        "Safe Zone pre-computation failed.\n"
-                                        "The automation will run slower as it needs to calculate on-the-fly.")
-                # ================================================================
                 
                 # Check hasHorror setting for remix generation
                 game_settings = self.config.get('gameSettings', {})

@@ -54,12 +54,13 @@
     "max_pagedown_attempts": 5,
     "fullscreen_wait": 8,
     "intro_skip_clicks": 10,
-    "run_button_max_retries": 2,
+    "run_button_max_retries": 3,
     "enhanced_verification": true
   },
   "page_verification": {
     "enabled": true,
     "timeout_ms": 120000,
+    "continuous_check_interval_ms": 10000,
     "check_interval_ms": 2000,
     "criteria": {
       "document_ready": true,
@@ -67,12 +68,13 @@
       "no_loading_spinners": true,
       "basic_elements": true
     },
-    "max_retries": 3,
+    "max_retries": 999,
     "stabilization_wait_seconds": 3
   },
   "game_load_verification": {
     "enabled": true,
-    "timeout_ms": 90000,
+    "timeout_ms": 120000,
+    "continuous_check_interval_ms": 10000,
     "check_interval_ms": 2000,
     "game_container_selectors": [
       ".ccw-stage-wrapper",
@@ -83,6 +85,16 @@
     "min_containers_required": 1,
     "check_react_components": true,
     "check_run_button_dom": true
+  },
+  "continuous_monitoring": {
+    "enabled": true,
+    "max_wait_time_seconds": 120,
+    "check_interval_seconds": 10,
+    "early_exit_on_success": true,
+    "patient_retry_enabled": true,
+    "patient_retry_wait_seconds": 30,
+    "no_refresh_policy": true,
+    "logging_enabled": true
   },
   "automation": {
     "pyautogui": {
@@ -147,7 +159,7 @@
   "processing": {
     "max_retries": 2,
     "auto_skip_on_error": true,
-    "pause_between_items": 5,
+    "pause_between_items": 60,
     "parallel_processing": false,
     "create_summary_report": true,
     "cleanup_temp_files": true
@@ -232,8 +244,8 @@
     "enhanced_page_verification": true,
     "max_page_load_wait": 120,
     "verification_check_interval": 2,
-    "auto_refresh_on_timeout": true,
-    "max_refresh_attempts": 3,
+    "auto_refresh_on_timeout": false,
+    "max_refresh_attempts": 0,
     "page_ready_criteria": {
       "min_pass_rate": 0.7,
       "critical_checks": [

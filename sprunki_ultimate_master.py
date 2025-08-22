@@ -819,7 +819,7 @@ class UnifiedProcessingManager:
                 self.logger.info("⏳ Step 2: Waiting for complete browser resource cleanup...")
                 
                 # Additional wait to ensure complete browser resource cleanup
-                browser_cleanup_duration = 3
+                browser_cleanup_duration = 60  # Wait for 60 seconds to ensure all resources are released
                 for countdown in range(browser_cleanup_duration, 0, -1):
                     if self.should_stop:
                         self.logger.warning("🛑 Emergency stop during browser cleanup wait")
