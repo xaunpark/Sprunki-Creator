@@ -964,15 +964,18 @@ class UnifiedProcessingManager:
                 
                 self.logger.info("⏳ Step 2: Waiting for complete browser resource cleanup...")
                 
-                # Additional wait to ensure complete browser resource cleanup
-                browser_cleanup_duration = 60  # Wait for 60 seconds to ensure all resources are released
+                # OPTIMIZED: Reduce wait time and improve feedback.
+                # The game_player.close_game_window() already performs a thorough cleanup with verification.
+                # This shorter wait is just an extra safety buffer.
+                browser_cleanup_duration = 10  # Reduced from 60s to 10s.
                 for countdown in range(browser_cleanup_duration, 0, -1):
                     if self.should_stop:
                         self.logger.warning("🛑 Emergency stop during browser cleanup wait")
-                        return master_success  # Return Master mode result only
+                        return master_success
                     
-                    if countdown == browser_cleanup_duration or countdown == 1:
-                        self.logger.info(f"   🧹 Browser cleanup... {countdown}s remaining")
+                    # Improved logging for better feedback every 2 seconds.
+                    if countdown % 2 == 0 or countdown <= 2:
+                        self.logger.info(f"   🧹 Browser cleanup cooldown... {countdown}s remaining")
                     time.sleep(1)
                 
                 self.logger.info("✅ Browser state isolation completed - clean slate ready")
