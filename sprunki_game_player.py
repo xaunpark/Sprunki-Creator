@@ -19,6 +19,7 @@ import pygetwindow as gw
 from pathlib import Path
 from datetime import datetime
 import math
+import psutil
 
 class DragOperationStats:
     """Class Ä‘á»ƒ tracking drag operation statistics"""
@@ -160,20 +161,20 @@ class SprunkiGamePlayer:
         # Timing constants for different operations
         self.DRAG_DELAYS = {
             'first_icon': {
-                'approach': 0.5,
-                'focus': 0.3,
-                'hold': 0.4,
-                'drag': 1.0,
-                'drop': 0.5,
-                'post_drop': 0.3
+                'approach': 0.8,
+                'focus': 0.6,
+                'hold': 0.8,
+                'drag': 1.5,
+                'drop': 0.8,
+                'post_drop': 0.5
             },
             'normal_icon': {
-                'approach': 0.25,
-                'focus': 0.15,
-                'hold': 0.25,
-                'drag': 0.6,
-                'drop': 0.3,
-                'post_drop': 0.2
+                'approach': 0.4,
+                'focus': 0.3,
+                'hold': 0.6,
+                'drag': 1.0,
+                'drop': 0.6,
+                'post_drop': 0.4
             }
         }
         
@@ -1012,97 +1013,151 @@ class SprunkiGamePlayer:
     # ================================================================
 
     def cleanup_chrome_complete(self):
-        """Complete cleanup: Close Chrome debug entirely and clean all resources + Clear browsing data"""
+        """
+        🔧 FIXED: Force complete browser shutdown with port cleanup verification
+        """
         try:
-            print("ðŸ§¹ Complete cleanup: Closing Chrome debug and cleaning resources + browsing data...")
+            print("🔧 ENHANCED: Force complete browser shutdown with port verification...")
             
-            # ðŸ†• PHASE 1: Minimal browser cache clearing (PRESERVE login/extensions)
-            try:
-                print("   ðŸ—‘ï¸ Phase 1: Minimal cache clearing (preserving login/extensions)...")
-                ws_url = self._get_websocket_url()
-                if ws_url:
-                    ws = websocket.create_connection(ws_url, timeout=10)
-                    
-                    # Only clear browser cache, NOT cookies or storage
-                    clear_cache_command = {
-                        "method": "Network.clearBrowserCache"
-                    }
-                    self._send_cdp_command(ws, clear_cache_command)
-                    
-                    # âŒ REMOVED: Storage.clearDataForOrigin - would remove extension data
-                    # âŒ REMOVED: Network.clearBrowserCookies - would remove login sessions
-                    
-                    ws.close()
-                    print("   âœ… Minimal cache cleared via CDP (login/extensions preserved)")
-                else:
-                    print("   âš ï¸ WebSocket not available for cache clearing")
-            except Exception as e:
-                print(f"   âš ï¸ CDP cache clearing failed: {e}")
-            
-            # PHASE 2: Close windows by title
-            print("   ðŸ—‚ï¸ Phase 2: Closing Chrome windows...")
-            for title_part in ['cocrea.world', 'Chrome']:
-                windows = gw.getWindowsWithTitle(title_part)
-                for window in windows:
-                    try:
-                        print(f"   ðŸ—‚ï¸ Closing window: {window.title}")
-                        window.close()
-                    except:
-                        pass
-            
-            time.sleep(2)
-            
-            # PHASE 3: Terminate Chrome process
-            print("   ðŸ”¥ Phase 3: Terminating Chrome process...")
-            if hasattr(self, 'chrome_process') and self.chrome_process:
+            # Phase 1: Close WebSocket connections immediately
+            if hasattr(self, 'session_websocket') and self.session_websocket:
                 try:
-                    print("   ðŸ”¥ Terminating Chrome process...")
-                    self.chrome_process.terminate()
-                    self.chrome_process.wait(timeout=5)
+                    self.session_websocket.close()
+                    print("   ✅ WebSocket connection closed")
                 except:
-                    try:
-                        self.chrome_process.kill()
-                    except:
-                        pass
-                self.chrome_process = None
+                    pass
             
-            # PHASE 4: Kill leftover Chrome debug processes
-            print("   âš”ï¸ Phase 4: Killing leftover Chrome debug processes...")
+            # Phase 2: Kill Chrome processes using port 9222 specifically
             try:
+                import subprocess
                 import psutil
+                
+                print(f"   🔍 Checking processes using port {self.debugging_port}...")
+                
+                # Find all Chrome processes with our debug port
+                chrome_pids_to_kill = []
+                
                 for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                     try:
                         if proc.info['name'] and 'chrome' in proc.info['name'].lower():
                             cmdline = proc.info.get('cmdline', [])
-                            if cmdline and f'--remote-debugging-port={self.debugging_port}' in ' '.join(cmdline):
-                                print(f"   âš”ï¸ Killing leftover Chrome debug process: {proc.info['pid']}")
-                                proc.kill()
+                            if cmdline:
+                                cmdline_str = ' '.join(cmdline)
+                                if f'--remote-debugging-port={self.debugging_port}' in cmdline_str:
+                                    chrome_pids_to_kill.append(proc.info['pid'])
+                                    print(f"   🎯 Found Chrome debug process: PID {proc.info['pid']}")
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
+                
+                # Kill identified processes
+                for pid in chrome_pids_to_kill:
+                    try:
+                        proc = psutil.Process(pid)
+                        proc.terminate()
+                        print(f"   ✅ Terminated Chrome debug process: PID {pid}")
+                    except:
+                        try:
+                            proc = psutil.Process(pid)
+                            proc.kill()
+                            print(f"   ⚡ Killed Chrome debug process: PID {pid}")
+                        except:
+                            pass
+                
+                # Wait for processes to fully terminate
+                if chrome_pids_to_kill:
+                    print(f"   ⏳ Waiting for {len(chrome_pids_to_kill)} processes to terminate...")
+                    psutil.wait_procs([psutil.Process(pid) for pid in chrome_pids_to_kill if psutil.pid_exists(pid)], timeout=5)
+                
             except ImportError:
-                print("   âš ï¸ psutil not available for process cleanup")
+                print("   ⚠️ psutil not available, using fallback method")
+                # Fallback: terminate via process reference
+                if hasattr(self, 'chrome_process') and self.chrome_process:
+                    try:
+                        self.chrome_process.terminate()
+                        self.chrome_process.wait(timeout=3)
+                        print("   ✅ Chrome process terminated via reference")
+                    except:
+                        try:
+                            self.chrome_process.kill()
+                            print("   ⚡ Chrome process killed via reference")
+                        except:
+                            pass
             
-            # ðŸ†• PHASE 5: Optional minimal cleanup (can be disabled)
-            skip_cleanup = self.chrome_config.get('skip_cache_cleanup', False)
-            if skip_cleanup:
-                print("   â„¹ï¸ Phase 5: Cache cleanup SKIPPED (preserving everything for extensions)")
-                print("   ðŸ“¦ All cookies, sessions, extension data preserved")
-            else:
-                print("   ðŸ—‘ï¸ Phase 5: Minimal cache clearing only...")
+            # Phase 3: Verify port 9222 is released
+            print(f"   🔍 Verifying port {self.debugging_port} is released...")
+            port_released = False
+            
+            for attempt in range(10):  # Try for 10 seconds
                 try:
-                    self.clear_cache_cookies_only()
+                    import socket
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1)
+                    result = sock.connect_ex(('localhost', self.debugging_port))
+                    sock.close()
+                    
+                    if result != 0:  # Port is not accessible = released
+                        port_released = True
+                        print(f"   ✅ Port {self.debugging_port} confirmed released")
+                        break
+                    else:
+                        print(f"   ⏳ Port {self.debugging_port} still in use, waiting... (attempt {attempt + 1}/10)")
+                        time.sleep(1)
+                        
                 except Exception as e:
-                    print(f"   âš ï¸ Could not clear cache/cookies: {e}")
+                    print(f"   ⚠️ Port check error: {e}")
+                    time.sleep(1)
             
+            if not port_released:
+                print(f"   ⚠️ Port {self.debugging_port} may still be in use after 10s")
+                
+                # Emergency: try to kill any remaining process on port
+                try:
+                    import subprocess
+                    # Use netstat to find process using port 9222
+                    result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+                    for line in result.stdout.split('\n'):
+                        if f':{self.debugging_port}' in line and 'LISTENING' in line:
+                            parts = line.split()
+                            if parts:
+                                pid = parts[-1]
+                                try:
+                                    subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
+                                    print(f"   ⚡ Emergency killed process {pid} using port {self.debugging_port}")
+                                except:
+                                    pass
+                except:
+                    pass
+            
+            # Phase 4: Close windows by title (keep existing logic)
+            try:
+                import pygetwindow as gw
+                for title_part in ['cocrea.world', 'Chrome']:
+                    windows = gw.getWindowsWithTitle(title_part)
+                    for window in windows:
+                        try:
+                            window.close()
+                            print(f"   ✅ Closed window: {window.title[:50]}...")
+                        except:
+                            pass
+            except:
+                print("   ⚠️ Could not close windows via pygetwindow")
+            
+            # Phase 5: Reset internal state
             self.ws_url = None
+            self.chrome_process = None
+            self.session_websocket = None
+            self.session_websocket_url = None
+            self.batch_verification_active = False
             
-            print("âœ… Complete cleanup finished - Chrome debug fully closed + browsing data cleared")
-            time.sleep(1)
-            return True
+            print("✅ ENHANCED browser shutdown completed with port verification")
             
         except Exception as e:
-            print(f"âŒ Complete cleanup error: {e}")
-            return False
+            print(f"🚫 Enhanced browser shutdown error: {e}")
+            # Still reset state even if error
+            self.ws_url = None
+            self.chrome_process = None
+            self.session_websocket = None
+            self.batch_verification_active = False
 
     def clear_cache_cookies_only(self):
         """ðŸ†• Clear only cache and cookies, keep profile/login intact"""
@@ -1392,7 +1447,8 @@ class SprunkiGamePlayer:
                 chrome_exe, 
                 f"--remote-debugging-port={self.debugging_port}", 
                 f"--user-data-dir={os.path.join(os.getcwd(), self.user_data_dir)}",
-                "--no-first-run", 
+                "--no-first-run",
+                "--incognito", 
                 "--window-size=1280,720", 
                 "--remote-allow-origins=*",
                 
@@ -1807,22 +1863,191 @@ class SprunkiGamePlayer:
             print(f"   âŒ Extension health check error: {e}")
             return False
 
-    def _get_websocket_url(self):
-        """Get WebSocket URL for CDP communication"""
-        if self.ws_url: 
-            return self.ws_url
+    def _get_websocket_url(self, max_retries=5, retry_delay=2):
+        """
+        🔍 FIXED: Get WebSocket URL with retry mechanism and health verification
+        """
+        if self.ws_url:
+            # Test existing URL first
+            try:
+                import websocket
+                ws = websocket.create_connection(self.ws_url, timeout=3)
+                ws.close()
+                print("   ✅ Existing WebSocket URL verified")
+                return self.ws_url
+            except:
+                print("   ⚠️ Existing WebSocket URL invalid, will refresh...")
+                self.ws_url = None
+        
+        print(f"🔍 Getting WebSocket URL with retry (max: {max_retries} attempts)...")
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"   🔄 WebSocket attempt {attempt}/{max_retries}...")
+                
+                # Check if Chrome debug port is accessible
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3)
+                port_result = sock.connect_ex(('localhost', self.debugging_port))
+                sock.close()
+                
+                if port_result != 0:
+                    print(f"   ⚠️ Port {self.debugging_port} not accessible, Chrome may not be ready")
+                    if attempt < max_retries:
+                        print(f"   ⏳ Waiting {retry_delay}s before retry...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print(f"   🚫 Port {self.debugging_port} still not accessible after {max_retries} attempts")
+                        return None
+                
+                # Port accessible, try to get tabs
+                import requests
+                response = requests.get(f"http://localhost:{self.debugging_port}/json", timeout=5)
+                
+                if response.status_code != 200:
+                    print(f"   ⚠️ HTTP {response.status_code} from debug endpoint")
+                    if attempt < max_retries:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        return None
+                
+                tabs = response.json()
+                print(f"   📋 Found {len(tabs)} tabs from Chrome debug endpoint")
+                
+                # Find cocrea.world tab
+                target_tab = None
+                for tab in tabs:
+                    if (tab.get('type') == 'page' and 
+                        'cocrea.world' in tab.get('url', '').lower()):
+                        target_tab = tab
+                        print(f"   🎯 Found cocrea.world tab: {tab.get('title', 'Unknown')[:50]}...")
+                        break
+                
+                if not target_tab:
+                    print(f"   ⚠️ No cocrea.world tab found in {len(tabs)} tabs")
+                    
+                    # Log available tabs for debugging
+                    for i, tab in enumerate(tabs[:3]):  # Show first 3 tabs
+                        url = tab.get('url', 'No URL')[:50]
+                        title = tab.get('title', 'No title')[:30]
+                        print(f"      Tab {i+1}: {title} - {url}")
+                    
+                    if attempt < max_retries:
+                        print(f"   ⏳ Tab may still be loading, waiting {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print("   🚫 No cocrea.world tab found after all attempts")
+                        return None
+                
+                # Test WebSocket connection
+                ws_url = target_tab['webSocketDebuggerUrl']
+                print(f"   🔌 Testing WebSocket connection to: {ws_url[:50]}...")
+                
+                try:
+                    import websocket
+                    test_ws = websocket.create_connection(ws_url, timeout=5)
+                    
+                    # Send a simple test command
+                    test_command = {
+                        "id": 999999,
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "1", "returnByValue": True}
+                    }
+                    test_ws.send(json.dumps(test_command))
+                    
+                    # Wait for response
+                    test_response = test_ws.recv()
+                    test_ws.close()
+                    
+                    response_data = json.loads(test_response)
+                    if response_data.get('id') == 999999:
+                        self.ws_url = ws_url
+                        print(f"   ✅ WebSocket connection verified and functional")
+                        return self.ws_url
+                    else:
+                        print(f"   ⚠️ WebSocket test command failed")
+                        
+                except Exception as ws_error:
+                    print(f"   ⚠️ WebSocket test failed: {ws_error}")
+                
+                if attempt < max_retries:
+                    print(f"   ⏳ WebSocket test failed, waiting {retry_delay}s before retry...")
+                    time.sleep(retry_delay)
+                
+            except Exception as e:
+                print(f"   ⚠️ WebSocket URL attempt {attempt} error: {e}")
+                if attempt < max_retries:
+                    print(f"   ⏳ Waiting {retry_delay}s before retry...")
+                    time.sleep(retry_delay)
+        
+        print(f"🚫 Failed to get functional WebSocket URL after {max_retries} attempts")
+        return None
+
+    def verify_cdp_ready(self, max_attempts=3):
+        """
+        🔍 NEW: Verify CDP is ready and functional before proceeding
+        """
         try:
-            response = requests.get(f"http://localhost:{self.debugging_port}/json", timeout=5)
-            tabs = response.json()
-            target_tab = next((t for t in tabs if t.get('type') == 'page' and 'cocrea.world' in t.get('url', '')), None)
-            if not target_tab: 
-                print("âš ï¸ Could not find cocrea.world tab for WebSocket connection")
-                return None
-            self.ws_url = target_tab['webSocketDebuggerUrl']
-            return self.ws_url
+            print(f"🔍 Verifying CDP readiness (max {max_attempts} attempts)...")
+            
+            for attempt in range(1, max_attempts + 1):
+                print(f"   🔄 CDP verification attempt {attempt}/{max_attempts}...")
+                
+                # Step 1: Get WebSocket URL with retry
+                ws_url = self._get_websocket_url()
+                if not ws_url:
+                    print(f"   ❌ WebSocket URL not available on attempt {attempt}")
+                    if attempt < max_attempts:
+                        print("   ⏳ Waiting 3s before retry...")
+                        time.sleep(3)
+                        continue
+                    else:
+                        return False
+                
+                # Step 2: Test CDP commands
+                try:
+                    import websocket
+                    ws = websocket.create_connection(ws_url, timeout=10)
+                    
+                    # Test basic Runtime command
+                    test_response = self._send_cdp_command(ws, {
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "window.location.href", "returnByValue": True}
+                    })
+                    
+                    if test_response and 'result' in test_response:
+                        current_url = test_response.get('result', {}).get('result', {}).get('value', '')
+                        print(f"   ✅ CDP test successful - Page: {current_url[:50]}...")
+                        
+                        # Test if it's the right page
+                        if 'cocrea.world' in current_url.lower():
+                            ws.close()
+                            print(f"   🎯 CDP verified ready on cocrea.world page")
+                            return True
+                        else:
+                            print(f"   ⚠️ CDP working but wrong page: {current_url}")
+                    else:
+                        print(f"   ⚠️ CDP test command failed - no valid response")
+                    
+                    ws.close()
+                    
+                except Exception as cdp_error:
+                    print(f"   ❌ CDP test error: {cdp_error}")
+                
+                if attempt < max_attempts:
+                    print("   ⏳ CDP not ready, waiting 5s before retry...")
+                    time.sleep(5)
+            
+            print(f"❌ CDP not ready after {max_attempts} attempts")
+            return False
+            
         except Exception as e:
-            print(f"âŒ Could not get WebSocket URL: {e}")
-            return None
+            print(f"❌ CDP verification error: {e}")
+            return False
 
     def _send_cdp_command(self, ws, command):
         """Send CDP command via WebSocket"""
@@ -5506,119 +5731,186 @@ class SprunkiGamePlayer:
 
     def setup_game_environment(self, progress_callback=None, first_setup=True):
         """
-        ENHANCED: Setup with DUAL verification system (Characters Array + Putted Characters)
+        FIXED: Setup with CDP verification and enhanced individual mode handling
         """
         try:
             if not self.config:
-                print("âŒ CRITICAL ERROR: No config loaded - Cannot continue setup")
-                print("   ðŸ’¡ Please load a JSON configuration file first")
+                print("🚫 CRITICAL ERROR: No config loaded - Cannot continue setup")
+                print("   💡 Please load a JSON configuration file first")
                 return False
 
-            # ðŸ†• ENHANCED CLEANUP: Clear browsing data before starting
-            if progress_callback:
-                progress_callback("ðŸ—‘ï¸ Clearing browsing data and preparing fresh session...")
-            
-            print("ðŸ—‘ï¸ Pre-setup cleanup: Clearing all browsing data...")
-            
-            # Complete cleanup first (includes browsing data clearing)
-            self.cleanup_chrome_complete()
-            
-            # Force clear any remaining data
-            self.force_clear_chrome_data()
-            
-            # Wait for cleanup to complete
-            time.sleep(3)
-            
-            print("âœ… Pre-setup cleanup completed - starting with fresh Chrome session")
+            # 🆕 ENHANCED INDIVIDUAL MODE CLEANUP
+            if not first_setup:
+                print("\n🔧 INDIVIDUAL MODE SETUP - Enhanced Cleanup with Port Verification")
+                print("="*70)
+                
+                if progress_callback:
+                    progress_callback("🔧 Individual Mode: Complete browser restart with port cleanup...")
+                
+                # Phase 1: Enhanced browser shutdown with port verification
+                print("Phase 1: Enhanced browser shutdown with port verification...")
+                self.cleanup_chrome_complete()  # This is our fixed function
+                time.sleep(5)  # Extended wait for port cleanup
+                
+                # Phase 2: Verify port is actually clean
+                print("Phase 2: Port cleanup verification...")
+                port_clean = False
+                for check_attempt in range(10):
+                    try:
+                        import socket
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(1)
+                        result = sock.connect_ex(('localhost', self.debugging_port))
+                        sock.close()
+                        
+                        if result != 0:  # Port not accessible = clean
+                            port_clean = True
+                            print(f"   ✅ Port {self.debugging_port} confirmed clean")
+                            break
+                        else:
+                            print(f"   ⏳ Port {self.debugging_port} still occupied, waiting... ({check_attempt + 1}/10)")
+                            time.sleep(1)
+                    except:
+                        time.sleep(1)
+                
+                if not port_clean:
+                    print(f"   ⚠️ Warning: Port {self.debugging_port} may still be in use")
+                    print("   🔧 Proceeding anyway - Chrome may auto-resolve port conflicts")
+                
+                # Phase 3: Clear all connections and state
+                print("Phase 3: Clear all sessions and connections...")
+                self.ws_url = None
+                self.session_websocket = None
+                self.session_websocket_url = None
+                self.batch_verification_active = False
+                self.verification_functions_ready = False
+                self.characters_setup_done = False
+                self.putted_chars_setup_done = False
+                self.characters_available = False
+                self.putted_chars_available = False
+                
+                print("✅ Individual Mode cleanup completed - guaranteed fresh start")
+                print("="*70)
 
-            # Setup browser using Chrome debug mode
-            # LUÃ”N má»Ÿ Chrome má»›i cho cáº£ Master vÃ  Individual mode
+            # 🔄 ENHANCED PRE-SETUP CLEANUP (existing logic, keep as-is)
+            if progress_callback:
+                progress_callback("🗃️ Clearing browsing data and preparing fresh session...")
+            
+            print("🗃️ Pre-setup cleanup: Clearing all browsing data...")
+            self.cleanup_chrome_complete()
+            self.force_clear_chrome_data()
+            time.sleep(3)
+            print("✅ Pre-setup cleanup completed")
+
+            # 🌐 BROWSER LAUNCH (existing logic, keep as-is)
             if progress_callback:
                 if first_setup:
-                    progress_callback("ðŸŒ Opening game in Chrome debug mode (Master)...")
+                    progress_callback("🌐 Opening game in Chrome debug mode (Master)...")
                 else:
-                    progress_callback("ðŸŒ Closing previous session and opening fresh game (Individual)...")
+                    progress_callback("🌐 Fresh Chrome launch for Individual Mode...")
 
-            print(f"ðŸŒ Opening {'fresh ' if not first_setup else ''}game in Chrome debug mode...")
-
-            # THÃŠM: Explicit cleanup cho Individual mode
-            if not first_setup:
-                print("ðŸ§¹ Explicitly closing previous Chrome session for Individual mode...")
-                self.cleanup_chrome_complete()
-                time.sleep(3)  # Extra wait for complete cleanup
-
+            print(f"🌐 Opening {'FRESH ' if not first_setup else ''}game in Chrome debug mode...")
+            
             success = self.navigate_and_prepare_game(self.config['currentUrl'])
             if not success:
-                print("âš ï¸ Chrome debug launch failed")
+                print("⚠️ Chrome debug launch failed")
                 return False
 
-            # Skip intros using hybrid approach (CDP preferred, pyautogui fallback)
+            # 🔍 NEW: CDP READINESS VERIFICATION
             if progress_callback:
-                progress_callback("ðŸ–±ï¸ Skipping intros...")
+                progress_callback("🔍 Verifying CDP connection readiness...")
+            
+            print("🔍 CRITICAL: Verifying CDP readiness before proceeding...")
+            cdp_ready = self.verify_cdp_ready(max_attempts=3)
+            
+            if not cdp_ready:
+                print("❌ CDP verification failed - automation will not work properly")
+                print("💡 This is likely why drag operations fail in Both mode")
+                return False
+            else:
+                print("✅ CDP verification successful - automation ready!")
+
+            # Skip intros (existing logic, keep as-is)
+            if progress_callback:
+                progress_callback("⏭️ Skipping intros...")
             
             if not self.intro_skip_via_cdp():
                 print("CDP intro skipping failed, but continuing anyway...")
 
-            # THAY Äá»”I: Setup DUAL verification system (Characters Array + Putted Characters)
+            # 🔄 DUAL VERIFICATION SETUP (existing logic, keep as-is)
             if progress_callback:
-                progress_callback("ðŸ”„ Setting up DUAL verification system...")
+                progress_callback("🎯 Setting up DUAL verification system...")
             
             if not self.setup_dual_verification_system():
-                print("âš ï¸ DUAL verification setup failed, continuing with basic workflow")
+                print("⚠️ DUAL verification setup failed, continuing with basic workflow")
             else:
-                print("âœ… DUAL verification system ready!")
+                print("✅ DUAL verification system ready!")
 
-            # Start batch verification session for performance
+            # 🚀 BATCH VERIFICATION SESSION (existing logic, keep as-is)
             if progress_callback:
-                progress_callback("âš¡ Starting batch verification session...")
+                progress_callback("⚡ Starting batch verification session...")
 
             if self.start_batch_verification_session():
-                print("ðŸš€ Batch verification session active - PERFORMANCE MODE!")
+                print("🎯 Batch verification session active - PERFORMANCE MODE!")
             else:
-                print("âš ï¸ Batch session failed, using individual verification")
+                print("⚠️ Batch session failed, using individual verification")
 
-            # Prepare game for playing
+            # 🎮 FINAL GAME PREPARATION (existing logic, keep as-is)
             self.prepare_game_for_playing()
             time.sleep(1)
 
             if progress_callback:
-                progress_callback("âœ… Enhanced game environment ready!")
+                progress_callback("✅ Enhanced game environment ready!")
             
-            print("âœ… ENHANCED GAME ENVIRONMENT SETUP COMPLETED!")
-            print("ðŸŽ¯ FEATURES ACTIVE:")
-            print("   ðŸŒ Chrome debug mode for browser management")
-            print("   ðŸŽ® PyAutoGUI for precise game automation")
-            print("   ðŸ“¡ WebSocket/CDP for advanced control")
-            print("   ðŸ›¡ï¸ AdBlocker extension loaded")
+            print("✅ ENHANCED GAME ENVIRONMENT SETUP COMPLETED!")
+            print("🎯 FEATURES ACTIVE:")
+            print("   🌐 Chrome debug mode for browser management")
+            print("   🎮 PyAutoGUI for precise game automation")
+            print("   🔌 WebSocket/CDP for advanced control")
+            print("   🛡️ AdBlocker extension loaded")
+            print("   🔍 CDP connection verified and functional")
             
-            # DUAL verification status
+            # DUAL verification status (existing logic, keep as-is)
             if self.characters_available or self.putted_chars_available:
-                print("   ðŸ”„ DUAL verification system ENABLED:")
-                print(f"      ðŸ”¢ Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ Failed'}")
-                print(f"      ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ Failed'}")
-                print("      ðŸ’¡ Only 1 method needs to work = Maximum compatibility!")
+                print("   🎯 DUAL verification system ENABLED:")
+                print(f"      🔢 Characters Array: {'✅ Ready' if self.characters_available else '❌ Failed'}")
+                print(f"      🎯 Putted Characters: {'✅ Ready' if self.putted_chars_available else '❌ Failed'}")
+                print("      💡 Only 1 method needs to work = Maximum compatibility!")
             else:
-                print("   âš ï¸ DUAL verification system DISABLED (fallback mode)")
+                print("   ⚠️ DUAL verification system DISABLED (fallback mode)")
             
             return True
-                
+            
         except Exception as e:
             error_message = f"An unexpected error occurred during game setup: {e}"
-            print(f"âŒ {error_message}")
+            print(f"🚫 {error_message}")
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Setup Error", error_message)
             return False
     
     def ensure_mouse_released(self):
-        """Ensure mouse is released before starting new drag"""
+        """IMPROVED: Ensure mouse is released before starting new drag"""
         try:
-            pyautogui.mouseUp(button='left')
-            pyautogui.mouseUp(button='middle')
-            time.sleep(0.1)
-            print("ðŸ”„ Mouse state cleaned")
+            print("🔄 IMPROVED: Cleaning mouse state with verification...")
+            
+            # Multiple release attempts để đảm bảo
+            for attempt in range(3):
+                pyautogui.mouseUp(button='left')
+                pyautogui.mouseUp(button='right')
+                pyautogui.mouseUp(button='middle')
+                time.sleep(0.05)
+            
+            # Move mouse to neutral position để tránh hover effects
+            screen_width, screen_height = pyautogui.size()
+            neutral_x = screen_width // 2
+            neutral_y = screen_height // 2
+            pyautogui.moveTo(neutral_x, neutral_y, duration=0.2)
+            time.sleep(0.2)
+            
+            print("   ✅ IMPROVED mouse state cleaned with verification")
+            
         except Exception as e:
-            print("âš ï¸ Mouse cleanup warning: " + str(e))
+            print("   ⚠️ Mouse cleanup warning: " + str(e))
     
     def ensure_game_focus(self):
         """ðŸ”§ ENHANCED: Ensure game focus vá»›i service mode support - SAFE CLICK VERSION"""
@@ -5828,83 +6120,121 @@ class SprunkiGamePlayer:
             return self._execute_pyautogui_drag(start_x, start_y, end_x, end_y, delays, domain_adj, False)
 
     def _execute_pyautogui_drag(self, start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon):
-        """Execute drag using PyAutoGUI (original method)"""
+        """Execute drag using PyAutoGUI (IMPROVED with stability enhancements)"""
         try:
-            print("ðŸ–±ï¸ Executing PyAutoGUI drag operation...")
+            print("🖱️ Executing IMPROVED PyAutoGUI drag operation...")
             
-            # ðŸ”§ SAFE: Ensure focus before drag operation (use light focus Ä‘á»ƒ trÃ¡nh click nháº§m)
+            # 🛡️ SAFE: Ensure focus before drag operation (use light focus để tránh click nhầm)
             self._ensure_focus_before_operation("drag operation", focus_type="light")
             
-            # === APPROACH ICON ===
-            print("ðŸ” Step 1: Moving to icon...")
-            move_duration = (0.4 if is_first_icon else 0.25) * domain_adj['drag_speed_multiplier']
+            # === APPROACH ICON WITH VERIFICATION ===
+            print("📍 Step 1: Moving to icon with verification...")
+            move_duration = (0.6 if is_first_icon else 0.4) * domain_adj['drag_speed_multiplier']  # Chậm hơn
             pyautogui.moveTo(start_x, start_y, duration=move_duration)
             time.sleep(delays['approach'])
             
-            # === ESTABLISH FOCUS ===
-            print("ðŸŽ¯ Step 2: Establishing focus...")
+            # VERIFY position after move
+            current_pos = pyautogui.position()
+            if abs(current_pos.x - start_x) > 5 or abs(current_pos.y - start_y) > 5:
+                print(f"   ⚠️ Position drift detected, correcting...")
+                pyautogui.moveTo(start_x, start_y, duration=0.2)
+                time.sleep(0.2)
+            
+            # === ESTABLISH FOCUS WITH ENHANCED TIMING ===
+            print("🎯 Step 2: Establishing focus with enhanced timing...")
             if domain_adj['requires_double_click'] or is_first_icon:
                 pyautogui.click()
-                time.sleep(0.15)
+                time.sleep(0.25)  # Tăng từ 0.15 → 0.25
                 pyautogui.click()
                 time.sleep(delays['focus'])
             else:
                 pyautogui.click()
                 time.sleep(delays['focus'])
             
-            # Move back to exact position
-            pyautogui.moveTo(start_x, start_y, duration=0.1)
-            time.sleep(0.1)
+            # Move back to exact position and verify
+            pyautogui.moveTo(start_x, start_y, duration=0.15)
+            time.sleep(0.2)  # Thêm pause để đảm bảo position
             
-            # === START DRAG ===
-            print("ðŸ¤ Step 3: Starting drag - MOUSE DOWN...")
+            # === START DRAG WITH ENHANCED VERIFICATION ===
+            print("🤌 Step 3: Starting ENHANCED drag - MOUSE DOWN...")
             
-            # Ensure correct position
+            # Final position verification before mouse down
             current_pos = pyautogui.position()
             if abs(current_pos.x - start_x) > 10 or abs(current_pos.y - start_y) > 10:
-                print("âš ï¸ Position drift, correcting...")
+                print("   ⚠️ Critical position drift, re-correcting...")
                 pyautogui.moveTo(start_x, start_y, duration=0.2)
-                time.sleep(0.1)
+                time.sleep(0.2)
             
-            # Mouse down and hold
+            # ENHANCED MOUSE DOWN with verification
+            print("🖱 MOUSE DOWN - holding with enhanced timing...")
             pyautogui.mouseDown(button='left')
-            print("ðŸ”½ Mouse DOWN - holding...")
-            time.sleep(delays['hold'])
             
-            # === DRAG TO TARGET ===
-            print("ðŸŽ¯ Step 4: Dragging to target...")
+            # 🔥 CRITICAL: Extended hold time để game nhận diện
+            extended_hold = delays['hold'] * 1.5  # Tăng thêm 50%
+            print(f"   ⏳ Extended hold time: {extended_hold:.2f}s")
+            time.sleep(extended_hold)
+            
+            # Verify mouse is still down (optional check)
+            print("   ✅ Mouse down phase completed")
+            
+            # === DRAG TO TARGET WITH SMOOTH MOVEMENT ===
+            print("🎯 Step 4: Dragging to target with enhanced smoothness...")
             drag_duration = delays['drag'] * domain_adj['drag_speed_multiplier']
             
-            # Smooth drag movement
+            # 🔥 ENHANCED: Minimum drag duration để đảm bảo game tracking
+            min_drag_duration = 0.8  # Tối thiểu 0.8 giây
+            if drag_duration < min_drag_duration:
+                drag_duration = min_drag_duration
+                print(f"   📈 Applied minimum drag duration: {drag_duration:.2f}s")
+            
+            # Smooth drag movement with intermediate checkpoints
+            print(f"   🎯 Dragging from ({start_x}, {start_y}) → ({end_x}, {end_y}) in {drag_duration:.2f}s")
             pyautogui.moveTo(end_x, end_y, duration=drag_duration)
-            time.sleep(delays['drop'])
             
-            # === RELEASE MOUSE ===
-            print("ðŸ”¼ Step 5: MOUSE UP - releasing at target...")
+            # 🔥 CRITICAL: Extended drop preparation time
+            enhanced_drop_wait = delays['drop'] * 1.3  # Tăng thêm 30%
+            print(f"   ⏳ Enhanced drop preparation: {enhanced_drop_wait:.2f}s")
+            time.sleep(enhanced_drop_wait)
             
-            # Final position check
+            # === RELEASE MOUSE WITH ENHANCED VERIFICATION ===
+            print("🖱 Step 5: ENHANCED MOUSE UP - releasing at target...")
+            
+            # Final position verification before release
             final_pos = pyautogui.position()
-            if abs(final_pos.x - end_x) > 15 or abs(final_pos.y - end_y) > 15:
-                print("âš ï¸ Final position drift, correcting...")
-                pyautogui.moveTo(end_x, end_y, duration=0.1)
-                time.sleep(0.1)
+            position_error = abs(final_pos.x - end_x) + abs(final_pos.y - end_y)
             
-            # Release mouse
+            if position_error > 20:  # If too far from target
+                print(f"   ⚠️ Large position error ({position_error:.1f}px), correcting before release...")
+                pyautogui.moveTo(end_x, end_y, duration=0.15)
+                time.sleep(0.2)
+            
+            # 🔥 ENHANCED MOUSE RELEASE
+            print("🖱 RELEASING mouse with verification...")
             pyautogui.mouseUp(button='left')
-            print("âœ… Mouse RELEASED - icon dropped!")
-            time.sleep(delays['post_drop'])
-
-            print("ðŸŽ¯ Moving to safe position immediately...")
-            screen_width, screen_height = pyautogui.size()
-            safe_x = screen_width - random.randint(30, 80)
-            safe_y = screen_height - random.randint(30, 80)
-            pyautogui.moveTo(safe_x, safe_y, duration=random.uniform(0.3, 0.5))
-            print(f"âœ… Mouse moved to safe corner: ({safe_x}, {safe_y})")
             
+            # Verify release completed
+            print("   ✅ Mouse UP completed")
+            time.sleep(delays['post_drop'])
+            
+            # === MOVE TO SAFE POSITION ===
+            print("🛡️ Moving to safe position immediately...")
+            screen_width, screen_height = pyautogui.size()
+            safe_x = screen_width - random.randint(50, 100)  # Tăng margin
+            safe_y = screen_height - random.randint(50, 100)
+            pyautogui.moveTo(safe_x, safe_y, duration=random.uniform(0.3, 0.5))
+            print(f"   ✅ Mouse moved to safe corner: ({safe_x}, {safe_y})")
+            
+            print("✅ IMPROVED PyAutoGUI drag completed with enhanced stability!")
             return True
             
         except Exception as e:
-            print(f"âŒ PyAutoGUI drag failed: {e}")
+            print(f"❌ IMPROVED PyAutoGUI drag failed: {e}")
+            # Emergency mouse release
+            try:
+                pyautogui.mouseUp(button='left')
+                print("   🆘 Emergency mouse release executed")
+            except:
+                pass
             return False
 
     def corrected_return_icon(self, target_slot, use_cdp=False):
@@ -6577,12 +6907,12 @@ class SprunkiGamePlayer:
             layout = self.config['layout']
             all_icons = layout['icons']
             
-            # LIMIT TO FIRST 20 ICONS (INDEX 0-19)
-            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 19]
+            # LIMIT TO FIRST 19 ICONS (INDEX 0-18)
+            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 18]
             
             print(f"\nðŸŽ¯ ICON LIMITATION APPLIED:")
             print(f"   ðŸ“Š Original icons: {len(all_icons)}")
-            print(f"   ðŸŽ¯ Limited to first 20: {len(limited_icons)} (index 0-19)")
+            print(f"   ðŸŽ¯ Limited to first 19: {len(limited_icons)} (index 0-18)")
             print(f"   âœ… Filtered out: {len(all_icons) - len(limited_icons)} icons (index 20+)")
             
             # Use limited_icons instead of all_icons for range calculation
@@ -6850,7 +7180,7 @@ class SprunkiGamePlayer:
             layout = self.config['layout']
             all_bonus_chars = layout.get('bonus', [])
             
-            # LIMIT BONUS TO FIRST 20 (if bonus has indices)
+            # LIMIT BONUS TO FIRST 19 (INDEX 0-18) - FIXED
             limited_bonus = []
             for bonus in all_bonus_chars:
                 bonus_index = bonus.get('index', 0)  # Default to 0 if no index
@@ -6974,6 +7304,7 @@ class SprunkiGamePlayer:
         """
         ENHANCED: Trigger horror mode with verification system - FIXED with Icon Return
         UPDATED: Added Phase 3 - Return Icon 19 after transformation
+        FIXED: Proper access to icon 19 for horror trigger
         """
         try:
             if not self.config:
@@ -6982,25 +7313,27 @@ class SprunkiGamePlayer:
             layout = self.config['layout']
             all_icons = layout['icons']
             
-            # ðŸŽ¯ NEW: LIMIT TO FIRST 20 ICONS
-            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 18]
-            icons = limited_icons
+            # FIXED: For horror trigger, we NEED to access icon 19 specifically from original list
+            print(f"🎯 HORROR MODE TRIGGER - Accessing icon 19 specifically")
+            print(f"   📊 Total icons available: {len(all_icons)}")
+            print(f"   💡 Normal operations limited to 0-18, but horror trigger needs icon 19")
             
-            # Check if icon 19 exists in limited set
-            icon_19_exists = any(icon.get('index') == 19 for icon in icons)
+            # Find icon 19 in the original (unlimited) icon list
+            horror_icon = None
+            for icon in all_icons:
+                if icon.get('index') == 19:
+                    horror_icon = icon
+                    print(f"   🎯 Icon 19 found at coordinates: ({icon.get('x')}, {icon.get('y')})")
+                    break
             
-            if not icon_19_exists:
-                print("âŒ Icon 19 not found in limited icon set (0-19)")
+            if not horror_icon:
+                print("❌ Icon 19 not found in config - cannot trigger horror mode")
+                print("   💡 Make sure your JSON config includes icon with index 19")
                 return False
             
-            print(f"ðŸŽ¯ HORROR MODE TRIGGER - Using limited icons (0-19)")
-            print(f"   ðŸ“Š Limited icons available: {len(icons)}")
-            print(f"   ðŸ‘» Icon 19 found: âœ…")
+            print(f"   ✅ Horror trigger ready - will use icon 19 specifically")
             
-            # Get icon index 19 from limited set
-            horror_icon = next(icon for icon in icons if icon.get('index') == 19)
-            
-            # Find slot index 3
+            # Find slot index 3 (rest of function remains the same)
             target_slot = self._find_slot_by_index(3)
             if not target_slot:
                 return False

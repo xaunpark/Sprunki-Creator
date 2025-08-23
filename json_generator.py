@@ -2830,7 +2830,8 @@ class SprunkiJSONGenerator:
                 chrome_exe, 
                 f"--remote-debugging-port={self.debugging_port}", 
                 f"--user-data-dir={os.path.join(os.getcwd(), self.user_data_dir)}",
-                "--no-first-run", 
+                "--no-first-run",
+                "--incognito",  
                 "--window-size=1280,720", 
                 "--remote-allow-origins=*",
                 url
