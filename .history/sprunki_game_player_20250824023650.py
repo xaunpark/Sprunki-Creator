@@ -123,7 +123,14 @@ class SprunkiGamePlayer:
         # Putted Characters system (backup)
         self.putted_chars_setup_done = False
         self.putted_chars_available = False
-        
+
+        # SMART DUAL TRACKING: Track which systems are actually working
+        self.working_systems = {
+            'characters': None,  # None/True/False
+            'putted': None       # None/True/False  
+        }
+        self.last_operation_working_systems = {}  # Store per operation
+
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
 
@@ -361,6 +368,24 @@ class SprunkiGamePlayer:
                 
                 # Game settings from config
                 self.game_config = self.app_config.get('game', {})
+
+                # 📁 PROJECT FOLDER MANAGEMENT (from sprunki_obs_controller.py)
+                self.base_output_dir = self.app_config.get('output', {}).get('base_directory', os.path.join(os.getcwd(), "videos"))
+                self.current_project_folder = None
+                self.project_slug = None
+
+                print(f"📁 Output directory configured: {self.base_output_dir}")
+
+                # Ensure base output directory exists
+                try:
+                    os.makedirs(self.base_output_dir, exist_ok=True)
+                    print(f"📁 Base output directory ready: {self.base_output_dir}")
+                except Exception as e:
+                    print(f"❌ Warning: Could not create base output directory: {e}")
+                    # Fallback to current working directory
+                    self.base_output_dir = os.path.join(os.getcwd(), "videos")
+                    os.makedirs(self.base_output_dir, exist_ok=True)
+
                 self.page_load_wait = self.game_config.get('page_load_wait', 20)
                 self.game_load_wait = self.game_config.get('game_load_wait', 10)
                 self.fullscreen_wait = self.game_config.get('fullscreen_wait', 8)
@@ -5179,82 +5204,131 @@ class SprunkiGamePlayer:
 
     def verify_drag_success_dual(self, before_chars, after_chars, before_putted, after_putted):
         """
-        ðŸ”„ DUAL VERIFICATION: CHá»ˆ Cáº¦N 1 TRONG 2 TÄ‚NG 1 ÄÆ N Vá»Š
-        """
-        print(f"ðŸ“Š DUAL Drag verification:")
-        
-        # Check Characters Array
-        chars_success = False
-        if before_chars is not None and after_chars is not None:
-            expected_chars = before_chars + 1
-            chars_success = (after_chars == expected_chars)
-            print(f"   ðŸ”¢ Characters: {before_chars} â†’ {after_chars} (expected: {expected_chars}) = {'âœ…' if chars_success else 'âŒ'}")
-        else:
-            print(f"   ðŸ”¢ Characters: N/A (not available)")
-        
-        # Check Putted Characters  
-        putted_success = False
-        if before_putted is not None and after_putted is not None:
-            expected_putted = before_putted + 1
-            putted_success = (after_putted == expected_putted)
-            print(f"   ðŸŽ¯ Putted: {before_putted} â†’ {after_putted} (expected: {expected_putted}) = {'âœ…' if putted_success else 'âŒ'}")
-        else:
-            print(f"   ðŸŽ¯ Putted: N/A (not available)")
-        
-        # DUAL LOGIC: CHá»ˆ Cáº¦N 1 TRONG 2 THÃ€NH CÃ”NG
-        overall_success = chars_success or putted_success
-        
-        if overall_success:
-            successful_method = []
-            if chars_success: successful_method.append("Characters Array")
-            if putted_success: successful_method.append("Putted Characters")
-            print(f"   ðŸŽ‰ DUAL SUCCESS via: {', '.join(successful_method)}")
-        else:
-            print(f"   âŒ DUAL FAILURE: Both methods failed")
-        
-        return overall_success
-
-    def verify_return_success_dual(self, before_chars, after_chars, before_putted, after_putted):
-        """
-        ðŸ”„ DUAL VERIFICATION: CHá»ˆ Cáº¦N 1 TRONG 2 GIáº¢M 1 ÄÆ N Vá»Š
-        FIXED: None safety checks
+        🎯 SMART DUAL VERIFICATION: Track working systems for future operations
         """
         try:
-            print(f"ðŸ“Š DUAL Return verification:")
+            print(f"📊 SMART DUAL Drag verification:")
             
             # Check Characters Array
             chars_success = False
-            if before_chars is not None and after_chars is not None:  # âœ… CHECK None
-                expected_chars = before_chars - 1
+            chars_working = False
+            if before_chars is not None and after_chars is not None:
+                expected_chars = before_chars + 1
                 chars_success = (after_chars == expected_chars)
-                print(f"   ðŸ“¢ Characters: {before_chars} â†’ {after_chars} (expected: {expected_chars}) = {'âœ…' if chars_success else 'âŒ'}")
+                chars_working = True  # System is responding
+                print(f"   📢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
             else:
-                print(f"   ðŸ“¢ Characters: N/A (not available)")
+                print(f"   📢 Characters: N/A (not available)")
             
             # Check Putted Characters  
             putted_success = False
-            if before_putted is not None and after_putted is not None:  # âœ… CHECK None
-                expected_putted = before_putted - 1
+            putted_working = False
+            if before_putted is not None and after_putted is not None:
+                expected_putted = before_putted + 1
                 putted_success = (after_putted == expected_putted)
-                print(f"   ðŸŽ¯ Putted: {before_putted} â†’ {after_putted} (expected: {expected_putted}) = {'âœ…' if putted_success else 'âŒ'}")
+                putted_working = True  # System is responding
+                print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
             else:
-                print(f"   ðŸŽ¯ Putted: N/A (not available)")
+                print(f"   🎯 Putted: N/A (not available)")
             
-            # DUAL LOGIC: CHá»ˆ Cáº¦N 1 TRONG 2 THÃ€NH CÃ”NG
+            # 🎯 SMART TRACKING: Record which systems are working
+            self.working_systems['characters'] = chars_success if chars_working else None # type: ignore
+            self.working_systems['putted'] = putted_success if putted_working else None # type: ignore
+            
+            # Store for this specific operation
+            operation_id = f"drag_{id(self)}"
+            self.last_operation_working_systems[operation_id] = {
+                'characters': chars_success if chars_working else None, # type: ignore
+                'putted': putted_success if putted_working else None # type: ignore
+            }
+            
+            # DUAL LOGIC: Chỉ cần 1 trong 2 thành công
             overall_success = chars_success or putted_success
             
             if overall_success:
-                successful_method = []
-                if chars_success: successful_method.append("Characters Array")
-                if putted_success: successful_method.append("Putted Characters")
-                print(f"   ðŸŽ‰ DUAL SUCCESS via: {', '.join(successful_method)}")
+                successful_systems = []
+                if chars_success: successful_systems.append("Characters Array")
+                if putted_success: successful_systems.append("Putted Characters")
+                print(f"   🎉 SMART DUAL SUCCESS via: {', '.join(successful_systems)}")
+                print(f"   🎯 Tracked working systems for return verification")
             else:
-                print(f"   âŒ DUAL FAILURE: Both methods failed")
+                print(f"   ❌ SMART DUAL FAILURE: Both methods failed")
+                print(f"   🎯 No working systems to track")
             
             return overall_success
             
         except Exception as e:
-            print(f"âŒ DUAL verification error: {e}")
+            print(f"❌ SMART DUAL verification error: {e}")
+            return False
+
+    def verify_return_success_dual(self, before_chars, after_chars, before_putted, after_putted):
+        """
+        🎯 SMART DUAL VERIFICATION: Only check systems that worked in drag phase
+        """
+        try:
+            print(f"📊 SMART DUAL Return verification (selective checking):")
+            
+            # Determine which systems to check based on what worked during drag
+            check_characters = self.working_systems.get('characters') is True
+            check_putted = self.working_systems.get('putted') is True
+            
+            if not check_characters and not check_putted:
+                print(f"   ⚠️ No working systems tracked - falling back to both")
+                check_characters = before_chars is not None and after_chars is not None
+                check_putted = before_putted is not None and after_putted is not None
+            
+            print(f"   🎯 Will check: Characters={'✅' if check_characters else '❌'}, Putted={'✅' if check_putted else '❌'}")
+            
+            chars_success = False
+            putted_success = False
+            
+            # Check Characters Array (only if it was working)
+            if check_characters and before_chars is not None and after_chars is not None:
+                expected_chars = before_chars - 1
+                chars_success = (after_chars == expected_chars)
+                print(f"   📢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'} [CHECKED]")
+            else:
+                if before_chars is not None and after_chars is not None:
+                    print(f"   📢 Characters: {before_chars} → {after_chars} = ⏭️ [SKIPPED - didn't work in drag]")
+                else:
+                    print(f"   📢 Characters: N/A (not available)")
+            
+            # Check Putted Characters (only if it was working)  
+            if check_putted and before_putted is not None and after_putted is not None:
+                expected_putted = before_putted - 1
+                putted_success = (after_putted == expected_putted)
+                print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'} [CHECKED]")
+            else:
+                if before_putted is not None and after_putted is not None:
+                    print(f"   🎯 Putted: {before_putted} → {after_putted} = ⏭️ [SKIPPED - didn't work in drag]")
+                else:
+                    print(f"   🎯 Putted: N/A (not available)")
+            
+            # SMART LOGIC: Success if any CHECKED system succeeded
+            overall_success = False
+            successful_systems = []
+            
+            if check_characters and chars_success:
+                overall_success = True
+                successful_systems.append("Characters Array")
+            
+            if check_putted and putted_success:
+                overall_success = True
+                successful_systems.append("Putted Characters")
+            
+            if overall_success:
+                print(f"   🎉 SMART DUAL SUCCESS via: {', '.join(successful_systems)}")
+                print(f"   🎯 Selective checking prevented false results")
+            else:
+                checked_systems = []
+                if check_characters: checked_systems.append("Characters Array")
+                if check_putted: checked_systems.append("Putted Characters")
+                print(f"   ❌ SMART DUAL FAILURE: Checked systems ({', '.join(checked_systems)}) failed")
+            
+            return overall_success
+            
+        except Exception as e:
+            print(f"❌ SMART DUAL verification error: {e}")
             return False
 
     def _execute_single_return_click(self, click_x, click_y, use_cdp, domain_adj):
@@ -5343,6 +5417,9 @@ class SprunkiGamePlayer:
             """
             print(f"\nðŸŽ¯ ENHANCED DRAG START: Icon to slot with DUAL verification")
             print("="*60)
+
+            # RESET TRACKING: Clear previous operation tracking
+            self.working_systems = {'characters': None, 'putted': None}
 
             # Store target slot for verification
             target_slot_index = target_slot.get('index', -1)
@@ -5792,7 +5869,15 @@ class SprunkiGamePlayer:
                 self.putted_chars_setup_done = False
                 self.characters_available = False
                 self.putted_chars_available = False
-                
+
+                # Reset control flags
+                print("Phase 4: Reset control flags for fresh Individual mode...")
+                self.should_stop = False
+                self.is_playing = False
+                print("   ✅ should_stop = False")
+                print("   ✅ is_playing = False")
+                print("   🎯 Control flags reset - ready for drag operations")
+
                 print("✅ Individual Mode cleanup completed - guaranteed fresh start")
                 print("="*70)
 
@@ -7714,6 +7799,9 @@ class SprunkiGamePlayer:
         Button(debug_buttons, text="ðŸ§ª Test Carpet", 
             command=self.show_carpet_bombing_test_results, bg="#4CAF50", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
 
+        Button(debug_buttons, text="🎯 DUAL Tracking", 
+            command=self.show_smart_dual_tracking_status, bg="#FF5722", fg="white", font=("Arial", 9)).pack(side="left", padx=(5,0))
+
         # Remix info display
         self.display_remix_library_info()
         
@@ -7858,6 +7946,31 @@ class SprunkiGamePlayer:
                     
         except Exception as e:
             messagebox.showerror("Verification Test", f"âŒ Characters Array test error: {e}")
+
+    def show_smart_dual_tracking_status(self):
+        """Debug: Show current SMART DUAL tracking status"""
+        try:
+            print("\n🎯 SMART DUAL TRACKING STATUS:")
+            print("="*50)
+            print(f"Working Systems State:")
+            print(f"   📢 Characters Array: {self.working_systems.get('characters', 'None')}")
+            print(f"   🎯 Putted Characters: {self.working_systems.get('putted', 'None')}")
+            
+            available_systems = []
+            if self.characters_available: available_systems.append("Characters Array")
+            if self.putted_chars_available: available_systems.append("Putted Characters")
+            
+            print(f"Available Systems: {', '.join(available_systems) if available_systems else 'None'}")
+            print(f"Last Operation Working Systems: {len(self.last_operation_working_systems)} stored")
+            print("="*50)
+            
+            messagebox.showinfo("SMART DUAL Tracking", 
+                f"📢 Characters: {self.working_systems.get('characters', 'None')}\n"
+                f"🎯 Putted: {self.working_systems.get('putted', 'None')}\n\n"
+                f"Available: {', '.join(available_systems) if available_systems else 'None'}")
+                
+        except Exception as e:
+            messagebox.showerror("Tracking Status Error", f"❌ Error: {e}")
 
     def test_smart_verification_system(self):
             """Test Smart Verification System"""

@@ -157,6 +157,13 @@ class SprunkiController:
         """PHASE 1: Enhanced filename forcing với multiple strategies và faster execution"""
         self.operation_start_time = time.time()
         
+        # ✨ DEBUG: Check current state
+        print(f"🔍 FORCE OBS FILENAME DEBUG:")
+        print(f"   📄 Requested filename: {filename}")
+        print(f"   📁 Base directory: {self.base_output_dir}")
+        print(f"   📂 Current project folder: {self.current_project_folder}")
+        print(f"   ✅ Project folder exists: {os.path.exists(self.current_project_folder) if self.current_project_folder else 'N/A'}")
+        
         # Đảm bảo không có recording đang chạy
         is_recording, _ = self.get_recording_status()
         if is_recording:
@@ -170,16 +177,19 @@ class SprunkiController:
             return False
         
         try:
-            # Xác định output directory dựa vào mode
-            if self.current_project_folder and self.current_project_folder != self.base_output_dir:
-                # Individual mode - lưu vào project folder
+            # ✨ LUÔN LUÔN sử dụng project folder nếu có (cho TẤT CẢ các mode)
+            if self.current_project_folder:
+                # Sử dụng project folder cho TẤT CẢ các mode
                 output_dir = self.current_project_folder
                 full_path = os.path.join(self.current_project_folder, filename)
+                print(f"📁 Using project folder: {self.current_project_folder}")
             else:
-                # Master mode - lưu vào base folder
+                # Fallback về base folder nếu không có project folder
                 output_dir = self.base_output_dir
                 full_path = os.path.join(self.base_output_dir, filename)
-            
+                print(f"📁 Using base folder (no project set): {self.base_output_dir}")
+
+            print(f"🎯 FINAL OBS OUTPUT: {full_path}")
             print(f"🔧 Forcing OBS filename: {filename}")
             print(f"📁 Output directory: {output_dir}")
             print(f"📄 Full path: {full_path}")
@@ -209,7 +219,7 @@ class SprunkiController:
                 path_success = response1.get('d', {}).get('requestStatus', {}).get('result', False)
                 methods_success.append(path_success)
                 print(f"📁 Set recording path: {path_success}")
-                time.sleep(0.3)  # Reduced delay
+                time.sleep(1.0)  # Reduced delay
             except Exception as e:
                 print(f"Method 1 failed: {e}")
                 methods_success.append(False)
@@ -234,7 +244,7 @@ class SprunkiController:
                 filename_success = response2.get('d', {}).get('requestStatus', {}).get('result', False)
                 methods_success.append(filename_success)
                 print(f"📄 Set filename formatting: {filename_success}")
-                time.sleep(0.3)  # Reduced delay
+                time.sleep(1.0)  # Reduced delay
             except Exception as e:
                 print(f"Method 2 failed: {e}")
                 methods_success.append(False)
@@ -259,13 +269,13 @@ class SprunkiController:
                 simple_success = response3.get('d', {}).get('requestStatus', {}).get('result', False)
                 methods_success.append(simple_success)
                 print(f"📁 Set simple output path: {simple_success}")
-                time.sleep(0.3)  # Reduced delay
+                time.sleep(1.0)  # Reduced delay
             except Exception as e:
                 print(f"Method 3 failed: {e}")
                 methods_success.append(False)
             
-            # Method 4: Set Advanced Output Settings (for Individual mode)
-            if self.current_project_folder and self.current_project_folder != self.base_output_dir:
+            # Method 4: Set Advanced Output Settings (✨ LUÔN LUÔN chạy nếu có project folder)
+            if self.current_project_folder:
                 try:
                     set_adv_output_request = {
                         "op": 6,
@@ -285,7 +295,7 @@ class SprunkiController:
                     adv_success = response4.get('d', {}).get('requestStatus', {}).get('result', False)
                     methods_success.append(adv_success)
                     print(f"📁 Set advanced output path: {adv_success}")
-                    time.sleep(0.3)
+                    time.sleep(1.0)
                 except Exception as e:
                     print(f"Method 4 failed: {e}")
                     methods_success.append(False)
@@ -306,7 +316,7 @@ class SprunkiController:
                 
                 # PHASE 1: Reduced wait time for settings to apply
                 print("⏳ Waiting for OBS settings to apply...")
-                time.sleep(1.5)  # Reduced from 2s
+                time.sleep(2.0)
             else:
                 print(f"⚠️ Warning: Only {success_rate*100:.0f}% of OBS settings applied correctly")
             
@@ -357,7 +367,85 @@ class SprunkiController:
             print(f"❌ Error loading config: {e}")
             self.log_performance("Config Loading", False)
             return False
-    
+
+    def full_setup_from_config(self, config_dict, use_full_screen=False, url=None):
+        """
+        🎬 Complete setup from config dictionary with project folder
+        Combines config loading + project setup + OBS setup
+        """
+        try:
+            self.operation_start_time = time.time()
+            
+            # Step 1: Load config
+            print("📁 Loading configuration...")
+            if not self.load_config_from_dict(config_dict):
+                print("❌ Failed to load config")
+                self.log_performance("Full Setup From Config", False)
+                return False
+            
+            # Step 2: Setup project folder if URL provided
+            if url:
+                print("📁 Setting up project folder...")
+                project_folder = self.setup_project_folder(url)
+                print(f"📁 Project folder: {project_folder}")
+            
+            # Step 3: Full OBS setup
+            print("🎬 Setting up OBS...")
+            success = self.full_setup(use_full_screen)
+            
+            if success:
+                print("✅ Complete setup successful!")
+            else:
+                print("❌ OBS setup failed")
+            
+            self.log_performance("Full Setup From Config", success)
+            return success
+            
+        except Exception as e:
+            print(f"❌ Error in full setup from config: {e}")
+            self.log_performance("Full Setup From Config", False)
+            return False
+
+    def validate_recording_area(self):
+        """🔍 Validate recording area configuration"""
+        if not self.recording_area:
+            print("❌ recording_area is None")
+            return False
+        
+        required_keys = ['x', 'y', 'width', 'height']
+        for key in required_keys:
+            if key not in self.recording_area:
+                print(f"❌ Missing key in recording_area: {key}")
+                return False
+        
+        try:
+            x, y, width, height = (
+                self.recording_area['x'],
+                self.recording_area['y'], 
+                self.recording_area['width'],
+                self.recording_area['height']
+            )
+            
+            # Validate ranges
+            if x < 0 or y < 0:
+                print(f"❌ Negative position: ({x}, {y})")
+                return False
+            
+            if width <= 0 or height <= 0:
+                print(f"❌ Invalid dimensions: {width}x{height}")
+                return False
+            
+            if x + width > self.screen_width or y + height > self.screen_height:
+                print(f"❌ Recording area exceeds screen: ({x}, {y}) {width}x{height} > {self.screen_width}x{self.screen_height}")
+                return False
+            
+            print(f"✅ Recording area valid: ({x}, {y}) {width}x{height}")
+            return True
+            
+        except (TypeError, ValueError) as e:
+            print(f"❌ Invalid recording_area values: {e}")
+            return False
+
     def connect_obs_fast(self):
         """PHASE 1: Faster OBS WebSocket connection với optimized timeout"""
         try:
@@ -409,16 +497,40 @@ class SprunkiController:
         return self.connect_obs_fast()
     
     def set_canvas_resolution(self):
-        """PHASE 1: Optimized canvas resolution setting"""
+        """PHASE 1: Optimized canvas resolution setting with None check"""
         if not self.recording_area:
+            print("❌ recording_area is None! Cannot set canvas resolution.")
+            print("💡 Make sure to call load_config_from_dict() first or use full_setup_from_config()")
+            self.log_performance("Canvas Resolution Setting", False)
             return False
         
         self.operation_start_time = time.time()
-        width = self.recording_area['width']
-        height = self.recording_area['height']
+        
+        try:
+            width = self.recording_area['width']
+            height = self.recording_area['height']
+        except (KeyError, TypeError) as e:
+            print(f"❌ Invalid recording_area structure: {e}")
+            print(f"📊 Current recording_area: {self.recording_area}")
+            self.log_performance("Canvas Resolution Setting", False)
+            return False
+        
+        # ✨ THÊM: Check và stop recording nếu đang active
+        print("🔍 Checking for active recordings before canvas resolution change...")
+        is_recording, current_path = self.get_recording_status()
+        if is_recording:
+            print("⚠️ Active recording detected - stopping before canvas change...")
+            stop_success, _ = self.stop_recording()
+            if stop_success:
+                print("✅ Recording stopped successfully")
+                # Wait for OBS to fully stop recording
+                time.sleep(2)
+            else:
+                print("⚠️ Warning: Could not stop recording - attempting canvas change anyway")
         
         ws = self.connect_obs_fast()
         if not ws:
+            self.log_performance("Canvas Resolution Setting", False)
             return False
         
         try:
@@ -447,34 +559,61 @@ class SprunkiController:
                 print(f"✅ Canvas resolution set to {width}x{height}")
             else:
                 print(f"❌ Failed to set canvas resolution")
+                print(f"📊 OBS Response: {response}")
             
             ws.close()
             self.log_performance("Canvas Resolution Setting", success)
             return success
             
         except Exception as e:
-            print(f"❌ Lỗi set canvas resolution: {e}")
+            print(f"❌ Error set canvas resolution: {e}")
             self.log_performance("Canvas Resolution Setting", False)
-            ws.close()
+            try:
+                ws.close()
+            except:
+                pass
             return False
     
     def apply_crop_and_scale(self):
-        """PHASE 1: Optimized crop and scale application"""
+        """PHASE 1: Optimized crop and scale application with None check"""
         if not self.recording_area:
+            print("❌ recording_area is None! Cannot apply crop and scale.")
+            print("💡 Make sure to call load_config_from_dict() first or use full_setup_from_config()")
+            self.log_performance("Crop and Scale Application", False)
             return False
         
         self.operation_start_time = time.time()
-        ws = self.connect_obs_fast()
-        if not ws:
-            return False
         
+        # Validate recording_area structure
+        required_keys = ['x', 'y', 'width', 'height']
         try:
+            for key in required_keys:
+                if key not in self.recording_area:
+                    raise KeyError(f"Missing key: {key}")
+            
             x = self.recording_area['x']
             y = self.recording_area['y']
             width = self.recording_area['width']
             height = self.recording_area['height']
             
-            print(f"✂️ Cropping và scaling source...")
+            # Validate values are reasonable
+            if width <= 0 or height <= 0:
+                raise ValueError(f"Invalid dimensions: {width}x{height}")
+            
+        except (KeyError, TypeError, ValueError) as e:
+            print(f"❌ Invalid recording_area: {e}")
+            print(f"📊 Current recording_area: {self.recording_area}")
+            self.log_performance("Crop and Scale Application", False)
+            return False
+        
+        ws = self.connect_obs_fast()
+        if not ws:
+            self.log_performance("Crop and Scale Application", False)
+            return False
+        
+        try:
+            print(f"✂️ Cropping and scaling source...")
+            print(f"📐 Area: ({x}, {y}) {width}x{height}")
             
             # PHASE 1: Batch requests for faster execution
             
@@ -509,11 +648,18 @@ class SprunkiController:
             
             if not item_response.get("d", {}).get("requestStatus", {}).get("result", False):
                 print("❌ Source 'Sprunki Capture' không tồn tại!")
+                print("💡 Make sure the source 'Sprunki Capture' exists in OBS")
                 ws.close()
                 self.log_performance("Crop and Scale Application", False)
                 return False
             
             scene_item_id = item_response.get("d", {}).get("responseData", {}).get("sceneItemId")
+            
+            # Calculate crop values
+            crop_right = self.screen_width - x - width
+            crop_bottom = self.screen_height - y - height
+            
+            print(f"🔧 Crop values: Left={x}, Top={y}, Right={crop_right}, Bottom={crop_bottom}")
             
             # Apply transform
             transform_request = {
@@ -527,8 +673,8 @@ class SprunkiController:
                         "sceneItemTransform": {
                             "cropLeft": x,
                             "cropTop": y,
-                            "cropRight": self.screen_width - x - width,
-                            "cropBottom": self.screen_height - y - height,
+                            "cropRight": crop_right,
+                            "cropBottom": crop_bottom,
                             "positionX": 0,
                             "positionY": 0,
                             "scaleX": 1.0,
@@ -547,15 +693,19 @@ class SprunkiController:
                 print("✅ Crop and scale applied!")
             else:
                 print("❌ Failed to apply transform")
+                print(f"📊 OBS Response: {transform_response}")
             
             ws.close()
             self.log_performance("Crop and Scale Application", success)
             return success
             
         except Exception as e:
-            print(f"❌ Lỗi apply crop and scale: {e}")
+            print(f"❌ Error apply crop and scale: {e}")
             self.log_performance("Crop and Scale Application", False)
-            ws.close()
+            try:
+                ws.close()
+            except:
+                pass
             return False
 
     def reset_crop_and_scale(self):
@@ -730,12 +880,26 @@ class SprunkiController:
     def reset_canvas_resolution(self):
         """PHASE 1: Optimized reset canvas về 1920x1080"""
         self.operation_start_time = time.time()
+        
+        # ✨ THÊM: Check và stop recording nếu đang active
+        print("🔍 Checking for active recordings before canvas reset...")
+        is_recording, current_path = self.get_recording_status()
+        if is_recording:
+            print("⚠️ Active recording detected - stopping before canvas reset...")
+            stop_success, _ = self.stop_recording()
+            if stop_success:
+                print("✅ Recording stopped successfully")
+                # Wait for OBS to fully stop recording
+                time.sleep(2)
+            else:
+                print("⚠️ Warning: Could not stop recording - attempting canvas reset anyway")
+        
         ws = self.connect_obs_fast()
         if not ws:
             return False
         
         try:
-            print("🔄 Resetting canvas to 1920x1080...")
+            print("📄 Resetting canvas to 1920x1080...")
             
             video_settings_request = {
                 "op": 6,
@@ -807,6 +971,13 @@ class SprunkiController:
             # Quy trình cũ cho Individual Mode (Cropped)
             print("\n🎬 CROPPED VIDEO SETUP - OPTIMIZED")
             print("="*50)
+            
+            # Kiểm tra recording_area trước khi làm gì
+            if not self.recording_area:
+                print("❌ recording_area is None! Cannot setup cropped mode.")
+                print("💡 Make sure to call load_config_from_dict() first")
+                self.log_performance("Full Setup", False)
+                return False
         
             # Step 1: Set canvas resolution theo recordingArea
             if not self.set_canvas_resolution():
@@ -820,11 +991,16 @@ class SprunkiController:
                 self.log_performance("Full Setup", False)
                 return False
             
-            width = self.recording_area['width']
-            height = self.recording_area['height']
-        
-            print(f"\n✅ CROPPED SETUP COMPLETED!")
-            print(f"🎯 Video output will be: {width}x{height} pixels")
+            # SỬA LỖI: Đảm bảo recording_area không None trước khi truy cập
+            try:
+                width = self.recording_area['width']
+                height = self.recording_area['height']
+                print(f"\n✅ CROPPED SETUP COMPLETED!")
+                print(f"🎯 Video output will be: {width}x{height} pixels")
+            except (TypeError, KeyError) as e:
+                print(f"❌ Error accessing recording_area dimensions: {e}")
+                self.log_performance("Full Setup", False)
+                return False
 
         # PHASE 1: Performance summary
         total_setup_time = time.time() - setup_start_time
@@ -1013,6 +1189,359 @@ class SprunkiController:
         else:
             print("📊 No operations tracked yet")
 
+    def comprehensive_obs_cleanup(self):
+        """🧹 ENHANCED COMPREHENSIVE OBS CLEANUP - Cấp độ 1 với health check và force stop"""
+        self.operation_start_time = time.time()
+        
+        print("🧹 Starting ENHANCED comprehensive OBS cleanup...")
+        print("="*60)
+        
+        cleanup_success_count = 0
+        cleanup_total_count = 0
+        
+        try:
+            # ✨ NEW STEP 0: OBS Health Check
+            cleanup_total_count += 1
+            print("🏥 Step 0: OBS Health Check...")
+            try:
+                health_ok = self._obs_health_check()
+                if health_ok:
+                    print("✅ OBS is responsive")
+                    cleanup_success_count += 1
+                else:
+                    print("⚠️ OBS health issues detected")
+            except Exception as e:
+                print(f"❌ OBS health check failed: {e}")
+
+            # ✨ ENHANCED STEP 1: Force stop ALL recording types
+            cleanup_total_count += 1
+            print("🔴 Step 1: Enhanced force stop ALL recordings...")
+            try:
+                stop_success = self._force_stop_all_recordings()
+                if stop_success:
+                    print("✅ All recordings force stopped")
+                    cleanup_success_count += 1
+                else:
+                    print("⚠️ Some recordings may still be active")
+            except Exception as e:
+                print(f"❌ Error force stopping recordings: {e}")
+            
+            # ✨ ENHANCED STEP 2: Wait for OBS to stabilize after recording stop
+            cleanup_total_count += 1
+            print("⏳ Step 2: Enhanced stabilization wait...")
+            try:
+                stabilization_time = 5  # Increased from 3
+                for countdown in range(stabilization_time, 0, -1):
+                    print(f"   🔄 Enhanced stabilizing... {countdown}s remaining")
+                    time.sleep(1)
+                
+                print("✅ Enhanced stabilization completed")
+                cleanup_success_count += 1
+            except Exception as e:
+                print(f"❌ Error during enhanced stabilization: {e}")
+
+            # STEP 3: Reset canvas to default 1920x1080 (with retry)
+            cleanup_total_count += 1
+            print("📐 Step 3: Enhanced canvas reset with retry...")
+            try:
+                canvas_reset_success = self._enhanced_canvas_reset()
+                if canvas_reset_success:
+                    print("✅ Enhanced canvas reset successful")
+                    cleanup_success_count += 1
+                else:
+                    print("⚠️ Enhanced canvas reset had issues")
+            except Exception as e:
+                print(f"❌ Error in enhanced canvas reset: {e}")
+            
+            # STEP 4: Enhanced source transforms reset
+            cleanup_total_count += 1
+            print("✂️ Step 4: Enhanced source transforms reset...")
+            try:
+                transform_reset_success = self._enhanced_transform_reset()
+                if transform_reset_success:
+                    print("✅ Enhanced transforms reset successful")
+                    cleanup_success_count += 1
+                else:
+                    print("⚠️ Enhanced transforms reset had issues")
+            except Exception as e:
+                print(f"❌ Error in enhanced transform reset: {e}")
+            
+            # STEP 5: Enhanced settings cleanup
+            cleanup_total_count += 1
+            print("📝 Step 5: Enhanced settings cleanup...")
+            try:
+                settings_success = self._enhanced_settings_cleanup()
+                if settings_success:
+                    print("✅ Enhanced settings cleanup successful")
+                    cleanup_success_count += 1
+                else:
+                    print("⚠️ Enhanced settings cleanup had issues")
+            except Exception as e:
+                print(f"❌ Error in enhanced settings cleanup: {e}")
+            
+            # STEP 6: Clear internal state
+            cleanup_total_count += 1
+            print("🔄 Step 6: Clear internal state...")
+            try:
+                self.current_filename = None
+                self.current_project_folder = None
+                self.master_mode_active = False
+                print("✅ Internal state cleared")
+                cleanup_success_count += 1
+            except Exception as e:
+                print(f"❌ Error clearing internal state: {e}")
+            
+            # ✨ NEW STEP 7: Final OBS health verification
+            cleanup_total_count += 1
+            print("🏥 Step 7: Final OBS health verification...")
+            try:
+                final_health = self._obs_health_check()
+                if final_health:
+                    print("✅ Final OBS health check passed")
+                    cleanup_success_count += 1
+                else:
+                    print("⚠️ Final OBS health check issues")
+            except Exception as e:
+                print(f"❌ Final health check error: {e}")
+
+            # CLEANUP SUMMARY
+            print("="*60)
+            cleanup_duration = time.time() - self.operation_start_time
+            success_rate = (cleanup_success_count / cleanup_total_count * 100) if cleanup_total_count > 0 else 0
+            
+            print(f"🧹 ENHANCED CLEANUP COMPLETED")
+            print(f"   ⏱️ Duration: {cleanup_duration:.1f}s")
+            print(f"   ✅ Success: {cleanup_success_count}/{cleanup_total_count} steps ({success_rate:.0f}%)")
+            print(f"   🎯 OBS ready for next job (enhanced)")
+            
+            # Log performance
+            overall_success = cleanup_success_count >= (cleanup_total_count * 0.6)  # 60% success rate
+            self.log_performance("Enhanced Comprehensive OBS Cleanup", overall_success)
+            
+            return overall_success
+            
+        except Exception as e:
+            cleanup_duration = time.time() - self.operation_start_time if self.operation_start_time else 0
+            print(f"💥 Critical error during enhanced cleanup after {cleanup_duration:.1f}s: {e}")
+            self.log_performance("Enhanced Comprehensive OBS Cleanup", False)
+            return False
+
+    def _obs_health_check(self):
+        """🏥 Kiểm tra health của OBS WebSocket connection"""
+        try:
+            ws = self.connect_obs_fast()
+            if not ws:
+                return False
+            
+            # Test basic communication
+            health_request = {
+                "op": 6,
+                "d": {
+                    "requestType": "GetVersion",
+                    "requestId": "health-check"
+                }
+            }
+            
+            ws.send(json.dumps(health_request))
+            response = json.loads(ws.recv())
+            
+            ws.close()
+            
+            # Check if response is valid
+            return response.get("d", {}).get("requestStatus", {}).get("result", False)
+            
+        except Exception as e:
+            print(f"   Health check exception: {e}")
+            return False
+
+    def _force_stop_all_recordings(self):
+        """🔴 Force stop ALL types of recordings với enhanced retry"""
+        max_attempts = 3
+        
+        for attempt in range(max_attempts):
+            try:
+                print(f"   🔄 Force stop attempt {attempt + 1}/{max_attempts}")
+                
+                ws = self.connect_obs_fast()
+                if not ws:
+                    continue
+                
+                # Check recording status first
+                status_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "GetRecordStatus",
+                        "requestId": f"force-check-{attempt}"
+                    }
+                }
+                
+                ws.send(json.dumps(status_request))
+                status_response = json.loads(ws.recv())
+                
+                is_recording = status_response.get("d", {}).get("responseData", {}).get("outputActive", False)
+                
+                if not is_recording:
+                    print(f"   ✅ No active recording found (attempt {attempt + 1})")
+                    ws.close()
+                    return True
+                
+                print(f"   ⚠️ Active recording detected, forcing stop...")
+                
+                # Force stop recording
+                stop_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "StopRecord",
+                        "requestId": f"force-stop-{attempt}"
+                    }
+                }
+                
+                ws.send(json.dumps(stop_request))
+                stop_response = json.loads(ws.recv())
+                
+                stop_success = stop_response.get("d", {}).get("requestStatus", {}).get("result", False)
+                
+                ws.close()
+                
+                if stop_success:
+                    print(f"   ✅ Recording force stopped (attempt {attempt + 1})")
+                    # Wait longer after successful stop
+                    time.sleep(3)
+                    return True
+                else:
+                    print(f"   ⚠️ Stop failed (attempt {attempt + 1})")
+                    time.sleep(2)  # Wait before retry
+                    
+            except Exception as e:
+                print(f"   ❌ Force stop attempt {attempt + 1} error: {e}")
+                time.sleep(2)
+        
+        print(f"   ⚠️ Force stop failed after {max_attempts} attempts")
+        return False
+
+    def _enhanced_canvas_reset(self):
+        """📐 Enhanced canvas reset với retry mechanism"""
+        max_attempts = 3
+        
+        for attempt in range(max_attempts):
+            try:
+                print(f"   🔄 Canvas reset attempt {attempt + 1}/{max_attempts}")
+                
+                ws = self.connect_obs_fast()
+                if not ws:
+                    continue
+                
+                video_settings_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "SetVideoSettings",
+                        "requestId": f"enhanced-canvas-reset-{attempt}",
+                        "requestData": {
+                            "baseWidth": 1920,
+                            "baseHeight": 1080,
+                            "outputWidth": 1920,
+                            "outputHeight": 1080
+                        }
+                    }
+                }
+                
+                ws.send(json.dumps(video_settings_request))
+                response = json.loads(ws.recv())
+                
+                success = response.get("d", {}).get("requestStatus", {}).get("result", False)
+                
+                ws.close()
+                
+                if success:
+                    print(f"   ✅ Canvas reset successful (attempt {attempt + 1})")
+                    time.sleep(1)  # Wait for settings to apply
+                    return True
+                else:
+                    print(f"   ⚠️ Canvas reset failed (attempt {attempt + 1}): {response}")
+                    time.sleep(2)  # Wait before retry
+                    
+            except Exception as e:
+                print(f"   ❌ Canvas reset attempt {attempt + 1} error: {e}")
+                time.sleep(2)
+        
+        return False
+
+    def _enhanced_transform_reset(self):
+        """✂️ Enhanced transform reset với better error handling"""
+        try:
+            return self.reset_crop_and_scale()
+        except Exception as e:
+            print(f"   ❌ Transform reset error: {e}")
+            return False
+
+    def _enhanced_settings_cleanup(self):
+        """📝 Enhanced settings cleanup với multiple parameters"""
+        try:
+            ws = self.connect_obs_fast()
+            if not ws:
+                return False
+            
+            # Reset multiple settings with delays
+            settings_success = []
+            
+            # 1. Reset filename formatting
+            try:
+                filename_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "SetProfileParameter",
+                        "requestId": "enhanced-filename-reset",
+                        "requestData": {
+                            "parameterCategory": "Output",
+                            "parameterName": "FilenameFormatting",
+                            "parameterValue": "%CCYY-%MM-%DD %hh-%mm-%ss"
+                        }
+                    }
+                }
+                
+                ws.send(json.dumps(filename_request))
+                response1 = json.loads(ws.recv())
+                settings_success.append(response1.get('d', {}).get('requestStatus', {}).get('result', False))
+                
+                time.sleep(0.5)  # Enhanced delay between settings
+                
+            except Exception as e:
+                print(f"   ❌ Filename reset error: {e}")
+                settings_success.append(False)
+            
+            # 2. Reset output path
+            try:
+                path_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "SetProfileParameter",
+                        "requestId": "enhanced-path-reset",
+                        "requestData": {
+                            "parameterCategory": "Output",
+                            "parameterName": "FilePath",
+                            "parameterValue": self.base_output_dir
+                        }
+                    }
+                }
+                
+                ws.send(json.dumps(path_request))
+                response2 = json.loads(ws.recv())
+                settings_success.append(response2.get('d', {}).get('requestStatus', {}).get('result', False))
+                
+            except Exception as e:
+                print(f"   ❌ Path reset error: {e}")
+                settings_success.append(False)
+            
+            ws.close()
+            
+            # Evaluate success
+            success_rate = sum(settings_success) / len(settings_success) if settings_success else 0
+            return success_rate >= 0.5
+            
+        except Exception as e:
+            print(f"   ❌ Settings cleanup error: {e}")
+            return False
+
 def main():
     controller = SprunkiController()
     
@@ -1063,42 +1592,59 @@ def main():
             
         elif choice == "4":
             print("\n🎬 Full setup test (OPTIMIZED)...")
-            # Giả lập có recording area
-            controller.recording_area = {
-                'x': 664, 'y': 164, 'width': 593, 'height': 513
+            
+            # Tạo config giả lập với recordingArea
+            test_config = {
+                'layout': {
+                    'recordingArea': {
+                        'x': 664, 
+                        'y': 164, 
+                        'width': 593, 
+                        'height': 513
+                    }
+                }
             }
             
-            # Setup project folder
-            controller.setup_project_folder("https://sprunki.org/sprunki-phase-7")
+            test_url = "https://sprunki.org/sprunki-phase-7"
             
-            if controller.full_setup():
+            # Use new full setup method
+            if controller.full_setup_from_config(test_config, use_full_screen=False, url=test_url):
                 print("✅ Setup completed!")
                 
-                # Test với filename
-                test_filename = "full-setup-test-optimized.mp4"
-                controller.force_obs_filename(test_filename)
-                
-                # PHASE 1: Optimized test recording (8s instead of 10s)
-                print("🎬 Starting optimized test recording...")
-                if controller.start_recording():
-                    print("Recording for 8 seconds (OPTIMIZED)...")
-                    for i in range(8, 0, -1):
-                        print(f"   Recording... {i}s remaining")
-                        time.sleep(1)
-                        
-                        # Check status every 3 seconds
-                        if i % 3 == 0:
-                            is_active, path = controller.get_recording_status()
-                            print(f"   📊 Recording active: {is_active}")
+                # Validate setup
+                if controller.validate_recording_area():
+                    print("✅ Recording area validated!")
                     
-                    print("🛑 Stopping recording...")
-                    success, path = controller.stop_recording()
-                    print(f"Recording result: {success}")
-                    if path:
-                        print(f"File path: {path}")
-                        print(f"File exists: {os.path.exists(path) if path else 'N/A'}")
+                    # Test with filename
+                    test_filename = "full-setup-test-optimized.mp4"
+                    if controller.force_obs_filename(test_filename):
+                        print("✅ Filename forced successfully!")
+                        
+                        # PHASE 1: Optimized test recording (8s instead of 10s)
+                        print("🎬 Starting optimized test recording...")
+                        if controller.start_recording():
+                            print("Recording for 8 seconds (OPTIMIZED)...")
+                            for i in range(8, 0, -1):
+                                print(f"   Recording... {i}s remaining")
+                                time.sleep(1)
+                                
+                                # Check status every 3 seconds
+                                if i % 3 == 0:
+                                    is_active, path = controller.get_recording_status()
+                                    print(f"   📊 Recording active: {is_active}")
+                            
+                            print("🛑 Stopping recording...")
+                            success, path = controller.stop_recording()
+                            print(f"Recording result: {success}")
+                            if path:
+                                print(f"File path: {path}")
+                                print(f"File exists: {os.path.exists(path) if path else 'N/A'}")
+                        else:
+                            print("❌ Failed to start recording")
+                    else:
+                        print("❌ Failed to force filename")
                 else:
-                    print("❌ Failed to start recording")
+                    print("❌ Recording area validation failed")
             else:
                 print("❌ Setup failed")
                 

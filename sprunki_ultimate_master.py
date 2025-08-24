@@ -796,16 +796,32 @@ class UnifiedProcessingManager:
             if not item.start_time:
                 item.start_time = datetime.now()
             
+            # ✨ SETUP PROJECT FOLDER TRƯỚC KHI INITIALIZE
+            # Lấy output base directory từ config.json
+            config_manager = self.master_controller.config_manager
+            output_base_dir = config_manager.get('output.base_directory', "C:\\Output")
+            project_slug = getattr(item, 'project_slug', 'default_project')
+            project_folder = os.path.join(output_base_dir, project_slug)
+            os.makedirs(project_folder, exist_ok=True)
+            
+            self.logger.info(f"📁 Created project folder from config: {project_folder}")
+            self.logger.info(f"📁 Config base directory: {output_base_dir}")
+            
             # Initialize components
             if not self.master_controller._initialize_components(item.json_data):
                 raise Exception("Failed to initialize components")
             
-            # Setup project folder - ALL MODES now use project-specific folder
-            output_base_dir = getattr(self.config, 'output_base_dir', r"C:\Users\dinht\Videos\SPRUNKI")
-            project_slug = getattr(item, 'project_slug', 'default_project')
-            project_folder = os.path.join(output_base_dir, project_slug)
-            os.makedirs(project_folder, exist_ok=True)
-            self.master_controller.obs_controller.current_project_folder = project_folder
+            # ✨ SET PROJECT FOLDER CHO OBS CONTROLLER NGAY SAU KHI INITIALIZE
+            if hasattr(self.master_controller, 'obs_controller') and self.master_controller.obs_controller:
+                self.master_controller.obs_controller.current_project_folder = project_folder
+                self.logger.info(f"✅ OBS controller project folder set to: {project_folder}")
+                
+                # Verify project folder is set correctly
+                actual_folder = self.master_controller.obs_controller.current_project_folder
+                self.logger.info(f"🔍 Verification - OBS current_project_folder: {actual_folder}")
+            else:
+                self.logger.error("❌ OBS controller not available after initialization!")
+                raise Exception("OBS controller not available")
             
             self.logger.info(f"📁 All videos will be saved to: {project_folder}")
             if item.mode == "master":
@@ -859,6 +875,20 @@ class UnifiedProcessingManager:
             return False
         
         finally:
+            # ✨ THÊM: Comprehensive OBS cleanup sau mỗi job
+            self.logger.info("🧹 Starting comprehensive OBS cleanup after job completion...")
+            try:
+                if hasattr(self.master_controller, 'obs_controller') and self.master_controller.obs_controller:
+                    cleanup_success = self.master_controller.obs_controller.comprehensive_obs_cleanup()
+                    if cleanup_success:
+                        self.logger.info("✅ Comprehensive OBS cleanup completed successfully")
+                    else:
+                        self.logger.warning("⚠️ Some OBS cleanup steps may have failed")
+                else:
+                    self.logger.warning("⚠️ OBS controller not available for cleanup")
+            except Exception as cleanup_error:
+                self.logger.error(f"❌ Error during comprehensive OBS cleanup: {cleanup_error}")
+            
             # Cleanup file handlers after processing
             self._cleanup_logging_handlers()
 
@@ -2054,25 +2084,20 @@ class SprunkiUltimateMaster:
                 # PHASE 2: OBS EMERGENCY CLEANUP
                 # ================================================================
                 self.processing_manager.logger.info("🛑 Phase 2: OBS emergency cleanup...")
-                
+
                 if hasattr(self, 'obs_controller') and self.obs_controller:
                     try:
-                        self.processing_manager.logger.info("   🔴 Stopping any active OBS recording...")
-                        
-                        # Try to stop any active recording
-                        try:
-                            stop_success, final_path = self.obs_controller.stop_recording()
-                            if stop_success:
-                                self.processing_manager.logger.info(f"   ✅ Recording stopped successfully: {final_path}")
-                            else:
-                                self.processing_manager.logger.warning("   ⚠️ Recording stop may have failed")
-                        except Exception as e:
-                            self.processing_manager.logger.info(f"   ℹ️ No active recording or stop failed: {e}")
+                        self.processing_manager.logger.info("   🧹 Running comprehensive emergency cleanup...")
+                        cleanup_success = self.obs_controller.comprehensive_obs_cleanup()
+                        if cleanup_success:
+                            self.processing_manager.logger.info("   ✅ Comprehensive emergency cleanup completed")
+                        else:
+                            self.processing_manager.logger.warning("   ⚠️ Some emergency cleanup steps failed")
                         
                         self.processing_manager.logger.info("✅ OBS emergency cleanup completed")
                         
                     except Exception as e:
-                        self.processing_manager.logger.error(f"   ❌ OBS emergency cleanup error: {e}")
+                        self.processing_manager.logger.error(f"   ❌ Comprehensive emergency cleanup error: {e}")
                         self.processing_manager.logger.warning("   Continuing with other cleanup operations...")
                 else:
                     self.processing_manager.logger.info("   ℹ️ OBS controller not available")
