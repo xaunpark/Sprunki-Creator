@@ -6,7 +6,7 @@
     "log_level": "INFO"
   },
   "obs": {
-    "host": "192.168.1.17",
+    "host": "192.168.1.20",
     "port": 4455,
     "password": "BDdtMRgQabXu3sy1",
     "connection_timeout": 10,

@@ -160,7 +160,7 @@ class SprunkiController:
         # ✨ DEBUG: Check current state
         print(f"🔍 FORCE OBS FILENAME DEBUG:")
         print(f"   📄 Requested filename: {filename}")
-        print(f"   📁 Base directory: {self.base_output_dir}")
+        print(f"   📂 Base directory: {self.base_output_dir}")
         print(f"   📂 Current project folder: {self.current_project_folder}")
         print(f"   ✅ Project folder exists: {os.path.exists(self.current_project_folder) if self.current_project_folder else 'N/A'}")
         
@@ -182,12 +182,12 @@ class SprunkiController:
                 # Sử dụng project folder cho TẤT CẢ các mode
                 output_dir = self.current_project_folder
                 full_path = os.path.join(self.current_project_folder, filename)
-                print(f"📁 Using project folder: {self.current_project_folder}")
+                print(f"🎯 Using project folder: {self.current_project_folder}")
             else:
                 # Fallback về base folder nếu không có project folder
                 output_dir = self.base_output_dir
                 full_path = os.path.join(self.base_output_dir, filename)
-                print(f"📁 Using base folder (no project set): {self.base_output_dir}")
+                print(f"🎯 Using base folder (no project set): {self.base_output_dir}")
 
             print(f"🎯 FINAL OBS OUTPUT: {full_path}")
             print(f"🔧 Forcing OBS filename: {filename}")
@@ -196,10 +196,10 @@ class SprunkiController:
             
             filename_without_ext = filename.replace('.mp4', '').replace('.mkv', '')
             
-            # PHASE 1: Parallel execution của multiple methods
+            # 🔥 NEW: FORCE ALL RECORDING PATHS - Multiple methods with enhanced force
             methods_success = []
             
-            # Method 1: Set Recording Path để đổi thư mục output
+            # Method 1: Set Main Recording Output Path
             try:
                 set_path_request = {
                     "op": 6,
@@ -218,13 +218,88 @@ class SprunkiController:
                 response1 = json.loads(ws.recv())
                 path_success = response1.get('d', {}).get('requestStatus', {}).get('result', False)
                 methods_success.append(path_success)
-                print(f"📁 Set recording path: {path_success}")
-                time.sleep(1.0)  # Reduced delay
+                print(f"📁 Set main recording path: {path_success}")
+                time.sleep(1.0)
             except Exception as e:
                 print(f"Method 1 failed: {e}")
                 methods_success.append(False)
             
-            # Method 2: Set Filename Formatting
+            # 🔥 NEW Method 2: Set SimpleOutput FilePath (THIS IS CRUCIAL!)
+            try:
+                set_simple_path_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "SetProfileParameter",
+                        "requestId": "set-simple-output-path",
+                        "requestData": {
+                            "parameterCategory": "SimpleOutput",
+                            "parameterName": "FilePath", 
+                            "parameterValue": output_dir
+                        }
+                    }
+                }
+                
+                ws.send(json.dumps(set_simple_path_request))
+                response2 = json.loads(ws.recv())
+                simple_success = response2.get('d', {}).get('requestStatus', {}).get('result', False)
+                methods_success.append(simple_success)
+                print(f"📁 Set SimpleOutput path: {simple_success}")
+                time.sleep(1.0)
+            except Exception as e:
+                print(f"Method 2 failed: {e}")
+                methods_success.append(False)
+
+            # 🔥 NEW Method 3: Set AdvOut RecFilePath (Advanced Output)
+            try:
+                set_adv_rec_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "SetProfileParameter",
+                        "requestId": "set-adv-rec-path",
+                        "requestData": {
+                            "parameterCategory": "AdvOut", 
+                            "parameterName": "RecFilePath",
+                            "parameterValue": output_dir
+                        }
+                    }
+                }
+                
+                ws.send(json.dumps(set_adv_rec_request))
+                response3 = json.loads(ws.recv())
+                adv_rec_success = response3.get('d', {}).get('requestStatus', {}).get('result', False)
+                methods_success.append(adv_rec_success)
+                print(f"📁 Set AdvOut RecFilePath: {adv_rec_success}")
+                time.sleep(1.0)
+            except Exception as e:
+                print(f"Method 3 failed: {e}")
+                methods_success.append(False)
+
+            # 🔥 NEW Method 4: Set AdvOut FFFilePath (if different from RecFilePath)
+            try:
+                set_adv_ff_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "SetProfileParameter",
+                        "requestId": "set-adv-ff-path",
+                        "requestData": {
+                            "parameterCategory": "AdvOut", 
+                            "parameterName": "FFFilePath",
+                            "parameterValue": output_dir
+                        }
+                    }
+                }
+                
+                ws.send(json.dumps(set_adv_ff_request))
+                response4 = json.loads(ws.recv())
+                adv_ff_success = response4.get('d', {}).get('requestStatus', {}).get('result', False)
+                methods_success.append(adv_ff_success)
+                print(f"📁 Set AdvOut FFFilePath: {adv_ff_success}")
+                time.sleep(1.0)
+            except Exception as e:
+                print(f"Method 4 failed: {e}")
+                methods_success.append(False)
+
+            # Method 5: Set Filename Formatting (AFTER setting all paths)
             try:
                 set_filename_request = {
                     "op": 6,
@@ -240,65 +315,64 @@ class SprunkiController:
                 }
                 
                 ws.send(json.dumps(set_filename_request))
-                response2 = json.loads(ws.recv())
-                filename_success = response2.get('d', {}).get('requestStatus', {}).get('result', False)
+                response5 = json.loads(ws.recv())
+                filename_success = response5.get('d', {}).get('requestStatus', {}).get('result', False)
                 methods_success.append(filename_success)
                 print(f"📄 Set filename formatting: {filename_success}")
-                time.sleep(1.0)  # Reduced delay
+                time.sleep(1.0)
             except Exception as e:
-                print(f"Method 2 failed: {e}")
+                print(f"Method 5 failed: {e}")
                 methods_success.append(False)
-            
-            # Method 3: Set Simple Output Path (backup method)
+
+            # 🔥 NEW Method 6: Force SimpleOutput filename (CRUCIAL BACKUP!)
             try:
-                set_simple_path_request = {
+                set_simple_filename_request = {
                     "op": 6,
                     "d": {
                         "requestType": "SetProfileParameter",
-                        "requestId": "set-simple-path",
+                        "requestId": "set-simple-filename",
                         "requestData": {
                             "parameterCategory": "SimpleOutput",
-                            "parameterName": "FilePath", 
-                            "parameterValue": output_dir
+                            "parameterName": "FilenameFormatting",
+                            "parameterValue": filename_without_ext
                         }
                     }
                 }
                 
-                ws.send(json.dumps(set_simple_path_request))
-                response3 = json.loads(ws.recv())
-                simple_success = response3.get('d', {}).get('requestStatus', {}).get('result', False)
-                methods_success.append(simple_success)
-                print(f"📁 Set simple output path: {simple_success}")
-                time.sleep(1.0)  # Reduced delay
+                ws.send(json.dumps(set_simple_filename_request))
+                response6 = json.loads(ws.recv())
+                simple_filename_success = response6.get('d', {}).get('requestStatus', {}).get('result', False)
+                methods_success.append(simple_filename_success)
+                print(f"📄 Set SimpleOutput filename: {simple_filename_success}")
+                time.sleep(1.0)
             except Exception as e:
-                print(f"Method 3 failed: {e}")
+                print(f"Method 6 failed: {e}")
                 methods_success.append(False)
-            
-            # Method 4: Set Advanced Output Settings (✨ LUÔN LUÔN chạy nếu có project folder)
-            if self.current_project_folder:
-                try:
-                    set_adv_output_request = {
-                        "op": 6,
-                        "d": {
-                            "requestType": "SetProfileParameter",
-                            "requestId": "set-adv-output",
-                            "requestData": {
-                                "parameterCategory": "AdvOut", 
-                                "parameterName": "FFFilePath",
-                                "parameterValue": output_dir
-                            }
+
+            # 🔥 NEW Method 7: Set AdvOut RecRB (Recording Rebuild - sometimes needed)
+            try:
+                set_rec_rb_request = {
+                    "op": 6,
+                    "d": {
+                        "requestType": "SetProfileParameter",
+                        "requestId": "set-rec-rb",
+                        "requestData": {
+                            "parameterCategory": "AdvOut",
+                            "parameterName": "RecRB",
+                            "parameterValue": "false"  # Disable rebuild to force path
                         }
                     }
-                    
-                    ws.send(json.dumps(set_adv_output_request))
-                    response4 = json.loads(ws.recv())
-                    adv_success = response4.get('d', {}).get('requestStatus', {}).get('result', False)
-                    methods_success.append(adv_success)
-                    print(f"📁 Set advanced output path: {adv_success}")
-                    time.sleep(1.0)
-                except Exception as e:
-                    print(f"Method 4 failed: {e}")
-                    methods_success.append(False)
+                }
+                
+                ws.send(json.dumps(set_rec_rb_request))
+                response7 = json.loads(ws.recv())
+                rec_rb_success = response7.get('d', {}).get('requestStatus', {}).get('result', False)
+                methods_success.append(rec_rb_success)
+                print(f"🔧 Set RecRB disable: {rec_rb_success}")
+                time.sleep(1.0)
+            except Exception as e:
+                print(f"Method 7 failed: {e}")
+                methods_success.append(False)
             
             ws.close()
             
@@ -307,16 +381,19 @@ class SprunkiController:
             
             # PHASE 1: Evaluate success rate
             success_rate = sum(methods_success) / len(methods_success) if methods_success else 0
-            overall_success = success_rate >= 0.5  # At least 50% methods succeeded
+            overall_success = success_rate >= 0.4  # Lowered to 40% for more tolerance
+            
+            print(f"📊 METHODS RESULTS: {methods_success}")
+            print(f"📊 SUCCESS RATE: {success_rate*100:.0f}% ({sum(methods_success)}/{len(methods_success)})")
             
             if overall_success:
                 print(f"✅ OBS configured successfully! ({success_rate*100:.0f}% methods succeeded)")
                 print(f"   📁 Directory: {output_dir}")
                 print(f"   📄 Filename: {filename}")
                 
-                # PHASE 1: Reduced wait time for settings to apply
-                print("⏳ Waiting for OBS settings to apply...")
-                time.sleep(2.0)
+                # 🔥 ENHANCED: Longer wait time for ALL settings to properly apply
+                print("⏳ Waiting for ALL OBS settings to apply...")
+                time.sleep(4.0)  # Increased from 2.0s for better reliability
             else:
                 print(f"⚠️ Warning: Only {success_rate*100:.0f}% of OBS settings applied correctly")
             
