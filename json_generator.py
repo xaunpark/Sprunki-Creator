@@ -192,60 +192,80 @@ class SprunkiJSONGenerator:
                 });
                 
                 // =====================================================
-                // UPDATED: Hybrid Logic cho Icons (Logic MÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi)
+                // UPDATED: Bottom Half Only + Coordinate-Based Sorting
                 // =====================================================
-                console.log("ÃƒÂ°Ã…Â¸Ã…Â¡Ã¢â€šÂ¬ BÃƒÂ¡Ã‚ÂºÃ‚Â¯t Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚ÂºÃ‚Â§u quÃƒÆ’Ã‚Â¡ trÃƒÆ’Ã‚Â¬nh lÃƒÂ¡Ã‚ÂºÃ‚Â¥y icons (Logic Hybrid - ChÃƒÆ’Ã‚Â­nh xÃƒÆ’Ã‚Â¡c nhÃƒÂ¡Ã‚ÂºÃ‚Â¥t)...");
+                console.log("🎬 Bắt đầu quá trình lấy icons (Bottom Half + Coordinate Sorting)...");
 
-                // BÃƒâ€ Ã‚Â¯ÃƒÂ¡Ã‚Â»Ã…Â¡C 1: LÃƒÂ¡Ã‚ÂºÃ‚Â¤Y CÃƒÆ’Ã‚ÂC ICON Ãƒâ€žÃ‚ÂANG HIÃƒÂ¡Ã‚Â»Ã¢â‚¬Å¡N THÃƒÂ¡Ã‚Â»Ã… 
-                console.log("ÃƒÂ¢Ã¢â‚¬â€œÃ‚Â¶ÃƒÂ¯Ã‚Â¸Ã‚Â BÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc 1: TÃƒÆ’Ã‚Â¬m cÃƒÆ’Ã‚Â¡c sprite 'Icons' Ãƒâ€žÃ¢â‚¬Ëœang hiÃƒÂ¡Ã‚Â»Ã†â€™n thÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¹...");
+                // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ 
+                console.log("🔶️ Bước 1: Tìm các sprite 'Icons' đang hiện thị...");
                 const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
-                console.log(`ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ TÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y ${visibleIcons.length} icons trÃƒÆ’Ã‚Âªn mÃƒÆ’ n hÃƒÆ’Ã‚Â¬nh.`);
+                console.log(`✦ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
 
-                // BÃƒâ€ Ã‚Â¯ÃƒÂ¡Ã‚Â»Ã…Â¡C 2: TÃƒÂ¡Ã‚Âº O "DANH BÃƒÂ¡Ã‚Âº " SPRITE (chÃƒÂ¡Ã‚Â»Ã¢â‚¬Â° loÃƒÂ¡Ã‚ÂºÃ‚Â¡i bÃƒÂ¡Ã‚Â»Ã‚Â Stage)
-                console.log("ÃƒÂ¢Ã¢â‚¬â€œÃ‚Â¶ÃƒÂ¯Ã‚Â¸Ã‚Â BÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc 2: TÃƒÂ¡Ã‚ÂºÃ‚Â¡o 'danh bÃƒÂ¡Ã‚ÂºÃ‚Â¡' gÃƒÂ¡Ã‚Â»Ã¢â‚¬Å“m tÃƒÂ¡Ã‚ÂºÃ‚Â¥t cÃƒÂ¡Ã‚ÂºÃ‚Â£ cÃƒÆ’Ã‚Â¡c sprite (trÃƒÂ¡Ã‚Â»Ã‚Â« Stage) Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ tra cÃƒÂ¡Ã‚Â»Ã‚Â©u...");
-                const allSprites = allTargets.filter(t => !t.isStage);
-                console.log(`ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ 'Danh bÃƒÂ¡Ã‚ÂºÃ‚Â¡' cÃƒÆ’Ã‚Â³ ${allSprites.length} sprite.`);
-
-                // BÃƒâ€ Ã‚Â¯ÃƒÂ¡Ã‚Â»Ã…Â¡C 3: SÃƒÂ¡Ã‚ÂºÃ‚Â®P XÃƒÂ¡Ã‚ÂºÃ‚Â¾P ICONS DÃƒÂ¡Ã‚Â»Ã‚Â°A TRÃƒÆ’Ã… N INDEX CÃƒÂ¡Ã‚Â»Ã‚Â¦A SPRITE TÃƒâ€ Ã‚Â¯Ãƒâ€  NG ÃƒÂ¡Ã‚Â»Ã‚Â¨NG
-                console.log("ÃƒÂ¢Ã¢â‚¬â€œÃ‚Â¶ÃƒÂ¯Ã‚Â¸Ã‚Â BÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc 3: SÃƒÂ¡Ã‚ÂºÃ‚Â¯p xÃƒÂ¡Ã‚ÂºÃ‚Â¿p icons bÃƒÂ¡Ã‚ÂºÃ‚Â±ng cÃƒÆ’Ã‚Â¡ch liÃƒÆ’Ã‚Âªn kÃƒÂ¡Ã‚ÂºÃ‚Â¿t ngÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c lÃƒÂ¡Ã‚ÂºÃ‚Â¡i vÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi sprite gÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœc...");
-                visibleIcons.sort((iconA, iconB) => {
-                    // LÃƒÂ¡Ã‚ÂºÃ‚Â¥y 'chÃƒÆ’Ã‚Â¬a khÃƒÆ’Ã‚Â³a' tÃƒÂ¡Ã‚Â»Ã‚Â« mÃƒÂ¡Ã‚Â»Ã¢â‚¬â€i icon
-                    const charIndexA = Math.floor(iconA.currentCostume / 3);
-                    const charIndexB = Math.floor(iconB.currentCostume / 3);
-
-                    // DÃƒÆ’Ã‚Â¹ng 'chÃƒÆ’Ã‚Â¬a khÃƒÆ’Ã‚Â³a' Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ tra cÃƒÂ¡Ã‚Â»Ã‚Â©u trong 'danh bÃƒÂ¡Ã‚ÂºÃ‚Â¡'
-                    const linkedSpriteA = allSprites[charIndexA];
-                    const linkedSpriteB = allSprites[charIndexB];
-
-                    // NÃƒÂ¡Ã‚ÂºÃ‚Â¿u vÃƒÆ’Ã‚Â¬ lÃƒÆ’Ã‚Â½ do nÃƒÆ’ o Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â³ khÃƒÆ’Ã‚Â´ng tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y sprite, khÃƒÆ’Ã‚Â´ng sÃƒÂ¡Ã‚ÂºÃ‚Â¯p xÃƒÂ¡Ã‚ÂºÃ‚Â¿p
-                    if (!linkedSpriteA || !linkedSpriteB) {
-                        console.warn(`KhÃƒÆ’Ã‚Â´ng thÃƒÂ¡Ã‚Â»Ã†â€™ tÃƒÆ’Ã‚Â¬m thÃƒÂ¡Ã‚ÂºÃ‚Â¥y sprite liÃƒÆ’Ã‚Âªn kÃƒÂ¡Ã‚ÂºÃ‚Â¿t cho index ${charIndexA} hoÃƒÂ¡Ã‚ÂºÃ‚Â·c ${charIndexB}`);
-                        return 0;
-                    }
-
-                    // LÃƒÂ¡Ã‚ÂºÃ‚Â¥y 'sÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœ bÃƒÆ’Ã‚Â¡o danh' (runtime index) cÃƒÂ¡Ã‚Â»Ã‚Â§a sprite Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ liÃƒÆ’Ã‚Âªn kÃƒÂ¡Ã‚ÂºÃ‚Â¿t
-                    const runtimeIndexA = allTargets.indexOf(linkedSpriteA);
-                    const runtimeIndexB = allTargets.indexOf(linkedSpriteB);
-
-                    // So sÃƒÆ’Ã‚Â¡nh 'sÃƒÂ¡Ã‚Â»Ã¢â‚¬Ëœ bÃƒÆ’Ã‚Â¡o danh' Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã†â€™ sÃƒÂ¡Ã‚ÂºÃ‚Â¯p xÃƒÂ¡Ã‚ÂºÃ‚Â¿p
-                    return runtimeIndexA - runtimeIndexB;
-                });
-
-                // BÃƒâ€ Ã‚Â¯ÃƒÂ¡Ã‚Â»Ã…Â¡C 4: TÃƒÂ¡Ã‚Âº O MÃƒÂ¡Ã‚ÂºÃ‚Â¢NG KÃƒÂ¡Ã‚ÂºÃ‚Â¾T QUÃƒÂ¡Ã‚ÂºÃ‚Â¢ CUÃƒÂ¡Ã‚Â»Ã‚ÂI CÃƒÆ’Ã¢â€žÂ¢NG
-                console.log("ÃƒÂ¢Ã¢â‚¬â€œÃ‚Â¶ÃƒÂ¯Ã‚Â¸Ã‚Â BÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºc 4: ChuyÃƒÂ¡Ã‚Â»Ã†â€™n Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â‚¬Â¢i tÃƒÂ¡Ã‚Â»Ã‚Âa Ãƒâ€žÃ¢â‚¬ËœÃƒÂ¡Ã‚Â»Ã¢â€žÂ¢ vÃƒÆ’  gÃƒÆ’Ã‚Â¡n index tuÃƒÂ¡Ã‚ÂºÃ‚Â§n tÃƒÂ¡Ã‚Â»Ã‚Â± mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi...");
-                const icons = visibleIcons.map((icon, index) => {
+                // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ VÀ LỌC NỬA DƯỚI MÀN HÌNH
+                console.log("🔶️ Bước 2: Chuyển đổi tọa độ và lọc icons ở nửa dưới màn hình...");
+                const iconsWithPixelCoords = visibleIcons.map((icon) => {
                     const pixelCoords = toPixelWithMenu(icon.x, icon.y);
                     return {
+                        originalIcon: icon,
                         x: pixelCoords.x,
-                        y: pixelCoords.y,
-                        index: index // GÃƒÆ’Ã‚Â¡n index tuÃƒÂ¡Ã‚ÂºÃ‚Â§n tÃƒÂ¡Ã‚Â»Ã‚Â± 0, 1, 2... sau khi Ãƒâ€žÃ¢â‚¬ËœÃƒÆ’Ã‚Â£ sÃƒÂ¡Ã‚ÂºÃ‚Â¯p xÃƒÂ¡Ã‚ÂºÃ‚Â¿p
+                        y: pixelCoords.y
+                    };
+                }).filter(icon => icon.y >= 540); // Chỉ lấy icons ở nửa dưới màn hình (y >= 540)
+                
+                console.log(`✦ Sau khi lọc nửa dưới: ${iconsWithPixelCoords.length} icons.`);
+
+                // Bước 3: SẮP XẾP THEO TỌA ĐỘ (TRÊN XUỐNG DƯỚI, TRÁI SANG PHẢI)
+                console.log("🔶️ Bước 3: Sắp xếp icons theo tọa độ (từ trên xuống dưới, trái sang phải)...");
+                
+                // Tolerance cho việc xác định cùng hàng (các icon cùng hàng có thể lệch y một chút)
+                const ROW_TOLERANCE = 30;
+                
+                // Nhóm icons thành các hàng dựa trên tọa độ y
+                const sortedByY = iconsWithPixelCoords.sort((a, b) => a.y - b.y);
+                const rows = [];
+                
+                sortedByY.forEach(icon => {
+                    // Tìm hàng phù hợp (y gần nhau trong khoảng tolerance)
+                    let foundRow = false;
+                    for (let row of rows) {
+                        if (Math.abs(row[0].y - icon.y) <= ROW_TOLERANCE) {
+                            row.push(icon);
+                            foundRow = true;
+                            break;
+                        }
+                    }
+                    
+                    // Nếu không tìm thấy hàng phù hợp, tạo hàng mới
+                    if (!foundRow) {
+                        rows.push([icon]);
+                    }
+                });
+                
+                console.log(`✦ Tạo được ${rows.length} hàng icons.`);
+                
+                // Sắp xếp từng hàng theo x (trái sang phải) và ghép lại
+                const finalSortedIcons = [];
+                rows.forEach((row, rowIndex) => {
+                    // Sắp xếp icons trong hàng theo x
+                    row.sort((a, b) => a.x - b.x);
+                    console.log(`✦ Hàng ${rowIndex + 1}: ${row.length} icons`);
+                    finalSortedIcons.push(...row);
+                });
+
+                // Bước 4: TẠO MẢNG KẾT QUẢ CUỐI CÙNG
+                console.log("🔶️ Bước 4: Gán index tuần tự mới...");
+                const icons = finalSortedIcons.map((iconData, index) => {
+                    return {
+                        x: iconData.x,
+                        y: iconData.y,
+                        index: index // Gán index tuần tự 0, 1, 2... theo thứ tự sau khi sắp xếp
                     };
                 });
 
-                console.log("ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ HOÃƒÆ’Ã¢â€šÂ¬N THÃƒÆ’Ã¢â€šÂ¬NH! Icons Ãƒâ€žÃ¢â‚¬ËœÃƒâ€ Ã‚Â°ÃƒÂ¡Ã‚Â»Ã‚Â£c tÃƒÂ¡Ã‚ÂºÃ‚Â¡o theo logic Hybrid mÃƒÂ¡Ã‚Â»Ã¢â‚¬Âºi:");
+                console.log("✦ HOÀN THÀNH! Icons được tạo theo logic Bottom Half + Coordinate Sorting:");
                 console.table(icons);
                 // =====================================================
-                // END: UPDATED Hybrid Logic cho Icons
+                // END: UPDATED Bottom Half + Coordinate Sorting
                 // =====================================================
                 
                 // Get slots coordinates
@@ -497,55 +517,75 @@ class SprunkiJSONGenerator:
                         // UPDATED: Function getIconsWithHybridLogic (Logic Mới)
                         // =====================================================
                         function getIconsWithHybridLogic(allTargets) {
-                            console.log("🎬 Bắt đầu quá trình lấy icons (Logic Hybrid - Chính xác nhất)...");
+                            console.log("🎬 Bắt đầu quá trình lấy icons (Bottom Half + Coordinate Sorting)...");
 
                             // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ 
                             console.log("🔶️ Bước 1: Tìm các sprite 'Icons' đang hiện thị...");
                             const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
                             console.log(`✦ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
 
-                            // Bước 2: TẠO "DANH BẢ" SPRITE (chỉ loại bỏ Stage)
-                            console.log("🔶️ Bước 2: Tạo 'danh bả' gồm tất cả các sprite (trừ Stage) để tra cứu...");
-                            const allSprites = allTargets.filter(t => !t.isStage);
-                            console.log(`✦ 'Danh bả' có ${allSprites.length} sprite.`);
+                            // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ VÀ LỌC NỬA DƯỚI MÀN HÌNH
+                            console.log("🔶️ Bước 2: Chuyển đổi tọa độ và lọc icons ở nửa dưới màn hình...");
+                            const iconsWithPixelCoords = visibleIcons.map((icon) => {
+                                const pixelCoords = toPixelWithMenu(icon.x, icon.y);
+                                return {
+                                    originalIcon: icon,
+                                    x: pixelCoords.x,
+                                    y: pixelCoords.y
+                                };
+                            }).filter(icon => icon.y >= 540); // Chỉ lấy icons ở nửa dưới màn hình (y >= 540)
+                            
+                            console.log(`✦ Sau khi lọc nửa dưới: ${iconsWithPixelCoords.length} icons.`);
 
-                            // Bước 3: SẮP XẾP ICONS DỰA TRÊN INDEX CỦA SPRITE TƯƠNG ỨNG
-                            console.log("🔶️ Bước 3: Sắp xếp icons bằng cách liên kết ngược lại với sprite gốc...");
-                            visibleIcons.sort((iconA, iconB) => {
-                                // Lấy 'chìa khóa' từ mỗi icon
-                                const charIndexA = Math.floor(iconA.currentCostume / 3);
-                                const charIndexB = Math.floor(iconB.currentCostume / 3);
-
-                                // Dùng 'chìa khóa' để tra cứu trong 'danh bả'
-                                const linkedSpriteA = allSprites[charIndexA];
-                                const linkedSpriteB = allSprites[charIndexB];
-
-                                // Nếu vì lý do nào đó không tìm thấy sprite, không sắp xếp
-                                if (!linkedSpriteA || !linkedSpriteB) {
-                                    console.warn(`Không thể tìm thấy sprite liên kết cho index ${charIndexA} hoặc ${charIndexB}`);
-                                    return 0;
+                            // Bước 3: SẮP XẾP THEO TỌA ĐỘ (TRÊN XUỐNG DƯỚI, TRÁI SANG PHẢI)
+                            console.log("🔶️ Bước 3: Sắp xếp icons theo tọa độ (từ trên xuống dưới, trái sang phải)...");
+                            
+                            // Tolerance cho việc xác định cùng hàng
+                            const ROW_TOLERANCE = 30;
+                            
+                            // Nhóm icons thành các hàng dựa trên tọa độ y
+                            const sortedByY = iconsWithPixelCoords.sort((a, b) => a.y - b.y);
+                            const rows = [];
+                            
+                            sortedByY.forEach(icon => {
+                                // Tìm hàng phù hợp (y gần nhau trong khoảng tolerance)
+                                let foundRow = false;
+                                for (let row of rows) {
+                                    if (Math.abs(row[0].y - icon.y) <= ROW_TOLERANCE) {
+                                        row.push(icon);
+                                        foundRow = true;
+                                        break;
+                                    }
                                 }
-
-                                // Lấy 'số báo danh' (runtime index) của sprite đã liên kết
-                                const runtimeIndexA = allTargets.indexOf(linkedSpriteA);
-                                const runtimeIndexB = allTargets.indexOf(linkedSpriteB);
-
-                                // So sánh 'số báo danh' để sắp xếp
-                                return runtimeIndexA - runtimeIndexB;
+                                
+                                // Nếu không tìm thấy hàng phù hợp, tạo hàng mới
+                                if (!foundRow) {
+                                    rows.push([icon]);
+                                }
+                            });
+                            
+                            console.log(`✦ Tạo được ${rows.length} hàng icons.`);
+                            
+                            // Sắp xếp từng hàng theo x (trái sang phải) và ghép lại
+                            const finalSortedIcons = [];
+                            rows.forEach((row, rowIndex) => {
+                                // Sắp xếp icons trong hàng theo x
+                                row.sort((a, b) => a.x - b.x);
+                                console.log(`✦ Hàng ${rowIndex + 1}: ${row.length} icons`);
+                                finalSortedIcons.push(...row);
                             });
 
                             // Bước 4: TẠO MẢNG KẾT QUẢ CUỐI CÙNG
-                            console.log("🔶️ Bước 4: Chuyển đổi tọa độ và gán index tuần tự mới...");
-                            const finalLayoutIcons = visibleIcons.map((icon, index) => {
-                                const pixelCoords = toPixelWithMenu(icon.x, icon.y);
+                            console.log("🔶️ Bước 4: Gán index tuần tự mới...");
+                            const finalLayoutIcons = finalSortedIcons.map((iconData, index) => {
                                 return {
-                                    x: pixelCoords.x,
-                                    y: pixelCoords.y,
-                                    index: index // Gán index tuần tự 0, 1, 2... sau khi đã sắp xếp
+                                    x: iconData.x,
+                                    y: iconData.y,
+                                    index: index // Gán index tuần tự 0, 1, 2... theo thứ tự sau khi sắp xếp
                                 };
                             });
 
-                            console.log("✦ HOÀN THÀNH! Icons được tạo theo logic Hybrid mới:");
+                            console.log("✦ HOÀN THÀNH! Icons được tạo theo logic Bottom Half + Coordinate Sorting:");
                             console.table(finalLayoutIcons);
                             
                             return finalLayoutIcons;

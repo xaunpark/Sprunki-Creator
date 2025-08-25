@@ -6745,115 +6745,101 @@ class SprunkiGamePlayer:
     # == HIGH-LEVEL GAME OPERATIONS (ENHANCED) ==
     # ================================================================
     
-    def showcase_single_icon_corrected(self, icon_index, mode="Normal", listen_duration=15, progress_callback=None):
-        """ENHANCED: Showcase single icon with verification system"""
-        try:
-            if not self.config:
-                print("âŒ No config loaded")
-                return False
+    def showcase_single_icon_corrected(self, current_icon, mode="Normal", listen_duration=15, progress_callback=None):
+            """ENHANCED: Showcase single icon with verification system - NOW ACCEPTS ICON OBJECT"""
+            try:
+                if not self.config or not current_icon:
+                    print("â Œ No config or icon object provided")
+                    return False
+
+                # Find target slot (index 3) - Logic remains the same
+                target_slot = self._find_slot_by_index(3)
+                if not target_slot:
+                    print("â Œ Could not find slot index 3")
+                    return False
                 
-            layout = self.config['layout']
-            icons = layout['icons']
-            
-            if icon_index >= len(icons):
-                print(f"âŒ Icon index {icon_index} does not exist")
-                return False
-            
-            # Find target slot (index 3)
-            target_slot = self._find_slot_by_index(3)
-            if not target_slot:
-                print("âŒ Could not find slot index 3")
-                return False
-            
-            current_icon = icons[icon_index]
-            emoji = "ðŸ‘»" if mode == "Horror" else "ðŸŽª"
-            
-            if progress_callback:
-                progress_callback(f"{emoji} Showcasing {mode} icon {icon_index + 1}")
-            
-            print(f"\n{emoji} STARTING ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
-            print("="*60)
+                icon_index = current_icon.get('index', -1) # Get index for logging
+                emoji = "ðŸ‘»" if mode == "Horror" else "ðŸŽª"
+                
+                if progress_callback:
+                    progress_callback(f"{emoji} Showcasing {mode} icon {icon_index + 1}")
+                
+                print(f"\n{emoji} STARTING ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
+                print("="*60)
 
-            # ðŸ†• PHASE 0: FAST SHOWCASE CLEANUP (chá»‰ cho showcase mode)
-            print("ðŸ§¹ PHASE 0: Fast Showcase Cleanup...")
-            if progress_callback:
-                progress_callback(f"ðŸ§¹ Quick cleanup before {mode} icon {icon_index + 1}")
+                # ðŸ†• PHASE 0: FAST SHOWCASE CLEANUP (chá»‰ cho showcase mode)
+                print("ðŸ§¹ PHASE 0: Fast Showcase Cleanup...")
+                if progress_callback:
+                    progress_callback(f"ðŸ§¹ Quick cleanup before {mode} icon {icon_index + 1}")
 
-            cleanup_start = time.time()
-            self.execute_fast_showcase_cleanup()
-            cleanup_time = time.time() - cleanup_start
-            print(f"âœ… Fast cleanup completed in {cleanup_time:.1f}s")
+                cleanup_start = time.time()
+                self.execute_fast_showcase_cleanup()
+                cleanup_time = time.time() - cleanup_start
+                print(f"âœ… Fast cleanup completed in {cleanup_time:.1f}s")
 
-            # PHASE 1: ENHANCED DRAG & DROP with verification  
-            print("ðŸŽ¯ PHASE 1: Enhanced Drag & Drop with verification...")
-            is_first_icon = (icon_index == 0 and mode == "Normal")
-            
-            # Use CDP for first icon, PyAutoGUI for others (can be customized)
-            use_cdp = True  # Can be changed to True for all, or False for all, or is_first_icon
-            
-            drag_success = self.corrected_drag_and_drop(current_icon, target_slot, is_first_icon, use_cdp)
-            
-            if not drag_success:
-                print(f"âŒ Failed to drag icon {icon_index} with verification")
-                return False
-            
-            if self.should_stop:
-                return False
-            
-            # PHASE 2: LISTEN TO MUSIC
-            print(f"ðŸŽµ PHASE 2: Listening to music for {listen_duration}s...")
-            for countdown in range(listen_duration, 0, -1):
+                # PHASE 1: ENHANCED DRAG & DROP with verification  
+                print("ðŸŽ¯ PHASE 1: Enhanced Drag & Drop with verification...")
+                is_first_icon = (icon_index == 0 and mode == "Normal")
+                
+                use_cdp = True
+                
+                drag_success = self.corrected_drag_and_drop(current_icon, target_slot, is_first_icon, use_cdp)
+                
+                if not drag_success:
+                    print(f"â Œ Failed to drag icon {icon_index} with verification")
+                    return False
+                
                 if self.should_stop:
                     return False
+                
+                # PHASE 2: LISTEN TO MUSIC
+                print(f"ðŸŽµ PHASE 2: Listening to music for {listen_duration}s...")
+                for countdown in range(listen_duration, 0, -1):
+                    if self.should_stop:
+                        return False
+                    if progress_callback:
+                        progress_callback(f"ðŸŽµ Listening {mode} icon {icon_index + 1} ({countdown}s)")
+                    time.sleep(1)
+                
+                if self.should_stop:
+                    return False
+                
+                # PHASE 3: SMART RETURN WITH AUTO-RECOVERY
+                print("ðŸ”„ PHASE 3: Smart returning with auto-recovery...")
                 if progress_callback:
-                    progress_callback(f"ðŸŽµ Listening {mode} icon {icon_index + 1} ({countdown}s)")
-                time.sleep(1)
-            
-            if self.should_stop:
+                    progress_callback(f"â†º Smart returning {mode} icon {icon_index + 1}")
+
+                operation_context = f"showcase_{mode}_icon_{icon_index}"
+                return_success = self.execute_smart_return_with_auto_recovery(
+                    target_slot, operation_context, max_retries=2, use_cdp=use_cdp
+                )
+
+                if return_success:
+                    print(f"âœ… Icon {icon_index + 1} returned successfully")
+                    if self.characters_available:
+                        quick_count = self.get_characters_count()
+                        if quick_count == 0:
+                            print(f"   ðŸ“Š Validation: Characters count = 0 (perfect)")
+                        else:
+                            print(f"   âš ï¸  Validation: Characters count = {quick_count} (may need cleanup)")
+                else:
+                    print(f"âš ï¸  Warning: Failed to return icon {icon_index}")
+                    if self.characters_available:
+                        emergency_count = self.get_characters_count()
+                        if emergency_count is not None and emergency_count > 0:
+                            print(f"ðŸš¨ Quick emergency cleanup attempt...")
+                            self._execute_emergency_return_click(target_slot)
+
+                time.sleep(0.1)
+                
+                print(f"âœ… COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
+                print("="*60)
+                return True
+                
+            except Exception as e:
+                icon_index_for_error = current_icon.get('index', 'unknown') if 'current_icon' in locals() else 'unknown'
+                print("â Œ Error in enhanced showcase icon " + str(icon_index_for_error) + ": " + str(e))
                 return False
-            
-            # PHASE 3: SMART RETURN WITH AUTO-RECOVERY
-            print("ðŸ”„ PHASE 3: Smart returning with auto-recovery...")
-            if progress_callback:
-                progress_callback(f"â†º Smart returning {mode} icon {icon_index + 1}")
-
-            # PHASE 4: Enhanced return with auto-recovery
-            operation_context = f"showcase_{mode}_icon_{icon_index}"
-            return_success = self.execute_smart_return_with_auto_recovery(
-                target_slot, operation_context, max_retries=2, use_cdp=use_cdp
-            )
-
-            if return_success:
-                # STREAMLINED: Quick validation without extra delays
-                print(f"âœ… Icon {icon_index + 1} returned successfully")
-                
-                # Optional: Quick state check without comprehensive validation
-                if self.characters_available:
-                    quick_count = self.get_characters_count()
-                    if quick_count == 0:
-                        print(f"   ðŸ“Š Validation: Characters count = 0 (perfect)")
-                    else:
-                        print(f"   âš ï¸ Validation: Characters count = {quick_count} (may need cleanup)")
-            else:
-                print(f"âš ï¸ Warning: Failed to return icon {icon_index}")
-                
-                # STREAMLINED: Quick emergency cleanup only if needed
-                if self.characters_available:
-                    emergency_count = self.get_characters_count()
-                    if emergency_count is not None and emergency_count > 0:  # âœ… Kiá»ƒm tra None trÆ°á»›c
-                        print(f"ðŸš¨ Quick emergency cleanup attempt...")
-                        self._execute_emergency_return_click(target_slot)
-
-            # OPTIMIZED: Reduce stabilization delay
-            time.sleep(0.1)  # Reduced from 0.3s to 0.1s
-            
-            print(f"âœ… COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
-            print("="*60)
-            return True
-            
-        except Exception as e:
-            print("âŒ Error in enhanced showcase icon " + str(icon_index) + ": " + str(e))
-            return False
 
     def execute_fast_showcase_cleanup(self):
             """
@@ -7146,59 +7132,57 @@ class SprunkiGamePlayer:
     # ================================================================
 
     def showcase_all_icons_corrected(self, mode="Normal", skip_icon_19=False, listen_duration=15, progress_callback=None):
-        """ENHANCED: Showcase all icons with verification system - LIMITED TO FIRST 20 ICONS"""
-        try:
-            if not self.config:
-                return False
+            """ENHANCED: Showcase all icons with verification system - NOW PASSES ICON OBJECTS"""
+            try:
+                if not self.config:
+                    return False
+                    
+                layout = self.config['layout']
+                all_icons = layout['icons']
                 
-            layout = self.config['layout']
-            all_icons = layout['icons']
-            
-            # LIMIT TO FIRST 19 ICONS (INDEX 0-18)
-            limited_icons = [icon for icon in all_icons if icon.get('index', 999) <= 18]
-            
-            print(f"\nðŸŽ¯ ICON LIMITATION APPLIED:")
-            print(f"   ðŸ“Š Original icons: {len(all_icons)}")
-            print(f"   ðŸŽ¯ Limited to first 19: {len(limited_icons)} (index 0-18)")
-            print(f"   âœ… Filtered out: {len(all_icons) - len(limited_icons)} icons (index 20+)")
-            
-            # Use limited_icons instead of all_icons for range calculation
-            icons = limited_icons
-            
-            # Determine icon range (EXISTING LOGIC PRESERVED)
-            if mode == "Normal" and skip_icon_19:
-                icon_range = range(len(icons) - 1)  # 0-18, skip icon 19
-                print(f"   ðŸŽª Normal mode (hasHorror=true): Using icons 0-18, skipping icon 19")
-            else:
-                icon_range = range(len(icons))  # 0-19 or 0-18 depending on limited_icons
-                print(f"   ðŸŽª {mode} mode: Using all limited icons 0-{len(icons)-1}")
-            
-            print(f"\nÃ°Å¸Å½Âª STARTING ENHANCED {mode.upper()} SHOWCASE")
-            print(f"ðŸ“Š Will showcase {len(icon_range)} icons with verification system")
-            if self.characters_available:
-                print("ðŸ” Drag verification: ENABLED")
-            else:
-                print("âš ï¸ Drag verification: DISABLED (fallback mode)")
-            print("="*60)
-            
-            success_count = 0
-            for icon_index in icon_range:
-                if self.should_stop:
-                    break
-                
-                if self.showcase_single_icon_corrected(icon_index, mode, listen_duration, progress_callback):
-                    success_count += 1
+                # --- CENTRALIZED ICON FILTERING LOGIC ---
+                icons_to_showcase = []
+                if mode == "Normal":
+                    # For Normal mode, ALWAYS use icons with index 0-18
+                    icons_to_showcase = [icon for icon in all_icons if icon.get('index', 999) <= 18]
+                    print(f"ðŸŽ¯ Normal Mode: Filtering to icons 0-18. Found {len(icons_to_showcase)} icons.")
+                elif mode == "Horror":
+                    # For Horror mode, use icons 0-19
+                    icons_to_showcase = [icon for icon in all_icons if icon.get('index', 999) <= 19]
+                    print(f"ðŸ‘» Horror Mode: Filtering to icons 0-19. Found {len(icons_to_showcase)} icons.")
                 else:
-                    print(f"âš ï¸ Failed to showcase icon {icon_index}")
-            
-            print(f"\nÃ¢Å“â€¦ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
-            print(f"ðŸ“Š Success: {success_count}/{len(icon_range)} icons")
-            print("="*60)
-            return success_count == len(icon_range)
-            
-        except Exception as e:
-            print("âŒ Error in enhanced " + mode + " showcase: " + str(e))
-            return False
+                    # Fallback for other modes
+                    icons_to_showcase = all_icons
+
+                print(f"\nÃ°Å¸Å½Âª STARTING ENHANCED {mode.upper()} SHOWCASE")
+                print(f"ðŸ“Š Will showcase {len(icons_to_showcase)} icons with verification system")
+                if self.characters_available:
+                    print("ðŸ”  Drag verification: ENABLED")
+                else:
+                    print("âš ï¸  Drag verification: DISABLED (fallback mode)")
+                print("="*60)
+                
+                success_count = 0
+                # --- LOOP DIRECTLY THROUGH ICON OBJECTS ---
+                for icon_object in icons_to_showcase:
+                    if self.should_stop:
+                        break
+                    
+                    # Pass the entire icon object to the handler function
+                    if self.showcase_single_icon_corrected(icon_object, mode, listen_duration, progress_callback):
+                        success_count += 1
+                    else:
+                        icon_index = icon_object.get('index', 'unknown')
+                        print(f"âš ï¸  Failed to showcase icon {icon_index}")
+                
+                print(f"\nÃ¢Å“â€¦ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
+                print(f"ðŸ“Š Success: {success_count}/{len(icons_to_showcase)} icons")
+                print("="*60)
+                return success_count == len(icons_to_showcase)
+                
+            except Exception as e:
+                print("â Œ Error in enhanced " + mode + " showcase: " + str(e))
+                return False
 
     def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
         """ENHANCED: Play remix with verification system"""
