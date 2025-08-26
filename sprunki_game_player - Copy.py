@@ -20,6 +20,73 @@ from pathlib import Path
 from datetime import datetime
 import math
 import psutil
+import gc
+import weakref
+
+class ThreadSafeProgressUpdater:
+    def __init__(self, root, action_var):
+        self.root = root
+        self.action_var = action_var
+        self.update_queue = []
+        self.queue_lock = threading.Lock()
+        
+    def safe_update_progress(self, message):
+        """Thread-safe progress update"""
+        try:
+            with self.queue_lock:
+                self.update_queue.append(message)
+            
+            # Schedule GUI update on main thread
+            self.root.after(0, self._process_queue)
+            
+        except Exception as e:
+            print(f"⚠️ Progress update error: {e}")
+    
+    def _process_queue(self):
+        """Process updates on main thread"""
+        try:
+            with self.queue_lock:
+                if self.update_queue:
+                    message = self.update_queue.pop(0)
+                    self.action_var.set(message)
+                    self.root.update_idletasks()
+        except Exception as e:
+            print(f"⚠️ Queue process error: {e}")
+
+class ResourceManager:
+    def __init__(self):
+        self.cleanup_registry = weakref.WeakSet()
+        self.active_threads = []
+        self.websockets = []
+        
+    def register_cleanup(self, obj):
+        """Register object for cleanup"""
+        self.cleanup_registry.add(obj)
+        
+    def force_cleanup(self):
+        """Force cleanup all registered resources"""
+        try:
+            # 1. Close WebSocket connections
+            for ws in self.websockets[:]:
+                try:
+                    ws.close()
+                    self.websockets.remove(ws)
+                except:
+                    pass
+            
+            # 2. Wait for threads to finish
+            for thread in self.active_threads[:]:
+                if thread.is_alive():
+                    thread.join(timeout=2.0)
+                self.active_threads.remove(thread)
+            
+            # 3. Force garbage collection
+            gc.collect()
+            
+            print(f"Resource cleanup completed")
+            
+        except Exception as e:
+            print(f"Resource cleanup error: {e}")
 
 class DragOperationStats:
     """Class Ä‘á»ƒ tracking drag operation statistics"""
@@ -339,6 +406,27 @@ class SprunkiGamePlayer:
 
         # âœ… CLEANUP: Remove unused safe zone code  
         print("ðŸŽ¯ Initialized SIMPLIFIED return system: Precision Center + Carpet Bombing only")
+
+        # Initialize resource manager
+        self.resource_manager = ResourceManager()
+
+        # Initialize progress updater
+        self.progress_updater = None  # Will be initialized when GUI is ready
+
+    def setup_thread_safe_progress(self):
+        """Setup thread-safe progress updater"""
+        self.progress_updater = ThreadSafeProgressUpdater(self.root, self.action_var)
+
+    def thread_safe_progress_callback(self, message):
+        """Thread-safe wrapper for progress callbacks"""
+        if hasattr(self, 'progress_updater') and self.progress_updater is not None:
+            self.progress_updater.safe_update_progress(message)
+        else:
+            # Fallback to direct update (risky)
+            try:
+                self.action_var.set(message)
+            except:
+                print(f"Direct progress update failed: {message}")
 
     def cleanup_unused_safe_zone_code(self):  # â† Äáº¶T á»ž ÄÃ‚Y
         """
@@ -6746,100 +6834,131 @@ class SprunkiGamePlayer:
     # ================================================================
     
     def showcase_single_icon_corrected(self, current_icon, mode="Normal", listen_duration=15, progress_callback=None):
-            """ENHANCED: Showcase single icon with verification system - NOW ACCEPTS ICON OBJECT"""
-            try:
-                if not self.config or not current_icon:
-                    print("â Œ No config or icon object provided")
-                    return False
-
-                # Find target slot (index 3) - Logic remains the same
-                target_slot = self._find_slot_by_index(3)
-                if not target_slot:
-                    print("â Œ Could not find slot index 3")
-                    return False
-                
-                icon_index = current_icon.get('index', -1) # Get index for logging
-                emoji = "ðŸ‘»" if mode == "Horror" else "ðŸŽª"
-                
-                if progress_callback:
-                    progress_callback(f"{emoji} Showcasing {mode} icon {icon_index + 1}")
-                
-                print(f"\n{emoji} STARTING ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
-                print("="*60)
-
-                # ðŸ†• PHASE 0: FAST SHOWCASE CLEANUP (chá»‰ cho showcase mode)
-                print("ðŸ§¹ PHASE 0: Fast Showcase Cleanup...")
-                if progress_callback:
-                    progress_callback(f"ðŸ§¹ Quick cleanup before {mode} icon {icon_index + 1}")
-
-                cleanup_start = time.time()
-                self.execute_fast_showcase_cleanup()
-                cleanup_time = time.time() - cleanup_start
-                print(f"âœ… Fast cleanup completed in {cleanup_time:.1f}s")
-
-                # PHASE 1: ENHANCED DRAG & DROP with verification  
-                print("ðŸŽ¯ PHASE 1: Enhanced Drag & Drop with verification...")
-                is_first_icon = (icon_index == 0 and mode == "Normal")
-                
-                use_cdp = True
-                
-                drag_success = self.corrected_drag_and_drop(current_icon, target_slot, is_first_icon, use_cdp)
-                
-                if not drag_success:
-                    print(f"â Œ Failed to drag icon {icon_index} with verification")
-                    return False
-                
-                if self.should_stop:
-                    return False
-                
-                # PHASE 2: LISTEN TO MUSIC
-                print(f"ðŸŽµ PHASE 2: Listening to music for {listen_duration}s...")
-                for countdown in range(listen_duration, 0, -1):
-                    if self.should_stop:
-                        return False
-                    if progress_callback:
-                        progress_callback(f"ðŸŽµ Listening {mode} icon {icon_index + 1} ({countdown}s)")
-                    time.sleep(1)
-                
-                if self.should_stop:
-                    return False
-                
-                # PHASE 3: SMART RETURN WITH AUTO-RECOVERY
-                print("ðŸ”„ PHASE 3: Smart returning with auto-recovery...")
-                if progress_callback:
-                    progress_callback(f"â†º Smart returning {mode} icon {icon_index + 1}")
-
-                operation_context = f"showcase_{mode}_icon_{icon_index}"
-                return_success = self.execute_smart_return_with_auto_recovery(
-                    target_slot, operation_context, max_retries=2, use_cdp=use_cdp
-                )
-
-                if return_success:
-                    print(f"âœ… Icon {icon_index + 1} returned successfully")
-                    if self.characters_available:
-                        quick_count = self.get_characters_count()
-                        if quick_count == 0:
-                            print(f"   ðŸ“Š Validation: Characters count = 0 (perfect)")
-                        else:
-                            print(f"   âš ï¸  Validation: Characters count = {quick_count} (may need cleanup)")
-                else:
-                    print(f"âš ï¸  Warning: Failed to return icon {icon_index}")
-                    if self.characters_available:
-                        emergency_count = self.get_characters_count()
-                        if emergency_count is not None and emergency_count > 0:
-                            print(f"ðŸš¨ Quick emergency cleanup attempt...")
-                            self._execute_emergency_return_click(target_slot)
-
-                time.sleep(0.1)
-                
-                print(f"âœ… COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
-                print("="*60)
-                return True
-                
-            except Exception as e:
-                icon_index_for_error = current_icon.get('index', 'unknown') if 'current_icon' in locals() else 'unknown'
-                print("â Œ Error in enhanced showcase icon " + str(icon_index_for_error) + ": " + str(e))
+        """Enhanced version with resource management"""
+        try:
+            if not self.config or not current_icon:
                 return False
+
+            # Setup resource tracking
+            if not hasattr(self, 'resource_manager'):
+                self.resource_manager = ResourceManager()
+
+            # Find target slot
+            target_slot = self._find_slot_by_index(3)
+            if not target_slot:
+                return False
+            
+            icon_index = current_icon.get('index', -1)
+            
+            print(f"STARTING ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
+            
+            # PHASE 0: Enhanced cleanup with resource management
+            try:
+                self.execute_fast_showcase_cleanup()
+            except Exception as e:
+                print(f"Cleanup warning: {e}")
+                # Continue anyway
+            
+            # PHASE 1: Drag with exception handling
+            try:
+                drag_success = self.corrected_drag_and_drop(current_icon, target_slot, False, True)
+                if not drag_success:
+                    print(f"Failed to drag icon {icon_index}")
+                    return False
+            except Exception as e:
+                print(f"Drag error: {e}")
+                return False
+            
+            if self.should_stop:
+                return False
+            
+            # PHASE 2: ENHANCED LISTENING with memory-safe updates
+            print(f"PHASE 2: Listening to music for {listen_duration}s...")
+            
+            # Track memory usage
+            initial_memory = psutil.Process().memory_info().rss / 1024 / 1024
+            
+            for countdown in range(listen_duration, 0, -1):
+                if self.should_stop:
+                    return False
+                
+                # Memory-safe progress update
+                try:
+                    if progress_callback and hasattr(self, 'thread_safe_progress_callback'):
+                        self.thread_safe_progress_callback(f"Listening {mode} icon {icon_index + 1} ({countdown}s)")
+                    elif progress_callback:
+                        # Fallback with exception handling
+                        try:
+                            progress_callback(f"Listening {mode} icon {icon_index + 1} ({countdown}s)")
+                        except Exception as gui_error:
+                            print(f"GUI update failed: {gui_error}")
+                            # Continue without GUI updates to prevent crash
+                except Exception as callback_error:
+                    print(f"Progress callback error: {callback_error}")
+                
+                # Memory monitoring every 5 seconds
+                if countdown % 5 == 0:
+                    try:
+                        current_memory = psutil.Process().memory_info().rss / 1024 / 1024
+                        memory_increase = current_memory - initial_memory
+                        
+                        if memory_increase > 50:  # More than 50MB increase
+                            print(f"Memory increase detected: {memory_increase:.1f}MB - forcing cleanup")
+                            gc.collect()  # Force garbage collection
+                            
+                    except Exception as memory_error:
+                        print(f"Memory monitoring error: {memory_error}")
+                
+                time.sleep(1)
+            
+            if self.should_stop:
+                return False
+            
+            # PHASE 3: Return with enhanced error handling
+            try:
+                return_success = self.execute_smart_return_with_auto_recovery(
+                    target_slot, f"showcase_{mode}_icon_{icon_index}", max_retries=2, use_cdp=True
+                )
+                
+                if return_success:
+                    print(f"Icon {icon_index + 1} returned successfully")
+                else:
+                    print(f"Return warning for icon {icon_index}")
+                    # Try emergency cleanup
+                    try:
+                        self._execute_emergency_return_click(target_slot)
+                    except:
+                        pass
+                
+            except Exception as return_error:
+                print(f"Return error: {return_error}")
+                # Continue anyway, don't fail entire showcase
+            
+            # Force cleanup after each icon
+            try:
+                if hasattr(self, 'resource_manager'):
+                    self.resource_manager.force_cleanup()
+            except Exception as cleanup_error:
+                print(f"Resource cleanup error: {cleanup_error}")
+            
+            time.sleep(0.1)
+            
+            print(f"COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
+            return True
+            
+        except Exception as e:
+            icon_index_for_error = current_icon.get('index', 'unknown') if current_icon else 'unknown'
+            print(f"Critical error in showcase icon {icon_index_for_error}: {e}")
+            
+            # Emergency resource cleanup
+            try:
+                if hasattr(self, 'resource_manager'):
+                    self.resource_manager.force_cleanup()
+                gc.collect()
+            except:
+                pass
+            
+            return False
 
     def execute_fast_showcase_cleanup(self):
             """
@@ -7237,16 +7356,25 @@ class SprunkiGamePlayer:
             if self.should_stop:
                 return False
             
-            # Phase 2: Listen to remix music
-            print(f"ðŸŽ¶ PHASE 2: Enjoying remix for {listen_duration}s...")
+            # Phase 2: Listen to remix music - THREAD SAFE
+            print(f"PHASE 2: Enjoying remix for {listen_duration}s...")
             if progress_callback:
-                progress_callback(f"ðŸŽ¶ Enjoying {remix_name}")
-            
+                try:
+                    self.thread_safe_progress_callback(f"Enjoying {remix_name}")
+                except Exception as e:
+                    print(f"Progress callback warning: {e}")
+
             for countdown in range(listen_duration, 0, -1):
                 if self.should_stop:
                     return False
-                if progress_callback:
-                    progress_callback(f"ðŸŽ¶ Enjoying {remix_name} ({countdown}s)")
+                
+                # THREAD SAFE: Only update every 3 seconds to reduce GUI pressure
+                if progress_callback and countdown % 3 == 0:
+                    try:
+                        self.thread_safe_progress_callback(f"Enjoying {remix_name} ({countdown}s)")
+                    except Exception as e:
+                        print(f"Progress callback warning: {e}")
+                
                 time.sleep(1)
             
             if self.should_stop:
@@ -7460,13 +7588,19 @@ class SprunkiGamePlayer:
                 if self.should_stop:
                     break
                 
-                # Listen to music
-                print(f"ðŸŽµ Listening to bonus {bonus_index + 1} for {listen_duration}s...")
+                # Listen to music - THREAD SAFE
+                print(f"Listening to bonus {bonus_index + 1} for {listen_duration}s...")
                 for countdown in range(listen_duration, 0, -1):
                     if self.should_stop:
                         break
-                    if progress_callback:
-                        progress_callback(f"ðŸŽµ Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
+                    
+                    # THREAD SAFE: Update every 3 seconds
+                    if progress_callback and countdown % 3 == 0:
+                        try:
+                            self.thread_safe_progress_callback(f"Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
+                        except Exception as e:
+                            print(f"Progress callback warning: {e}")
+                    
                     time.sleep(1)
                 
                 if self.should_stop:
@@ -7591,12 +7725,18 @@ class SprunkiGamePlayer:
             # ================================================================
             # PHASE 2: WAIT FOR TRANSFORMATION
             # ================================================================
-            print(f"â³ PHASE 2: Waiting for horror transformation ({transition_duration}s)...")
+            print(f"PHASE 2: Waiting for horror transformation ({transition_duration}s)...")
             for countdown in range(transition_duration, 0, -1):
                 if self.should_stop:
                     return False
-                if progress_callback:
-                    progress_callback(f"ðŸ‘» Horror mode transition... ({countdown}s)")
+                
+                # THREAD SAFE: Update every 5 seconds for longer transitions
+                if progress_callback and countdown % 5 == 0:
+                    try:
+                        self.thread_safe_progress_callback(f"Horror mode transition... ({countdown}s)")
+                    except Exception as e:
+                        print(f"Progress callback warning: {e}")
+                
                 time.sleep(1)
             
             if self.should_stop:
@@ -7841,7 +7981,9 @@ class SprunkiGamePlayer:
         self.status_var.set("Config not loaded")
         self.action_var = StringVar()
         self.action_var.set("ðŸš€ Ready for ENHANCED workflow with Smart Verification...")
-        
+
+        self.progress_updater = ThreadSafeProgressUpdater(self.root, self.action_var)
+
         # Header
         Label(self.root, text="Sprunki Game Player", font=("Arial", 16, "bold")).pack(pady=10)
         Label(self.root, text="ðŸŽ® ENHANCED: Chrome Debug + Characters Array Verification + Smart Page Verification ðŸš€", 
@@ -8392,35 +8534,59 @@ class SprunkiGamePlayer:
         print("="*60)
         
     def stop_all(self):
-        """Stop all processes"""
+        """Enhanced stop with complete resource cleanup"""
+        print("Enhanced stop initiated...")
+        
         self.should_stop = True
         self.is_playing = False
 
-        # ðŸš€ NEW: Stop batch verification session
+        # Stop batch verification session
         if self.batch_verification_active:
-            self.stop_batch_verification_session()
+            try:
+                self.stop_batch_verification_session()
+            except Exception as e:
+                print(f"Batch stop error: {e}")
 
-        self.stop_btn.config(state="disabled")
-        self.action_var.set("â„¹ï¸ ENHANCED Auto stopped")
-        self.status_var.set("Stopped")
-        
-        if self.drag_stats.total_attempts > 0:
-            print("\n" + "="*50)
-            print("ðŸ“Š FINAL ENHANCED AUTO STATISTICS:")
-            print(self.get_drag_statistics())
-            print("="*50)
-            
-            # Enhanced cleanup and reporting on stop
-            self.cleanup_and_report("Manual_Stop")
-
-        # ðŸ†• CLEAR BROWSING DATA ON STOP
-        print("ðŸ—‘ï¸ Clearing browsing data on stop...")
-        self.cleanup_chrome_complete()  # This now includes browsing data clearing
-
+        # Enhanced resource cleanup
         try:
+            if hasattr(self, 'resource_manager'):
+                self.resource_manager.force_cleanup()
+        except Exception as e:
+            print(f"Resource cleanup error: {e}")
+
+        # Force garbage collection
+        gc.collect()
+        
+        # Update GUI safely
+        try:
+            self.stop_btn.config(state="disabled")
+            self.action_var.set("ENHANCED Auto stopped")
+            self.status_var.set("Stopped")
+        except Exception as gui_error:
+            print(f"GUI update error during stop: {gui_error}")
+
+        # Show final stats if available
+        if hasattr(self, 'drag_stats') and self.drag_stats.total_attempts > 0:
+            try:
+                print("FINAL ENHANCED AUTO STATISTICS:")
+                print(self.get_drag_statistics())
+            except Exception as stats_error:
+                print(f"Stats error: {stats_error}")
+
+        # Enhanced Chrome cleanup
+        try:
+            self.cleanup_chrome_complete()
+        except Exception as chrome_error:
+            print(f"Chrome cleanup error: {chrome_error}")
+
+        # Remove hotkey safely
+        try:
+            import keyboard
             keyboard.remove_hotkey('esc')
         except:
             pass
+        
+        print("Enhanced stop completed")
     
     def emergency_stop(self):
         """Emergency stop"""

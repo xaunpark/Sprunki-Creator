@@ -1761,6 +1761,14 @@ class SprunkiJSONGenerator:
                 print("🔧 Ensuring window activation after game setup...")
                 self.ensure_window_activation("post-game-setup")
 
+                # OPTIMIZED: Single WebSocket approach like original working code
+                ws_url = self._get_websocket_url()
+                if not ws_url: 
+                    self.game_player.cleanup_chrome_complete()
+                    return False, None, None
+
+                ws = websocket.create_connection(ws_url, timeout=30)
+
                 # Bước 1: ĐÃ XÓA - Quản lý WebSocket thủ công
                 # ws_url = self._get_websocket_url()
                 # if not ws_url: 
@@ -1852,6 +1860,27 @@ class SprunkiJSONGenerator:
 
                 print("✅ Skip intro phase finished - Game should be ready for interaction")
 
+                ### ========Xong phần SKIP INTRO ======== ###
+
+                # ========================================
+                # ### THIẾT LẬP DUAL VERIFICATION      ###
+                # ########################################
+                
+                # BƯỚC BẮT BUỘC: Thiết lập hệ thống DUAL Verification TRƯỚC khi sử dụng.
+                print("\n" + "="*70)
+                print("🎯 INITIALIZING DUAL VERIFICATION SYSTEM FOR TESTS")
+                print("="*70)
+                
+                # Gọi hàm setup từ game_player.
+                # Hàm này sẽ inject các hàm JS cần thiết vào trang web.
+                if self.game_player.setup_dual_verification_system():
+                    print("✅ DUAL Verification system is now ready for use in tests.")
+                else:
+                    print("⚠️ DUAL Verification setup failed. Control detection will be less reliable.")
+                    # Không dừng lại, nhưng cần lưu ý rằng xác minh có thể thất bại.
+
+                # ### KẾT THÚC THIẾT LẬP DUAL VERIFICATION ### #
+
                 # OpenCV Layout Analysis AFTER entering the actual game
                 print("\n" + "="*70)
                 print("🔍 OPENCV LAYOUT ANALYSIS - Analyzing Game Layout After Game Entry")
@@ -1891,16 +1920,106 @@ class SprunkiJSONGenerator:
                 print("\n" + "="*70)
                 print("📸 CAPTURE A: Initial State (Screenshot + Phase)")
                 print("="*70)
-                
+
+                # ============================
+                # GAME CONTROL TYPE DETECTION 
+                # ============================
+                print("\n" + "="*70)
+                print("🎮 GAME CONTROL TYPE DETECTION")
+                print("="*70)
+                print("Testing: Double-Click and Drag vs Click-Drag mechanism")
+
+                game_control_type = "click_drag"  # Default fallback
+                game_control_details = {
+                    "method": "default_fallback",
+                    "test_performed": False,
+                    "confidence": 0.5,
+                    "test_icon": 0,
+                    "test_slot": 0
+                }
+
+                try:
+                    # Get initial layout for control testing
+                    print("📋 Getting layout for game control test...")
+                    response = self._send_cdp_command(ws, {
+                        "method": "Runtime.evaluate", 
+                        "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
+                    })
+                    
+                    if response and 'result' in response:
+                        control_test_state = response.get('result', {}).get('result', {}).get('value')
+                        
+                        if control_test_state and 'icons' in control_test_state and 'slots' in control_test_state:
+                            icons = control_test_state['icons']
+                            slots = control_test_state['slots']
+                            
+                            # Find icon 0 and slot 0 for testing
+                            test_icon = next((icon for icon in icons if icon.get('index') == 0), None)
+                            test_slot = next((slot for slot in slots if slot.get('index') == 0), None)
+                            
+                            if test_icon and test_slot and test_icon.get('x') and test_slot.get('x'):
+                                print(f"🎯 Test setup: Icon 0 at ({test_icon['x']}, {test_icon['y']}) -> Slot 0 at ({test_slot['x']}, {test_slot['y']})")
+                                
+                                # Store original position for reset
+                                original_icon_pos = {'x': test_icon['x'], 'y': test_icon['y']}
+                                
+                                # Perform double-click drag test
+                                print("🖱️ Testing Double-Click and Drag mechanism...")
+                                success, result_code = self.test_double_click_drag(ws, test_icon, test_slot)
+                                
+                                game_control_details['test_performed'] = True
+                                game_control_details['result_code'] = result_code
+                                
+                                if success:
+                                    print("✅ Double-Click and Drag test SUCCESSFUL!")
+                                    game_control_type = "double_click_drag"
+                                    game_control_details['method'] = "double_click_test_success"
+                                    game_control_details['confidence'] = 1.0
+                                    
+                                    # Reset icon to original position
+                                    print("🔄 Resetting game state...")
+                                    reset_success = self.reset_icon_position(ws, test_slot, original_icon_pos)
+                                    game_control_details['reset_performed'] = reset_success
+                                    
+                                    if reset_success:
+                                        print("✅ Game state reset completed")
+                                    else:
+                                        print("⚠️ Reset may have failed - continuing anyway")
+                                        
+                                else:
+                                    print(f"❌ Double-Click and Drag test FAILED: {result_code}")
+                                    print("🎯 Defaulting to Click-Drag mechanism")
+                                    game_control_type = "click_drag"  
+                                    game_control_details['method'] = "double_click_test_failed"
+                                    game_control_details['confidence'] = 0.9
+                                    game_control_details['failure_reason'] = result_code
+                                    
+                            else:
+                                print("❌ Could not find icon 0 or slot 0 for testing")
+                                game_control_details['method'] = "test_setup_failed"
+                                game_control_details['failure_reason'] = "missing_test_elements"
+                        else:
+                            print("❌ Invalid state for game control testing")  
+                            game_control_details['method'] = "invalid_state"
+                            game_control_details['failure_reason'] = "state_extraction_failed"
+                    else:
+                        print("❌ Failed to get state for game control testing")
+                        game_control_details['method'] = "state_fetch_failed"
+                        
+                except Exception as e:
+                    print(f"❌ Exception during game control detection: {e}")
+                    game_control_details['method'] = "exception"
+                    game_control_details['failure_reason'] = str(e)
+
+                print(f"\n🎮 GAME CONTROL DETECTION RESULT:")
+                print(f"   Control Type: {game_control_type}")
+                print(f"   Detection Method: {game_control_details['method']}")
+                print(f"   Confidence: {game_control_details['confidence']}")
+                if 'failure_reason' in game_control_details:
+                    print(f"   Failure Reason: {game_control_details['failure_reason']}")
+                print("="*70)
+
                 print("📊 Extracting initial state A + coordinates...")
-
-                # OPTIMIZED: Single WebSocket approach like original working code
-                ws_url = self._get_websocket_url()
-                if not ws_url: 
-                    self.game_player.cleanup_chrome_complete()
-                    return False, None, None
-
-                ws = websocket.create_connection(ws_url, timeout=30)
 
                 try:
                     # ============================
@@ -1962,8 +2081,10 @@ class SprunkiJSONGenerator:
                                     "currentUrl": layout_state.get('currentUrl'), 
                                     "pageTitle": page_title,
                                     "gameSettings": {
-                                        "hasHorror": False,
+                                        "hasHorror": final_has_horror,
                                         "hasBonus": len(layout_state.get('layout', {}).get('bonus', [])) > 0,
+                                        "gameControlType": game_control_type,
+                                        "controlDetectionDetails": game_control_details,
                                         "detectionMethod": "insufficient_icons",
                                         "detectionDetails": {
                                             "method": "insufficient_icons",
@@ -2014,7 +2135,7 @@ class SprunkiJSONGenerator:
                     print(f"🎯 Dragging icon 19 from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
                     
                     # Use optimized drag
-                    drag_success = self.game_player.corrected_drag_and_drop(icon_coords, slot_coords)
+                    drag_success = self._execute_dynamic_drag(ws, icon_coords, slot_coords, game_control_type)
                     if not drag_success:
                         print("❌ Drag failed but continuing...")
                     
@@ -2143,7 +2264,7 @@ class SprunkiJSONGenerator:
                                 if slot_4_coords and slot_4_coords.get('x') is not None:
                                     print(f"🎯 Dragging icon {highest_index} to slot 4...")
                                     
-                                    drag_success_C = self.game_player.corrected_drag_and_drop(highest_index_icon, slot_4_coords)
+                                    drag_success_C = self._execute_dynamic_drag(ws, highest_index_icon, slot_4_coords, game_control_type)
                                     if drag_success_C:
                                         time.sleep(25)
                                         
@@ -2258,6 +2379,8 @@ class SprunkiJSONGenerator:
                     "gameSettings": {
                         "hasHorror": final_has_horror,
                         "hasBonus": len(layout_state.get('layout', {}).get('bonus', [])) > 0,
+                        "gameControlType": game_control_type,
+                        "controlDetectionDetails": game_control_details,
                         "detectionMethod": "simplified_A_vs_B_vs_C",
                         "detectionDetails": {
                             "method": final_detection_method,
@@ -2286,104 +2409,6 @@ class SprunkiJSONGenerator:
 
                 self.game_player.cleanup_chrome_complete()
                 return True, json_file_path, final_json
-                    
-                print("✅ Final full layout captured successfully")
-                
-                # 🔍 NEW: Calculate recording area using OpenCV results
-                print("\n" + "="*50)
-                print("🔍 OPENCV RECORDING AREA CALCULATION")
-                print("="*50)
-                
-                # Get slot center coordinates
-                slots = layout_state.get('layout', {}).get('slots', [])
-                center_slot, center_index, total_slots = self.calculate_slot_center_index(slots)
-
-                if center_slot and center_slot.get('x') is not None:
-                    slot_center_x = center_slot['x']
-                    print(f"🔍 Found slot center (index {center_index}) at X coordinate: {slot_center_x}")
-                    
-                    # Calculate recording area using OpenCV results
-                    opencv_recording_area = self.calculate_recording_area_opencv(slot_center_x, center_index, total_slots)
-                    
-                    if opencv_recording_area:
-                        # Override the recordingArea in layout_state
-                        layout_state['layout']['recordingArea'] = opencv_recording_area
-                        print("✅ Recording area successfully calculated and applied using OpenCV method!")
-                        print(f"   📌 Final Recording Area: {opencv_recording_area}")
-                    else:
-                        print("❌ Failed to calculate recording area with OpenCV method")
-                        print("💡 Possible reasons:")
-                        print("   - OpenCV layout analysis was not performed successfully")
-                        print("   - Dividing lines could not be detected in this game")
-                        print("   - Game layout doesn't follow expected structure")
-                        print("⚠️ Will proceed without recording area - JSON will still be generated")
-                        layout_state['layout']['recordingArea'] = None
-                else:
-                    print("❌ Slot center coordinates not found - cannot calculate recording area")
-                    print("💡 This means the game doesn't have the expected slot structure")
-                    print("⚠️ Will proceed without recording area")
-                    layout_state['layout']['recordingArea'] = None
-                
-                print("="*50)
-                
-                # Bước 4: ĐÃ XÓA - ws.close() thủ công
-                # ws.close()
-                
-                # ============================
-                # Generate Final JSON
-                # ============================
-                print("\n" + "="*70)
-                print("📄 Generate Final JSON")
-                print("="*70)
-                
-                page_title = layout_state.get('pageTitle', 'Unknown')
-                
-                final_json = {
-                    "version": "11.0-simplified-complete-logic", 
-                    "created": datetime.now().isoformat(),
-                    "currentUrl": layout_state.get('currentUrl'), 
-                    "pageTitle": page_title,
-                    "gameSettings": {
-                        "hasHorror": final_has_horror,
-                        "hasBonus": len(layout_state.get('layout', {}).get('bonus', [])) > 0,
-                        "detectionMethod": "simplified_A_vs_B_vs_C",
-                        "detectionDetails": {
-                            "method": final_detection_method,
-                            "confidence": final_confidence,
-                            "phase_before": final_visual_result.get('phase_before'),
-                            "phase_after": final_visual_result.get('phase_after'),
-                            "color_score": final_visual_result.get('color_shift', 0),
-                            "structural_score": final_visual_result.get('structural_change', 0),
-                            "horror_icon_index": final_visual_result.get('horror_icon_index', 19),
-                            "comparison_type": final_visual_result.get('comparison', 'none'),
-                            "logic_flow": "A(initial) → B(icon19) → C(highest) with early stop"
-                        }
-                    },
-                    "layout": layout_state.get('layout', {}),
-                    "settings": {
-                        "aspectRatio": "96:83"
-                    }
-                }
-                
-                print("💾 Saving JSON file...")
-                json_file_path = self.save_json_file(final_json, output_path, custom_title=page_title)
-                if not json_file_path: 
-                    self.game_player.cleanup_chrome_complete()
-                    return False, None, None
-                    
-                print("\n🎯 SIMPLIFIED COMPLETE LOGIC COMPLETED!")
-                print("="*70)
-                print(f"✅ hasHorror Detection: {final_has_horror}")
-                print(f"✅ Detection Method: {final_detection_method}")
-                print(f"✅ Logic Flow: A(initial) vs B(icon19) vs C(highest) with early stop")
-                if 'comparison' in final_visual_result:
-                    print(f"✅ Successful Comparison: {final_visual_result['comparison']}")
-                print("="*70)
-                
-                print("🧹 Performing complete cleanup...")
-                self.game_player.cleanup_chrome_complete()
-                    
-                return True, json_file_path, final_json
                 
             except Exception as e:
                 print(f"❌ Simplified complete logic error: {e}")
@@ -2411,6 +2436,221 @@ class SprunkiJSONGenerator:
             return obj.item()
         else:
             return obj
+
+    def test_double_click_drag(self, ws, icon_coords, slot_coords):
+        """Test double-click and drag mechanism with DUAL verification"""
+        try:
+            print(f"   Testing double-click drag from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
+            
+            # BƯỚC 1: Lấy số đếm của DUAL Verification TRƯỚC khi thực hiện hành động
+            # Chúng ta dùng self.game_player để truy cập vào các hàm xác minh.
+            print("   📊 Capturing DUAL verification counts BEFORE test...")
+            characters_before, putted_before = self.game_player.get_dual_counts()
+            print(f"   📊 Counts BEFORE: Characters={characters_before}, Putted={putted_before}")
+
+            if characters_before is None and putted_before is None:
+                print("   ❌ CRITICAL: Cannot get any verification counts. Aborting test.")
+                return False, "failed_get_dual_counts"
+
+            # BƯỚC 2: Thực hiện hành động Double-Click và Drag (Giữ nguyên)
+            print("   🖱️ Executing double-click and drag...")
+            start_x, start_y = icon_coords['x'], icon_coords['y']
+            end_x, end_y = slot_coords['x'], slot_coords['y']
+            
+            # First click
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent", 
+                "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
+            })
+            time.sleep(0.1)
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent", 
+                "params": {"type": "mouseReleased", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
+            })
+            time.sleep(0.2)
+            
+            # Second click and hold
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent", 
+                "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 2}
+            })
+            time.sleep(0.2)
+            
+            # Drag while holding
+            steps = 10
+            for i in range(1, steps + 1):
+                progress = i / steps
+                curr_x = start_x + (end_x - start_x) * progress
+                curr_y = start_y + (end_y - start_y) * progress
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent", 
+                    "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}
+                })
+                time.sleep(0.02)
+            
+            # Release at target
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent", 
+                "params": {"type": "mouseReleased", "x": end_x, "y": end_y, "button": "left", "clickCount": 2}
+            })
+            
+            # BƯỚC 3: Chờ game xử lý và lấy lại số đếm
+            time.sleep(3)
+            print("   📊 Capturing DUAL verification counts AFTER test...")
+
+            # ####################################################################
+            # ### START: SỬA CODE - Thay thế so sánh tọa độ bằng DUAL verify   ###
+            # ####################################################################
+
+            characters_after, putted_after = self.game_player.get_dual_counts()
+            print(f"   📊 Counts AFTER: Characters={characters_after}, Putted={putted_after}")
+
+            # BƯỚC 4: Dùng hàm xác minh của game_player để đưa ra kết luận
+            print("   🔍 Verifying test result using DUAL verification system...")
+            drag_successful = self.game_player.verify_drag_success_dual(
+                characters_before, characters_after, putted_before, putted_after
+            )
+            
+            print(f"   🎯 DUAL Verification Result: {'SUCCESS' if drag_successful else 'FAILURE'}")
+
+            return drag_successful, "success" if drag_successful else "verification_failed_no_change"
+
+            # ####################################################################
+            # ### KẾT THÚC: SỬA CODE                                            ###
+            # ####################################################################
+
+        except Exception as e:
+            print(f"   ❌ Exception during double-click test: {e}")
+            return False, f"exception_{str(e)}"
+
+    def reset_icon_position(self, ws, target_icon_coords, original_position):
+        """Reset icon back to original position with DUAL verification"""
+        try:
+            print(f"   🔄 Resetting icon from ({target_icon_coords['x']}, {target_icon_coords['y']}) to ({original_position['x']}, {original_position['y']})")
+
+            # BƯỚC 1: Lấy số đếm TRƯỚC khi reset
+            print("   📊 Capturing DUAL verification counts BEFORE reset...")
+            characters_before, putted_before = self.game_player.get_dual_counts()
+            print(f"   📊 Counts BEFORE: Characters={characters_before}, Putted={putted_before}")
+
+            if characters_before is None and putted_before is None:
+                print("   ⚠️ Cannot get verification counts. Proceeding with blind reset.")
+
+            # BƯỚC 2: Thực hiện hành động kéo trả về (Giữ nguyên)
+            start_x, start_y = target_icon_coords['x'], target_icon_coords['y']  
+            end_x, end_y = original_position['x'], original_position['y']
+            
+            # Standard drag implementation
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": start_x, "y": start_y}})
+            time.sleep(0.2)
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}})
+            time.sleep(0.2)
+            
+            # Drag to original position
+            steps = 15
+            for i in range(1, steps + 1):
+                progress = i / steps
+                curr_x = start_x + (end_x - start_x) * progress
+                curr_y = start_y + (end_y - start_y) * progress
+                self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}})
+                time.sleep(0.03)
+            
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseReleased", "x": end_x, "y": end_y, "button": "left", "clickCount": 1}})
+            time.sleep(2)
+            
+            # BƯỚC 3: Lấy số đếm và xác minh SAU khi reset
+            print("   📊 Capturing DUAL verification counts AFTER reset...")
+            characters_after, putted_after = self.game_player.get_dual_counts()
+            print(f"   📊 Counts AFTER: Characters={characters_after}, Putted={putted_after}")
+
+            print("   🔍 Verifying reset result using DUAL verification system...")
+            reset_successful = self.game_player.verify_return_success_dual(
+                characters_before, characters_after, putted_before, putted_after
+            )
+            
+            if reset_successful:
+                print("   ✅ Icon reset VERIFIED successfully")
+                return True
+            else:
+                print("   ❌ Icon reset FAILED verification. State may be inconsistent.")
+                return False
+            
+        except Exception as e:
+            print(f"   ❌ Exception during reset: {e}")
+            return False
+
+    def _execute_dynamic_drag(self, ws, icon_coords, slot_coords, control_type):
+        """
+        Executes a drag operation using the dynamically detected control type.
+        This function is specific to the JSON generator's workflow.
+        """
+        try:
+            print(f"Executing DYNAMIC DRAG with control type: '{control_type}'")
+            start_x, start_y = icon_coords['x'], icon_coords['y']
+            end_x, end_y = slot_coords['x'], slot_coords['y']
+
+            # Di chuyển chuột đến vị trí bắt đầu
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {"type": "mouseMoved", "x": start_x, "y": start_y}
+            })
+            time.sleep(0.2)
+
+            if control_type == "double_click_drag":
+                print("   Using DOUBLE-CLICK AND DRAG mechanism...")
+                # First click (part of the double-click)
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
+                })
+                time.sleep(0.1)
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mouseReleased", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
+                })
+                time.sleep(0.2)
+                
+                # Second click and hold
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 2}
+                })
+                time.sleep(0.2)
+
+            else: # Default to "click_drag"
+                print("   Using standard CLICK-DRAG mechanism...")
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
+                })
+                time.sleep(0.2)
+            
+            # Kéo chuột đến vị trí đích (chung cho cả hai cơ chế)
+            print(f"   Dragging from ({start_x}, {start_y}) to ({end_x}, {end_y})")
+            steps = 15
+            for i in range(1, steps + 1):
+                progress = i / steps
+                curr_x = start_x + (end_x - start_x) * progress
+                curr_y = start_y + (end_y - start_y) * progress
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}
+                })
+                time.sleep(0.03)
+
+            # Thả chuột tại đích
+            release_params = {
+                "type": "mouseReleased", "x": end_x, "y": end_y, "button": "left",
+                "clickCount": 2 if control_type == "double_click_drag" else 1
+            }
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": release_params})
+            
+            print("   Dynamic drag operation completed.")
+            return True
+
+        except Exception as e:
+            print(f"   ❌ Exception during dynamic drag: {e}")
+            return False
 
     def save_json_file(self, json_data, output_path=None, custom_title=None):
             try:

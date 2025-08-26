@@ -147,7 +147,9 @@ class SprunkiGamePlayer:
         self.RETURN_MODE_INDIVIDUAL = "individual"  # Single icon operations
         self.RETURN_MODE_REMIX = "remix"           # Multiple icons batch operations
         self.RETURN_MODE_AUTO = "auto"             # Auto-detect based on context
-        
+
+        self.game_control_type = "click_drag"  # Default to the most common type
+
         # Current return mode tracking
         self.current_return_mode = self.RETURN_MODE_AUTO
         self.active_icons_count = 0  # Track how many icons currently on slots
@@ -5635,12 +5637,23 @@ class SprunkiGamePlayer:
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True):
             """
-            ENHANCED: Drag and drop with DUAL verification (Characters Array + Putted Characters)
-            UPDATED: Reduced timing for faster workflow
-            CHá»ˆ Cáº¦N 1 TRONG 2 THÃ€NH CÃ”NG LÃ€ Äá»¦ - Maximum compatibility across all mods
+            [FINAL REFINED] Drag and drop with DUAL verification, DYNAMIC control type,
+            and special handling for the `is_first_icon` flag.
             """
-            print(f"\nðŸŽ¯ ENHANCED DRAG START: Icon to slot with DUAL verification")
+            print(f"\nðŸŽ¯ DYNAMIC DRAG START (is_first_icon: {is_first_icon})")
             print("="*60)
+
+            # Đọc gameControlType từ config
+            if self.config and 'gameSettings' in self.config:
+                self.game_control_type = self.config['gameSettings'].get('gameControlType', 'click_drag')
+            else:
+                self.game_control_type = 'click_drag'
+            
+            print(f"🎮 Using detected control type: '{self.game_control_type}'")
+
+            if is_first_icon:
+                print("🎪 First icon detected - ensuring game focus and applying extended waits...")
+                self.ensure_game_focus()
 
             # RESET TRACKING: Clear previous operation tracking
             self.working_systems = {'characters': None, 'putted': None}
@@ -5701,11 +5714,41 @@ class SprunkiGamePlayer:
                 self.last_drag_characters_before = characters_before
                 self.last_drag_putted_before = putted_before
 
-                # Execute single drag attempt
-                drag_executed = self._execute_single_drag_attempt(
-                    start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj
-                )
-                
+                print("   Executing dynamic drag attempt...")
+                drag_executed = False
+                end_x, end_y = target_slot['x'], target_slot['y']
+
+                if use_cdp:
+                    ws_url = self._get_websocket_url()
+                    if ws_url:
+                        try:
+                            ws = websocket.create_connection(ws_url, timeout=30)
+                            drag_executed = self._execute_dynamic_drag_cdp(
+                                ws, start_x, start_y, end_x, end_y, 
+                                self.game_control_type, 
+                                is_first_icon
+                            )
+                            ws.close()
+                        except Exception as cdp_err:
+                            print(f"   ⚠️ CDP connection/drag error: {cdp_err}, falling back to PyAutoGUI")
+                            drag_executed = False # Đảm bảo fallback được kích hoạt
+                    else:
+                        print("   ⚠️ WebSocket not available, falling back to PyAutoGUI")
+
+                # Fallback to PyAutoGUI if CDP is disabled or fails
+                if not use_cdp or not drag_executed:
+                    print("   Fallback to PyAutoGUI drag...")
+                    # PyAutoGUI chưa hỗ trợ dynamic, ta sẽ dùng logic cũ của nó
+                    # Đây là điểm có thể nâng cấp trong tương lai nếu cần
+                    timing_key = 'first_icon' if is_first_icon else 'normal_icon'
+                    delays = self.DRAG_DELAYS[timing_key].copy()
+                    
+                    drag_executed = self._execute_pyautogui_drag(
+                        start_x, start_y, end_x, end_y, 
+                        delays, domain_adj, 
+                        is_first_icon # Truyền biến is_first_icon vào
+                    )
+
                 if not drag_executed:
                     print(f"âŒ Drag execution failed at coordinate {coord_used}")
                     if coord_index < len(coordinates) - 1:
@@ -6570,6 +6613,100 @@ class SprunkiGamePlayer:
                 print("   🆘 Emergency mouse release executed")
             except:
                 pass
+            return False
+
+    def _execute_dynamic_drag_cdp(self, ws, start_x, start_y, end_x, end_y, control_type, is_first_icon):
+        """
+        [UPGRADED v2] Executes a dynamic drag via CDP, now aware of `is_first_icon`
+        for appropriate timing and delays.
+        """
+        try:
+            print(f"   Executing UPGRADED DYNAMIC CDP DRAG (is_first_icon: {is_first_icon}, type: '{control_type}')")
+            
+            # BƯỚC 1: Lấy bộ thời gian trễ phù hợp
+            timing_key = 'first_icon' if is_first_icon else 'normal_icon'
+            delays = self.DRAG_DELAYS[timing_key].copy()
+            domain_adj = self.get_domain_adjustments()
+            stability_factor = domain_adj.get('stability_factor', 1.0)
+            for key in delays:
+                delays[key] *= stability_factor
+            
+            # Xử lý đặc biệt cho first_icon (chờ lâu hơn)
+            if is_first_icon:
+                print("   🎪 First icon - applying extended timing and extra wait...")
+                time.sleep(delays['approach'])
+                time.sleep(domain_adj['extra_focus_time'])
+            
+            # Di chuyển chuột đến vị trí bắt đầu
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {"type": "mouseMoved", "x": start_x, "y": start_y}
+            })
+            if not is_first_icon: # Nếu không phải icon đầu, dùng approach delay bình thường
+                time.sleep(delays['approach'])
+
+            # BƯỚC 2: Focus vào icon (click "mồi")
+            if control_type == "double_click_drag":
+                print("   Using DOUBLE-CLICK AND DRAG (CDP)...")
+                # Click đầu tiên
+                self._simulate_click_via_cdp(ws, start_x, start_y)
+                time.sleep(0.15) 
+                
+                # Click thứ hai và giữ
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 2}
+                })
+            else: # Mặc định là "click_drag"
+                print("   Using standard CLICK-DRAG (CDP)...")
+                self._simulate_click_via_cdp(ws, start_x, start_y)
+                time.sleep(delays['focus']) # Sử dụng delay từ bộ timing
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
+                })
+
+            # BƯỚC 3: Thời gian giữ chuột dài hơn (sử dụng delay từ bộ timing)
+            extended_hold = delays['hold']
+            print(f"   Holding for {extended_hold:.2f}s before dragging...")
+            time.sleep(extended_hold)
+
+            # BƯỚC 4: Kéo chuột đến vị trí đích
+            print(f"   Dragging from ({start_x}, {start_y}) to ({end_x}, {end_y})")
+            steps = 20
+            drag_duration = delays['drag']
+            sleep_per_step = drag_duration / steps
+            for i in range(1, steps + 1):
+                progress = i / steps
+                curr_x = start_x + (end_x - start_x) * progress
+                curr_y = start_y + (end_y - start_y) * progress
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}
+                })
+                time.sleep(sleep_per_step)
+
+            # BƯỚC 5: Thời gian chuẩn bị thả (CRITICAL)
+            enhanced_drop_wait = delays['drop'] * 1.3
+            print(f"   Preparing to drop for {enhanced_drop_wait:.2f}s...")
+            time.sleep(enhanced_drop_wait)
+
+            # BƯỚC 6: Thả chuột tại đích
+            release_params = {
+                "type": "mouseReleased", "x": end_x, "y": end_y, "button": "left",
+                "clickCount": 2 if control_type == "double_click_drag" else 1
+            }
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": release_params})
+            time.sleep(delays['post_drop'])
+            
+            # BƯỚC 7: Di chuyển chuột đến vị trí an toàn (CRITICAL)
+            self.move_mouse_to_safe_position()
+            
+            print("   ✅ Upgraded Dynamic CDP drag successful.")
+            return True
+
+        except Exception as e:
+            print(f"   ❌ Exception during dynamic CDP drag: {e}")
             return False
 
     def corrected_return_icon(self, target_slot, use_cdp=True):
