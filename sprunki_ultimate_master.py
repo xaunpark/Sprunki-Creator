@@ -686,9 +686,8 @@ class UnifiedProcessingManager:
         self.logger.info("Starting unified processing pipeline")
         self.logger.info(f"Output directory: {config.output_base_dir}")
         
-        # Start processing thread
-        processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
-        processing_thread.start()
+        # [REFACTORED & FIXED] Start processing on the main thread via master_controller
+        self.master_controller.root.after(100, self._process_next_queue_item) # Start after 100ms
         
         return True
     
@@ -705,56 +704,87 @@ class UnifiedProcessingManager:
         
         self.logger.info("Processing stopped by user")
     
-    def _processing_loop(self):
-        """Main processing loop"""
+    def _process_next_queue_item(self):
+        """
+        [NEW - EVENT DRIVEN & FIXED]
+        Processes one item from the queue and schedules the next one.
+        This runs on the main GUI thread to avoid threading conflicts.
+        All GUI calls are delegated to the master_controller.
+        """
         try:
-            self.logger.info("=== UNIFIED PROCESSING PIPELINE STARTED ===")
+            # --- Check for stop conditions or end of queue ---
+            if self.should_stop:
+                self.logger.info("Pipeline stopped by user signal.")
+                # [FIXED] Call on_processing_complete via master_controller
+                self.master_controller.on_processing_complete()
+                return
+
+            if self.current_item_index >= len(self.queue):
+                self.logger.info("=== UNIFIED PROCESSING PIPELINE COMPLETED ===")
+                # [FIXED] Call on_processing_complete via master_controller
+                self.master_controller.on_processing_complete()
+                return
+
+            # --- Get current item ---
+            item = self.queue[self.current_item_index]
             
-            for i, item in enumerate(self.queue):
-                if self.should_stop:
-                    break
-                
-                self.current_item_index = i
-                
-                if item.status != "pending":
-                    continue
-                
-                self.logger.info(f"Processing item {i+1}/{len(self.queue)}: {item.display_name}")
-                
-                # PHASE 1: JSON Generation (if needed)
-                if item.source_url and not item.json_data:
-                    success = self._generate_json_for_item(item)
-                    if not success and item.status == "failed":
+            # --- Skip items that are not pending ---
+            if item.status != "pending":
+                self.logger.info(f"Skipping item {self.current_item_index + 1} with status '{item.status}'")
+                self.current_item_index += 1
+                # [FIXED] Call after() via master_controller.root
+                self.master_controller.root.after(10, self._process_next_queue_item) # Check next item immediately
+                return
+
+            # --- Process the item ---
+            self.logger.info(f"--- Processing item {self.current_item_index + 1}/{len(self.queue)}: {item.display_name} ---")
+            
+            # PHASE 1: JSON Generation (if needed)
+            if item.source_url and not item.json_data:
+                json_success = self._generate_json_for_item(item)
+                if not json_success and item.status == "failed":
+                    self.total_failed += 1
+                    self.current_item_index += 1
+                    # Schedule next item after a pause
+                    pause_duration = getattr(self.config, 'pause_between_items', 5) * 1000
+                    # [FIXED] Call after() via master_controller.root
+                    self.master_controller.root.after(pause_duration, self._process_next_queue_item)
+                    return
+
+            # PHASE 2: Video Processing
+            if item.json_data:
+                video_success = self._process_video_for_item(item)
+                if video_success:
+                    self.total_completed += 1
+                else:
+                    if item.status == "failed":
                         self.total_failed += 1
-                        continue
-                
-                # PHASE 2: Video Processing
-                if item.json_data:
-                    success = self._process_video_for_item(item)
-                    if success:
-                        self.total_completed += 1
-                    else:
-                        if item.status == "failed":
-                            self.total_failed += 1
-                        elif item.status == "skipped":
-                            self.total_skipped += 1
-                
-                # Pause between items
-                if not self.should_stop and i < len(self.queue) - 1:
-                    pause_duration = getattr(self.config, 'pause_between_items', 5)
-                    self.logger.info(f"Pausing {pause_duration}s before next item...")
-                    time.sleep(pause_duration)
+                    elif item.status == "skipped":
+                        self.total_skipped += 1
             
-            self.logger.info("=== UNIFIED PROCESSING PIPELINE COMPLETED ===")
-            
+            # --- Schedule the next item ---
+            self.current_item_index += 1
+            if self.current_item_index < len(self.queue):
+                pause_duration = getattr(self.config, 'pause_between_items', 5) * 1000 # Convert to ms
+                self.logger.info(f"Pausing {pause_duration/1000}s before next item...")
+                # [FIXED] Call after() via master_controller.root
+                self.master_controller.root.after(pause_duration, self._process_next_queue_item)
+            else:
+                # This was the last item, finalize
+                self.logger.info("--- Reached end of queue ---")
+                # [FIXED] Call on_processing_complete via master_controller
+                self.master_controller.on_processing_complete()
+
         except Exception as e:
             self.logger.error(f"Critical error in processing pipeline: {e}")
-        finally:
-            self.is_running = False
-            self.is_paused = False
-            # Notify main thread
-            if hasattr(self.master_controller, 'root'):
-                self.master_controller.root.after(100, self.master_controller.on_processing_complete)
+            # Mark current item as failed
+            if self.current_item_index < len(self.queue):
+                item = self.queue[self.current_item_index]
+                item.status = "failed"
+                item.error_message = f"Critical pipeline error: {e}"
+            # Finalize the process
+            # [FIXED] Call on_processing_complete via master_controller
+            self.master_controller.on_processing_complete()
     
     def _generate_json_for_item(self, item: ProcessingItem) -> bool:
         """Generate JSON for a URL item"""
@@ -1328,9 +1358,13 @@ class UnifiedProcessingManager:
             # ================================================================
             self.logger.info("🔹 PHASE 1: Safe individual icon recording...")
             
-            # Process normal mode icons
-            normal_range = range(len(icons) - 1) if has_horror else range(len(icons))
-            for icon_index in normal_range:
+            ### <<< THAY ĐỔI BẮT ĐẦU: Lọc icon cho Normal Mode >>>
+            # Lọc danh sách icon để chỉ lấy những icon có index từ 0 đến 18
+            normal_icons_to_process = [icon for icon in icons if icon.get('index', 999) <= 18]
+            self.logger.info(f"Individual (Normal Mode): Found {len(normal_icons_to_process)} icons to process (index <= 18)")
+
+            # Lặp qua danh sách icon đã được lọc
+            for current_icon in normal_icons_to_process:
                 if self.should_stop:
                     break
                 
@@ -1340,8 +1374,9 @@ class UnifiedProcessingManager:
                 if self.should_stop:
                     break
                 
+                # Lấy index thực sự từ đối tượng icon để đặt tên file
+                icon_index = current_icon.get('index')
                 filename = f"n-{icon_index}.mp4"
-                current_icon = icons[icon_index]
                 
                 # 🔥 USE SAFE OPERATION
                 success, output_path, error_msg = safe_ops.safe_single_icon_operation(
@@ -1356,17 +1391,25 @@ class UnifiedProcessingManager:
                 
                 if not self.should_stop:
                     time.sleep(1)
+            ### <<< THAY ĐỔI KẾT THÚC: Lọc icon cho Normal Mode >>>
             
             # Process horror mode icons (SAME SAFE PATTERN)
             if has_horror and not self.should_stop:
                 if self.master_controller.game_player.trigger_horror_mode_transition_corrected():
                     
-                    for icon_index in range(len(icons)):
+                    ### <<< THAY ĐỔI BẮT ĐẦU: Lọc icon cho Horror Mode >>>
+                    # Lọc danh sách icon để chỉ lấy những icon có index từ 0 đến 18 theo yêu cầu
+                    horror_icons_to_process = [icon for icon in icons if icon.get('index', 999) <= 18]
+                    self.logger.info(f"Individual (Horror Mode): Found {len(horror_icons_to_process)} icons to process (index <= 18)")
+                    
+                    # Lặp qua danh sách icon đã được lọc
+                    for current_icon in horror_icons_to_process:
                         if self.should_stop:
                             break
                         
+                        # Lấy index thực sự từ đối tượng icon để đặt tên file
+                        icon_index = current_icon.get('index')
                         filename = f"h-{icon_index}.mp4"
-                        current_icon = icons[icon_index]
                         
                         # 🔥 SAFE HORROR OPERATION
                         success, output_path, error_msg = safe_ops.safe_single_icon_operation(
@@ -1381,6 +1424,7 @@ class UnifiedProcessingManager:
                         
                         if not self.should_stop:
                             time.sleep(1)
+                    ### <<< THAY ĐỔI KẾT THÚC: Lọc icon cho Horror Mode >>>
             
             # ================================================================
             # PHASE 2: SAFE REMIX RECORDING
