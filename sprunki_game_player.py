@@ -5635,19 +5635,27 @@ class SprunkiGamePlayer:
     # == ENHANCED DRAG & DROP WITH VERIFICATION ==
     # ================================================================
 
-    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True):
+    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
             """
-            [FINAL REFINED] Drag and drop with DUAL verification, DYNAMIC control type,
+            [FINAL REFINED v2] Drag and drop with DUAL verification, DYNAMIC control type,
             and special handling for the `is_first_icon` flag.
+            Accepts an optional `control_type_override` for scenarios like JSON generation.
             """
             print(f"\nðŸŽ¯ DYNAMIC DRAG START (is_first_icon: {is_first_icon})")
             print("="*60)
 
-            # Đọc gameControlType từ config
-            if self.config and 'gameSettings' in self.config:
+            # Ưu tiên giá trị override được truyền vào (dùng cho json_generator)
+            if control_type_override:
+                self.game_control_type = control_type_override
+                print(f"🎮 Using OVERRIDDEN control type: '{self.game_control_type}'")
+            # Nếu không, cố gắng đọc từ config (dùng khi chơi game bình thường)
+            elif self.config and 'gameSettings' in self.config:
                 self.game_control_type = self.config['gameSettings'].get('gameControlType', 'click_drag')
+                print(f"🎮 Using control type from JSON config: '{self.game_control_type}'")
+            # Nếu cả hai đều không có, dùng giá trị mặc định
             else:
-                self.game_control_type = 'click_drag'
+                self.game_control_type = 'click_drag' # Fallback
+                print(f"🎮 Using DEFAULT control type: '{self.game_control_type}'")
             
             print(f"🎮 Using detected control type: '{self.game_control_type}'")
 

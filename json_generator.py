@@ -2135,7 +2135,13 @@ class SprunkiJSONGenerator:
                     print(f"🎯 Dragging icon 19 from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
                     
                     # Use optimized drag
-                    drag_success = self._execute_dynamic_drag(ws, icon_coords, slot_coords, game_control_type)
+                    drag_success = self.game_player.corrected_drag_and_drop(
+                        icon=icon_coords, 
+                        target_slot=slot_coords, 
+                        is_first_icon=True,
+                        use_cdp=True,
+                        control_type_override=game_control_type
+                    )
                     if not drag_success:
                         print("❌ Drag failed but continuing...")
                     
@@ -2264,7 +2270,13 @@ class SprunkiJSONGenerator:
                                 if slot_4_coords and slot_4_coords.get('x') is not None:
                                     print(f"🎯 Dragging icon {highest_index} to slot 4...")
                                     
-                                    drag_success_C = self._execute_dynamic_drag(ws, highest_index_icon, slot_4_coords, game_control_type)
+                                    drag_success_C = self.game_player.corrected_drag_and_drop(
+                                        icon=highest_index_icon, 
+                                        target_slot=slot_4_coords, 
+                                        is_first_icon=False, 
+                                        use_cdp=True,
+                                        control_type_override=game_control_type
+                                    )
                                     if drag_success_C:
                                         time.sleep(25)
                                         
@@ -2577,79 +2589,6 @@ class SprunkiJSONGenerator:
             
         except Exception as e:
             print(f"   ❌ Exception during reset: {e}")
-            return False
-
-    def _execute_dynamic_drag(self, ws, icon_coords, slot_coords, control_type):
-        """
-        Executes a drag operation using the dynamically detected control type.
-        This function is specific to the JSON generator's workflow.
-        """
-        try:
-            print(f"Executing DYNAMIC DRAG with control type: '{control_type}'")
-            start_x, start_y = icon_coords['x'], icon_coords['y']
-            end_x, end_y = slot_coords['x'], slot_coords['y']
-
-            # Di chuyển chuột đến vị trí bắt đầu
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {"type": "mouseMoved", "x": start_x, "y": start_y}
-            })
-            time.sleep(0.2)
-
-            if control_type == "double_click_drag":
-                print("   Using DOUBLE-CLICK AND DRAG mechanism...")
-                # First click (part of the double-click)
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
-                })
-                time.sleep(0.1)
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mouseReleased", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
-                })
-                time.sleep(0.2)
-                
-                # Second click and hold
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 2}
-                })
-                time.sleep(0.2)
-
-            else: # Default to "click_drag"
-                print("   Using standard CLICK-DRAG mechanism...")
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
-                })
-                time.sleep(0.2)
-            
-            # Kéo chuột đến vị trí đích (chung cho cả hai cơ chế)
-            print(f"   Dragging from ({start_x}, {start_y}) to ({end_x}, {end_y})")
-            steps = 15
-            for i in range(1, steps + 1):
-                progress = i / steps
-                curr_x = start_x + (end_x - start_x) * progress
-                curr_y = start_y + (end_y - start_y) * progress
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}
-                })
-                time.sleep(0.03)
-
-            # Thả chuột tại đích
-            release_params = {
-                "type": "mouseReleased", "x": end_x, "y": end_y, "button": "left",
-                "clickCount": 2 if control_type == "double_click_drag" else 1
-            }
-            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": release_params})
-            
-            print("   Dynamic drag operation completed.")
-            return True
-
-        except Exception as e:
-            print(f"   ❌ Exception during dynamic drag: {e}")
             return False
 
     def save_json_file(self, json_data, output_path=None, custom_title=None):
