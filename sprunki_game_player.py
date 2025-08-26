@@ -419,14 +419,14 @@ class SprunkiGamePlayer:
 
     def thread_safe_progress_callback(self, message):
         """Thread-safe wrapper for progress callbacks"""
-        if hasattr(self, 'progress_updater'):
+        if hasattr(self, 'progress_updater') and self.progress_updater is not None:
             self.progress_updater.safe_update_progress(message)
         else:
             # Fallback to direct update (risky)
             try:
                 self.action_var.set(message)
             except:
-                print(f"⚠️ Direct progress update failed: {message}")
+                print(f"Direct progress update failed: {message}")
 
     def cleanup_unused_safe_zone_code(self):  # â† Äáº¶T á»ž ÄÃ‚Y
         """
