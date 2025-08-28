@@ -221,7 +221,7 @@ class CreatorService:
         
         self.game_player = None
         self.obs_controller = None
-        # self.config = None # Dòng này bây giờ không cần nữa và có thể bị ghi đè. Tốt nhất nên xóa.
+        # self.config = None #Dòng này bây giờ không cần nữa và có thể bị ghi đè. Tốt nhất nên xóa.
         
         from sprunki_ultimate_master import UnifiedProcessingManager
         self.processing_manager = UnifiedProcessingManager(master_controller=self)
@@ -506,7 +506,7 @@ class CreatorService:
             return False
 
     def _execute_with_retry(self, queue_id: int, operation_name: str, operation_function: Callable, 
-                        context: dict = None, max_step_retries: int = 3) -> bool:
+                        context: Optional[dict] = None, max_step_retries: int = 3) -> bool:
         """Execute operation with smart retry logic - PHASE 2 (API-based)"""
         
         for step_attempt in range(1, max_step_retries + 1):
@@ -786,6 +786,7 @@ class CreatorService:
             self.api_client.update_job_status(queue_id, 'failed',
                 error_log=f"Video processing error: {str(e)}")
             return False
+        return False        
 
     def _process_with_progress_callbacks(self, item, queue_id: int) -> bool:
         """Enhanced processing with progress callbacks - PHASE 1"""

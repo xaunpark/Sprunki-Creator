@@ -478,27 +478,6 @@ class UnifiedProcessingManager:
         except Exception as e:
             self.logger.error(f"Failed to cleanup logging handlers: {e}")
     
-    def _calculate_center_slot_index(self, slots):
-        """Calculate center slot index for showcase"""
-        try:
-            total_slots = len(slots)
-            if total_slots == 0:
-                return 0
-            
-            # Calculate center index (0-based)
-            # For odd numbers: middle slot
-            # For even numbers: slightly left of middle 
-            center_index = (total_slots - 1) // 2
-            
-            self.logger.info(f"📊 Slot calculation: {total_slots} slots → center index {center_index}")
-            self.logger.info(f"   Examples: 7 slots → index 3, 9 slots → index 4, 6 slots → index 2")
-            
-            return center_index
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating center slot: {e}")
-            return 3  # Fallback to hardcoded value
-    
     def add_urls(self, urls: List[str]) -> int:
         """Add URLs to processing queue"""
         added_count = 0
@@ -789,6 +768,9 @@ class UnifiedProcessingManager:
     def _generate_json_for_item(self, item: ProcessingItem) -> bool:
         """Generate JSON for a URL item"""
         try:
+            # Reset the generator's state to ensure no stale WebSocket URLs are used.
+            self.json_generator.reset_state_for_new_job()
+
             item.status = "generating"
             item.start_time = datetime.now()
             
@@ -1333,7 +1315,7 @@ class UnifiedProcessingManager:
             has_horror = game_settings.get('hasHorror', False)
             
             # Calculate center slot index dynamically
-            center_slot_index = self._calculate_center_slot_index(slots)
+            center_slot_index = self.master_controller.game_player.game_operations.calculate_center_slot_index(slots)
             self.logger.info(f"🎯 Using center slot index {center_slot_index} out of {len(slots)} total slots")
             
             target_slot = self.master_controller.game_player._find_slot_by_index(center_slot_index)

@@ -7,6 +7,9 @@ Mở Chrome Debug - Đăng nhập conanghaimuoi@ - mail khôi phục xaunpark@
 
 & "C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="C:\Sprunki Studio\Sprunki-Creator\chrome_debug_profile"
 
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="C:\Sprunki Studio\Sprunki Creator\chrome_debug_profile"
+
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\Sprunki Studio\Sprunki Creator\chrome_permanent_profile"
 ----
 2. RDP
 
@@ -45,6 +48,19 @@ python -m venv venv
 .\venv\Scripts\Activate
 
 ----
+
+1. Quay về commit cũ và xoá luôn lịch sử sau đó
+git checkout main
+git reset --hard <commit-id>
+
+Nếu muốn đẩy lên remote:
+git push origin main --force
+
+2. Quay về commit cũ nhưng vẫn giữ lịch sử (an toàn hơn)
+
+git checkout main
+git revert <commit-id>..HEAD
+-----
 
 Access settings:
 

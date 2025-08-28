@@ -1,0 +1,133 @@
+Dưới đây là bản tổng hợp chi tiết, có cấu trúc rõ ràng về kiến trúc mới của dự án sau khi chúng ta đã hoàn thành việc tái cấu trúc. Bạn có thể lưu lại và sử dụng nó như một "bản đồ" cho dự án.
+
+---
+
+### **Tổng hợp Kiến trúc Dự án Sprunki Player**
+
+---
+
+#### **Sơ đồ Kiến trúc và Luồng Phụ thuộc**
+
+Đây là sơ đồ trực quan thể hiện mối quan hệ và luồng điều khiển giữa các module chính:
+
+```mermaid
+graph TD
+    subgraph "Main Application (Orchestrators)"
+        LAUNCH[launch.py] --> MASTER[sprunki_ultimate_master.py]
+        MASTER --> PLAYER[sprunki_game_player.py]
+        PLAYER --> GUI[gui_interface.py]
+    end
+
+    subgraph "Core Engine Modules"
+        PLAYER -- instantiates --> BM[browser_manager.py]
+        PLAYER -- instantiates --> VS[verification_system.py]
+        PLAYER -- instantiates --> GO[game_operations.py]
+        PLAYER -- instantiates --> WM[workflow_manager.py]
+        PLAYER -- instantiates --> CB[carpet_bombing.py]
+    end
+
+    subgraph "Module Dependencies"
+        VS -- uses --> BM
+        GO -- uses --> BM
+        GO -- uses --> VS
+        WM -- uses --> PLAYER
+        WM -- uses --> GO
+        WM -- uses --> VS
+        CB -- uses --> GO
+        CB -- uses --> VS
+        CB -- uses --> BM
+        JSON_GEN[json_generator.py] -- uses --> PLAYER
+    end
+
+    subgraph "Utility Modules"
+        UTILS[utils/]
+        UTILS --> STATS[statistics.py]
+        UTILS --> RM[resource_manager.py]
+        PLAYER -- uses --> UTILS
+    end
+
+    style PLAYER fill:#c9f,stroke:#333,stroke-width:2px
+    style MASTER fill:#f9f,stroke:#333,stroke-width:2px
+```
+
+---
+
+#### **Chi tiết Trách nhiệm của từng Module**
+
+##### **1. `sprunki_game_player.py` - Nhạc trưởng (Orchestrator)**
+*   **Vai trò:** Là lớp "Facade" chính, đóng vai trò điều phối trung tâm. Nó không còn chứa logic nghiệp vụ chi tiết.
+*   **Trách nhiệm chính:**
+    *   **Khởi tạo:** Tạo và quản lý vòng đời của tất cả các module con (BrowserManager, VerificationSystem, v.v.).
+    *   **Quản lý Trạng thái Cấp cao:** Giữ các trạng thái chung của ứng dụng như `is_playing`, `should_stop`, `config`, `remix_library`.
+    *   **Cung cấp API Tương thích Ngược:** Chứa các hàm "wrapper" để các script bên ngoài (như `sprunki_ultimate_master.py`, `json_generator.py`) có thể gọi các chức năng đã được di chuyển mà không cần thay đổi code của chúng.
+    *   **Điểm vào (Entry Point):** Chứa hàm `run()` để khởi động ứng dụng ở chế độ GUI độc lập và vòng lặp `full_auto_loop_corrected`.
+
+##### **2. `gui_interface.py` - Giao diện Người dùng**
+*   **Vai trò:** Chịu trách nhiệm hoàn toàn về việc hiển thị và tương tác với người dùng.
+*   **Trách nhiệm chính:**
+    *   Sử dụng `tkinter` để tạo cửa sổ chính, các nút bấm, nhãn, thanh tiến trình.
+    *   Xử lý các sự kiện từ người dùng (nhấn nút "Start", "Stop", chọn file).
+    *   Khi có sự kiện, nó sẽ gọi các phương thức tương ứng trong `SprunkiGamePlayer` để kích hoạt logic nghiệp vụ.
+    *   Hiển thị thông tin trạng thái được cung cấp bởi `SprunkiGamePlayer`.
+
+##### **3. `browser_manager.py` - Quản lý Trình duyệt**
+*   **Vai trò:** Module cấp thấp nhất, chịu trách nhiệm mọi tương tác với trình duyệt Chrome.
+*   **Trách nhiệm chính:**
+    *   Khởi chạy và đóng tiến trình Chrome ở chế độ debug.
+    *   Dọn dẹp triệt để các tiến trình và cổng debug (`cleanup_chrome_complete`).
+    *   Quản lý kết nối WebSocket đến Chrome DevTools Protocol (CDP).
+    *   Cung cấp các hàm cơ bản để tương tác qua CDP (`_send_cdp_command`, `_simulate_click_via_cdp`).
+    *   Thực hiện các quy trình phức tạp liên quan đến trình duyệt như `navigate_and_prepare_game`, `intro_skip_via_cdp`.
+
+##### **4. `verification_system.py` - "Bộ não" Xác thực**
+*   **Vai trò:** Module quan trọng nhất, đảm bảo sự ổn định bằng cách liên tục kiểm tra trạng thái thực tế của game.
+*   **Trách nhiệm chính:**
+    *   Thiết lập và quản lý hệ thống **Xác thực Kép** (`Characters` Array và `Putted Characters`).
+    *   Cung cấp các hàm để lấy trạng thái game (`get_dual_counts`, `get_active_slots_queue`).
+    *   Quản lý "Batch Session" (phiên WebSocket liên tục) để tăng tốc độ kiểm tra trạng thái.
+    *   Thực hiện logic `validate_workflow_completion` để kiểm tra kết quả cuối cùng.
+
+##### **5. `game_operations.py` - Thao tác Game Cơ bản**
+*   **Vai trò:** Chứa các "hành động" cơ bản, có thể tái sử dụng để tương tác với các yếu tố trong game.
+*   **Trách nhiệm chính:**
+    *   Logic cốt lõi của việc kéo và thả icon (`corrected_drag_and_drop`).
+    *   Logic cốt lõi của việc trả lại icon (`corrected_return_icon`).
+    *   Các hàm tạo tọa độ (`generate_icon_coordinates`).
+    *   Logic xác minh thành công cho từng hành động (`verify_drag_success_dual`).
+    *   Quản lý thư mục dự án (`setup_project_folder`).
+
+##### **6. `workflow_manager.py` - Quản lý Kịch bản**
+*   **Vai trò:** Chứa các kịch bản chơi game cấp cao, kết hợp các hành động từ `GameOperations` thành một chuỗi có ý nghĩa.
+*   **Trách nhiệm chính:**
+    *   Điều phối kịch bản "Showcase" (`showcase_all_icons_corrected`).
+    *   Điều phối kịch bản "Remix" (`play_complete_remix_corrected`).
+    *   Điều phối toàn bộ quy trình chơi game (`execute_full_showcase_workflow_corrected`).
+    *   Xử lý các logic chuyển đổi đặc biệt như `trigger_horror_mode_transition_corrected`.
+
+##### **7. `carpet_bombing.py` - Chiến lược "Rải thảm"**
+*   **Vai trò:** Đóng gói toàn bộ logic phức tạp của chiến lược dọn dẹp "rải thảm".
+*   **Trách nhiệm chính:**
+    *   Thực hiện logic "rải thảm" tuần tự, tăng dần (`execute_sequential_carpet_bombing_sets`).
+    *   Tạo ra các bộ tọa độ cho việc "rải thảm" (`generate_simple_coordinate_set`).
+    *   Cung cấp phương thức dọn dẹp chính cho chế độ Remix (`execute_remix_return_strategy`).
+
+##### **8. `utils/` - Các Tiện ích**
+*   **Vai trò:** Chứa các lớp tiện ích nhỏ, độc lập, có thể tái sử dụng.
+*   **`statistics.py`**: Chứa class `DragOperationStats`.
+*   **`resource_manager.py`**: Chứa `ResourceManager` và `ThreadSafeProgressUpdater`.
+
+---
+
+#### **Cách làm việc với AI trong tương lai**
+
+Khi bạn cần yêu cầu AI chỉnh sửa code, bạn có thể làm như sau:
+
+**Prompt Mẫu:**
+
+> "Tôi đang làm việc trên một dự án tự động hóa game Sprunki có cấu trúc module hóa. Dưới đây là file `[tên_file_cần_sửa].py` và bản tổng hợp kiến trúc của toàn bộ dự án để bạn hiểu bối cảnh.
+>
+> **[Dán bản tổng hợp kiến trúc ở trên vào đây]**
+>
+> **Yêu cầu của tôi là:**
+>
+> [Mô tả chi tiết yêu cầu của bạn. Ví dụ: "Trong file `game_operations.py`, tôi muốn thay đổi logic của hàm `corrected_drag_and_drop` để nó thử 7 tọa độ thay vì 5. Tọa độ mới cần thêm là góc trên-trái và dưới-phải."]"
