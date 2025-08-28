@@ -9,6 +9,7 @@ import os
 import logging
 from tkinter import Tk, Button, Label, StringVar, messagebox, filedialog, Frame, Listbox, Scrollbar, Text, Entry, Toplevel, Canvas, Label, StringVar, messagebox, filedialog, Frame, Listbox, Scrollbar, Text, Entry, Toplevel, Canvas, Toplevel, Canvas
 from tkinter.ttk import Progressbar, Separator, Combobox
+from urllib.parse import urlparse
 import keyboard
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -66,7 +67,11 @@ class ProcessingItem:
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     project_slug: Optional[str] = None
-    
+
+    json_generation_status: str = "not_started" # "success", "failure", "skipped"
+    master_mode_status: str = "not_started"     # "success", "failure", "skipped"
+    individual_mode_status: str = "not_started" # "success", "failure", "skipped"
+
     @property
     def display_name(self) -> str:
         """Get display name for UI"""
@@ -477,7 +482,126 @@ class UnifiedProcessingManager:
             self.logger.info("📝 Log files closed and finalized")
         except Exception as e:
             self.logger.error(f"Failed to cleanup logging handlers: {e}")
-    
+
+    def _generate_manifest_for_item(self, item: ProcessingItem):
+        """
+        Thu thập dữ liệu và tạo file manifest.json cho một item đã xử lý xong.
+        SỬ DỤNG pageTitle từ JSON đầu ra.
+        """
+        try:
+            self.logger.info(f"📄 Generating manifest for {item.project_slug}...")
+            
+            if not self.config or not item.json_data:
+                self.logger.error("Cannot generate manifest: Missing config or json_data.")
+                return
+
+            # Xác định thư mục output với kiểm tra an toàn
+            project_slug = item.project_slug or f"unknown-project-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            project_folder = os.path.join(self.config.output_base_dir, project_slug)
+            
+            if not os.path.exists(project_folder):
+                self.logger.warning(f"Project folder not found for manifest: {project_folder}, attempting to create it.")
+                try:
+                    os.makedirs(project_folder, exist_ok=True)
+                except Exception as e:
+                    self.logger.error(f"Could not create project folder for manifest: {e}")
+            
+            # 1. Thu thập thông tin
+            # SỬA LỖI Ở ĐÂY: Ưu tiên lấy pageTitle từ json_data
+            page_title = item.json_data.get('pageTitle', 'Unknown Title')
+            
+            source_url = item.json_data.get('currentUrl', item.source_url or '')
+            domain = urlparse(source_url).netloc.replace('www.', '') if source_url else ''
+
+            # Xác định overallStatus (logic không đổi)
+            if item.status == "completed":
+                overall_status = "success"
+            elif item.status == "failed":
+                overall_status = "failure"
+            else:
+                if item.master_mode_status == 'success' or item.individual_mode_status == 'success':
+                    overall_status = 'partial_success'
+                else:
+                    overall_status = 'failure'
+
+            # 2. Xây dựng cấu trúc manifest
+            manifest_data = {
+                "version": "1.1",
+                "sessionId": f"{item.project_slug}-{item.start_time.strftime('%Y%m%d%H%M%S')}" if item.start_time else "unknown",
+                "generatedAt": datetime.now().isoformat(),
+                "source": {
+                    "type": "url" if item.source_url else "json_file",
+                    "value": item.source_url or item.json_path
+                },
+                "projectInfo": {
+                    "sourceUrl": source_url,
+                    "projectSlug": item.project_slug,
+                    "pageTitle": page_title,
+                    "domain": domain,
+                    "outputDirectory": project_folder
+                },
+                "processingSummary": {
+                    "mode": item.mode,
+                    "overallStatus": overall_status,
+                    "statusDetails": {
+                        "jsonGeneration": item.json_generation_status,
+                        "masterMode": item.master_mode_status,
+                        "individualMode": item.individual_mode_status
+                    },
+                    "startTime": item.start_time.isoformat() if item.start_time else None,
+                    "endTime": item.end_time.isoformat() if item.end_time else None,
+                    "durationSeconds": (item.end_time - item.start_time).total_seconds() if item.start_time and item.end_time else 0,
+                    "hasHorror": item.json_data.get('gameSettings', {}).get('hasHorror', False)
+                },
+                "outputs": {}, # Sẽ điền sau
+                "errors": [] # Sẽ điền sau
+            }
+            
+            # 3. Điền thông tin outputs và errors
+            outputs = {"masterVideo": None, "individualVideos": [], "remixVideos": [], "logFiles": [], "sourceJson": None}
+            if item.error_message:
+                manifest_data["errors"].append({
+                    "timestamp": datetime.now().isoformat(),
+                    "stage": "general",
+                    "message": item.error_message
+                })
+            
+            for file_path in item.output_files:
+                filename = os.path.basename(file_path)
+                file_info = {
+                    "status": "success",
+                    "filename": filename,
+                    "relativePath": f"./{filename}",
+                    "fileSizeMb": round(os.path.getsize(file_path) / (1024*1024), 2) if os.path.exists(file_path) else 0
+                }
+                if 'showcase' in filename:
+                    outputs['masterVideo'] = file_info
+                elif 'remix' in filename:
+                    outputs['remixVideos'].append(file_info)
+                else:
+                    outputs['individualVideos'].append(file_info)
+
+            if item.json_path:
+                outputs['sourceJson'] = os.path.basename(item.json_path)
+            
+            log_slug = f"{item.project_slug}"
+            if os.path.exists(os.path.join(project_folder, f"{log_slug}-master.log")):
+                outputs['logFiles'].append({"type": "master", "filename": f"{log_slug}-master.log"})
+            if os.path.exists(os.path.join(project_folder, f"{log_slug}-individual.log")):
+                outputs['logFiles'].append({"type": "individual", "filename": f"{log_slug}-individual.log"})
+
+            manifest_data['outputs'] = outputs
+
+            # 4. Ghi file
+            manifest_path = os.path.join(project_folder, "manifest.json")
+            with open(manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+            
+            self.logger.info(f"✅ Manifest file created successfully: {manifest_path}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Failed to generate manifest file: {e}")
+
     def add_urls(self, urls: List[str]) -> int:
         """Add URLs to processing queue"""
         added_count = 0
@@ -685,95 +809,72 @@ class UnifiedProcessingManager:
     
     def _process_next_queue_item(self):
         """
-        [NEW - EVENT DRIVEN & FIXED]
-        Processes one item from the queue and schedules the next one.
-        This runs on the main GUI thread to avoid threading conflicts.
-        All GUI calls are delegated to the master_controller.
+        Processes one item from the queue, generates a manifest, and schedules the next one.
         """
+        item = None # Khai báo để có thể dùng trong finally
         try:
-            # --- Check for stop conditions or end of queue ---
             if self.should_stop:
                 self.logger.info("Pipeline stopped by user signal.")
-                # [FIXED] Call on_processing_complete via master_controller
                 self.master_controller.on_processing_complete()
                 return
 
             if self.current_item_index >= len(self.queue):
                 self.logger.info("=== UNIFIED PROCESSING PIPELINE COMPLETED ===")
-                # [FIXED] Call on_processing_complete via master_controller
                 self.master_controller.on_processing_complete()
                 return
 
-            # --- Get current item ---
             item = self.queue[self.current_item_index]
             
-            # --- Skip items that are not pending ---
             if item.status != "pending":
                 self.logger.info(f"Skipping item {self.current_item_index + 1} with status '{item.status}'")
                 self.current_item_index += 1
-                # [FIXED] Call after() via master_controller.root
-                self.master_controller.root.after(10, self._process_next_queue_item) # Check next item immediately
+                self.master_controller.root.after(10, self._process_next_queue_item)
                 return
 
-            # --- Process the item ---
             self.logger.info(f"--- Processing item {self.current_item_index + 1}/{len(self.queue)}: {item.display_name} ---")
             
-            # PHASE 1: JSON Generation (if needed)
             if item.source_url and not item.json_data:
                 json_success = self._generate_json_for_item(item)
                 if not json_success and item.status == "failed":
                     self.total_failed += 1
-                    self.current_item_index += 1
-                    # Schedule next item after a pause
-                    pause_duration = getattr(self.config, 'pause_between_items', 5) * 1000
-                    # [FIXED] Call after() via master_controller.root
-                    self.master_controller.root.after(pause_duration, self._process_next_queue_item)
-                    return
+                    # Bỏ qua các bước tiếp theo, đi thẳng đến finally để tạo manifest
+                    return 
 
-            # PHASE 2: Video Processing
-            if item.json_data:
+            if item.json_data and item.status != "failed":
                 video_success = self._process_video_for_item(item)
                 if video_success:
                     self.total_completed += 1
                 else:
-                    if item.status == "failed":
-                        self.total_failed += 1
-                    elif item.status == "skipped":
-                        self.total_skipped += 1
+                    if item.status == "failed": self.total_failed += 1
+                    elif item.status == "skipped": self.total_skipped += 1
             
-            # --- Schedule the next item ---
-            self.current_item_index += 1
-            if self.current_item_index < len(self.queue):
-                pause_duration = getattr(self.config, 'pause_between_items', 5) * 1000 # Convert to ms
-                self.logger.info(f"Pausing {pause_duration/1000}s before next item...")
-                # [FIXED] Call after() via master_controller.root
-                self.master_controller.root.after(pause_duration, self._process_next_queue_item)
-            else:
-                # This was the last item, finalize
-                self.logger.info("--- Reached end of queue ---")
-                # [FIXED] Call on_processing_complete via master_controller
-                self.master_controller.on_processing_complete()
-
         except Exception as e:
             self.logger.error(f"Critical error in processing pipeline: {e}")
-            # Mark current item as failed
-            if self.current_item_index < len(self.queue):
-                item = self.queue[self.current_item_index]
+            if item:
                 item.status = "failed"
                 item.error_message = f"Critical pipeline error: {e}"
-            # Finalize the process
-            # [FIXED] Call on_processing_complete via master_controller
-            self.master_controller.on_processing_complete()
+        
+        finally:
+            # TẠO MANIFEST SAU KHI XỬ LÝ XONG (DÙ THÀNH CÔNG HAY THẤT BẠI)
+            if item:
+                self._generate_manifest_for_item(item)
+
+            # Lên lịch cho item tiếp theo
+            self.current_item_index += 1
+            if self.current_item_index < len(self.queue) and not self.should_stop:
+                pause_duration = getattr(self.config, 'pause_between_items', 5) * 1000
+                self.logger.info(f"Pausing {pause_duration/1000}s before next item...")
+                self.master_controller.root.after(pause_duration, self._process_next_queue_item)
+            else:
+                self.logger.info("--- Reached end of queue ---")
+                self.master_controller.on_processing_complete()
     
     def _generate_json_for_item(self, item: ProcessingItem) -> bool:
         """Generate JSON for a URL item"""
         try:
-            # Reset the generator's state to ensure no stale WebSocket URLs are used.
             self.json_generator.reset_state_for_new_job()
-
             item.status = "generating"
             item.start_time = datetime.now()
-            
             self.logger.info(f"Generating JSON for: {item.source_url}")
             
             success, json_path, json_data = self.json_generator.generate_complete_json(item.source_url)
@@ -781,15 +882,15 @@ class UnifiedProcessingManager:
             if success and json_data:
                 item.json_path = json_path
                 item.json_data = json_data
-                item.status = "pending"  # Ready for video processing
-                
+                item.status = "pending"
+                item.json_generation_status = "success" # GHI LẠI TRẠNG THÁI
                 self.logger.info(f"JSON generated successfully: {json_path}")
                 return True
             else:
                 item.status = "failed"
                 item.error_message = "JSON generation failed"
                 item.end_time = datetime.now()
-                
+                item.json_generation_status = "failure" # GHI LẠI TRẠNG THÁI
                 self.logger.error(f"JSON generation failed for: {item.source_url}")
                 return False
                 
@@ -797,7 +898,7 @@ class UnifiedProcessingManager:
             item.status = "failed"
             item.error_message = f"JSON generation error: {str(e)}"
             item.end_time = datetime.now()
-            
+            item.json_generation_status = "failure" # GHI LẠI TRẠNG THÁI
             self.logger.error(f"JSON generation error for {item.source_url}: {e}")
             return False
     
@@ -1236,10 +1337,12 @@ class UnifiedProcessingManager:
             # SUCCESS
             item.output_files.append(output_path)
             self.logger.info(f"✅ Master video saved: {output_path}")
+            item.master_mode_status = "success"
             return True
             
         except Exception as e:
             self.logger.error(f"Master mode error: {e}")
+            item.master_mode_status = "failure"
             return False
             
         finally:
@@ -1418,10 +1521,12 @@ class UnifiedProcessingManager:
             
             item.output_files.extend(output_files)
             self.logger.info("✅ Enhanced Individual Mode completed with safe operations!")
+            item.individual_mode_status = "success"
             return len(output_files) > 0
             
         except Exception as e:
             self.logger.error(f"Individual mode error: {e}")
+            item.individual_mode_status = "failure"
             return False
         finally:
             # 🔥 EMERGENCY CLEANUP
@@ -2346,62 +2451,54 @@ class SprunkiUltimateMaster:
                 f"• Restart application if issues persist")
     
     def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
-        """Initialize game player and OBS controller"""
+        """Initialize game player and OBS controller for a specific job."""
         try:
-            # Initialize game player
-            self.game_player = SprunkiGamePlayer()
-            self.game_player.config = config_data
+            print("⚙️ Initializing components for new job...")
             
-            # Check domain support (only cocrea.world supported)
+            if hasattr(self, 'obs_controller') and self.obs_controller:
+                print("🧹 Cleaning up previous OBS controller...")
+                self.obs_controller = None
+                time.sleep(1)
+            
+            # Khởi tạo game player
+            self.game_player = SprunkiGamePlayer()
+            self.game_player.config = config_data # Gán config trước
+            
             current_url = config_data.get('currentUrl', '').lower()
             if 'cocrea.world' not in current_url:
-                from urllib.parse import urlparse
-                parsed_url = urlparse(current_url)
-                domain = parsed_url.netloc.lower().replace('www.', '')
-                
-                messagebox.showerror("Unsupported Domain", 
-                    f"Domain '{domain}' is not supported!\n\n"
-                    f"This version is optimized for 'cocrea.world' only.")
+                print(f"❌ Unsupported Domain: {current_url}")
                 return False
             
             # Check hasHorror setting để tạo remix phù hợp
             game_settings = config_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             
-            # Generate remix library với logic tránh horror icon
+            # 1. Lấy số lượng slot từ config_data
+            total_slots = len(config_data.get('layout', {}).get('slots', []))
+            
+            # 2. Tạo các pattern remix động
+            self.game_player.generate_dynamic_patterns(total_slots)
+            
+            # 3. Tạo thư viện remix từ các pattern mới
             self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
             self.game_player.current_remix_index = 0
             
-            # Log remix generation info
-            if has_horror:
-                print("👻 Horror mode detected - Generated remixes avoid icon 19 for normal mode")
-            else:
-                print("🎪 Normal mode only - Generated remixes use all 20 icons")
-            
-            print(f"🎼 Created {len(self.game_player.remix_library)} horror-aware remixes")
-            
+            # Khởi tạo OBS controller
+            print("🎥 Initializing OBS controller for service mode...")
             self.obs_controller = SprunkiController()
             
-            # NOTE: OBS Controller uses hardcoded settings from sprunki_obs_controller.py
-            # Host: 192.168.1.17, Port: 4455 - DO NOT override from config.json
-            # OBS Controller uses hardcoded settings - skip config override
-            # if not self.obs_controller.load_config_from_dict(config_data):
-            #     messagebox.showerror("OBS Error", "Could not load config into OBS!")
-            #     return False
-            
-            # Instead, just verify OBS controller can load basic recording area
             if not self.obs_controller.load_config_from_dict(config_data):
-                messagebox.showerror("OBS Error", "Could not load recording area config!")
+                print("❌ OBS Error: Could not load recording area config!")
                 return False
             
             self.config = config_data
-            
-            print("✅ Components initialized successfully for cocrea.world with horror-aware remix generation")
+            print("✅ Components initialized successfully.")
             return True
             
         except Exception as e:
-            print(f"Error initializing components: {e}")
-            messagebox.showerror("Initialization Error", f"Could not initialize components: {str(e)}")
+            print(f"❌ Error initializing components: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def setup_gui(self):

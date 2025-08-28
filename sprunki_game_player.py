@@ -1333,34 +1333,56 @@ class SprunkiGamePlayer:
         return remix_library
     
     def create_remix_from_pattern(self, pattern, remix_number, avoid_horror_icon=False):
-        """Create remix from pattern with option to avoid horror icon - WORKS WITH LIMITED ICONS"""
+        """
+        Tạo remix từ pattern, đảm bảo các icon được chọn nằm trong giới hạn thực tế
+        của file JSON.
+        """
         try:
             selected_icons = []
             
-            # ðŸŽ¯ NEW: Create icon_groups based on LIMITED icons (0-18)
-            limited_icon_groups = {
-                'beats': list(range(0, min(5, 19))),      # 0-4
-                'effects': list(range(5, min(10, 19))),   # 5-9
-                'melodies': list(range(10, min(15, 19))), # 10-14
-                'vocals': list(range(15, min(19, 19)))    # 15-18
+            # Lấy số lượng icon thực tế từ config đã được load
+            if not self.config or 'layout' not in self.config or 'icons' not in self.config['layout']:
+                print("❌ Cannot create remix: Config with icon layout not available.")
+                return None
+                
+            total_icons_available = len(self.config['layout']['icons'])
+            print(f"🎼 Creating remix based on {total_icons_available} available icons.")
+
+            # TẠO ICON GROUPS ĐỘNG DỰA TRÊN SỐ LƯỢNG ICON THỰC TẾ
+            # Điều này đảm bảo chúng ta không bao giờ chọn một index không tồn tại.
+            dynamic_icon_groups = {
+                'beats': [i for i in range(0, 5) if i < total_icons_available],
+                'effects': [i for i in range(5, 10) if i < total_icons_available],
+                'melodies': [i for i in range(10, 15) if i < total_icons_available],
+                'vocals': [i for i in range(15, 19) if i < total_icons_available]
             }
-            
-            icon_groups_to_use = limited_icon_groups.copy()
-            
-            if avoid_horror_icon:
-                # Remove icon 19 from vocals group (15-19 -> 15-18)
-                icon_groups_to_use['vocals'] = list(range(15, 19))  # Remove index 19
-                print(f"ðŸš¨ Avoiding horror icon (19) for normal mode remix")
-            
-            print(f"ðŸŽ¯ Using limited icon groups (0-19): {icon_groups_to_use}")
-            
+
+            # Xử lý trường hợp "avoid_horror_icon"
+            # Logic này giả định icon horror luôn là icon có index cao nhất trong nhóm vocal
+            if avoid_horror_icon and 19 in dynamic_icon_groups['vocals']:
+                dynamic_icon_groups['vocals'].remove(19)
+                print(f"👻 Avoiding horror icon (19) for normal mode remix.")
+
+            print(f"   - Available Beats: {len(dynamic_icon_groups['beats'])}")
+            print(f"   - Available Effects: {len(dynamic_icon_groups['effects'])}")
+            print(f"   - Available Melodies: {len(dynamic_icon_groups['melodies'])}")
+            print(f"   - Available Vocals: {len(dynamic_icon_groups['vocals'])}")
+
             for group_name, count in [('beats', pattern['beats']), 
-                                    ('effects', pattern['effects']),
-                                    ('melodies', pattern['melodies']), 
-                                    ('vocals', pattern['vocals'])]:
+                                      ('effects', pattern['effects']),
+                                      ('melodies', pattern['melodies']), 
+                                      ('vocals', pattern['vocals'])]:
                 if count > 0:
-                    available_icons = icon_groups_to_use[group_name].copy()
-                    selected = random.sample(available_icons, min(count, len(available_icons)))
+                    available_icons_in_group = dynamic_icon_groups[group_name]
+                    
+                    # Nếu không có icon nào trong nhóm, bỏ qua
+                    if not available_icons_in_group:
+                        print(f"   ⚠️ No icons available for group '{group_name}', skipping.")
+                        continue
+                        
+                    # Chọn ngẫu nhiên từ các icon thực sự có sẵn
+                    num_to_select = min(count, len(available_icons_in_group))
+                    selected = random.sample(available_icons_in_group, num_to_select)
                     selected_icons.extend(selected)
             
             random.shuffle(selected_icons)
@@ -1369,13 +1391,116 @@ class SprunkiGamePlayer:
             
             return {
                 'name': remix_name,
-                'description': f"{pattern['description']} ({pattern_counts}) [LIMITED 0-19]",
+                'description': f"{pattern['description']} ({pattern_counts})",
                 'icons': selected_icons,
                 'pattern': pattern['name']
             }
         except Exception as e:
-            print("Error creating remix from pattern: " + str(e))
+            print(f"❌ Error creating remix from pattern: {e}")
             return None
+
+    def _adjust_sum_to_target(self, counts: Dict[str, int], target_sum: int) -> Dict[str, int]:
+        """Hàm trợ giúp để điều chỉnh tổng các số đếm cho khớp với target_sum."""
+        current_sum = sum(counts.values())
+        diff = target_sum - current_sum
+
+        # Sắp xếp các loại theo giá trị hiện tại để ưu tiên điều chỉnh
+        # Ưu tiên thêm/bớt vào 'beats' và 'effects'
+        priority = ['beats', 'effects', 'melodies', 'vocals']
+        
+        while diff != 0:
+            if diff > 0: # Cần thêm
+                # Thêm vào thành phần có giá trị nhỏ nhất trong danh sách ưu tiên
+                key_to_increment = min(priority, key=lambda k: counts.get(k, 0))
+                counts[key_to_increment] = counts.get(key_to_increment, 0) + 1
+                diff -= 1
+            else: # Cần bớt
+                # Bớt từ thành phần có giá trị lớn nhất (và > 0)
+                key_to_decrement = max(priority, key=lambda k: counts.get(k, 0))
+                if counts.get(key_to_decrement, 0) > 0:
+                    counts[key_to_decrement] -= 1
+                    diff += 1
+                else: # Nếu không thể bớt được nữa, dừng lại để tránh số âm
+                    break 
+        return counts
+
+    def generate_dynamic_patterns(self, total_slots: int):
+        """
+        Tạo các pattern remix một cách linh động dựa trên tổng số slot có sẵn.
+        LUÔN tạo tất cả các loại pattern.
+        """
+        print(f"🎼 Generating dynamic remix patterns for {total_slots} slots...")
+        if total_slots <= 0:
+            return []
+
+        dynamic_patterns = []
+
+        # 1. Khuôn mẫu "Balanced" (Cân bằng) - Luôn có
+        balanced_counts = {
+            'beats': max(1, round(total_slots * 0.40)),
+            'effects': max(1, round(total_slots * 0.30)),
+            'melodies': max(1, round(total_slots * 0.20)),
+            'vocals': max(0, round(total_slots * 0.10))
+        }
+        balanced_counts = self._adjust_sum_to_target(balanced_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'Balanced {total_slots}-Slot', 
+            'description': f'Bản phối cân bằng cho {total_slots} slot', 
+            **balanced_counts
+        })
+
+        # 2. Khuôn mẫu "Beat Heavy" (Nhiều nhịp điệu) - Luôn có
+        beat_heavy_counts = {
+            'beats': max(2, round(total_slots * 0.60)),
+            'effects': max(1, round(total_slots * 0.20)),
+            'melodies': max(1, round(total_slots * 0.10)),
+            'vocals': max(1, round(total_slots * 0.10))
+        }
+        # Đảm bảo vẫn còn slot cho các thành phần khác
+        if beat_heavy_counts['beats'] >= total_slots - 2:
+            beat_heavy_counts['beats'] = total_slots - 3
+        beat_heavy_counts = self._adjust_sum_to_target(beat_heavy_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'Beat Heavy {total_slots}-Slot', 
+            'description': f'Bản phối tập trung vào nhịp điệu', 
+            **beat_heavy_counts
+        })
+        
+        # 3. Khuôn mẫu "Melodic & Atmospheric" (Giai điệu & Không khí) - Luôn có
+        melodic_counts = {
+            'beats': max(1, round(total_slots * 0.25)),
+            'effects': max(1, round(total_slots * 0.35)),
+            'melodies': max(1, round(total_slots * 0.30)),
+            'vocals': max(1, round(total_slots * 0.10))
+        }
+        melodic_counts = self._adjust_sum_to_target(melodic_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'Melodic {total_slots}-Slot', 
+            'description': f'Bản phối tập trung giai điệu và hiệu ứng', 
+            **melodic_counts
+        })
+
+        # 4. Khuôn mẫu "No Vocals" - Luôn có
+        no_vocals_counts = {
+            'beats': max(2, round(total_slots * 0.50)),
+            'effects': max(2, round(total_slots * 0.30)),
+            'melodies': max(1, round(total_slots * 0.20)),
+            'vocals': 0 # Không có vocals
+        }
+        no_vocals_counts = self._adjust_sum_to_target(no_vocals_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'No Vocals {total_slots}-Slot', 
+            'description': f'Bản phối không lời', 
+            **no_vocals_counts
+        })
+
+        print(f"✅ Generated {len(dynamic_patterns)} dynamic patterns:")
+        for p in dynamic_patterns:
+            icon_total = p['beats'] + p['effects'] + p['melodies'] + p['vocals']
+            print(f"   - {p['name']}: B={p['beats']}, E={p['effects']}, M={p['melodies']}, V={p['vocals']} (Total: {icon_total})")
+
+        self.remix_patterns = dynamic_patterns
+        return dynamic_patterns
 
     # ================================================================
     # == LEGACY METHOD REDIRECTS ==

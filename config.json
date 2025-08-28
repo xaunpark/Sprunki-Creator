@@ -14,8 +14,8 @@
     "websocket_url": "ws://192.168.1.14:4455"
   },
   "output": {
-    "base_directory": "C:\\Users\\dinht\\Videos\\SPRUNKI",
-    "json_output_directory": "I:\\VS-Project\\Sprunki\\JSON",
+    "base_directory": "G:\\Sprunki OUTPUT",
+    "json_output_directory": "G:\\Sprunki OUTPUT\\JSON",
     "create_project_folders": true,
     "video_format": "mp4",
     "video_quality": "high",

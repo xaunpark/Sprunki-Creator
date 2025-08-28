@@ -276,12 +276,11 @@ class GameGUI:
             self.remix_display_var.set("ðŸ“‹ Will generate library when loading JSON...")
 
     def load_config_and_start(self):
-        """Load config and start enhanced auto process in a new thread."""
+        """Load config, generate dynamic remixes, and start auto process in a new thread."""
         import threading
 
         def start_logic():
             try:
-                # Logic tải config vẫn chạy ở đây
                 file_path = filedialog.askopenfilename(
                     title="Choose JSON configuration file",
                     filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
@@ -290,6 +289,7 @@ class GameGUI:
                     return
                 
                 with open(file_path, 'r', encoding='utf-8') as f:
+                    # Gán config vào player
                     self.player.config = json.load(f)
             
                 if 'currentUrl' not in self.player.config or 'layout' not in self.player.config:
@@ -303,7 +303,16 @@ class GameGUI:
                 game_settings = self.player.config.get('gameSettings', {})
                 has_horror = game_settings.get('hasHorror', False)
                 
+                # 1. Lấy số lượng slot từ JSON
+                total_slots = len(self.player.config.get('layout', {}).get('slots', []))
+                
+                # 2. Tạo các pattern remix động dựa trên số slot
+                self.player.generate_dynamic_patterns(total_slots)
+                
+                # 3. Tạo thư viện remix từ các pattern mới
                 self.player.remix_library = self.player.generate_random_remixes(avoid_horror_icon=not has_horror)
+                
+                # 4. Cập nhật giao diện
                 self.update_remix_display()
 
                 print(f"ðŸŽ¯ ENHANCED WORKFLOW READY: Auto-starting...")

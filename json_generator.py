@@ -2277,14 +2277,30 @@ class SprunkiJSONGenerator:
                                 print(f"🎯 Found highest index icon: {highest_index}")
                                 
                                 available_slots = current_layout_data.get('layout', {}).get('slots', [])
-                                slot_4_coords = next((slot for slot in available_slots if slot.get('index') == 4), None)
+                                total_slots = len(available_slots)
                                 
-                                if slot_4_coords and slot_4_coords.get('x') is not None:
-                                    print(f"🎯 Dragging icon {highest_index} to slot 4...")
+                                # LOGIC MỚI: Chọn slot bên cạnh slot giữa một cách thông minh
+                                center_slot_index = (total_slots - 1) // 2
+                                target_index_for_highest = center_slot_index + 1
+                                
+                                # Kiểm tra an toàn: nếu slot +1 không tồn tại, dùng slot -1
+                                if target_index_for_highest >= total_slots:
+                                    target_index_for_highest = center_slot_index - 1
+                                
+                                # Đảm bảo không bao giờ < 0
+                                if target_index_for_highest < 0:
+                                    target_index_for_highest = 0
+
+                                print(f"🎯 Center slot was {center_slot_index}. Selecting adjacent slot {target_index_for_highest} for highest index icon test.")
+                                
+                                target_slot_for_highest = next((slot for slot in available_slots if slot.get('index') == target_index_for_highest), None)
+                                
+                                if target_slot_for_highest and target_slot_for_highest.get('x') is not None:
+                                    print(f"🎯 Dragging icon {highest_index} to slot {target_index_for_highest}...")
                                     
                                     drag_success_C = self.game_player.game_operations.corrected_drag_and_drop(
                                         icon=highest_index_icon, 
-                                        target_slot=slot_4_coords, 
+                                        target_slot=target_slot_for_highest, 
                                         is_first_icon=False, 
                                         use_cdp=True,
                                         control_type_override=game_control_type

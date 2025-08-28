@@ -540,8 +540,8 @@ class GameOperations:
             print(f"📊 SMART DUAL Return verification (selective checking):")
             
             # Determine which systems to check based on what worked during drag
-            check_characters = self.working_systems.get('characters') is True
-            check_putted = self.working_systems.get('putted') is True
+            check_characters = self.player.working_systems.get('characters') is True
+            check_putted = self.player.working_systems.get('putted') is True
             
             if not check_characters and not check_putted:
                 print(f"   ⚠️ No working systems tracked - falling back to both")
@@ -709,7 +709,7 @@ class GameOperations:
                 self.browser_manager.ensure_game_focus()
 
             # RESET TRACKING: Clear previous operation tracking
-            self.working_systems = {'characters': None, 'putted': None}
+            self.player.working_systems = {'characters': None, 'putted': None}
 
             # Store target slot for verification
             target_slot_index = target_slot.get('index', -1)
@@ -1349,7 +1349,7 @@ class GameOperations:
                 print("   âš ï¸ Verification disabled - assuming carpet bombing needed")
             
             # Execute SAME sequential carpet bombing as remix cleanup
-            success = self.player.execute_sequential_carpet_bombing_sets(
+            success = self.player.carpet_bombing.execute_sequential_carpet_bombing_sets(
                 sorted_slots, initial_count, use_cdp
             )
             
