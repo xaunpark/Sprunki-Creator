@@ -680,205 +680,208 @@ class GameOperations:
     # == ENHANCED DRAG & DROP WITH VERIFICATION ==
     # ================================================================
 
-    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
-            """
-            [FINAL REFINED v2] Drag and drop with DUAL verification, DYNAMIC control type,
-            and special handling for the `is_first_icon` flag.
-            Accepts an optional `control_type_override` for scenarios like JSON generation.
-            """
-            print(f"\nðŸŽ¯ DYNAMIC DRAG START (is_first_icon: {is_first_icon})")
-            print("="*60)
+    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None, context=None):
+        """
+        [FINAL REFINED v2] Drag and drop with DUAL verification, DYNAMIC control type,
+        and special handling for the `is_first_icon` flag.
+        Accepts an optional `control_type_override` for scenarios like JSON generation.
+        """
+        print(f"\nðŸŽ¯ DYNAMIC DRAG START (is_first_icon: {is_first_icon})")
+        print("="*60)
 
-            # Ưu tiên giá trị override được truyền vào (dùng cho json_generator)
-            if control_type_override:
-                self.game_control_type = control_type_override
-                print(f"🎮 Using OVERRIDDEN control type: '{self.game_control_type}'")
-            # Nếu không, cố gắng đọc từ config (dùng khi chơi game bình thường)
-            elif self.player.config and 'gameSettings' in self.player.config:
-                self.game_control_type = self.player.config['gameSettings'].get('gameControlType', 'click_drag')
-                print(f"🎮 Using control type from JSON config: '{self.game_control_type}'")
-            # Nếu cả hai đều không có, dùng giá trị mặc định
-            else:
-                self.game_control_type = 'click_drag' # Fallback
-                print(f"🎮 Using DEFAULT control type: '{self.game_control_type}'")
+        if context:
+            print(f"Executing drag within context: {context.get('operation')}")
+
+        # Ưu tiên giá trị override được truyền vào (dùng cho json_generator)
+        if control_type_override:
+            self.game_control_type = control_type_override
+            print(f"🎮 Using OVERRIDDEN control type: '{self.game_control_type}'")
+        # Nếu không, cố gắng đọc từ config (dùng khi chơi game bình thường)
+        elif self.player.config and 'gameSettings' in self.player.config:
+            self.game_control_type = self.player.config['gameSettings'].get('gameControlType', 'click_drag')
+            print(f"🎮 Using control type from JSON config: '{self.game_control_type}'")
+        # Nếu cả hai đều không có, dùng giá trị mặc định
+        else:
+            self.game_control_type = 'click_drag' # Fallback
+            print(f"🎮 Using DEFAULT control type: '{self.game_control_type}'")
+        
+        print(f"🎮 Using detected control type: '{self.game_control_type}'")
+
+        if is_first_icon:
+            print("🎪 First icon detected - ensuring game focus and applying extended waits...")
+            self.browser_manager.ensure_game_focus()
+
+        # RESET TRACKING: Clear previous operation tracking
+        self.player.working_systems = {'characters': None, 'putted': None}
+
+        # Store target slot for verification
+        target_slot_index = target_slot.get('index', -1)
+        self.store_target_slot_for_verification(target_slot_index)
+
+        # Check if DUAL verification is available
+        dual_verification_enabled = self.verification_system.characters_available or self.verification_system.putted_chars_available
+        if dual_verification_enabled:
+            print("ðŸ”„ DUAL verification ENABLED:")
+            print(f"   ðŸ”¢ Characters Array: {'âœ… Ready' if self.verification_system.characters_available else 'âŒ N/A'}")
+            print(f"   ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.verification_system.putted_chars_available else 'âŒ N/A'}")
+        else:
+            print("âš ï¸ DUAL verification DISABLED - using fallback logic")
+        
+        # Generate 5 coordinates to try
+        coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
+        
+        domain_adj = self.player.get_domain_adjustments()
+        success = False
+        coord_used = 0
+
+        # INITIALIZE variables properly
+        characters_before, putted_before = None, None
+        characters_after, putted_after = None, None
+
+        # Try each coordinate until success
+        for coord_index, (start_x, start_y) in enumerate(coordinates):
+            if self.player.should_stop:
+                break
+                
+            coord_used = coord_index + 1
+            coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
+            print(f"\nðŸŽ¯ Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
             
-            print(f"🎮 Using detected control type: '{self.game_control_type}'")
-
-            if is_first_icon:
-                print("🎪 First icon detected - ensuring game focus and applying extended waits...")
-                self.browser_manager.ensure_game_focus()
-
-            # RESET TRACKING: Clear previous operation tracking
-            self.player.working_systems = {'characters': None, 'putted': None}
-
-            # Store target slot for verification
-            target_slot_index = target_slot.get('index', -1)
-            self.store_target_slot_for_verification(target_slot_index)
-
-            # Check if DUAL verification is available
-            dual_verification_enabled = self.verification_system.characters_available or self.verification_system.putted_chars_available
-            if dual_verification_enabled:
-                print("ðŸ”„ DUAL verification ENABLED:")
-                print(f"   ðŸ”¢ Characters Array: {'âœ… Ready' if self.verification_system.characters_available else 'âŒ N/A'}")
-                print(f"   ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.verification_system.putted_chars_available else 'âŒ N/A'}")
-            else:
-                print("âš ï¸ DUAL verification DISABLED - using fallback logic")
-            
-            # Generate 5 coordinates to try
-            coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
-            
-            domain_adj = self.player.get_domain_adjustments()
-            success = False
-            coord_used = 0
-
-            # INITIALIZE variables properly
+            # Get DUAL counts BEFORE drag (if verification available)
             characters_before, putted_before = None, None
-            characters_after, putted_after = None, None
-
-            # Try each coordinate until success
-            for coord_index, (start_x, start_y) in enumerate(coordinates):
-                if self.player.should_stop:
-                    break
-                    
-                coord_used = coord_index + 1
-                coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
-                print(f"\nðŸŽ¯ Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
+            if dual_verification_enabled:
+                characters_before, putted_before = self.verification_system.get_dual_counts()
+                print(f"ðŸ“Š DUAL counts BEFORE drag:")
+                print(f"   ðŸ”¢ Characters: {characters_before}")
+                print(f"   ðŸŽ¯ Putted: {putted_before}")
                 
-                # Get DUAL counts BEFORE drag (if verification available)
-                characters_before, putted_before = None, None
-                if dual_verification_enabled:
-                    characters_before, putted_before = self.verification_system.get_dual_counts()
-                    print(f"ðŸ“Š DUAL counts BEFORE drag:")
-                    print(f"   ðŸ”¢ Characters: {characters_before}")
-                    print(f"   ðŸŽ¯ Putted: {putted_before}")
-                    
-                    # SMART DETECTION: Check if icon already placed from previous attempt
-                    if coord_index > 0:
-                        if (characters_before is not None and characters_before > 0) or (putted_before is not None and putted_before > 0):
-                            if self.verify_drag_success_dual(self.last_drag_characters_before, characters_before, self.last_drag_putted_before, putted_before):
-                                print(f"ðŸŽ‰ SMART DETECTION: Icon already placed by previous attempt!")
-                                print(f"   ðŸ“Š Evidence: Previous attempt was successful upon re-check.")
-                                print(f"   âœ… Previous coordinate {coord_index} actually succeeded")
-                                print(f"   ðŸŽ¯ Stopping retry loop - SUCCESS!")
-                                success = True
-                                break
+                # SMART DETECTION: Check if icon already placed from previous attempt
+                if coord_index > 0:
+                    if (characters_before is not None and characters_before > 0) or (putted_before is not None and putted_before > 0):
+                        if self.verify_drag_success_dual(self.last_drag_characters_before, characters_before, self.last_drag_putted_before, putted_before):
+                            print(f"ðŸŽ‰ SMART DETECTION: Icon already placed by previous attempt!")
+                            print(f"   ðŸ“Š Evidence: Previous attempt was successful upon re-check.")
+                            print(f"   âœ… Previous coordinate {coord_index} actually succeeded")
+                            print(f"   ðŸŽ¯ Stopping retry loop - SUCCESS!")
+                            success = True
+                            break
+            
+            # Store counts for smart detection in the next loop
+            self.last_drag_characters_before = characters_before
+            self.last_drag_putted_before = putted_before
+
+            print("   Executing dynamic drag attempt...")
+            drag_executed = False
+            end_x, end_y = target_slot['x'], target_slot['y']
+
+            if use_cdp:
+                ws_url = self.browser_manager._get_websocket_url()
+                if ws_url:
+                    try:
+                        ws = websocket.create_connection(ws_url, timeout=30)
+                        drag_executed = self._execute_dynamic_drag_cdp(
+                            ws, start_x, start_y, end_x, end_y, 
+                            self.game_control_type, 
+                            is_first_icon
+                        )
+                        ws.close()
+                    except Exception as cdp_err:
+                        print(f"   ⚠️ CDP connection/drag error: {cdp_err}, falling back to PyAutoGUI")
+                        drag_executed = False # Đảm bảo fallback được kích hoạt
+                else:
+                    print("   ⚠️ WebSocket not available, falling back to PyAutoGUI")
+
+            # Fallback to PyAutoGUI if CDP is disabled or fails
+            if not use_cdp or not drag_executed:
+                print("   Fallback to PyAutoGUI drag...")
+                # PyAutoGUI chưa hỗ trợ dynamic, ta sẽ dùng logic cũ của nó
+                # Đây là điểm có thể nâng cấp trong tương lai nếu cần
+                timing_key = 'first_icon' if is_first_icon else 'normal_icon'
+                delays = self.player.DRAG_DELAYS[timing_key].copy()
                 
-                # Store counts for smart detection in the next loop
-                self.last_drag_characters_before = characters_before
-                self.last_drag_putted_before = putted_before
+                drag_executed = self._execute_pyautogui_drag(
+                    start_x, start_y, end_x, end_y, 
+                    delays, domain_adj, 
+                    is_first_icon # Truyền biến is_first_icon vào
+                )
 
-                print("   Executing dynamic drag attempt...")
-                drag_executed = False
-                end_x, end_y = target_slot['x'], target_slot['y']
+            if not drag_executed:
+                print(f"âŒ Drag execution failed at coordinate {coord_used}")
+                if coord_index < len(coordinates) - 1:
+                    print("   Trying next coordinate...")
+                    time.sleep(0.3)
+                continue
+            
+            # Wait for game state to update - this is now handled by the retry loop
+            
+            # Get DUAL counts AFTER drag (if verification available)
+            if dual_verification_enabled:
+                
+                ### Lá»›p 1 - TÄƒng cÆ°á»ng xÃ¡c thá»±c vá»›i vÃ²ng láº·p thá»­ láº¡i ###
+                verification_success = False
+                # VÃ²ng láº·p xÃ¡c thá»±c 3 láº§n vá»›i Ä‘á»™ trá»… tÄƒng dáº§n
+                for verify_attempt in range(1, 4):
+                    # Chá» má»™t chÃºt trÆ°á»›c má»—i láº§n kiá»ƒm tra
+                    wait_time = 0.5 + (verify_attempt * 0.4) # Chá» 0.9s, 1.3s, 1.7s
+                    print(f"â³ Verification attempt {verify_attempt}/3: Waiting {wait_time:.1f}s for game state...")
+                    time.sleep(wait_time)
 
-                if use_cdp:
-                    ws_url = self.browser_manager._get_websocket_url()
-                    if ws_url:
-                        try:
-                            ws = websocket.create_connection(ws_url, timeout=30)
-                            drag_executed = self._execute_dynamic_drag_cdp(
-                                ws, start_x, start_y, end_x, end_y, 
-                                self.game_control_type, 
-                                is_first_icon
-                            )
-                            ws.close()
-                        except Exception as cdp_err:
-                            print(f"   ⚠️ CDP connection/drag error: {cdp_err}, falling back to PyAutoGUI")
-                            drag_executed = False # Đảm bảo fallback được kích hoạt
-                    else:
-                        print("   ⚠️ WebSocket not available, falling back to PyAutoGUI")
-
-                # Fallback to PyAutoGUI if CDP is disabled or fails
-                if not use_cdp or not drag_executed:
-                    print("   Fallback to PyAutoGUI drag...")
-                    # PyAutoGUI chưa hỗ trợ dynamic, ta sẽ dùng logic cũ của nó
-                    # Đây là điểm có thể nâng cấp trong tương lai nếu cần
-                    timing_key = 'first_icon' if is_first_icon else 'normal_icon'
-                    delays = self.player.DRAG_DELAYS[timing_key].copy()
+                    characters_after, putted_after = self.verification_system.get_dual_counts()
+                    print(f"ðŸ“Š DUAL counts AFTER drag (attempt {verify_attempt}/3):")
+                    print(f"   ðŸ”¢ Characters: {characters_after}")
+                    print(f"   ðŸŽ¯ Putted: {putted_after}")
                     
-                    drag_executed = self._execute_pyautogui_drag(
-                        start_x, start_y, end_x, end_y, 
-                        delays, domain_adj, 
-                        is_first_icon # Truyền biến is_first_icon vào
-                    )
+                    # Verify drag success using DUAL system
+                    if self.verify_drag_success_dual(characters_before, characters_after, putted_before, putted_after):
+                        verification_success = True
+                        print(f"ðŸŽ‰ DUAL VERIFIED SUCCESS at coordinate {coord_used} (attempt {verify_attempt})!")
+                        break # ThoÃ¡t khá»i vÃ²ng láº·p xÃ¡c thá»±c khi Ä‘Ã£ thÃ nh cÃ´ng
+                    elif verify_attempt < 3:
+                        print(f"   âš ï¸ Verification attempt {verify_attempt} failed, will try again after a longer wait...")
+                
+                if verification_success:
+                    print(f"ðŸŽ‰ ENHANCED DRAG VERIFIED successfully at coordinate {coord_used}!")
+                    success = True
+                    break # ThoÃ¡t khá»i vÃ²ng láº·p thá»­ tá»a Ä‘á»™ (for coord_index...)
+                else:
+                    print(f"âŒ DUAL VERIFICATION FAILED at coordinate {coord_used} after 3 attempts.")
+                    
+                    ### Lá»›p 2 - Tá»± sá»­a lá»—i báº±ng "tráº£ hÃ ng phÃ²ng há»" ###
+                    print("ðŸ›¡ï¸ SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
+                    # DÃ¹ xÃ¡c thá»±c tháº¥t báº¡i, váº«n cÃ³ kháº£ nÄƒng icon Ä‘Ã£ bá»‹ káº¹t á»Ÿ Ä‘Ã³.
+                    # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá» "phÃ²ng há»".
+                    self.attempt_icon_return(target_slot)
+                    time.sleep(0.8) # Chá» má»™t chÃºt sau khi tráº£ hÃ ng
+                    ### Káº¾T THÃšC: Lá»›p 2 ###
 
-                if not drag_executed:
-                    print(f"âŒ Drag execution failed at coordinate {coord_used}")
                     if coord_index < len(coordinates) - 1:
                         print("   Trying next coordinate...")
-                        time.sleep(0.3)
-                    continue
-                
-                # Wait for game state to update - this is now handled by the retry loop
-                
-                # Get DUAL counts AFTER drag (if verification available)
-                if dual_verification_enabled:
                     
-                    ### Lá»›p 1 - TÄƒng cÆ°á»ng xÃ¡c thá»±c vá»›i vÃ²ng láº·p thá»­ láº¡i ###
-                    verification_success = False
-                    # VÃ²ng láº·p xÃ¡c thá»±c 3 láº§n vá»›i Ä‘á»™ trá»… tÄƒng dáº§n
-                    for verify_attempt in range(1, 4):
-                        # Chá» má»™t chÃºt trÆ°á»›c má»—i láº§n kiá»ƒm tra
-                        wait_time = 0.5 + (verify_attempt * 0.4) # Chá» 0.9s, 1.3s, 1.7s
-                        print(f"â³ Verification attempt {verify_attempt}/3: Waiting {wait_time:.1f}s for game state...")
-                        time.sleep(wait_time)
-
-                        characters_after, putted_after = self.verification_system.get_dual_counts()
-                        print(f"ðŸ“Š DUAL counts AFTER drag (attempt {verify_attempt}/3):")
-                        print(f"   ðŸ”¢ Characters: {characters_after}")
-                        print(f"   ðŸŽ¯ Putted: {putted_after}")
-                        
-                        # Verify drag success using DUAL system
-                        if self.verify_drag_success_dual(characters_before, characters_after, putted_before, putted_after):
-                            verification_success = True
-                            print(f"ðŸŽ‰ DUAL VERIFIED SUCCESS at coordinate {coord_used} (attempt {verify_attempt})!")
-                            break # ThoÃ¡t khá»i vÃ²ng láº·p xÃ¡c thá»±c khi Ä‘Ã£ thÃ nh cÃ´ng
-                        elif verify_attempt < 3:
-                            print(f"   âš ï¸ Verification attempt {verify_attempt} failed, will try again after a longer wait...")
-                    
-                    if verification_success:
-                        print(f"ðŸŽ‰ ENHANCED DRAG VERIFIED successfully at coordinate {coord_used}!")
-                        success = True
-                        break # ThoÃ¡t khá»i vÃ²ng láº·p thá»­ tá»a Ä‘á»™ (for coord_index...)
-                    else:
-                        print(f"âŒ DUAL VERIFICATION FAILED at coordinate {coord_used} after 3 attempts.")
-                        
-                        ### Lá»›p 2 - Tá»± sá»­a lá»—i báº±ng "tráº£ hÃ ng phÃ²ng há»" ###
-                        print("ðŸ›¡ï¸ SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
-                        # DÃ¹ xÃ¡c thá»±c tháº¥t báº¡i, váº«n cÃ³ kháº£ nÄƒng icon Ä‘Ã£ bá»‹ káº¹t á»Ÿ Ä‘Ã³.
-                        # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá» "phÃ²ng há»".
-                        self.attempt_icon_return(target_slot)
-                        time.sleep(0.8) # Chá» má»™t chÃºt sau khi tráº£ hÃ ng
-                        ### Káº¾T THÃšC: Lá»›p 2 ###
-
-                        if coord_index < len(coordinates) - 1:
-                            print("   Trying next coordinate...")
-                        
-                    ### Káº¾T THÃšC Lá»›p 1 ###
-                else:
-                    # No verification available - assume success if drag executed
-                    print(f"âœ… ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
-                    success = True
-                    break
-            
-            # Final result
-            if success:
-                print(f"ðŸŽ‰ ENHANCED DRAG COMPLETED SUCCESSFULLY!")
-                print(f"   Coordinate used: {coord_used}/5")
-                print(f"   Verification: {'ðŸ”„ DUAL Enabled' if dual_verification_enabled else 'âš ï¸ Disabled'}")
-                if dual_verification_enabled:
-                    print(f"   Systems: Characters Array {'âœ…' if self.verification_system.characters_available else 'âŒ'} + Putted Characters {'âœ…' if self.verification_system.putted_chars_available else 'âŒ'}")
-                print("   Mouse already at safe position")
-                print("="*60)
-                
-                self.player.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=dual_verification_enabled)
-                return True
+                ### Káº¾T THÃšC Lá»›p 1 ###
             else:
-                print(f"ðŸ’¥ ENHANCED DRAG FAILED - All {len(coordinates)} coordinates attempted")
-                print("="*60)
-                
-                self.player.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=dual_verification_enabled)
-                return False
+                # No verification available - assume success if drag executed
+                print(f"âœ… ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
+                success = True
+                break
+        
+        # Final result
+        if success:
+            print(f"ðŸŽ‰ ENHANCED DRAG COMPLETED SUCCESSFULLY!")
+            print(f"   Coordinate used: {coord_used}/5")
+            print(f"   Verification: {'ðŸ”„ DUAL Enabled' if dual_verification_enabled else 'âš ï¸ Disabled'}")
+            if dual_verification_enabled:
+                print(f"   Systems: Characters Array {'âœ…' if self.verification_system.characters_available else 'âŒ'} + Putted Characters {'âœ…' if self.verification_system.putted_chars_available else 'âŒ'}")
+            print("   Mouse already at safe position")
+            print("="*60)
+            
+            self.player.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=dual_verification_enabled)
+            return True
+        else:
+            print(f"ðŸ’¥ ENHANCED DRAG FAILED - All {len(coordinates)} coordinates attempted")
+            print("="*60)
+            
+            self.player.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=dual_verification_enabled)
+            return False
 
     def _execute_single_drag_attempt(self, start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj):
         """
@@ -1131,21 +1134,17 @@ class GameOperations:
             print(f"   ❌ Exception during dynamic CDP drag: {e}")
             return False
 
-    def corrected_return_icon(self, target_slot, use_cdp=True):
+    def corrected_return_icon(self, target_slot, use_cdp=True, context=None):
         """
-        ðŸŽ¯ IMPROVED: 2-Phase Return vá»›i Sequential Carpet Bombing  
-        Phase 1: Precision Click trá»±c tiáº¿p vÃ o tá» a Ä‘á»™ chÃ­nh xÃ¡c
-        Phase 2: Sequential Carpet Bombing (same as remix cleanup)
-        Phase 3: Game Restart (Hành động + Xác thực)
+        [ĐÃ SỬA] 3-Phase Return với đầy đủ logic timestamp và xác minh.
         """
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             target_slot_index = target_slot.get('index', -1)
             
-            print(f"\nðŸŽ¯ 2-PHASE RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
+            print(f"\nðŸŽ¯ 3-PHASE RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
             print("="*70)
             
-            # Check if DUAL verification is available
             dual_verification_enabled = self.verification_system.characters_available or self.verification_system.putted_chars_available
             if dual_verification_enabled:
                 print("ðŸ”„ DUAL verification ENABLED:")
@@ -1207,46 +1206,42 @@ class GameOperations:
                     print("ðŸ’¥ PHASE 2 FAILED: Sequential carpet bombing unsuccessful")
 
             # ================================================================
-            # PHASE 3: GAME RESTART FALLBACK (SỬA ĐỔI)
+            # PHASE 3: GAME RESTART FALLBACK (PHIÊN BẢN ĐÚNG)
             # ================================================================
             if not self.player.should_stop:
-                print(f"\nPHASE 3: GAME RESTART FALLBACK (NEW)")
+                print(f"\nPHASE 3: GAME RESTART FALLBACK")
                 print("-" * 40)
-
-                # === LOGIC GHI TIMESTAMP ===
-                # Lấy obs_controller một cách an toàn từ player instance
+                
                 obs_controller = getattr(self.player, 'obs_controller', None)
                 
                 if obs_controller:
+                    restart_metadata = {"failed_slot_index": target_slot_index}
+                    if context:
+                        restart_metadata.update(context)
+                    
                     obs_controller.log_event_timestamp(
                         "start_game_restart", 
-                        "Restart triggered due to return failure",
-                        {"failed_slot_index": target_slot_index}
+                        f"Restart triggered during {context.get('operation', 'operation') if context else 'unknown'}",
+                        restart_metadata
                     )
-                # === KẾT THÚC PHẦN LOGIC GHI TIMESTAMP ===
 
-                # BƯỚC 3A: Thực hiện hành động restart từ BrowserManager
                 phase3_action_success = self.browser_manager.restart_game_to_initial_state(use_cdp)
-
-                # === LOGIC GHI TIMESTAMP ===
+                
                 if obs_controller:
                     obs_controller.log_event_timestamp(
                         "end_game_restart", 
                         "Restart and skip intro completed"
                     )
-                # === KẾT THÚC PHẦN LOGIC GHI TIMESTAMP ===
 
                 if not phase3_action_success:
                     print("PHASE 3 WARNING: Game restart action failed, but assuming it might have worked.")
-                    return True # Vẫn trả về True vì đây là phương án cuối cùng
-                
-                # BƯỚC 3B: Thực hiện xác thực TẠI ĐÂY (trong GameOperations)
+                    return True
+
+                # THÊM LẠI PHẦN XÁC MINH BỊ THIẾU
                 print("   Verifying game restart...")
                 if self.verification_system.characters_available or self.verification_system.putted_chars_available:
                     characters_count, putted_count = self.verification_system.get_dual_counts()
-                    print(f"      Post-restart verification:")
-                    print(f"      Characters: {characters_count}")
-                    print(f"      Putted: {putted_count}")
+                    print(f"      Post-restart verification: Characters={characters_count}, Putted={putted_count}")
                     
                     if (characters_count == 0 or characters_count is None) and (putted_count == 0 or putted_count is None):
                         print("   RESTART VERIFIED: Game returned to initial state!")
@@ -1256,7 +1251,7 @@ class GameOperations:
                     print("   Verification disabled - assuming restart successful.")
                 
                 print("PHASE 3 COMPLETED!")
-                return True # Luôn trả về True vì đây là phương án cuối cùng
+                return True
 
             # ================================================================
             # FINAL RESULT

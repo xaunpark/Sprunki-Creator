@@ -259,13 +259,9 @@ class SprunkiJSONGenerator:
                     originalSprite: slot.originalIndex
                 }));
                 
-                // Find horror icon (index 19) and DYNAMIC target slot (center)
+                // Find horror icon (index 19) and target slot (index 3)
                 const horrorIconCoords = icons.find(i => i.index === 19);
-                
-                // Calculate center slot index dynamically
-                const centerSlotIndex = Math.floor((slots.length - 1) / 2);
-                const targetSlotCoords = slots.find(s => s.index === centerSlotIndex);
-                console.log(`🎯 Dynamically selected target slot with index: ${centerSlotIndex}`);
+                const targetSlotCoords = slots.find(s => s.index === 3);
                 
                 state.icons = icons;
                 state.slots = slots;
@@ -1686,7 +1682,7 @@ class SprunkiJSONGenerator:
             """
             print("INFO: Delegating game setup to SprunkiGamePlayer engine...")
 
-            return self.game_player.browser_manager.navigate_and_prepare_game(url)
+            return self.game_player.navigate_and_prepare_game(url)
 
     def _get_websocket_url(self):
         if self.ws_url: return self.ws_url
@@ -1772,7 +1768,7 @@ class SprunkiJSONGenerator:
                 print("="*70)
                 
                 # Setup game
-                if not self.game_player.browser_manager.navigate_and_prepare_game(url): 
+                if not self.navigate_and_prepare_game(url): 
                     return False, None, None
 
                 # 🔧 SERVICE MODE FIX: Ensure window activation after game setup
@@ -1780,19 +1776,25 @@ class SprunkiJSONGenerator:
                 self.ensure_window_activation("post-game-setup")
 
                 # OPTIMIZED: Single WebSocket approach like original working code
-                ws_url = self.game_player.browser_manager._get_websocket_url()
+                ws_url = self._get_websocket_url()
                 if not ws_url: 
-                    self.game_player.browser_manager.cleanup_chrome_complete()
+                    self.game_player.cleanup_chrome_complete()
                     return False, None, None
 
                 ws = websocket.create_connection(ws_url, timeout=30)
+
+                # Bước 1: ĐÃ XÓA - Quản lý WebSocket thủ công
+                # ws_url = self._get_websocket_url()
+                # if not ws_url: 
+                #     return False, None, None
+                # ws = websocket.create_connection(ws_url, timeout=30)
                 
                 print("🔍 Testing JavaScript environment...")
                 # [ĐÃ SỬA] Test môi trường thông qua engine
-                test_response = self.game_player.browser_manager._execute_verification_js("window.location.href")
+                test_response = self.game_player._execute_verification_js("window.location.href")
                 if test_response is None:
                     print("❌ JavaScript environment test failed via engine")
-                    self.game_player.browser_manager.cleanup_chrome_complete()
+                    self.game_player.cleanup_chrome_complete()
                     return False, None, None
                 print(f"✅ JavaScript environment ready. Current URL: {test_response}")
                 
@@ -1803,8 +1805,8 @@ class SprunkiJSONGenerator:
                 print("\n🎯 MULTI-TARGET SKIP INTRO: Finding and clicking ALL Skip Intro buttons...")
                 
                 print("🔍 Phase 1: Searching for ALL Skip Intro buttons...")
-                # Thực thi JS skip intro thông qua engine
-                skip_intro_response = self.game_player.browser_manager._execute_verification_js(self.js_find_skip_intro)
+                # [ĐÃ SỬA] Thực thi JS skip intro thông qua engine
+                skip_intro_response = self.game_player._execute_verification_js(self.js_find_skip_intro)
                 
                 smart_clicks_performed = 0
                 all_buttons = []
@@ -1827,8 +1829,8 @@ class SprunkiJSONGenerator:
                         
                         print(f"👆 Clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
                         
-                        # Sử dụng hàm click của engine
-                        self.game_player.game_operations._execute_cdp_single_click(x, y)
+                        # [ĐÃ SỬA] Sử dụng hàm click của engine
+                        self.game_player._execute_cdp_single_click(x, y)
                         time.sleep(0.8)  # Wait between clicks
                         
                         smart_clicks_performed += 1
@@ -1851,7 +1853,7 @@ class SprunkiJSONGenerator:
                 # [ĐÃ SỬA] Lấy config `intro_skip_clicks` từ engine
                 for i in range(self.game_player.intro_skip_clicks):
                     # [ĐÃ SỬA] Sử dụng hàm click của engine
-                    self.game_player.game_operations._execute_cdp_single_click(960, 540)
+                    self.game_player._execute_cdp_single_click(960, 540)
                     time.sleep(0.5)
 
                 # Summary
@@ -1885,7 +1887,7 @@ class SprunkiJSONGenerator:
                 
                 # Gọi hàm setup từ game_player.
                 # Hàm này sẽ inject các hàm JS cần thiết vào trang web.
-                if self.game_player.verification_system.setup_dual_verification_system():
+                if self.game_player.setup_dual_verification_system():
                     print("✅ DUAL Verification system is now ready for use in tests.")
                 else:
                     print("⚠️ DUAL Verification setup failed. Control detection will be less reliable.")
@@ -1953,7 +1955,7 @@ class SprunkiJSONGenerator:
                 try:
                     # Get initial layout for control testing
                     print("📋 Getting layout for game control test...")
-                    response = self.game_player.browser_manager._send_cdp_command(ws, {
+                    response = self._send_cdp_command(ws, {
                         "method": "Runtime.evaluate", 
                         "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
                     })
@@ -2114,11 +2116,11 @@ class SprunkiJSONGenerator:
                                 json_file_path = self.save_json_file(final_json, output_path, custom_title=page_title)
                                 if json_file_path:
                                     print(f"✅ EARLY EXIT COMPLETED - INSUFFICIENT ICONS!")
-                                    self.game_player.browser_manager.cleanup_chrome_complete()
+                                    self.game_player.cleanup_chrome_complete()
                                     return True, json_file_path, final_json
                         
                         ws.close()
-                        self.game_player.browser_manager.cleanup_chrome_complete()
+                        self.game_player.cleanup_chrome_complete()
                         return False, None, None
                     
                     print(f"✅ SUFFICIENT ICONS: {icons_count} icons found - proceeding with horror detection")
@@ -2147,7 +2149,7 @@ class SprunkiJSONGenerator:
                     print(f"🎯 Dragging icon 19 from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
                     
                     # Use optimized drag
-                    drag_success = self.game_player.game_operations.corrected_drag_and_drop(
+                    drag_success = self.game_player.corrected_drag_and_drop(
                         icon=icon_coords, 
                         target_slot=slot_coords, 
                         is_first_icon=True,
@@ -2277,30 +2279,14 @@ class SprunkiJSONGenerator:
                                 print(f"🎯 Found highest index icon: {highest_index}")
                                 
                                 available_slots = current_layout_data.get('layout', {}).get('slots', [])
-                                total_slots = len(available_slots)
+                                slot_4_coords = next((slot for slot in available_slots if slot.get('index') == 4), None)
                                 
-                                # LOGIC MỚI: Chọn slot bên cạnh slot giữa một cách thông minh
-                                center_slot_index = (total_slots - 1) // 2
-                                target_index_for_highest = center_slot_index + 1
-                                
-                                # Kiểm tra an toàn: nếu slot +1 không tồn tại, dùng slot -1
-                                if target_index_for_highest >= total_slots:
-                                    target_index_for_highest = center_slot_index - 1
-                                
-                                # Đảm bảo không bao giờ < 0
-                                if target_index_for_highest < 0:
-                                    target_index_for_highest = 0
-
-                                print(f"🎯 Center slot was {center_slot_index}. Selecting adjacent slot {target_index_for_highest} for highest index icon test.")
-                                
-                                target_slot_for_highest = next((slot for slot in available_slots if slot.get('index') == target_index_for_highest), None)
-                                
-                                if target_slot_for_highest and target_slot_for_highest.get('x') is not None:
-                                    print(f"🎯 Dragging icon {highest_index} to slot {target_index_for_highest}...")
+                                if slot_4_coords and slot_4_coords.get('x') is not None:
+                                    print(f"🎯 Dragging icon {highest_index} to slot 4...")
                                     
-                                    drag_success_C = self.game_player.game_operations.corrected_drag_and_drop(
+                                    drag_success_C = self.game_player.corrected_drag_and_drop(
                                         icon=highest_index_icon, 
-                                        target_slot=target_slot_for_highest, 
+                                        target_slot=slot_4_coords, 
                                         is_first_icon=False, 
                                         use_cdp=True,
                                         control_type_override=game_control_type
@@ -2440,14 +2426,14 @@ class SprunkiJSONGenerator:
 
                 json_file_path = self.save_json_file(final_json, output_path, custom_title=page_title)
                 if not json_file_path: 
-                    self.game_player.browser_manager.cleanup_chrome_complete()
+                    self.game_player.cleanup_chrome_complete()
                     return False, None, None
 
                 print(f"\n🎯 SIMPLIFIED COMPLETE LOGIC COMPLETED!")
                 print(f"✅ hasHorror Detection: {final_has_horror}")
                 print(f"✅ Detection Method: {final_detection_method}")
 
-                self.game_player.browser_manager.cleanup_chrome_complete()
+                self.game_player.cleanup_chrome_complete()
                 return True, json_file_path, final_json
                 
             except Exception as e:
@@ -2455,7 +2441,7 @@ class SprunkiJSONGenerator:
                 import traceback
                 traceback.print_exc()
                 
-                self.game_player.browser_manager.cleanup_chrome_complete()
+                self.game_player.cleanup_chrome_complete()
                 return False, None, None
             
     def convert_to_json_serializable(self, obj):
@@ -2485,7 +2471,7 @@ class SprunkiJSONGenerator:
             # BƯỚC 1: Lấy số đếm của DUAL Verification TRƯỚC khi thực hiện hành động
             # Chúng ta dùng self.game_player để truy cập vào các hàm xác minh.
             print("   📊 Capturing DUAL verification counts BEFORE test...")
-            characters_before, putted_before = self.game_player.verification_system.get_dual_counts()
+            characters_before, putted_before = self.game_player.get_dual_counts()
             print(f"   📊 Counts BEFORE: Characters={characters_before}, Putted={putted_before}")
 
             if characters_before is None and putted_before is None:
@@ -2542,12 +2528,12 @@ class SprunkiJSONGenerator:
             # ### START: SỬA CODE - Thay thế so sánh tọa độ bằng DUAL verify   ###
             # ####################################################################
 
-            characters_after, putted_after = self.game_player.verification_system.get_dual_counts()
+            characters_after, putted_after = self.game_player.get_dual_counts()
             print(f"   📊 Counts AFTER: Characters={characters_after}, Putted={putted_after}")
 
             # BƯỚC 4: Dùng hàm xác minh của game_player để đưa ra kết luận
             print("   🔍 Verifying test result using DUAL verification system...")
-            drag_successful = self.game_player.game_operations.verify_drag_success_dual(
+            drag_successful = self.game_player.verify_drag_success_dual(
                 characters_before, characters_after, putted_before, putted_after
             )
             
@@ -2570,7 +2556,7 @@ class SprunkiJSONGenerator:
 
             # BƯỚC 1: Lấy số đếm TRƯỚC khi reset
             print("   📊 Capturing DUAL verification counts BEFORE reset...")
-            characters_before, putted_before = self.game_player.verification_system.get_dual_counts()
+            characters_before, putted_before = self.game_player.get_dual_counts()
             print(f"   📊 Counts BEFORE: Characters={characters_before}, Putted={putted_before}")
 
             if characters_before is None and putted_before is None:
@@ -2600,11 +2586,11 @@ class SprunkiJSONGenerator:
             
             # BƯỚC 3: Lấy số đếm và xác minh SAU khi reset
             print("   📊 Capturing DUAL verification counts AFTER reset...")
-            characters_after, putted_after = self.game_player.verification_system.get_dual_counts()
+            characters_after, putted_after = self.game_player.get_dual_counts()
             print(f"   📊 Counts AFTER: Characters={characters_after}, Putted={putted_after}")
 
             print("   🔍 Verifying reset result using DUAL verification system...")
-            reset_successful = self.game_player.game_operations.verify_return_success_dual(
+            reset_successful = self.game_player.verify_return_success_dual(
                 characters_before, characters_after, putted_before, putted_after
             )
             

@@ -1,5 +1,6 @@
 import json
 import time
+from typing import Optional
 import websocket
 import hashlib
 import base64
@@ -8,7 +9,6 @@ import re
 from urllib.parse import urlparse
 from datetime import datetime
 from config_manager import get_config
-from typing import Optional
 
 class SprunkiController:
     def __init__(self):
@@ -51,7 +51,6 @@ class SprunkiController:
     def log_event_timestamp(self, event_name: str, label: str = "", metadata: Optional[dict] = None):
         """Ghi lại một sự kiện và timestamp tương đối so với thời điểm bắt đầu ghi hình."""
         if not self.is_currently_recording or self.recording_start_time is None:
-            # Không ghi lại sự kiện nếu OBS không đang trong phiên ghi hình
             return
         
         import time
@@ -59,7 +58,7 @@ class SprunkiController:
         
         event_data = {
             "event": event_name,
-            "timestamp": round(elapsed_time, 3), # Chính xác đến mili giây
+            "timestamp": round(elapsed_time, 3),
             "label": label or event_name,
             "metadata": metadata or {}
         }
@@ -68,7 +67,8 @@ class SprunkiController:
         print(f"🕒 Event Logged: '{event_name}' at {elapsed_time:.3f}s")
 
     def _save_timestamps_to_file(self, video_path: str):
-        # Chỉ tạo file nếu có nhiều hơn 2 sự kiện (start/stop mặc định)
+        """Lưu danh sách các timestamp đã ghi lại vào một file JSON tương ứng với video."""
+        # Chỉ tạo file nếu có nhiều hơn 2 sự kiện (start/stop mặc định) để tránh file rác
         if len(self.event_timestamps) <= 2 or not video_path:
             print("🕒 No detailed events to log. Skipping timestamp file creation.")
             return
@@ -78,21 +78,17 @@ class SprunkiController:
         import time
 
         try:
-            # Tạo tên file timestamp từ tên file video
             base, _ = os.path.splitext(video_path)
             timestamp_path = f"{base}.timestamps.json"
 
-            # Lấy tổng thời lượng kể từ lúc bắt đầu ghi hình
             total_duration = time.monotonic() - self.recording_start_time if self.recording_start_time else 0
 
-            # Xây dựng nội dung file JSON
             data_to_save = {
                 "videoFilename": os.path.basename(video_path),
                 "totalDurationSeconds": round(total_duration, 3),
                 "events": self.event_timestamps
             }
 
-            # Ghi file
             with open(timestamp_path, 'w', encoding='utf-8') as f:
                 json.dump(data_to_save, f, indent=2, ensure_ascii=False)
             
@@ -1161,40 +1157,27 @@ class SprunkiController:
             return False
         
         try:
-            start_request = {
-                "op": 6,
-                "d": {
-                    "requestType": "StartRecord",
-                    "requestId": "start-recording"
-                }
-            }
-            
+            start_request = {"op": 6, "d": {"requestType": "StartRecord", "requestId": "start-recording"}}
             ws.send(json.dumps(start_request))
             response = json.loads(ws.recv())
-            
             success = response.get("d", {}).get("requestStatus", {}).get("result", False)
             
             if success:
                 print("🎬 Recording started!")
                 
-                # === THÊM CÁC DÒNG MỚI VÀO ĐÂY ===
+                # BẮT ĐẦU THEO DÕI TIMESTAMP
                 self.is_currently_recording = True
                 self.recording_start_time = time.monotonic()
-                self.event_timestamps = [] # Reset danh sách cho video mới
+                self.event_timestamps = [] # Reset cho video mới
                 self.log_event_timestamp("recording_started", "OBS recording confirmed active")
-                # === KẾT THÚC PHẦN THÊM MỚI ===
-
-                if self.current_filename:
-                    print(f"📹 Target filename: {self.current_filename}")
-                if self.current_project_folder:
-                    print(f"📁 Output folder: {self.current_project_folder}")
+                
+                if self.current_filename: print(f"📹 Target filename: {self.current_filename}")
+                if self.current_project_folder: print(f"📁 Output folder: {self.current_project_folder}")
                 
                 time.sleep(0.8)
                 is_active, _ = self.get_recording_status()
-                if is_active:
-                    print("✅ Recording verified as active")
-                else:
-                    print("⚠️ Warning: Recording may not be active")
+                if is_active: print("✅ Recording verified as active")
+                else: print("⚠️ Warning: Recording may not be active")
             else:
                 print(f"❌ Failed to start recording: {response}")
             
@@ -1215,11 +1198,8 @@ class SprunkiController:
         is_recording, current_path = self.get_recording_status()
         if not is_recording:
             print("⚠️ OBS không đang recording")
-            # === THÊM CÁC DÒNG MỚI VÀO ĐÂY ===
-            # Đảm bảo trạng thái được reset ngay cả khi không có gì để dừng
             self.is_currently_recording = False
             self.recording_start_time = None
-            # === KẾT THÚC PHẦN THÊM MỚI ===
             self.log_performance("Recording Stop", True)
             return True, current_path
         
@@ -1228,14 +1208,18 @@ class SprunkiController:
             self.log_performance("Recording Stop", False)
             return False, None
         
-        max_retries = 2
+        # PHASE 1: Reduced max retries and faster retry timing
+        max_retries = 2  # Reduced from 3
         for attempt in range(max_retries):
             try:
                 print(f"🛑 Attempting to stop recording (attempt {attempt + 1}/{max_retries})...")
                 
                 stop_request = {
                     "op": 6,
-                    "d": { "requestType": "StopRecord", "requestId": f"stop-recording-{attempt}" }
+                    "d": {
+                        "requestType": "StopRecord",
+                        "requestId": f"stop-recording-{attempt}"
+                    }
                 }
                 
                 ws.send(json.dumps(stop_request))
@@ -1246,14 +1230,13 @@ class SprunkiController:
                 if success:
                     output_path = response.get("d", {}).get("responseData", {}).get("outputPath", "")
                     print("⏹️ Recording stopped successfully!")
-                    
-                    # === THÊM CÁC DÒNG MỚI VÀO ĐÂY ===
+
+                    # LƯU FILE TIMESTAMP
                     self.log_event_timestamp("recording_stopped", "OBS recording stopped")
                     self._save_timestamps_to_file(output_path)
                     self.is_currently_recording = False
                     self.recording_start_time = None
-                    # === KẾT THÚC PHẦN THÊM MỚI ===
-                    
+
                     if output_path:
                         print(f"📁 Video saved: {output_path}")
                         

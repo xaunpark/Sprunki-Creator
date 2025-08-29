@@ -52,7 +52,13 @@ class WorkflowManager:
                 return False
             
             icon_index = current_icon.get('index', -1)
-            
+
+            showcase_context = {
+                "operation": "icon_showcase",
+                "icon_index": icon_index,
+                "mode": mode
+            }
+
             print(f"STARTING ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
             
             # PHASE 0: Enhanced cleanup with resource management
@@ -73,7 +79,7 @@ class WorkflowManager:
 
             # PHASE 1: Drag with exception handling
             try:
-                drag_success = self.game_operations.corrected_drag_and_drop(current_icon, target_slot, False, True)
+                drag_success = self.game_operations.corrected_drag_and_drop(current_icon, target_slot, False, True, context=showcase_context)
                 if not drag_success:
                     print(f"Failed to drag icon {icon_index}")
                     return False
@@ -128,9 +134,7 @@ class WorkflowManager:
             
             # PHASE 3: Return with enhanced error handling
             try:
-                return_success = self.player.execute_smart_return_with_auto_recovery(
-                    target_slot, f"showcase_{mode}_icon_{icon_index}", max_retries=2, use_cdp=True
-                )
+                return_success = self.player.execute_smart_return_with_auto_recovery(target_slot, f"showcase_{mode}_icon_{icon_index}", max_retries=2, use_cdp=True, context=showcase_context)
                 
                 if return_success:
                     print(f"Icon {icon_index + 1} returned successfully")
@@ -418,6 +422,11 @@ class WorkflowManager:
 
             obs_controller = getattr(self.player, 'obs_controller', None)
 
+            remix_context = {
+                "operation": "remix_playback",
+                "remix_name": remix_name
+            }
+
             if self.verification_system.characters_available:
                 print("ðŸ” Verification system ENABLED for all drags")
             else:
@@ -445,7 +454,7 @@ class WorkflowManager:
                 
                 # Use enhanced drag with verification
                 use_cdp = True  # Can be customized
-                if not self.game_operations.corrected_drag_and_drop(current_icon, target_slot, False, use_cdp):
+                if not self.game_operations.corrected_drag_and_drop(current_icon, target_slot, False, use_cdp=True, context=remix_context):
                     print(f"  âŒ Failed to drag icon {icon_index} with verification")
                     continue
                 
@@ -512,7 +521,7 @@ class WorkflowManager:
             print(f"  ðŸ”„ Using mode-aware batch return for {len(remix_icons)} icons...")
 
             # Use smart batch return with mode awareness
-            success_count, total_attempted, error_log = self.player.smart_batch_return_all_slots_with_mode(use_cdp=False)
+            success_count, total_attempted, error_log = self.player.smart_batch_return_all_slots_with_mode(use_cdp=False, context=remix_context)
 
             if success_count == total_attempted:
                 print(f"  âœ… Smart batch return: {success_count}/{total_attempted} icons returned successfully")

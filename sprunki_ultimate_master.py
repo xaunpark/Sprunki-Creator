@@ -57,24 +57,23 @@ MODE_OPTIONS = {
 @dataclass
 class ProcessingItem:
     """Represents one URL/JSON + processing settings"""
-    source_url: Optional[str] = None  # URL for JSON generation
-    json_path: Optional[str] = None   # Path to existing/generated JSON
+    source_url: Optional[str] = None
+    json_path: Optional[str] = None
     json_data: Optional[Dict[str, Any]] = None
-    mode: str = "both"  # Processing mode
-    status: str = "pending"  # "pending", "generating", "processing", "completed", "failed", "skipped"
+    mode: str = "both"
+    status: str = "pending"
     error_message: Optional[str] = None
     output_files: List[str] = field(default_factory=list)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     project_slug: Optional[str] = None
-
+    
     json_generation_status: str = "not_started" # "success", "failure", "skipped"
     master_mode_status: str = "not_started"     # "success", "failure", "skipped"
     individual_mode_status: str = "not_started" # "success", "failure", "skipped"
-
+    
     @property
     def display_name(self) -> str:
-        """Get display name for UI"""
         if self.source_url:
             return f"URL: {self.source_url.split('/')[-1] or 'Game'}"
         elif self.json_path:
@@ -84,7 +83,6 @@ class ProcessingItem:
     
     @property
     def status_emoji(self) -> str:
-        """Get emoji for status"""
         status_map = {
             "pending": "⏳",
             "generating": "🚀", 
@@ -97,7 +95,6 @@ class ProcessingItem:
     
     @property
     def mode_emoji(self) -> str:
-        """Get emoji for mode"""
         mode_map = {
             "master": "🎬",
             "individual": "🎭",
@@ -135,13 +132,8 @@ class SafeOperationManager:
         icon_placed = False
         recording_started = False
         output_path = None
-
-        # Lấy icon_index để sử dụng trong metadata
-        icon_index = icon.get('index', 'unknown')
-        mode = "horror" if filename.startswith('h-') else "normal"
-
+        
         try:
-
             # STEP 1: Drag icon
             self.logger.info(f"🎯 Dragging icon to slot index {target_slot.get('index', 'unknown')} at coords ({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
             drag_success = self.game_player.corrected_drag_and_drop(icon, target_slot)
@@ -183,20 +175,13 @@ class SafeOperationManager:
             
             recording_started = False  # Recording stopped successfully
             self.logger.info(f"✅ Recording completed: {output_path}")
-
+            
             return True, output_path, None
             
         except Exception as e:
             error_msg = f"Operation failed: {str(e)}"
             self.logger.error(error_msg)
-
-            # Ghi lại timestamp lỗi nếu có thể
-            self.obs_controller.log_event_timestamp(
-                "icon_showcase_failed", 
-                f"Showcase failed for icon {icon_index}: {error_msg}",
-                {"mode": mode, "icon_index": icon_index, "error": error_msg}
-            )
-
+            
             return False, output_path, error_msg
             
         finally:
@@ -498,7 +483,6 @@ class UnifiedProcessingManager:
     def _generate_manifest_for_item(self, item: ProcessingItem):
         """
         Thu thập dữ liệu và tạo file manifest.json cho một item đã xử lý xong.
-        SỬ DỤNG pageTitle từ JSON đầu ra.
         """
         try:
             self.logger.info(f"📄 Generating manifest for {item.project_slug}...")
@@ -507,54 +491,41 @@ class UnifiedProcessingManager:
                 self.logger.error("Cannot generate manifest: Missing config or json_data.")
                 return
 
-            # Xác định thư mục output với kiểm tra an toàn
+            # Xác định thư mục output
             project_slug = item.project_slug or f"unknown-project-{datetime.now().strftime('%Y%m%d%H%M%S')}"
             project_folder = os.path.join(self.config.output_base_dir, project_slug)
             
             if not os.path.exists(project_folder):
-                self.logger.warning(f"Project folder not found for manifest: {project_folder}, attempting to create it.")
-                try:
-                    os.makedirs(project_folder, exist_ok=True)
-                except Exception as e:
-                    self.logger.error(f"Could not create project folder for manifest: {e}")
+                self.logger.warning(f"Project folder not found for manifest: {project_folder}, creating it.")
+                os.makedirs(project_folder, exist_ok=True)
             
             # 1. Thu thập thông tin
-            # SỬA LỖI Ở ĐÂY: Ưu tiên lấy pageTitle từ json_data
             page_title = item.json_data.get('pageTitle', 'Unknown Title')
-            
             source_url = item.json_data.get('currentUrl', item.source_url or '')
             domain = urlparse(source_url).netloc.replace('www.', '') if source_url else ''
 
-            # Xác định overallStatus (logic không đổi)
+            # Xác định overallStatus
             if item.status == "completed":
                 overall_status = "success"
             elif item.status == "failed":
                 overall_status = "failure"
+            elif item.master_mode_status == 'success' or item.individual_mode_status == 'success':
+                overall_status = 'partial_success'
             else:
-                if item.master_mode_status == 'success' or item.individual_mode_status == 'success':
-                    overall_status = 'partial_success'
-                else:
-                    overall_status = 'failure'
+                overall_status = 'failure'
 
             # 2. Xây dựng cấu trúc manifest
             manifest_data = {
                 "version": "1.1",
                 "sessionId": f"{item.project_slug}-{item.start_time.strftime('%Y%m%d%H%M%S')}" if item.start_time else "unknown",
                 "generatedAt": datetime.now().isoformat(),
-                "source": {
-                    "type": "url" if item.source_url else "json_file",
-                    "value": item.source_url or item.json_path
-                },
+                "source": { "type": "url" if item.source_url else "json_file", "value": item.source_url or item.json_path },
                 "projectInfo": {
-                    "sourceUrl": source_url,
-                    "projectSlug": item.project_slug,
-                    "pageTitle": page_title,
-                    "domain": domain,
-                    "outputDirectory": project_folder
+                    "sourceUrl": source_url, "projectSlug": item.project_slug,
+                    "pageTitle": page_title, "domain": domain, "outputDirectory": project_folder
                 },
                 "processingSummary": {
-                    "mode": item.mode,
-                    "overallStatus": overall_status,
+                    "mode": item.mode, "overallStatus": overall_status,
                     "statusDetails": {
                         "jsonGeneration": item.json_generation_status,
                         "masterMode": item.master_mode_status,
@@ -565,25 +536,18 @@ class UnifiedProcessingManager:
                     "durationSeconds": (item.end_time - item.start_time).total_seconds() if item.start_time and item.end_time else 0,
                     "hasHorror": item.json_data.get('gameSettings', {}).get('hasHorror', False)
                 },
-                "outputs": {}, # Sẽ điền sau
-                "errors": [] # Sẽ điền sau
+                "outputs": {}, "errors": []
             }
             
             # 3. Điền thông tin outputs và errors
             outputs = {"masterVideo": None, "individualVideos": [], "remixVideos": [], "logFiles": [], "sourceJson": None}
             if item.error_message:
-                manifest_data["errors"].append({
-                    "timestamp": datetime.now().isoformat(),
-                    "stage": "general",
-                    "message": item.error_message
-                })
+                manifest_data["errors"].append({"timestamp": datetime.now().isoformat(), "stage": "general", "message": item.error_message})
             
             for file_path in item.output_files:
                 filename = os.path.basename(file_path)
                 file_info = {
-                    "status": "success",
-                    "filename": filename,
-                    "relativePath": f"./{filename}",
+                    "status": "success", "filename": filename, "relativePath": f"./{filename}",
                     "fileSizeMb": round(os.path.getsize(file_path) / (1024*1024), 2) if os.path.exists(file_path) else 0
                 }
                 if 'showcase' in filename:
@@ -614,6 +578,27 @@ class UnifiedProcessingManager:
         except Exception as e:
             self.logger.error(f"❌ Failed to generate manifest file: {e}")
 
+    def _calculate_center_slot_index(self, slots):
+        """Calculate center slot index for showcase"""
+        try:
+            total_slots = len(slots)
+            if total_slots == 0:
+                return 0
+            
+            # Calculate center index (0-based)
+            # For odd numbers: middle slot
+            # For even numbers: slightly left of middle 
+            center_index = (total_slots - 1) // 2
+            
+            self.logger.info(f"📊 Slot calculation: {total_slots} slots → center index {center_index}")
+            self.logger.info(f"   Examples: 7 slots → index 3, 9 slots → index 4, 6 slots → index 2")
+            
+            return center_index
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating center slot: {e}")
+            return 3  # Fallback to hardcoded value
+    
     def add_urls(self, urls: List[str]) -> int:
         """Add URLs to processing queue"""
         added_count = 0
@@ -820,25 +805,19 @@ class UnifiedProcessingManager:
         self.logger.info("Processing stopped by user")
     
     def _process_next_queue_item(self):
-        """
-        Processes one item from the queue, generates a manifest, and schedules the next one.
-        """
-        item = None # Khai báo để có thể dùng trong finally
+        item = None
         try:
             if self.should_stop:
-                self.logger.info("Pipeline stopped by user signal.")
                 self.master_controller.on_processing_complete()
                 return
 
             if self.current_item_index >= len(self.queue):
-                self.logger.info("=== UNIFIED PROCESSING PIPELINE COMPLETED ===")
                 self.master_controller.on_processing_complete()
                 return
 
             item = self.queue[self.current_item_index]
             
             if item.status != "pending":
-                self.logger.info(f"Skipping item {self.current_item_index + 1} with status '{item.status}'")
                 self.current_item_index += 1
                 self.master_controller.root.after(10, self._process_next_queue_item)
                 return
@@ -847,15 +826,13 @@ class UnifiedProcessingManager:
             
             if item.source_url and not item.json_data:
                 json_success = self._generate_json_for_item(item)
-                if not json_success and item.status == "failed":
+                if not json_success: # Dừng lại nếu tạo JSON lỗi
                     self.total_failed += 1
-                    # Bỏ qua các bước tiếp theo, đi thẳng đến finally để tạo manifest
-                    return 
-
+                    return # Đi thẳng tới finally
+            
             if item.json_data and item.status != "failed":
                 video_success = self._process_video_for_item(item)
-                if video_success:
-                    self.total_completed += 1
+                if video_success: self.total_completed += 1
                 else:
                     if item.status == "failed": self.total_failed += 1
                     elif item.status == "skipped": self.total_skipped += 1
@@ -884,9 +861,12 @@ class UnifiedProcessingManager:
     def _generate_json_for_item(self, item: ProcessingItem) -> bool:
         """Generate JSON for a URL item"""
         try:
+            # Reset the generator's state to ensure no stale WebSocket URLs are used.
             self.json_generator.reset_state_for_new_job()
+
             item.status = "generating"
             item.start_time = datetime.now()
+            
             self.logger.info(f"Generating JSON for: {item.source_url}")
             
             success, json_path, json_data = self.json_generator.generate_complete_json(item.source_url)
@@ -894,7 +874,7 @@ class UnifiedProcessingManager:
             if success and json_data:
                 item.json_path = json_path
                 item.json_data = json_data
-                item.status = "pending"
+                item.status = "pending"  # Ready for video processing
                 item.json_generation_status = "success" # GHI LẠI TRẠNG THÁI
                 self.logger.info(f"JSON generated successfully: {json_path}")
                 return True
@@ -1410,45 +1390,43 @@ class UnifiedProcessingManager:
     
     def _process_individual_mode(self, item: ProcessingItem) -> bool:
         """Enhanced Individual mode with SafeOperationManager"""
-        
-        # SỬA LỖI: Khởi tạo safe_ops ở ngoài hoặc ngay đầu try block
         safe_ops = None
         
         try:
             self.logger.info(f"Executing enhanced individual workflow for {item.display_name}")
-
-            # Lấy các component đã được khởi tạo từ master_controller
-            game_player = self.master_controller.game_player
-            obs_controller = self.master_controller.obs_controller
-
-            if not obs_controller or not game_player:
-                raise Exception("Components (game_player/obs_controller) not initialized properly.")
-
-            # KHỞI TẠO SafeOperationManager NGAY TẠI ĐÂY, TRƯỚC CÁC THAO TÁC CÓ THỂ GÂY LỖI
-            safe_ops = SafeOperationManager(game_player, obs_controller, self.logger)
-
-            if not obs_controller.full_setup(use_full_screen=False):
+            
+            if not self.master_controller.obs_controller.full_setup(use_full_screen=False):
                 raise Exception("OBS setup failed for individual mode")
             
-            if not game_player.setup_game_environment(first_setup=False):
+            if not self.master_controller.game_player.setup_game_environment(first_setup=False):
                 raise Exception("Game environment re-setup failed")
 
             if not item.json_data or 'layout' not in item.json_data:
                 raise Exception("Invalid JSON data - missing layout")
-                
             layout = item.json_data['layout']
             icons = layout['icons']
             slots = layout['slots']
             game_settings = item.json_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             
-            center_slot_index = game_player.game_operations.calculate_center_slot_index(slots)
-            target_slot = game_player._find_slot_by_index(center_slot_index)
+            # Calculate center slot index dynamically
+            center_slot_index = self._calculate_center_slot_index(slots)
+            self.logger.info(f"🎯 Using center slot index {center_slot_index} out of {len(slots)} total slots")
+            
+            target_slot = self.master_controller.game_player._find_slot_by_index(center_slot_index)
             if not target_slot:
                 raise Exception(f"Could not find slot at center index {center_slot_index}")
             
-            # KHỞI TẠO SafeOperationManager VỚI CÁC COMPONENT ĐÚNG
-            safe_ops = SafeOperationManager(game_player, obs_controller, self.logger)
+            # Log detailed slot information
+            self.logger.info(f"🎯 Target slot details: index={center_slot_index}, coords=({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
+            self.logger.info(f"🎯 This is the slot that will receive the icon and be used for return operation")
+            
+            # 🔥 INITIALIZE SAFE OPERATION MANAGER
+            safe_ops = SafeOperationManager(
+                self.master_controller.game_player,
+                self.master_controller.obs_controller,
+                self.logger
+            )
             
             output_files = []
             
@@ -1543,12 +1521,11 @@ class UnifiedProcessingManager:
             item.individual_mode_status = "failure"
             return False
         finally:
-            # 🔥 EMERGENCY CLEANUP (Sử dụng safe_ops đã tạo)
+            # 🔥 EMERGENCY CLEANUP
             if safe_ops:
                 safe_ops.emergency_cleanup_all()
             
-            # Đảm bảo trình duyệt luôn được đóng
-            if hasattr(self.master_controller, 'game_player') and self.master_controller.game_player:
+            if self.master_controller.game_player:
                 self.master_controller.game_player.close_game_window()
 
     def _safe_record_individual_remixes(self, item, icons, slots, safe_ops) -> List[str]:
@@ -2225,7 +2202,24 @@ class SprunkiUltimateMaster:
                 self.should_stop = True
                 
                 self.processing_manager.logger.info("✅ Processing pipeline stop signal sent")
-                
+
+                # ================================================================
+                # PHASE 1.5: GRACEFUL RECORDING STOP
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 1.5: Attempting graceful OBS stop to save timestamp...")
+                if hasattr(self, 'obs_controller') and self.obs_controller:
+                    try:
+                        # Hàm này sẽ tự động gọi logic lưu file timestamp
+                        stop_success, final_path = self.obs_controller.stop_recording()
+                        if stop_success:
+                            self.processing_manager.logger.info(f"   ✅ Recording stopped gracefully. Timestamp file saved for: {final_path}")
+                        else:
+                            self.processing_manager.logger.warning("   ⚠️ Graceful stop failed, comprehensive cleanup will take over.")
+                    except Exception as e:
+                        self.processing_manager.logger.error(f"   ❌ Error during graceful stop_recording call: {e}")
+                else:
+                    self.processing_manager.logger.info("   ℹ️ OBS controller not available for graceful stop.")
+
                 # ================================================================
                 # PHASE 2: OBS EMERGENCY CLEANUP
                 # ================================================================
@@ -2360,7 +2354,33 @@ class SprunkiUltimateMaster:
                     self.processing_manager.logger.info("   ✅ Emergency stop hotkey removed")
                 except Exception as e:
                     self.processing_manager.logger.info(f"   ℹ️ Hotkey removal: {e} (may not have been registered)")
-                
+
+                # ================================================================
+                # PHASE 6: FINAL DATA PERSISTENCE (SAVE PARTIAL MANIFEST)
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 6: Saving partial manifest for interrupted item...")
+                try:
+                    if self.processing_manager and self.processing_manager.queue:
+                        current_item_index = self.processing_manager.current_item_index
+                        if 0 <= current_item_index < len(self.processing_manager.queue):
+                            current_item = self.processing_manager.queue[current_item_index]
+                            
+                            # Cập nhật trạng thái của item trước khi lưu
+                            current_item.status = "failed"
+                            current_item.error_message = "Processing stopped by user (ESC key)"
+                            current_item.end_time = datetime.now()
+                            
+                            self.processing_manager.logger.info(f"   Updating status for '{current_item.display_name}' to FAILED.")
+                            
+                            # Gọi hàm tạo manifest
+                            self.processing_manager._generate_manifest_for_item(current_item)
+                        else:
+                            self.processing_manager.logger.info("   ℹ️ No active item index to generate a manifest for.")
+                    else:
+                        self.processing_manager.logger.info("   ℹ️ Processing manager or queue not available.")
+                except Exception as e:
+                    self.processing_manager.logger.error(f"   ❌ Failed to save partial manifest: {e}")
+
                 # ================================================================
                 # EMERGENCY STOP COMPLETION SUMMARY
                 # ================================================================
@@ -2377,20 +2397,6 @@ class SprunkiUltimateMaster:
                 self.processing_manager.logger.info("   • UI state reset")
                 self.processing_manager.logger.info("   • Hotkeys removed")
                 self.processing_manager.logger.info("=" * 60)
-                
-                # Show user notification
-                messagebox.showwarning("🛑 Emergency Stop Completed", 
-                    f"Unified processing pipeline emergency stopped!\n\n"
-                    f"🧹 COMPREHENSIVE CLEANUP PERFORMED:\n"
-                    f"✅ OBS recording stopped\n"
-                    f"✅ Game operations halted\n"
-                    f"✅ Browser closed and cleaned\n"
-                    f"✅ Resources freed\n"
-                    f"✅ UI state reset\n\n"
-                    f"⏱️ Emergency stop completed in {emergency_duration:.1f}s\n"
-                    f"🎯 System ready for new operations")
-                
-                return
             
             # ================================================================
             # FALLBACK: EMERGENCY STOP WHEN NO PIPELINE RUNNING
@@ -2424,14 +2430,6 @@ class SprunkiUltimateMaster:
                 emergency_duration = (datetime.now() - emergency_start_time).total_seconds()
                 
                 self.processing_manager.logger.info(f"✅ General emergency stop completed in {emergency_duration:.1f}s")
-                
-                messagebox.showwarning("⚠️ Emergency Stop", 
-                    f"Emergency stop performed!\n\n"
-                    f"🧹 CLEANUP PERFORMED:\n"
-                    f"✅ Stop flags set\n"
-                    f"✅ Game operations halted\n"
-                    f"✅ Browser closed\n\n"
-                    f"⏱️ Completed in {emergency_duration:.1f}s")
         
         except Exception as e:
             # Critical error during emergency stop
@@ -2454,53 +2452,41 @@ class SprunkiUltimateMaster:
                     
             except:
                 pass
-            
-            # Critical error notification
-            messagebox.showerror("💥 Emergency Stop Error", 
-                f"CRITICAL ERROR during emergency stop!\n\n"
-                f"❌ ERROR: {str(e)}\n"
-                f"⏱️ Duration: {emergency_duration:.1f}s\n\n"
-                f"⚠️ Manual cleanup may be required:\n"
-                f"• Check OBS for active recordings\n"
-                f"• Close browser manually if needed\n"
-                f"• Restart application if issues persist")
     
     def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
         """
-        [REFACTORED] Initialize ALL components for a new job and ensure they are linked.
+        [CHUẨN HÓA] Khởi tạo và liên kết các component cho một job.
         """
         try:
-            print("⚙️ Initializing and linking all components for new job...")
+            print("⚙️ Initializing and linking components for new job...")
             
-            # 1. Khởi tạo hoặc dọn dẹp các component chính
+            # 1. Tạo các component chính
             self.game_player = SprunkiGamePlayer()
             self.obs_controller = SprunkiController()
             
-            # 2. Gán các component vào nhau để chúng có thể giao tiếp
-            # Gán obs_controller vào game_player để các module con của nó có thể truy cập
+            # 2. LIÊN KẾT CÁC COMPONENT
+            # Gán obs_controller vào game_player để tất cả các hàm bên trong nó có thể truy cập
             self.game_player.obs_controller = self.obs_controller
-            # Gán game_player vào obs_controller nếu cần
-            # self.obs_controller.game_player = self.game_player
-
-            # 3. Nạp config cho game_player (nó sẽ tự động nạp cho các module con)
+            
+            # 3. Nạp config và tạo remix
             self.game_player.config = config_data
             
-            # 4. Tạo remix động (logic này vẫn đúng)
             game_settings = config_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             total_slots = len(config_data.get('layout', {}).get('slots', []))
+            
             self.game_player.generate_dynamic_patterns(total_slots)
             self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=not has_horror)
+            self.game_player.current_remix_index = 0
             
-            # 5. Nạp config cho obs_controller
+            # 4. Nạp config cho OBS controller
             if not self.obs_controller.load_config_from_dict(config_data):
-                print("❌ OBS Error: Could not load recording area config!")
                 return False
             
-            # 6. Gán config chung (tùy chọn)
+            # 5. Gán config chung (không cần thiết nhưng giữ lại cho nhất quán)
             self.config = config_data
             
-            print("✅ All components initialized and linked successfully.")
+            print("✅ Components initialized and linked successfully.")
             return True
             
         except Exception as e:
