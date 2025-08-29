@@ -135,8 +135,13 @@ class SafeOperationManager:
         icon_placed = False
         recording_started = False
         output_path = None
-        
+
+        # Lấy icon_index để sử dụng trong metadata
+        icon_index = icon.get('index', 'unknown')
+        mode = "horror" if filename.startswith('h-') else "normal"
+
         try:
+
             # STEP 1: Drag icon
             self.logger.info(f"🎯 Dragging icon to slot index {target_slot.get('index', 'unknown')} at coords ({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
             drag_success = self.game_player.corrected_drag_and_drop(icon, target_slot)
@@ -178,13 +183,20 @@ class SafeOperationManager:
             
             recording_started = False  # Recording stopped successfully
             self.logger.info(f"✅ Recording completed: {output_path}")
-            
+
             return True, output_path, None
             
         except Exception as e:
             error_msg = f"Operation failed: {str(e)}"
             self.logger.error(error_msg)
-            
+
+            # Ghi lại timestamp lỗi nếu có thể
+            self.obs_controller.log_event_timestamp(
+                "icon_showcase_failed", 
+                f"Showcase failed for icon {icon_index}: {error_msg}",
+                {"mode": mode, "icon_index": icon_index, "error": error_msg}
+            )
+
             return False, output_path, error_msg
             
         finally:
@@ -1398,43 +1410,45 @@ class UnifiedProcessingManager:
     
     def _process_individual_mode(self, item: ProcessingItem) -> bool:
         """Enhanced Individual mode with SafeOperationManager"""
+        
+        # SỬA LỖI: Khởi tạo safe_ops ở ngoài hoặc ngay đầu try block
         safe_ops = None
         
         try:
             self.logger.info(f"Executing enhanced individual workflow for {item.display_name}")
-            
-            if not self.master_controller.obs_controller.full_setup(use_full_screen=False):
+
+            # Lấy các component đã được khởi tạo từ master_controller
+            game_player = self.master_controller.game_player
+            obs_controller = self.master_controller.obs_controller
+
+            if not obs_controller or not game_player:
+                raise Exception("Components (game_player/obs_controller) not initialized properly.")
+
+            # KHỞI TẠO SafeOperationManager NGAY TẠI ĐÂY, TRƯỚC CÁC THAO TÁC CÓ THỂ GÂY LỖI
+            safe_ops = SafeOperationManager(game_player, obs_controller, self.logger)
+
+            if not obs_controller.full_setup(use_full_screen=False):
                 raise Exception("OBS setup failed for individual mode")
             
-            if not self.master_controller.game_player.setup_game_environment(first_setup=False):
+            if not game_player.setup_game_environment(first_setup=False):
                 raise Exception("Game environment re-setup failed")
 
             if not item.json_data or 'layout' not in item.json_data:
                 raise Exception("Invalid JSON data - missing layout")
+                
             layout = item.json_data['layout']
             icons = layout['icons']
             slots = layout['slots']
             game_settings = item.json_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             
-            # Calculate center slot index dynamically
-            center_slot_index = self.master_controller.game_player.game_operations.calculate_center_slot_index(slots)
-            self.logger.info(f"🎯 Using center slot index {center_slot_index} out of {len(slots)} total slots")
-            
-            target_slot = self.master_controller.game_player._find_slot_by_index(center_slot_index)
+            center_slot_index = game_player.game_operations.calculate_center_slot_index(slots)
+            target_slot = game_player._find_slot_by_index(center_slot_index)
             if not target_slot:
                 raise Exception(f"Could not find slot at center index {center_slot_index}")
             
-            # Log detailed slot information
-            self.logger.info(f"🎯 Target slot details: index={center_slot_index}, coords=({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
-            self.logger.info(f"🎯 This is the slot that will receive the icon and be used for return operation")
-            
-            # 🔥 INITIALIZE SAFE OPERATION MANAGER
-            safe_ops = SafeOperationManager(
-                self.master_controller.game_player,
-                self.master_controller.obs_controller,
-                self.logger
-            )
+            # KHỞI TẠO SafeOperationManager VỚI CÁC COMPONENT ĐÚNG
+            safe_ops = SafeOperationManager(game_player, obs_controller, self.logger)
             
             output_files = []
             
@@ -1529,11 +1543,12 @@ class UnifiedProcessingManager:
             item.individual_mode_status = "failure"
             return False
         finally:
-            # 🔥 EMERGENCY CLEANUP
+            # 🔥 EMERGENCY CLEANUP (Sử dụng safe_ops đã tạo)
             if safe_ops:
                 safe_ops.emergency_cleanup_all()
             
-            if self.master_controller.game_player:
+            # Đảm bảo trình duyệt luôn được đóng
+            if hasattr(self.master_controller, 'game_player') and self.master_controller.game_player:
                 self.master_controller.game_player.close_game_window()
 
     def _safe_record_individual_remixes(self, item, icons, slots, safe_ops) -> List[str]:
@@ -2451,48 +2466,41 @@ class SprunkiUltimateMaster:
                 f"• Restart application if issues persist")
     
     def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
-        """Initialize game player and OBS controller for a specific job."""
+        """
+        [REFACTORED] Initialize ALL components for a new job and ensure they are linked.
+        """
         try:
-            print("⚙️ Initializing components for new job...")
+            print("⚙️ Initializing and linking all components for new job...")
             
-            if hasattr(self, 'obs_controller') and self.obs_controller:
-                print("🧹 Cleaning up previous OBS controller...")
-                self.obs_controller = None
-                time.sleep(1)
-            
-            # Khởi tạo game player
+            # 1. Khởi tạo hoặc dọn dẹp các component chính
             self.game_player = SprunkiGamePlayer()
-            self.game_player.config = config_data # Gán config trước
-            
-            current_url = config_data.get('currentUrl', '').lower()
-            if 'cocrea.world' not in current_url:
-                print(f"❌ Unsupported Domain: {current_url}")
-                return False
-            
-            # Check hasHorror setting để tạo remix phù hợp
-            game_settings = config_data.get('gameSettings', {})
-            has_horror = game_settings.get('hasHorror', False)
-            
-            # 1. Lấy số lượng slot từ config_data
-            total_slots = len(config_data.get('layout', {}).get('slots', []))
-            
-            # 2. Tạo các pattern remix động
-            self.game_player.generate_dynamic_patterns(total_slots)
-            
-            # 3. Tạo thư viện remix từ các pattern mới
-            self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
-            self.game_player.current_remix_index = 0
-            
-            # Khởi tạo OBS controller
-            print("🎥 Initializing OBS controller for service mode...")
             self.obs_controller = SprunkiController()
             
+            # 2. Gán các component vào nhau để chúng có thể giao tiếp
+            # Gán obs_controller vào game_player để các module con của nó có thể truy cập
+            self.game_player.obs_controller = self.obs_controller
+            # Gán game_player vào obs_controller nếu cần
+            # self.obs_controller.game_player = self.game_player
+
+            # 3. Nạp config cho game_player (nó sẽ tự động nạp cho các module con)
+            self.game_player.config = config_data
+            
+            # 4. Tạo remix động (logic này vẫn đúng)
+            game_settings = config_data.get('gameSettings', {})
+            has_horror = game_settings.get('hasHorror', False)
+            total_slots = len(config_data.get('layout', {}).get('slots', []))
+            self.game_player.generate_dynamic_patterns(total_slots)
+            self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=not has_horror)
+            
+            # 5. Nạp config cho obs_controller
             if not self.obs_controller.load_config_from_dict(config_data):
                 print("❌ OBS Error: Could not load recording area config!")
                 return False
             
+            # 6. Gán config chung (tùy chọn)
             self.config = config_data
-            print("✅ Components initialized successfully.")
+            
+            print("✅ All components initialized and linked successfully.")
             return True
             
         except Exception as e:

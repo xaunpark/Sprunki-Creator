@@ -32,6 +32,13 @@ class WorkflowManager:
             if not self.player.config or not current_icon:
                 return False
 
+            # Lấy các thông tin cần thiết
+            obs_controller = getattr(self.player, 'obs_controller', None)
+            icon_index = current_icon.get('index', -1)
+            target_slot = self.game_operations._find_slot_by_index(3) # Logic cũ vẫn giữ nguyên, có thể cải tiến sau
+            if not target_slot:
+                return False
+
             # Setup resource tracking
             if not hasattr(self, 'resource_manager'):
                 self.resource_manager = ResourceManager()
@@ -54,7 +61,16 @@ class WorkflowManager:
             except Exception as e:
                 print(f"Cleanup warning: {e}")
                 # Continue anyway
-            
+
+            # === GHI TIMESTAMP BẮT ĐẦU SHOWCASE (TRƯỚC KHI KÉO) ===
+            if obs_controller:
+                obs_controller.log_event_timestamp(
+                    "start_icon_showcase", 
+                    f"Start showcase for icon {icon_index} ({mode})",
+                    {"mode": mode, "icon_index": icon_index}
+                )
+            # === KẾT THÚC PHẦN THÊM MỚI ===
+
             # PHASE 1: Drag with exception handling
             try:
                 drag_success = self.game_operations.corrected_drag_and_drop(current_icon, target_slot, False, True)
@@ -129,7 +145,25 @@ class WorkflowManager:
             except Exception as return_error:
                 print(f"Return error: {return_error}")
                 # Continue anyway, don't fail entire showcase
-            
+                return_success = False
+                
+            # === GHI TIMESTAMP KẾT THÚC SHOWCASE (SAU KHI TRẢ VỀ) ===
+            if obs_controller:
+                if return_success:
+                    obs_controller.log_event_timestamp(
+                        "end_icon_showcase", 
+                        f"End showcase for icon {icon_index} ({mode})",
+                        {"mode": mode, "icon_index": icon_index}
+                    )
+                else:
+                    # Ghi lại lỗi nếu return thất bại
+                    obs_controller.log_event_timestamp(
+                        "icon_showcase_failed",
+                        f"Return failed for icon {icon_index}",
+                        {"mode": mode, "icon_index": icon_index, "stage": "return"}
+                    )
+            # === KẾT THÚC PHẦN THÊM MỚI ===
+
             # Force cleanup after each icon
             try:
                 if hasattr(self, 'resource_manager'):
@@ -381,6 +415,9 @@ class WorkflowManager:
             emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             
             print(f"\n{emoji} STARTING ENHANCED REMIX: {remix_name}")
+
+            obs_controller = getattr(self.player, 'obs_controller', None)
+
             if self.verification_system.characters_available:
                 print("ðŸ” Verification system ENABLED for all drags")
             else:
@@ -417,7 +454,21 @@ class WorkflowManager:
             
             if self.player.should_stop:
                 return False
-            
+
+            # === THÊM LOGIC GHI TIMESTAMP BẮT ĐẦU REMIX ===
+            if obs_controller:
+                remix_metadata = {
+                    "remix_name": remix_name,
+                    "icon_indices": remix_icons,
+                    "pattern": remix_data.get('pattern', 'unknown')
+                }
+                obs_controller.log_event_timestamp(
+                    "start_remix_playback", 
+                    f"Start playback for {remix_name}", 
+                    remix_metadata
+                )
+            # === KẾT THÚC PHẦN THÊM MỚI ===
+
             # Phase 2: Listen to remix music - THREAD SAFE
             print(f"PHASE 2: Enjoying remix for {listen_duration}s...")
             if progress_callback:
@@ -441,7 +492,15 @@ class WorkflowManager:
             
             if self.player.should_stop:
                 return False
-            
+
+            # === THÊM LOGIC GHI TIMESTAMP KẾT THÚC REMIX ===
+            if obs_controller:
+                obs_controller.log_event_timestamp(
+                    "end_remix_playback", 
+                    f"End playback for {remix_name}"
+                )
+            # === KẾT THÚC PHẦN THÊM MỚI ===
+
             # Phase 3: Smart batch return with mode detection
             print("ðŸ”„ PHASE 3: Smart batch returning with mode detection...")
             if progress_callback:
@@ -767,11 +826,22 @@ class WorkflowManager:
             target_slot = self.game_operations._find_slot_by_index(center_slot_index)
             if not target_slot:
                 return False
-            
+
+            obs_controller = getattr(self.player, 'obs_controller', None)
+
             if progress_callback:
                 progress_callback("ðŸ‘» Triggering Horror Mode with verification...")
             
             print("\nðŸ‘» TRIGGERING ENHANCED HORROR MODE TRANSITION...")
+
+            # === THÊM LOGIC GHI TIMESTAMP BẮT ĐẦU ===
+            if obs_controller:
+                obs_controller.log_event_timestamp(
+                    "start_horror_transition", 
+                    "Dragging horror icon to trigger transition"
+                )
+            # === KẾT THÚC PHẦN THÊM MỚI ===
+
             if self.verification_system.characters_available:
                 print("ðŸ” Using verification for horror icon drag")
             else:
@@ -806,7 +876,15 @@ class WorkflowManager:
             
             if self.player.should_stop:
                 return False
-            
+
+            # === THÊM LOGIC GHI TIMESTAMP KẾT THÚC ===
+            if obs_controller:
+                obs_controller.log_event_timestamp(
+                    "end_horror_transition", 
+                    "Horror transition visual effect completed"
+                )
+            # === KẾT THÚC PHẦN THÊM MỚI ===
+
             print("âœ… ENHANCED HORROR MODE TRANSITION COMPLETED!")
             
             # ================================================================

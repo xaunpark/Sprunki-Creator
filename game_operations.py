@@ -1212,10 +1212,30 @@ class GameOperations:
             if not self.player.should_stop:
                 print(f"\nPHASE 3: GAME RESTART FALLBACK (NEW)")
                 print("-" * 40)
+
+                # === LOGIC GHI TIMESTAMP ===
+                # Lấy obs_controller một cách an toàn từ player instance
+                obs_controller = getattr(self.player, 'obs_controller', None)
                 
+                if obs_controller:
+                    obs_controller.log_event_timestamp(
+                        "start_game_restart", 
+                        "Restart triggered due to return failure",
+                        {"failed_slot_index": target_slot_index}
+                    )
+                # === KẾT THÚC PHẦN LOGIC GHI TIMESTAMP ===
+
                 # BƯỚC 3A: Thực hiện hành động restart từ BrowserManager
                 phase3_action_success = self.browser_manager.restart_game_to_initial_state(use_cdp)
-                
+
+                # === LOGIC GHI TIMESTAMP ===
+                if obs_controller:
+                    obs_controller.log_event_timestamp(
+                        "end_game_restart", 
+                        "Restart and skip intro completed"
+                    )
+                # === KẾT THÚC PHẦN LOGIC GHI TIMESTAMP ===
+
                 if not phase3_action_success:
                     print("PHASE 3 WARNING: Game restart action failed, but assuming it might have worked.")
                     return True # Vẫn trả về True vì đây là phương án cuối cùng

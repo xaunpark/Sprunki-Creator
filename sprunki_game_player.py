@@ -22,7 +22,10 @@ import math
 import psutil
 import gc
 import weakref
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING 
+
+if TYPE_CHECKING:
+    from sprunki_obs_controller import SprunkiController
 
 from utils import DragOperationStats, ResourceManager, ThreadSafeProgressUpdater
 
@@ -76,6 +79,8 @@ class SprunkiGamePlayer:
         self.current_icon = 0
         self.auto_thread = None
         self.game_url = None
+        # Tham chiếu đến OBS controller, sẽ được gán từ bên ngoài (ví dụ: từ Master)
+        self.obs_controller: Optional['SprunkiController'] = None
 
         # SMART DUAL TRACKING
         self.working_systems = {'characters': None, 'putted': None}
