@@ -4600,8 +4600,8 @@ class SprunkiGamePlayer:
 
     def execute_sequential_carpet_bombing_sets(self, sorted_slots, initial_count, use_cdp=False):
         """
-        ðŸŽ¯ NEW: Execute progressive carpet bombing sets
-        Set 1: 2 coords/slot, Set 2: 3 coords/slot, etc.
+        [FIXED v2] Execute progressive carpet bombing sets.
+        Returns False if a game restart was necessary.
         """
         try:
             print(f"\nðŸŽ¯ SEQUENTIAL CARPET BOMBING SETS")
@@ -4667,48 +4667,26 @@ class SprunkiGamePlayer:
             else:
                 print(f"CARPET BOMBING INCOMPLETE after {max_sets} sets: {final_count} icons remaining")
                 print("ATTEMPTING GAME RESTART FALLBACK...")
-                
-                # 🔥 THÊM VÀO ĐÂY: Logic ghi timestamp cho sự kiện restart
-                obs_controller = self.obs_controller
-                if obs_controller:
-                    obs_controller.log_event_timestamp(
-                        "start_game_restart", 
-                        "Restart triggered: Carpet Bombing cleanup failed"
-                    )
 
                 # Game restart fallback when carpet bombing fails
                 restart_success = self.restart_game_to_initial_state(use_cdp)
-                
-                if obs_controller:
-                    obs_controller.log_event_timestamp(
-                        "end_game_restart", 
-                        "Restart after Carpet Bombing completed"
-                    )
-                # 🔥 KẾT THÚC PHẦN THÊM MỚI
 
-                if restart_success:
-                    print("GAME RESTART FALLBACK SUCCESS: All icons should be cleared")
-                    return True
-                else:
-                    print("GAME RESTART FALLBACK WARNING: Assuming success anyway")
-                    return True  # Assume success since restart should work
+                # LUÔN TRẢ VỀ FALSE KHI ĐÃ RESTART
+                # Điều này báo cho hàm cha biết rằng đã xảy ra một sự kiện đặc biệt
+                return False
                 
         except Exception as e:
             print(f"Error in sequential carpet bombing: {e}")
             
-            # Emergency game restart fallback on exception
             print("EMERGENCY GAME RESTART due to carpet bombing error...")
             try:
-                restart_success = self.restart_game_to_initial_state(use_cdp)
-                if restart_success:
-                    print("EMERGENCY RESTART SUCCESS")
-                    return True
-                else:
-                    print("EMERGENCY RESTART WARNING: Assuming success")
-                    return True
+                self.restart_game_to_initial_state(use_cdp)
             except Exception as restart_error:
                 print(f"Emergency restart also failed: {restart_error}")
-                return False
+            
+            # Dù restart thành công hay thất bại,
+            # vẫn phải trả về False để báo hiệu cho hàm cha.
+            return False
 
     def generate_simple_coordinate_set(self, sorted_slots, coords_per_slot, set_num):
         """
@@ -5727,9 +5705,7 @@ class SprunkiGamePlayer:
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
             """
-            [FINAL REFINED v2] Drag and drop with DUAL verification, DYNAMIC control type,
-            and special handling for the `is_first_icon` flag.
-            Accepts an optional `control_type_override` for scenarios like JSON generation.
+            [FIXED & FINAL] Drag and drop với logic timestamp cho việc dựng video.
             """
             print(f"\nðŸŽ¯ DYNAMIC DRAG START (is_first_icon: {is_first_icon})")
             print("="*60)
@@ -5780,11 +5756,13 @@ class SprunkiGamePlayer:
             characters_before, putted_before = None, None
             characters_after, putted_after = None, None
 
+            obs_controller = self.obs_controller # Lấy controller để sử dụn
+
             # Try each coordinate until success
             for coord_index, (start_x, start_y) in enumerate(coordinates):
                 if self.should_stop:
                     break
-                    
+
                 coord_used = coord_index + 1
                 coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
                 print(f"\nðŸŽ¯ Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
@@ -5814,6 +5792,7 @@ class SprunkiGamePlayer:
 
                 print("   Executing dynamic drag attempt...")
                 drag_executed = False
+                action_start_time = None
                 end_x, end_y = target_slot['x'], target_slot['y']
 
                 if use_cdp:
@@ -5821,7 +5800,7 @@ class SprunkiGamePlayer:
                     if ws_url:
                         try:
                             ws = websocket.create_connection(ws_url, timeout=30)
-                            drag_executed = self._execute_dynamic_drag_cdp(
+                            drag_executed, action_start_time = self._execute_dynamic_drag_cdp(
                                 ws, start_x, start_y, end_x, end_y, 
                                 self.game_control_type, 
                                 is_first_icon
@@ -5882,6 +5861,24 @@ class SprunkiGamePlayer:
                             print(f"   âš ï¸ Verification attempt {verify_attempt} failed, will try again after a longer wait...")
                     
                     if verification_success:
+                        # Ghi lại timestamp của lần kéo thành công
+                        if obs_controller and action_start_time and obs_controller.recording_start_time is not None:
+                            elapsed_time = action_start_time - obs_controller.recording_start_time
+
+                            # Tạo một sự kiện mới thay vì gọi log_event_timestamp trực tiếp
+                            # để có thể tùy chỉnh timestamp
+                            event_data = {
+                                "event": "successful_drag_started",
+                                "timestamp": round(elapsed_time, 3),
+                                "label": f"Successful drag started for icon {icon.get('index', -1)}",
+                                "metadata": {
+                                    "icon_index": icon.get('index', -1),
+                                    "attempt_number": coord_used
+                                }
+                            }
+                            obs_controller.event_timestamps.append(event_data)
+                            print(f"🕒 Video Event Logged: 'successful_drag_started' at {elapsed_time:.3f}s")
+
                         print(f"ðŸŽ‰ ENHANCED DRAG VERIFIED successfully at coordinate {coord_used}!")
                         success = True
                         break # ThoÃ¡t khá»i vÃ²ng láº·p thá»­ tá»a Ä‘á»™ (for coord_index...)
@@ -6794,8 +6791,7 @@ class SprunkiGamePlayer:
 
     def _execute_dynamic_drag_cdp(self, ws, start_x, start_y, end_x, end_y, control_type, is_first_icon):
         """
-        [UPGRADED v2] Executes a dynamic drag via CDP, now aware of `is_first_icon`
-        for appropriate timing and delays.
+        [FIXED v2] Executes a dynamic drag via CDP, now returns precise start time.
         """
         try:
             print(f"   Executing UPGRADED DYNAMIC CDP DRAG (is_first_icon: {is_first_icon}, type: '{control_type}')")
@@ -6813,7 +6809,10 @@ class SprunkiGamePlayer:
                 print("   🎪 First icon - applying extended timing and extra wait...")
                 time.sleep(delays['approach'])
                 time.sleep(domain_adj['extra_focus_time'])
-            
+
+            # 🔥 GHI LẠI THỜI GIAN NGAY TRƯỚC HÀNH ĐỘNG ĐẦU TIÊN
+            action_start_time = time.monotonic()
+
             # Di chuyển chuột đến vị trí bắt đầu
             self._send_cdp_command(ws, {
                 "method": "Input.dispatchMouseEvent",
@@ -6880,19 +6879,21 @@ class SprunkiGamePlayer:
             self.move_mouse_to_safe_position()
             
             print("   ✅ Upgraded Dynamic CDP drag successful.")
-            return True
+            return True, action_start_time
 
         except Exception as e:
             print(f"   ❌ Exception during dynamic CDP drag: {e}")
-            return False
+            return False, None
 
     def corrected_return_icon(self, target_slot, use_cdp=True):
         """
-        ðŸŽ¯ IMPROVED: 2-Phase Return vá»›i Sequential Carpet Bombing  
-        Phase 1: Precision Click trá»±c tiáº¿p vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
-        Phase 2: Sequential Carpet Bombing (same as remix cleanup)
+        [FIXED & FINAL] 2-Phase Return với logic timestamp cho việc dựng video.
         """
         try:
+            # GHI LẠI THỜI ĐIỂM BẮT ĐẦU CỦA TOÀN BỘ QUÁ TRÌNH RETURN
+            return_process_start_time = time.monotonic()
+            obs_controller = self.obs_controller # Lấy controller
+
             center_x, center_y = target_slot['x'], target_slot['y']
             target_slot_index = target_slot.get('index', -1)
             
@@ -6957,8 +6958,31 @@ class SprunkiGamePlayer:
                     print("ðŸŽ‰ PHASE 2 SUCCESS: Sequential carpet bombing worked!")
                     print("="*70)
                     return True
-                else:
-                    print("ðŸ’¥ PHASE 2 FAILED: Sequential carpet bombing unsuccessful")
+
+                # 🔥 NẾU ĐẾN ĐÂY, CÓ NGHĨA LÀ PHASE 2 ĐÃ THẤT BẠI VÀ ĐÃ RESTART
+                print("ðŸ’¥ PHASE 3: FINALIZING AFTER RESTART")
+                print("-" * 40)
+                
+                # Ghi lại sự kiện "thất bại" với timestamp của lúc bắt đầu return
+                if obs_controller and obs_controller.recording_start_time is not None:
+                    elapsed_time = return_process_start_time - obs_controller.recording_start_time
+                    event_data = {
+                        "event": "return_completed_successfully",
+                        "timestamp": round(elapsed_time, 3),
+                        "label": f"Return failed for slot {target_slot.get('index', -1)}, restart was required",
+                        "metadata": {
+                            "slot_index": target_slot.get('index', -1),
+                            "return_phase": 3,
+                            "status": "failed_restart_required"
+                        }
+                    }
+                    obs_controller.event_timestamps.append(event_data)
+                    print(f"🕒 Video Event Logged: 'return_completed_successfully' (FAILED) at {elapsed_time:.3f}s")
+
+                # Vì restart đã xảy ra, coi như toàn bộ quá trình là thành công
+                print("   ✅ Finalized return process after restart.")
+                print("="*70)
+                return True
 
             # ================================================================
             # PHASE 3: GAME RESTART FALLBACK (NEW)
@@ -6969,6 +6993,22 @@ class SprunkiGamePlayer:
                 print("   Method: Click Re-Run button to reset all icons to initial positions")
                 print("   Rationale: Both precision click and carpet bombing failed")
                 print("   Expected: 100% success rate as game physically resets all states")
+
+                # Ghi lại sự kiện "thất bại" với timestamp cũ (nếu phải đến phase 3 thì lấy mốc thời gian từ khi bắt đầu return)
+                if obs_controller and obs_controller.recording_start_time is not None:
+                    elapsed_time = return_process_start_time - obs_controller.recording_start_time
+                    event_data = {
+                        "event": "return_completed_successfully",
+                        "timestamp": round(elapsed_time, 3),
+                        "label": f"Return failed for slot {target_slot.get('index', -1)}, triggering restart",
+                        "metadata": {
+                            "slot_index": target_slot.get('index', -1),
+                            "return_phase": 3,
+                            "status": "failed_restart_required"
+                        }
+                    }
+                    obs_controller.event_timestamps.append(event_data)
+                    print(f"🕒 Video Event Logged: 'return_completed_successfully' (FAILED) at {elapsed_time:.3f}s")
 
                 phase3_success = self.restart_game_to_initial_state(use_cdp)
                 
@@ -7038,6 +7078,18 @@ class SprunkiGamePlayer:
                 
                 if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
                     print("ðŸŽ‰ PRECISION CLICK SUCCESS: DUAL verification passed!")
+
+                    # Ghi lại sự kiện thành công
+                    if self.obs_controller:
+                        self.obs_controller.log_event_timestamp(
+                            "return_completed_successfully",
+                            f"Return successful for icon in slot {target_slot.get('index', -1)}",
+                            {
+                                "slot_index": target_slot.get('index', -1),
+                                "return_phase": 1,
+                                "status": "success"
+                            }
+                        )
                     return True
                 else:
                     print(f"âŒ Precision click failed: DUAL verification failed")
@@ -7053,8 +7105,7 @@ class SprunkiGamePlayer:
 
     def execute_remix_style_sequential_carpet_bombing_for_return(self, use_cdp=False):
         """
-        [FIXED] PHASE 2: REUSE exact logic from remix cleanup for return operation
-        Sửa lỗi: Thêm logic ghi timestamp cho sự kiện restart.
+        [FIXED v3] PHASE 2: Logic trung gian, truyền kết quả từ carpet bombing lên.
         """
         try:
             print(f"\nðŸ’¥ SEQUENTIAL CARPET BOMBING FOR RETURN")
@@ -7095,28 +7146,23 @@ class SprunkiGamePlayer:
             
             if success:
                 print("ðŸŽ‰ SEQUENTIAL CARPET BOMBING SUCCESS!")
-                return True
+                # Ghi lại sự kiện thành công của Phase 2
+                if self.obs_controller:
+                    self.obs_controller.log_event_timestamp(
+                        "return_completed_successfully",
+                        "Return successful via Carpet Bombing",
+                        {
+                            "return_phase": 2,
+                            "status": "success"
+                        }
+                    )
+                return True # Trả về True nếu thành công
             else:
-                print("ðŸ’¥ SEQUENTIAL CARPET BOMBING FAILED, triggering restart fallback...")
-                
-                # 🔥 ĐÂY LÀ PHẦN SỬA LỖI QUAN TRỌNG
-                obs_controller = self.obs_controller
-                if obs_controller:
-                    obs_controller.log_event_timestamp(
-                        "start_game_restart", 
-                        "Restart triggered: Carpet Bombing cleanup failed"
-                    )
-                
-                restart_success = self.restart_game_to_initial_state(use_cdp)
-
-                if obs_controller:
-                    obs_controller.log_event_timestamp(
-                        "end_game_restart", 
-                        "Restart after Carpet Bombing completed"
-                    )
-                
-                # Luôn trả về True vì restart được coi là giải pháp cuối cùng thành công
-                return True
+                # 🔥 THAY ĐỔI: Nếu hàm con trả về False (đã restart),
+                # thì hàm này cũng trả về False.
+                # Logic ghi timestamp restart sẽ được xử lý ở hàm cha.
+                print("ðŸ’¥ CARPET BOMBING FAILED, restart was triggered.")
+                return False
             
         except Exception as e:
             print(f"â Œ Error in sequential carpet bombing for return: {e}")
