@@ -6887,166 +6887,70 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=True):
         """
-        [FIXED & FINAL] 2-Phase Return với logic timestamp cho việc dựng video.
+        [REFACTORED] Centralized logic for returning an icon and logging the definitive timestamp.
+        Always returns True to allow main workflow to continue.
         """
+        return_process_start_time = time.monotonic()
+        obs_controller = self.obs_controller
+        target_slot_index = target_slot.get('index', -1)
+        
         try:
-            # GHI LẠI THỜI ĐIỂM BẮT ĐẦU CỦA TOÀN BỘ QUÁ TRÌNH RETURN
-            return_process_start_time = time.monotonic()
-            obs_controller = self.obs_controller # Lấy controller
-
-            center_x, center_y = target_slot['x'], target_slot['y']
-            target_slot_index = target_slot.get('index', -1)
-            
-            print(f"\nðŸŽ¯ 2-PHASE RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
-            print("="*70)
-            
-            # Check if DUAL verification is available
             dual_verification_enabled = self.characters_available or self.putted_chars_available
-            if dual_verification_enabled:
-                print("ðŸ”„ DUAL verification ENABLED:")
-                print(f"   ðŸ”¢ Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ N/A'}")
-                print(f"   ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ N/A'}")
-            else:
-                print("âš ï¸ DUAL verification DISABLED - using fallback logic")
             
-            # ================================================================
-            # PHASE 0: PRE-FLIGHT CHECK (Skip if already empty)
-            # ================================================================
-            print("\nðŸ” PHASE 0: PRE-FLIGHT CHECK")
-            print("-" * 40)
-            
-            if dual_verification_enabled:
-                needs_return, initial_state, reason = self.check_slot_needs_return(target_slot_index)
-                
-                if not needs_return:
-                    print(f"âœ… PHASE 0 RESULT: Slot {target_slot_index} doesn't need return ({reason})")
-                    print("ðŸš€ EARLY EXIT: Return operation skipped successfully")
-                    print("="*70)
-                    return True
-                else:
-                    print(f"ðŸŽ¯ PHASE 0 RESULT: Slot {target_slot_index} needs return ({reason})")
-            else:
-                print("âš ï¸ Pre-flight check skipped (verification disabled)")
-            
-            # ================================================================
-            # PHASE 1: PRECISION CLICK vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
-            # ================================================================
+            # PHASE 1: PRECISION CLICK
             print(f"\nðŸŽ¯ PHASE 1: PRECISION CLICK")
-            print("-" * 40)
-            
-            phase1_success = self.execute_precision_return_click(target_slot, use_cdp, dual_verification_enabled)
-            
-            if phase1_success:
-                print("ðŸŽ‰ PHASE 1 SUCCESS: Precision click worked!")
-                print("="*70)
-                return True
-            else:
-                print("âŒ PHASE 1 FAILED: Precision click unsuccessful")
-            
-            # ================================================================
-            # PHASE 2: SEQUENTIAL CARPET BOMBING (same as remix cleanup)
-            # ================================================================
-            if not self.should_stop:
-                print(f"\nðŸ’¥ PHASE 2: SEQUENTIAL CARPET BOMBING")
-                print("-" * 40)
-                print("   ðŸŽ¯ Using SAME logic as remix cleanup...")
-                print("   ðŸ’¥ Progressive slot-by-slot carpet bombing")
-                
-                phase2_success = self.execute_remix_style_sequential_carpet_bombing_for_return(use_cdp)
-                
-                if phase2_success:
-                    print("ðŸŽ‰ PHASE 2 SUCCESS: Sequential carpet bombing worked!")
-                    print("="*70)
-                    return True
-
-                # 🔥 NẾU ĐẾN ĐÂY, CÓ NGHĨA LÀ PHASE 2 ĐÃ THẤT BẠI VÀ ĐÃ RESTART
-                print("ðŸ’¥ PHASE 3: FINALIZING AFTER RESTART")
-                print("-" * 40)
-                
-                # Ghi lại sự kiện "thất bại" với timestamp của lúc bắt đầu return
-                if obs_controller and obs_controller.recording_start_time is not None:
-                    elapsed_time = return_process_start_time - obs_controller.recording_start_time
-                    event_data = {
-                        "event": "return_completed_successfully",
-                        "timestamp": round(elapsed_time, 3),
-                        "label": f"Return failed for slot {target_slot.get('index', -1)}, restart was required",
-                        "metadata": {
-                            "slot_index": target_slot.get('index', -1),
-                            "return_phase": 3,
-                            "status": "failed_restart_required"
-                        }
-                    }
-                    obs_controller.event_timestamps.append(event_data)
-                    print(f"🕒 Video Event Logged: 'return_completed_successfully' (FAILED) at {elapsed_time:.3f}s")
-
-                # Vì restart đã xảy ra, coi như toàn bộ quá trình là thành công
-                print("   ✅ Finalized return process after restart.")
-                print("="*70)
+            if self._execute_precision_return_click(target_slot, use_cdp, dual_verification_enabled):
+                print("ðŸŽ‰ PHASE 1 SUCCESS!")
+                if obs_controller:
+                    obs_controller.log_event_timestamp(
+                        "return_completed_successfully",
+                        f"Return successful (Phase 1) for slot {target_slot_index}",
+                        {"slot_index": target_slot_index, "return_phase": 1, "status": "success"}
+                    )
                 return True
 
-            # ================================================================
-            # PHASE 3: GAME RESTART FALLBACK (NEW)
-            # ================================================================
-            if not self.should_stop:
-                print(f"\nPHASE 3: GAME RESTART FALLBACK (NEW)")
-                print("-" * 40)
-                print("   Method: Click Re-Run button to reset all icons to initial positions")
-                print("   Rationale: Both precision click and carpet bombing failed")
-                print("   Expected: 100% success rate as game physically resets all states")
+            # PHASE 2: CARPET BOMBING
+            print(f"\nðŸ’¥ PHASE 2: CARPET BOMBING")
+            if self._execute_carpet_bombing_return(use_cdp):
+                print("ðŸŽ‰ PHASE 2 SUCCESS!")
+                if obs_controller:
+                     obs_controller.log_event_timestamp(
+                        "return_completed_successfully",
+                        f"Return successful (Phase 2) for slot {target_slot_index}",
+                        {"slot_index": target_slot_index, "return_phase": 2, "status": "success"}
+                    )
+                return True
 
-                # Ghi lại sự kiện "thất bại" với timestamp cũ (nếu phải đến phase 3 thì lấy mốc thời gian từ khi bắt đầu return)
-                if obs_controller and obs_controller.recording_start_time is not None:
-                    elapsed_time = return_process_start_time - obs_controller.recording_start_time
-                    event_data = {
-                        "event": "return_completed_successfully",
-                        "timestamp": round(elapsed_time, 3),
-                        "label": f"Return failed for slot {target_slot.get('index', -1)}, triggering restart",
-                        "metadata": {
-                            "slot_index": target_slot.get('index', -1),
-                            "return_phase": 3,
-                            "status": "failed_restart_required"
-                        }
-                    }
-                    obs_controller.event_timestamps.append(event_data)
-                    print(f"🕒 Video Event Logged: 'return_completed_successfully' (FAILED) at {elapsed_time:.3f}s")
+            # PHASE 3: RESTART FALLBACK
+            print(f"\nðŸš¨ PHASE 3: RESTART FALLBACK")
+            if obs_controller:
+                obs_controller.log_event_timestamp("start_game_restart", "Restart triggered: Phase 1 & 2 return failed")
+            
+            self.restart_game_to_initial_state(use_cdp)
 
-                phase3_success = self.restart_game_to_initial_state(use_cdp)
-                
-                if phase3_success:
-                    print("PHASE 3 SUCCESS: Game restart completed!")
-                    print("   All icons should now be in original positions")
-                    print("="*70)
-                    return True
-                else:
-                    print("PHASE 3 WARNING: Game restart may have issues, but continuing...")
-                    print("   Workflow will continue assuming restart worked")
-                    print("="*70)
-                    return True  # Assume success even if restart verification failed
+            if obs_controller:
+                obs_controller.log_event_timestamp("end_game_restart", "Restart completed")
+            
+            # Ghi lại sự kiện "thất bại" với timestamp lùi về quá khứ
+            if obs_controller and obs_controller.recording_start_time is not None:
+                elapsed_time = return_process_start_time - obs_controller.recording_start_time
+                event_data = {
+                    "event": "return_completed_successfully",
+                    "timestamp": round(elapsed_time, 3),
+                    "label": f"Return failed for slot {target_slot_index}, restart required",
+                    "metadata": { "slot_index": target_slot_index, "return_phase": 3, "status": "failed_restart_required"}
+                }
+                obs_controller.event_timestamps.append(event_data)
+                print(f"🕒 Video Event Logged: 'return_completed_successfully' (FAILED) at {elapsed_time:.3f}s")
+            
+            return True # Luôn trả về True vì restart là giải pháp cuối cùng
 
-            # ================================================================
-            # FINAL RESULT
-            # ================================================================
-            print("\n" + "="*70)
-            print(f"3-PHASE RETURN COMPLETED - ALL PHASES ATTEMPTED")
-            print(f"   Target slot: {target_slot_index}")
-            print(f"   Phase 1 (Precision Click): FAILED")
-            print(f"   Phase 2 (Sequential Carpet Bombing): FAILED") 
-            print(f"   Phase 3 (Game Restart): COMPLETED")
-            print(f"   DUAL verification: {'Enabled' if dual_verification_enabled else 'Disabled'}")
-            print(f"   Final Status: ASSUMED SUCCESS (game restart should work)")
-            print("="*70)
-            return True  # Assume success since Phase 3 (restart) should always work
-                    
         except Exception as e:
-            print(f"âŒ 2-Phase return error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            print(f"â Œ Critical error in corrected_return_icon: {e}")
+            return True # Vẫn trả về True để không làm sập workflow chính
 
-    def execute_precision_return_click(self, target_slot, use_cdp, dual_verification_enabled):
-        """
-        ðŸŽ¯ PHASE 1: Execute precision click trá»±c tiáº¿p vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
-        """
+    def _execute_precision_return_click(self, target_slot, use_cdp, dual_verification_enabled):
+        """PHASE 1: Attempts a precision click and returns ONLY True/False."""
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             domain_adj = self.get_domain_adjustments()
@@ -7078,35 +6982,19 @@ class SprunkiGamePlayer:
                 
                 if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
                     print("ðŸŽ‰ PRECISION CLICK SUCCESS: DUAL verification passed!")
-
-                    # Ghi lại sự kiện thành công
-                    if self.obs_controller:
-                        self.obs_controller.log_event_timestamp(
-                            "return_completed_successfully",
-                            f"Return successful for icon in slot {target_slot.get('index', -1)}",
-                            {
-                                "slot_index": target_slot.get('index', -1),
-                                "return_phase": 1,
-                                "status": "success"
-                            }
-                        )
                     return True
                 else:
                     print(f"âŒ Precision click failed: DUAL verification failed")
                     return False
             else:
-                # No verification - assume success
                 print("âœ… Precision click assumed success (no verification)")
                 return True
-                
         except Exception as e:
             print(f"âŒ Error in precision return click: {e}")
             return False
 
-    def execute_remix_style_sequential_carpet_bombing_for_return(self, use_cdp=False):
-        """
-        [FIXED v3] PHASE 2: Logic trung gian, truyền kết quả từ carpet bombing lên.
-        """
+    def _execute_carpet_bombing_return(self, use_cdp=False):
+        """PHASE 2: Attempts carpet bombing and returns ONLY True/False (True=cleaned, False=needs_restart)."""
         try:
             print(f"\nðŸ’¥ SEQUENTIAL CARPET BOMBING FOR RETURN")
             print("="*60)
@@ -7143,30 +7031,11 @@ class SprunkiGamePlayer:
             success = self.execute_sequential_carpet_bombing_sets(
                 sorted_slots, initial_count, use_cdp
             )
-            
-            if success:
-                print("ðŸŽ‰ SEQUENTIAL CARPET BOMBING SUCCESS!")
-                # Ghi lại sự kiện thành công của Phase 2
-                if self.obs_controller:
-                    self.obs_controller.log_event_timestamp(
-                        "return_completed_successfully",
-                        "Return successful via Carpet Bombing",
-                        {
-                            "return_phase": 2,
-                            "status": "success"
-                        }
-                    )
-                return True # Trả về True nếu thành công
-            else:
-                # 🔥 THAY ĐỔI: Nếu hàm con trả về False (đã restart),
-                # thì hàm này cũng trả về False.
-                # Logic ghi timestamp restart sẽ được xử lý ở hàm cha.
-                print("ðŸ’¥ CARPET BOMBING FAILED, restart was triggered.")
-                return False
-            
+            return success
         except Exception as e:
-            print(f"â Œ Error in sequential carpet bombing for return: {e}")
+            print(f"â Œ Error in carpet bombing return: {e}")
             return False
+                    
 
     def _execute_cdp_return(self, center_x, center_y, domain_adj):
         try:
@@ -7287,17 +7156,15 @@ class SprunkiGamePlayer:
             if obs_controller:
                 obs_controller.log_event_timestamp("start_return", f"Returning icon {icon_index}")
 
-            return_success = self.execute_smart_return_with_auto_recovery(target_slot, f"showcase_{mode}_icon_{icon_index}", max_retries=2, use_cdp=True)
+            return_success = self.corrected_return_icon(target_slot, use_cdp=True)
 
             if obs_controller:
-                obs_controller.log_event_timestamp("end_return", f"Return for icon {icon_index} {'succeeded' if return_success else 'failed'}", {"success": return_success})
-            
-            if obs_controller:
                 if return_success:
-                    obs_controller.log_event_timestamp("end_icon_showcase", f"End showcase cycle for icon {icon_index}")
+                     obs_controller.log_event_timestamp("end_icon_showcase", f"End showcase cycle for icon {icon_index}")
                 else:
-                    obs_controller.log_event_timestamp("icon_showcase_failed", f"Return failed for icon {icon_index}", {"stage": "return"})
-            
+                    # Ghi nhận lỗi nếu return thất bại (dù corrected_return_icon trả về True)
+                    obs_controller.log_event_timestamp("icon_showcase_failed", f"Return process for icon {icon_index} required a restart.", {"stage": "return"})
+
             # Force cleanup after each icon
             try:
                 if hasattr(self, 'resource_manager'):
@@ -7940,7 +7807,14 @@ class SprunkiGamePlayer:
             if has_bonus:
                 if not self.showcase_all_bonus_corrected("Normal", progress_callback=progress_callback):
                     return False
-            
+
+            # Ghi lại sự kiện bắt đầu phần remix
+            if self.obs_controller:
+                self.obs_controller.log_event_timestamp(
+                    "start_full_remix_performance",
+                    "Starting full remix performance section"
+                )
+
             # Normal remixes
             if not self.play_all_remixes_corrected("Normal", progress_callback=progress_callback):
                 return False
@@ -7959,7 +7833,14 @@ class SprunkiGamePlayer:
                 if has_bonus:
                     if not self.showcase_all_bonus_corrected("Horror", progress_callback=progress_callback):
                         return False
-                
+
+                # Ghi lại sự kiện bắt đầu phần horror remix
+                if self.obs_controller:
+                    self.obs_controller.log_event_timestamp(
+                        "start_full_remix_performance",
+                        "Starting HORROR remix performance section"
+                    )
+
                 # Horror remixes
                 if not self.play_all_remixes_corrected("Horror", progress_callback=progress_callback):
                     return False
