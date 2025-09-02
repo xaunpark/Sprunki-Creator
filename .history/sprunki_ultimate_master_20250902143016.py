@@ -2202,7 +2202,24 @@ class SprunkiUltimateMaster:
                 self.should_stop = True
                 
                 self.processing_manager.logger.info("✅ Processing pipeline stop signal sent")
-                
+
+                # ================================================================
+                # PHASE 1.5: GRACEFUL RECORDING STOP
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 1.5: Attempting graceful OBS stop to save timestamp...")
+                if hasattr(self, 'obs_controller') and self.obs_controller:
+                    try:
+                        # Hàm này sẽ tự động gọi logic lưu file timestamp
+                        stop_success, final_path = self.obs_controller.stop_recording()
+                        if stop_success:
+                            self.processing_manager.logger.info(f"   ✅ Recording stopped gracefully. Timestamp file saved for: {final_path}")
+                        else:
+                            self.processing_manager.logger.warning("   ⚠️ Graceful stop failed, comprehensive cleanup will take over.")
+                    except Exception as e:
+                        self.processing_manager.logger.error(f"   ❌ Error during graceful stop_recording call: {e}")
+                else:
+                    self.processing_manager.logger.info("   ℹ️ OBS controller not available for graceful stop.")
+
                 # ================================================================
                 # PHASE 2: OBS EMERGENCY CLEANUP
                 # ================================================================
@@ -2337,7 +2354,33 @@ class SprunkiUltimateMaster:
                     self.processing_manager.logger.info("   ✅ Emergency stop hotkey removed")
                 except Exception as e:
                     self.processing_manager.logger.info(f"   ℹ️ Hotkey removal: {e} (may not have been registered)")
-                
+
+                # ================================================================
+                # PHASE 6: FINAL DATA PERSISTENCE (SAVE PARTIAL MANIFEST)
+                # ================================================================
+                self.processing_manager.logger.info("🛑 Phase 6: Saving partial manifest for interrupted item...")
+                try:
+                    if self.processing_manager and self.processing_manager.queue:
+                        current_item_index = self.processing_manager.current_item_index
+                        if 0 <= current_item_index < len(self.processing_manager.queue):
+                            current_item = self.processing_manager.queue[current_item_index]
+                            
+                            # Cập nhật trạng thái của item trước khi lưu
+                            current_item.status = "failed"
+                            current_item.error_message = "Processing stopped by user (ESC key)"
+                            current_item.end_time = datetime.now()
+                            
+                            self.processing_manager.logger.info(f"   Updating status for '{current_item.display_name}' to FAILED.")
+                            
+                            # Gọi hàm tạo manifest
+                            self.processing_manager._generate_manifest_for_item(current_item)
+                        else:
+                            self.processing_manager.logger.info("   ℹ️ No active item index to generate a manifest for.")
+                    else:
+                        self.processing_manager.logger.info("   ℹ️ Processing manager or queue not available.")
+                except Exception as e:
+                    self.processing_manager.logger.error(f"   ❌ Failed to save partial manifest: {e}")
+
                 # ================================================================
                 # EMERGENCY STOP COMPLETION SUMMARY
                 # ================================================================
@@ -2354,20 +2397,6 @@ class SprunkiUltimateMaster:
                 self.processing_manager.logger.info("   • UI state reset")
                 self.processing_manager.logger.info("   • Hotkeys removed")
                 self.processing_manager.logger.info("=" * 60)
-                
-                # Show user notification
-                messagebox.showwarning("🛑 Emergency Stop Completed", 
-                    f"Unified processing pipeline emergency stopped!\n\n"
-                    f"🧹 COMPREHENSIVE CLEANUP PERFORMED:\n"
-                    f"✅ OBS recording stopped\n"
-                    f"✅ Game operations halted\n"
-                    f"✅ Browser closed and cleaned\n"
-                    f"✅ Resources freed\n"
-                    f"✅ UI state reset\n\n"
-                    f"⏱️ Emergency stop completed in {emergency_duration:.1f}s\n"
-                    f"🎯 System ready for new operations")
-                
-                return
             
             # ================================================================
             # FALLBACK: EMERGENCY STOP WHEN NO PIPELINE RUNNING
@@ -2401,14 +2430,6 @@ class SprunkiUltimateMaster:
                 emergency_duration = (datetime.now() - emergency_start_time).total_seconds()
                 
                 self.processing_manager.logger.info(f"✅ General emergency stop completed in {emergency_duration:.1f}s")
-                
-                messagebox.showwarning("⚠️ Emergency Stop", 
-                    f"Emergency stop performed!\n\n"
-                    f"🧹 CLEANUP PERFORMED:\n"
-                    f"✅ Stop flags set\n"
-                    f"✅ Game operations halted\n"
-                    f"✅ Browser closed\n\n"
-                    f"⏱️ Completed in {emergency_duration:.1f}s")
         
         except Exception as e:
             # Critical error during emergency stop
@@ -2431,16 +2452,6 @@ class SprunkiUltimateMaster:
                     
             except:
                 pass
-            
-            # Critical error notification
-            messagebox.showerror("💥 Emergency Stop Error", 
-                f"CRITICAL ERROR during emergency stop!\n\n"
-                f"❌ ERROR: {str(e)}\n"
-                f"⏱️ Duration: {emergency_duration:.1f}s\n\n"
-                f"⚠️ Manual cleanup may be required:\n"
-                f"• Check OBS for active recordings\n"
-                f"• Close browser manually if needed\n"
-                f"• Restart application if issues persist")
     
     def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
         """
@@ -2450,7 +2461,7 @@ class SprunkiUltimateMaster:
             print("⚙️ Initializing and linking components for new job...")
             
             # 1. Tạo các component chính
-            self.game_player = SprunkiGamePlayer()
+            self.game_player = SprunkiGamePlayer(run_gui=False)
             self.obs_controller = SprunkiController()
             
             # 2. LIÊN KẾT CÁC COMPONENT

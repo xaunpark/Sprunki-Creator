@@ -22,6 +22,9 @@ import math
 import psutil
 import gc
 import weakref
+from typing import Optional, Dict, Any, TYPE_CHECKING
+if TYPE_CHECKING:
+    from sprunki_obs_controller import SprunkiController
 
 class ThreadSafeProgressUpdater:
     def __init__(self, root, action_var):
@@ -147,7 +150,9 @@ class SprunkiGamePlayer:
         self.RETURN_MODE_INDIVIDUAL = "individual"  # Single icon operations
         self.RETURN_MODE_REMIX = "remix"           # Multiple icons batch operations
         self.RETURN_MODE_AUTO = "auto"             # Auto-detect based on context
-        
+
+        self.game_control_type = "click_drag"  # Default to the most common type
+
         # Current return mode tracking
         self.current_return_mode = self.RETURN_MODE_AUTO
         self.active_icons_count = 0  # Track how many icons currently on slots
@@ -155,7 +160,7 @@ class SprunkiGamePlayer:
         # Carpet bombing configuration - SIMPLIFIED
         self.carpet_bombing_config = {
             'base_coords_per_slot': 2,      # Start with 2 coordinates per slot
-            'max_sets': 6,                  # Maximum bombing sets
+            'max_sets': 3,                  # Maximum bombing sets
             'inter_click_delay': 0.03,      # Delay between clicks within slot
             'inter_slot_delay': 1.5,        # Delay between slots
             'inter_set_delay': 0.3,         # Delay between sets
@@ -182,6 +187,8 @@ class SprunkiGamePlayer:
         self.ws_url = None
         self.game_url = None
         
+        self.obs_controller: Optional['SprunkiController'] = None
+
         # DUAL VERIFICATION SYSTEM
         # Characters Array system  
         self.characters_setup_done = False
@@ -2114,19 +2121,22 @@ class SprunkiGamePlayer:
 
     def _get_websocket_url(self, max_retries=5, retry_delay=2):
         """
-        🔍 FIXED: Get WebSocket URL with retry mechanism and health verification
+        🔍 FIXED: Get WebSocket URL with retry mechanism and health verification. Automatically invalidates stale URLs.
         """
+        import websocket
+
+        # Nếu ws_url đã có, hãy kiểm tra xem nó còn "sống" không
         if self.ws_url:
-            # Test existing URL first
             try:
-                import websocket
-                ws = websocket.create_connection(self.ws_url, timeout=3)
-                ws.close()
-                print("   ✅ Existing WebSocket URL verified")
+                # Cố gắng tạo một kết nối ngắn để kiểm tra
+                ws_test = websocket.create_connection(self.ws_url, timeout=3) # Bây giờ sẽ không báo lỗi nữa
+                ws_test.close()
+                print(f"   ✅ Existing WebSocket URL is still valid: {self.ws_url[:60]}...")
                 return self.ws_url
-            except:
-                print("   ⚠️ Existing WebSocket URL invalid, will refresh...")
-                self.ws_url = None
+            except Exception:
+                # Nếu kết nối thất bại, URL này đã cũ. Xóa nó đi.
+                print(f"   ⚠️ Stale WebSocket URL detected. Invalidating and fetching a new one.")
+                self.ws_url = None # 🔥 ĐÂY LÀ ĐIỂM QUAN TRỌNG
         
         print(f"🔍 Getting WebSocket URL with retry (max: {max_retries} attempts)...")
         
@@ -4250,26 +4260,71 @@ class SprunkiGamePlayer:
         except Exception as e:
             return False
 
-    def smart_batch_return_all_slots_with_mode(self, use_cdp=False):
+    def smart_batch_return_all_slots_with_mode(self, use_cdp=False, context=None, obs_controller=None):
         """
-        ðŸ”„ ULTRA SIMPLIFIED: Sequential carpet bombing for batch returns
+        [FIXED] ULTRA SIMPLIFIED: Sequential carpet bombing for batch returns
+        Nhận obs_controller như một tham số để đảm bảo ghi log.
         """
         try:
             print(f"\nðŸ”„ ULTRA SIMPLIFIED BATCH RETURN")
             print("="*50)
             
+            # Luôn sử dụng obs_controller được truyền vào nếu có
+            current_obs_controller = obs_controller or self.obs_controller
+
             # Always use simplified carpet bombing
             dummy_slot = {'x': 999, 'y': 515, 'index': 3}
             success = self.execute_remix_return_strategy(dummy_slot, use_cdp)
             
             if success:
-                return 1, 1, []  # success_count, total_attempted, errors
+                print("SEQUENTIAL CARPET BOMBING SUCCESS for remix cleanup")
+                return 1, 1, []
             else:
-                return 0, 1, ["Sequential carpet bombing incomplete"]
+                print("SEQUENTIAL CARPET BOMBING FAILED for remix cleanup")
+                print("ATTEMPTING GAME RESTART FALLBACK for remix cleanup...")
+                
+                # Ghi timestamp trước khi restart
+                if current_obs_controller:
+                    restart_metadata = {"reason": "Remix cleanup failed"}
+                    if context:
+                        restart_metadata.update(context)
+                    current_obs_controller.log_event_timestamp("start_game_restart", "Restart triggered during remix cleanup", restart_metadata)
+
+                restart_success = self.restart_game_to_initial_state(use_cdp)
+                
+                if current_obs_controller:
+                    current_obs_controller.log_event_timestamp("end_game_restart", "Restart after remix cleanup completed")
+
+                if restart_success:
+                    print("GAME RESTART FALLBACK SUCCESS for remix cleanup")
+                    return 1, 1, []
+                else:
+                    print("GAME RESTART WARNING for remix cleanup: Assuming success")
+                    return 1, 1, []
             
         except Exception as e:
-            print(f"âŒ Ultra simplified batch return error: {e}")
-            return 0, 1, [f"Error: {str(e)}"]
+            print(f"Ultra simplified batch return error: {e}")
+            
+            # Luôn sử dụng obs_controller được truyền vào nếu có
+            current_obs_controller = obs_controller or self.obs_controller
+            if current_obs_controller:
+                current_obs_controller.log_event_timestamp("start_game_restart", f"Emergency restart due to exception: {e}", context)
+
+            try:
+                restart_success = self.restart_game_to_initial_state(use_cdp)
+                
+                if current_obs_controller:
+                    current_obs_controller.log_event_timestamp("end_game_restart", "Emergency restart completed")
+                
+                if restart_success:
+                    print("EMERGENCY RESTART SUCCESS for remix cleanup")
+                    return 1, 1, []
+                else:
+                    print("EMERGENCY RESTART WARNING: Assuming success")
+                    return 1, 1, []
+            except Exception as restart_error:
+                print(f"Emergency restart failed for remix: {restart_error}")
+                return 0, 1, [f"All methods failed including restart: {str(restart_error)}"]
 
     def _execute_carpet_bombing_strategy(self, icon_count, use_cdp=False):
         """
@@ -4390,8 +4445,7 @@ class SprunkiGamePlayer:
                 
                 # Try primary method
                 success = self.execute_smart_return_with_mode_detection(
-                    target_slot, operation_context, use_cdp
-                )
+                    target_slot, operation_context, use_cdp)
                 
                 if success:
                     print(f"âœ… SUCCESS on attempt {attempt}")
@@ -4546,8 +4600,8 @@ class SprunkiGamePlayer:
 
     def execute_sequential_carpet_bombing_sets(self, sorted_slots, initial_count, use_cdp=False):
         """
-        ðŸŽ¯ NEW: Execute progressive carpet bombing sets
-        Set 1: 2 coords/slot, Set 2: 3 coords/slot, etc.
+        [FIXED v2] Execute progressive carpet bombing sets.
+        Returns False if a game restart was necessary.
         """
         try:
             print(f"\nðŸŽ¯ SEQUENTIAL CARPET BOMBING SETS")
@@ -4608,14 +4662,30 @@ class SprunkiGamePlayer:
             final_count = self.get_characters_count() if self.characters_available else None
             
             if final_count == 0:
-                print(f"ðŸŽ‰ FINAL SUCCESS! All icons cleared")
+                print(f"FINAL SUCCESS! All icons cleared")
                 return True
             else:
-                print(f"âš ï¸ INCOMPLETE after {max_sets} sets: {final_count} icons remaining")
+                print(f"CARPET BOMBING INCOMPLETE after {max_sets} sets: {final_count} icons remaining")
+                print("ATTEMPTING GAME RESTART FALLBACK...")
+
+                # Game restart fallback when carpet bombing fails
+                restart_success = self.restart_game_to_initial_state(use_cdp)
+
+                # LUÔN TRẢ VỀ FALSE KHI ĐÃ RESTART
+                # Điều này báo cho hàm cha biết rằng đã xảy ra một sự kiện đặc biệt
                 return False
-            
+                
         except Exception as e:
-            print(f"âŒ Error in sequential carpet bombing: {e}")
+            print(f"Error in sequential carpet bombing: {e}")
+            
+            print("EMERGENCY GAME RESTART due to carpet bombing error...")
+            try:
+                self.restart_game_to_initial_state(use_cdp)
+            except Exception as restart_error:
+                print(f"Emergency restart also failed: {restart_error}")
+            
+            # Dù restart thành công hay thất bại,
+            # vẫn phải trả về False để báo hiệu cho hàm cha.
             return False
 
     def generate_simple_coordinate_set(self, sorted_slots, coords_per_slot, set_num):
@@ -5633,14 +5703,31 @@ class SprunkiGamePlayer:
     # == ENHANCED DRAG & DROP WITH VERIFICATION ==
     # ================================================================
 
-    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True):
+    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
             """
-            ENHANCED: Drag and drop with DUAL verification (Characters Array + Putted Characters)
-            UPDATED: Reduced timing for faster workflow
-            CHá»ˆ Cáº¦N 1 TRONG 2 THÃ€NH CÃ”NG LÃ€ Äá»¦ - Maximum compatibility across all mods
+            [FIXED & FINAL] Drag and drop với logic timestamp cho việc dựng video.
             """
-            print(f"\nðŸŽ¯ ENHANCED DRAG START: Icon to slot with DUAL verification")
+            print(f"\nðŸŽ¯ DYNAMIC DRAG START (is_first_icon: {is_first_icon})")
             print("="*60)
+
+            # Ưu tiên giá trị override được truyền vào (dùng cho json_generator)
+            if control_type_override:
+                self.game_control_type = control_type_override
+                print(f"🎮 Using OVERRIDDEN control type: '{self.game_control_type}'")
+            # Nếu không, cố gắng đọc từ config (dùng khi chơi game bình thường)
+            elif self.config and 'gameSettings' in self.config:
+                self.game_control_type = self.config['gameSettings'].get('gameControlType', 'click_drag')
+                print(f"🎮 Using control type from JSON config: '{self.game_control_type}'")
+            # Nếu cả hai đều không có, dùng giá trị mặc định
+            else:
+                self.game_control_type = 'click_drag' # Fallback
+                print(f"🎮 Using DEFAULT control type: '{self.game_control_type}'")
+            
+            print(f"🎮 Using detected control type: '{self.game_control_type}'")
+
+            if is_first_icon:
+                print("🎪 First icon detected - ensuring game focus and applying extended waits...")
+                self.ensure_game_focus()
 
             # RESET TRACKING: Clear previous operation tracking
             self.working_systems = {'characters': None, 'putted': None}
@@ -5669,11 +5756,13 @@ class SprunkiGamePlayer:
             characters_before, putted_before = None, None
             characters_after, putted_after = None, None
 
+            obs_controller = self.obs_controller # Lấy controller để sử dụn
+
             # Try each coordinate until success
             for coord_index, (start_x, start_y) in enumerate(coordinates):
                 if self.should_stop:
                     break
-                    
+
                 coord_used = coord_index + 1
                 coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
                 print(f"\nðŸŽ¯ Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
@@ -5701,11 +5790,42 @@ class SprunkiGamePlayer:
                 self.last_drag_characters_before = characters_before
                 self.last_drag_putted_before = putted_before
 
-                # Execute single drag attempt
-                drag_executed = self._execute_single_drag_attempt(
-                    start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj
-                )
-                
+                print("   Executing dynamic drag attempt...")
+                drag_executed = False
+                action_start_time = None
+                end_x, end_y = target_slot['x'], target_slot['y']
+
+                if use_cdp:
+                    ws_url = self._get_websocket_url()
+                    if ws_url:
+                        try:
+                            ws = websocket.create_connection(ws_url, timeout=30)
+                            drag_executed, action_start_time = self._execute_dynamic_drag_cdp(
+                                ws, start_x, start_y, end_x, end_y, 
+                                self.game_control_type, 
+                                is_first_icon
+                            )
+                            ws.close()
+                        except Exception as cdp_err:
+                            print(f"   ⚠️ CDP connection/drag error: {cdp_err}, falling back to PyAutoGUI")
+                            drag_executed = False # Đảm bảo fallback được kích hoạt
+                    else:
+                        print("   ⚠️ WebSocket not available, falling back to PyAutoGUI")
+
+                # Fallback to PyAutoGUI if CDP is disabled or fails
+                if not use_cdp or not drag_executed:
+                    print("   Fallback to PyAutoGUI drag...")
+                    # PyAutoGUI chưa hỗ trợ dynamic, ta sẽ dùng logic cũ của nó
+                    # Đây là điểm có thể nâng cấp trong tương lai nếu cần
+                    timing_key = 'first_icon' if is_first_icon else 'normal_icon'
+                    delays = self.DRAG_DELAYS[timing_key].copy()
+                    
+                    drag_executed = self._execute_pyautogui_drag(
+                        start_x, start_y, end_x, end_y, 
+                        delays, domain_adj, 
+                        is_first_icon # Truyền biến is_first_icon vào
+                    )
+
                 if not drag_executed:
                     print(f"âŒ Drag execution failed at coordinate {coord_used}")
                     if coord_index < len(coordinates) - 1:
@@ -5741,6 +5861,24 @@ class SprunkiGamePlayer:
                             print(f"   âš ï¸ Verification attempt {verify_attempt} failed, will try again after a longer wait...")
                     
                     if verification_success:
+                        # Ghi lại timestamp của lần kéo thành công
+                        if obs_controller and action_start_time and obs_controller.recording_start_time is not None:
+                            elapsed_time = action_start_time - obs_controller.recording_start_time
+
+                            # Tạo một sự kiện mới thay vì gọi log_event_timestamp trực tiếp
+                            # để có thể tùy chỉnh timestamp
+                            event_data = {
+                                "event": "successful_drag_started",
+                                "timestamp": round(elapsed_time, 3),
+                                "label": f"Successful drag started for icon {icon.get('index', -1)}",
+                                "metadata": {
+                                    "icon_index": icon.get('index', -1),
+                                    "attempt_number": coord_used
+                                }
+                            }
+                            obs_controller.event_timestamps.append(event_data)
+                            print(f"🕒 Video Event Logged: 'successful_drag_started' at {elapsed_time:.3f}s")
+
                         print(f"ðŸŽ‰ ENHANCED DRAG VERIFIED successfully at coordinate {coord_used}!")
                         success = True
                         break # ThoÃ¡t khá»i vÃ²ng láº·p thá»­ tá»a Ä‘á»™ (for coord_index...)
@@ -6016,6 +6154,85 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print(f"âŒ PyAutoGUI intro skipping failed: {e}")
+            return False
+
+    def restart_game_to_initial_state(self, use_cdp=True):
+        """
+        PHASE 3 FALLBACK: Restart game to initial state by clicking Re-Run button
+        Used when both precision click and carpet bombing fail
+        """
+        try:
+            print(f"\nPHASE 3: GAME RESTART TO INITIAL STATE")
+            print("="*60)
+            print("   Method: Click Re-Run button + Skip intro sequence")
+            print("   Re-Run button coordinates: (40, 75)")
+            print("   Expected result: All icons returned to initial positions")
+            
+            # Ensure window focus before restart
+            self._ensure_focus_before_operation("game restart", focus_type="light")
+            
+            # Click Re-Run button at fixed coordinates
+            print("   Step 1: Clicking Re-Run button...")
+            if use_cdp:
+                # Try CDP first
+                ws_url = self._get_websocket_url()
+                if ws_url:
+                    ws = websocket.create_connection(ws_url, timeout=10)
+                    self._simulate_click_via_cdp(ws, 40, 75)
+                    ws.close()
+                    print("   Re-Run clicked via CDP")
+                else:
+                    # Fallback to PyAutoGUI
+                    pyautogui.click(40, 75)
+                    print("   Re-Run clicked via PyAutoGUI")
+            else:
+                pyautogui.click(40, 75)
+                print("   Re-Run clicked via PyAutoGUI")
+            
+            # Wait for game restart process
+            print("   Waiting for game restart process (3s)...")
+            time.sleep(3.0)
+            
+            # Skip intro sequence (reuse existing logic)
+            print("   Step 2: Skipping intro sequence...")
+            if use_cdp:
+                intro_success = self.intro_skip_via_cdp()
+            else:
+                intro_success = self.intro_skip_via_pyautogui()
+            
+            if intro_success:
+                print("   Intro skip completed")
+            else:
+                print("   Intro skip warning, continuing anyway...")
+            
+            # Additional stabilization wait
+            print("   Game restart stabilization (2s)...")
+            time.sleep(2.0)
+            
+            # Verify restart success if verification available
+            if self.characters_available or self.putted_chars_available:
+                characters_count, putted_count = self.get_dual_counts()
+                print(f"   Post-restart verification:")
+                print(f"      Characters: {characters_count}")
+                print(f"      Putted: {putted_count}")
+                
+                # Expect 0 after successful restart
+                if (characters_count == 0 or characters_count is None) and (putted_count == 0 or putted_count is None):
+                    print("   RESTART VERIFIED: Game returned to initial state!")
+                    print("   All icons should now be in original positions")
+                else:
+                    print("   RESTART UNCLEAR: State verification inconclusive")
+                    print("   Assuming restart successful - continuing workflow")
+            else:
+                print("   Verification disabled - assuming restart successful")
+            
+            print("GAME RESTART COMPLETED!")
+            print("="*60)
+            return True
+            
+        except Exception as e:
+            print(f"Game restart error: {e}")
+            print("Restart may have failed - continuing with workflow anyway")
             return False
 
     def close_game_window(self):
@@ -6572,102 +6789,168 @@ class SprunkiGamePlayer:
                 pass
             return False
 
-    def corrected_return_icon(self, target_slot, use_cdp=True):
+    def _execute_dynamic_drag_cdp(self, ws, start_x, start_y, end_x, end_y, control_type, is_first_icon):
         """
-        ðŸŽ¯ IMPROVED: 2-Phase Return vá»›i Sequential Carpet Bombing  
-        Phase 1: Precision Click trá»±c tiáº¿p vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
-        Phase 2: Sequential Carpet Bombing (same as remix cleanup)
+        [FIXED v2] Executes a dynamic drag via CDP, now returns precise start time.
         """
         try:
-            center_x, center_y = target_slot['x'], target_slot['y']
-            target_slot_index = target_slot.get('index', -1)
+            print(f"   Executing UPGRADED DYNAMIC CDP DRAG (is_first_icon: {is_first_icon}, type: '{control_type}')")
             
-            print(f"\nðŸŽ¯ 2-PHASE RETURN: Slot {target_slot_index} at ({center_x}, {center_y})")
-            print("="*70)
+            # BƯỚC 1: Lấy bộ thời gian trễ phù hợp
+            timing_key = 'first_icon' if is_first_icon else 'normal_icon'
+            delays = self.DRAG_DELAYS[timing_key].copy()
+            domain_adj = self.get_domain_adjustments()
+            stability_factor = domain_adj.get('stability_factor', 1.0)
+            for key in delays:
+                delays[key] *= stability_factor
             
-            # Check if DUAL verification is available
-            dual_verification_enabled = self.characters_available or self.putted_chars_available
-            if dual_verification_enabled:
-                print("ðŸ”„ DUAL verification ENABLED:")
-                print(f"   ðŸ”¢ Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ N/A'}")
-                print(f"   ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ N/A'}")
-            else:
-                print("âš ï¸ DUAL verification DISABLED - using fallback logic")
-            
-            # ================================================================
-            # PHASE 0: PRE-FLIGHT CHECK (Skip if already empty)
-            # ================================================================
-            print("\nðŸ” PHASE 0: PRE-FLIGHT CHECK")
-            print("-" * 40)
-            
-            if dual_verification_enabled:
-                needs_return, initial_state, reason = self.check_slot_needs_return(target_slot_index)
-                
-                if not needs_return:
-                    print(f"âœ… PHASE 0 RESULT: Slot {target_slot_index} doesn't need return ({reason})")
-                    print("ðŸš€ EARLY EXIT: Return operation skipped successfully")
-                    print("="*70)
-                    return True
-                else:
-                    print(f"ðŸŽ¯ PHASE 0 RESULT: Slot {target_slot_index} needs return ({reason})")
-            else:
-                print("âš ï¸ Pre-flight check skipped (verification disabled)")
-            
-            # ================================================================
-            # PHASE 1: PRECISION CLICK vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
-            # ================================================================
-            print(f"\nðŸŽ¯ PHASE 1: PRECISION CLICK")
-            print("-" * 40)
-            
-            phase1_success = self.execute_precision_return_click(target_slot, use_cdp, dual_verification_enabled)
-            
-            if phase1_success:
-                print("ðŸŽ‰ PHASE 1 SUCCESS: Precision click worked!")
-                print("="*70)
-                return True
-            else:
-                print("âŒ PHASE 1 FAILED: Precision click unsuccessful")
-            
-            # ================================================================
-            # PHASE 2: SEQUENTIAL CARPET BOMBING (same as remix cleanup)
-            # ================================================================
-            if not self.should_stop:
-                print(f"\nðŸ’¥ PHASE 2: SEQUENTIAL CARPET BOMBING")
-                print("-" * 40)
-                print("   ðŸŽ¯ Using SAME logic as remix cleanup...")
-                print("   ðŸ’¥ Progressive slot-by-slot carpet bombing")
-                
-                phase2_success = self.execute_remix_style_sequential_carpet_bombing_for_return(use_cdp)
-                
-                if phase2_success:
-                    print("ðŸŽ‰ PHASE 2 SUCCESS: Sequential carpet bombing worked!")
-                    print("="*70)
-                    return True
-                else:
-                    print("ðŸ’¥ PHASE 2 FAILED: Sequential carpet bombing unsuccessful")
-            
-            # ================================================================
-            # FINAL RESULT
-            # ================================================================
-            print("\n" + "="*70)
-            print(f"ðŸ’¥ 2-PHASE RETURN FAILED - BOTH PHASES EXHAUSTED")
-            print(f"   âŒ Target slot: {target_slot_index}")
-            print(f"   âŒ Phase 1 (Precision Click): FAILED")
-            print(f"   âŒ Phase 2 (Sequential Carpet Bombing): FAILED") 
-            print(f"   ðŸ”„ DUAL verification: {'âœ… Enabled' if dual_verification_enabled else 'âš ï¸ Disabled'}")
-            print("="*70)
-            return False
-                    
-        except Exception as e:
-            print(f"âŒ 2-Phase return error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            # Xử lý đặc biệt cho first_icon (chờ lâu hơn)
+            if is_first_icon:
+                print("   🎪 First icon - applying extended timing and extra wait...")
+                time.sleep(delays['approach'])
+                time.sleep(domain_adj['extra_focus_time'])
 
-    def execute_precision_return_click(self, target_slot, use_cdp, dual_verification_enabled):
+            # 🔥 GHI LẠI THỜI GIAN NGAY TRƯỚC HÀNH ĐỘNG ĐẦU TIÊN
+            action_start_time = time.monotonic()
+
+            # Di chuyển chuột đến vị trí bắt đầu
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {"type": "mouseMoved", "x": start_x, "y": start_y}
+            })
+            if not is_first_icon: # Nếu không phải icon đầu, dùng approach delay bình thường
+                time.sleep(delays['approach'])
+
+            # BƯỚC 2: Focus vào icon (click "mồi")
+            if control_type == "double_click_drag":
+                print("   Using DOUBLE-CLICK AND DRAG (CDP)...")
+                # Click đầu tiên
+                self._simulate_click_via_cdp(ws, start_x, start_y)
+                time.sleep(0.15) 
+                
+                # Click thứ hai và giữ
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 2}
+                })
+            else: # Mặc định là "click_drag"
+                print("   Using standard CLICK-DRAG (CDP)...")
+                self._simulate_click_via_cdp(ws, start_x, start_y)
+                time.sleep(delays['focus']) # Sử dụng delay từ bộ timing
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
+                })
+
+            # BƯỚC 3: Thời gian giữ chuột dài hơn (sử dụng delay từ bộ timing)
+            extended_hold = delays['hold']
+            print(f"   Holding for {extended_hold:.2f}s before dragging...")
+            time.sleep(extended_hold)
+
+            # BƯỚC 4: Kéo chuột đến vị trí đích
+            print(f"   Dragging from ({start_x}, {start_y}) to ({end_x}, {end_y})")
+            steps = 20
+            drag_duration = delays['drag']
+            sleep_per_step = drag_duration / steps
+            for i in range(1, steps + 1):
+                progress = i / steps
+                curr_x = start_x + (end_x - start_x) * progress
+                curr_y = start_y + (end_y - start_y) * progress
+                self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}
+                })
+                time.sleep(sleep_per_step)
+
+            # BƯỚC 5: Thời gian chuẩn bị thả (CRITICAL)
+            enhanced_drop_wait = delays['drop'] * 1.3
+            print(f"   Preparing to drop for {enhanced_drop_wait:.2f}s...")
+            time.sleep(enhanced_drop_wait)
+
+            # BƯỚC 6: Thả chuột tại đích
+            release_params = {
+                "type": "mouseReleased", "x": end_x, "y": end_y, "button": "left",
+                "clickCount": 2 if control_type == "double_click_drag" else 1
+            }
+            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": release_params})
+            time.sleep(delays['post_drop'])
+            
+            # BƯỚC 7: Di chuyển chuột đến vị trí an toàn (CRITICAL)
+            self.move_mouse_to_safe_position()
+            
+            print("   ✅ Upgraded Dynamic CDP drag successful.")
+            return True, action_start_time
+
+        except Exception as e:
+            print(f"   ❌ Exception during dynamic CDP drag: {e}")
+            return False, None
+
+    def corrected_return_icon(self, target_slot, use_cdp=True):
         """
-        ðŸŽ¯ PHASE 1: Execute precision click trá»±c tiáº¿p vÃ o tá»a Ä‘á»™ chÃ­nh xÃ¡c
+        [REFACTORED] Centralized logic for returning an icon and logging the definitive timestamp.
+        Always returns True to allow main workflow to continue.
         """
+        return_process_start_time = time.monotonic()
+        obs_controller = self.obs_controller
+        target_slot_index = target_slot.get('index', -1)
+        
+        try:
+            dual_verification_enabled = self.characters_available or self.putted_chars_available
+            
+            # PHASE 1: PRECISION CLICK
+            print(f"\nðŸŽ¯ PHASE 1: PRECISION CLICK")
+            if self._execute_precision_return_click(target_slot, use_cdp, dual_verification_enabled):
+                print("ðŸŽ‰ PHASE 1 SUCCESS!")
+                if obs_controller:
+                    obs_controller.log_event_timestamp(
+                        "return_completed_successfully",
+                        f"Return successful (Phase 1) for slot {target_slot_index}",
+                        {"slot_index": target_slot_index, "return_phase": 1, "status": "success"}
+                    )
+                return True
+
+            # PHASE 2: CARPET BOMBING
+            print(f"\nðŸ’¥ PHASE 2: CARPET BOMBING")
+            if self._execute_carpet_bombing_return(use_cdp):
+                print("ðŸŽ‰ PHASE 2 SUCCESS!")
+                if obs_controller:
+                     obs_controller.log_event_timestamp(
+                        "return_completed_successfully",
+                        f"Return successful (Phase 2) for slot {target_slot_index}",
+                        {"slot_index": target_slot_index, "return_phase": 2, "status": "success"}
+                    )
+                return True
+
+            # PHASE 3: RESTART FALLBACK
+            print(f"\nðŸš¨ PHASE 3: RESTART FALLBACK")
+            if obs_controller:
+                obs_controller.log_event_timestamp("start_game_restart", "Restart triggered: Phase 1 & 2 return failed")
+            
+            self.restart_game_to_initial_state(use_cdp)
+
+            if obs_controller:
+                obs_controller.log_event_timestamp("end_game_restart", "Restart completed")
+            
+            # Ghi lại sự kiện "thất bại" với timestamp lùi về quá khứ
+            if obs_controller and obs_controller.recording_start_time is not None:
+                elapsed_time = return_process_start_time - obs_controller.recording_start_time
+                event_data = {
+                    "event": "return_completed_successfully",
+                    "timestamp": round(elapsed_time, 3),
+                    "label": f"Return failed for slot {target_slot_index}, restart required",
+                    "metadata": { "slot_index": target_slot_index, "return_phase": 3, "status": "failed_restart_required"}
+                }
+                obs_controller.event_timestamps.append(event_data)
+                print(f"🕒 Video Event Logged: 'return_completed_successfully' (FAILED) at {elapsed_time:.3f}s")
+            
+            return True # Luôn trả về True vì restart là giải pháp cuối cùng
+
+        except Exception as e:
+            print(f"â Œ Critical error in corrected_return_icon: {e}")
+            return True # Vẫn trả về True để không làm sập workflow chính
+
+    def _execute_precision_return_click(self, target_slot, use_cdp, dual_verification_enabled):
+        """PHASE 1: Attempts a precision click and returns ONLY True/False."""
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             domain_adj = self.get_domain_adjustments()
@@ -6704,41 +6987,32 @@ class SprunkiGamePlayer:
                     print(f"âŒ Precision click failed: DUAL verification failed")
                     return False
             else:
-                # No verification - assume success
                 print("âœ… Precision click assumed success (no verification)")
                 return True
-                
         except Exception as e:
             print(f"âŒ Error in precision return click: {e}")
             return False
 
-    def execute_remix_style_sequential_carpet_bombing_for_return(self, use_cdp=False):
-        """
-        ðŸ’¥ PHASE 2: REUSE exact logic from remix cleanup for return operation
-        Sequential carpet bombing: slot 0 â†’ slot 1 â†’ slot 2 â†’ ... â†’ cuá»‘i
-        Progressive sets: 2â†’3â†’4â†’5â†’6... coordinates per slot
-        """
+    def _execute_carpet_bombing_return(self, use_cdp=False):
+        """PHASE 2: Attempts carpet bombing and returns ONLY True/False (True=cleaned, False=needs_restart)."""
         try:
             print(f"\nðŸ’¥ SEQUENTIAL CARPET BOMBING FOR RETURN")
             print("="*60)
             print("   ðŸ”„ REUSING: Same logic as remix cleanup")
             print("   ðŸŽ¯ Strategy: Sequential slot-by-slot processing")
             
-            # Get configuration
             if not self.config:
-                print("âŒ No config available for carpet bombing")
+                print("â Œ No config available for carpet bombing")
                 return False
                     
             all_slots = self.config.get('layout', {}).get('slots', [])
             if not all_slots:
-                print("âŒ No slots configuration found")
+                print("â Œ No slots configuration found")
                 return False
             
-            # Sort slots for sequential processing (same as remix)
             sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
             print(f"   ðŸŽ¯ Will process {len(sorted_slots)} slots sequentially")
             
-            # Get initial count for verification
             dual_verification_enabled = self.characters_available or self.putted_chars_available
             initial_count = None
             
@@ -6752,26 +7026,16 @@ class SprunkiGamePlayer:
                 
                 print(f"   ðŸ“Š Icons to clear: {initial_count}")
             else:
-                print("   âš ï¸ Verification disabled - assuming carpet bombing needed")
+                print("   âš ï¸  Verification disabled - assuming carpet bombing needed")
             
-            # Execute SAME sequential carpet bombing as remix cleanup
             success = self.execute_sequential_carpet_bombing_sets(
                 sorted_slots, initial_count, use_cdp
             )
-            
-            if success:
-                print("ðŸŽ‰ SEQUENTIAL CARPET BOMBING SUCCESS!")
-                print("   âœ… Return operation completed via carpet bombing")
-                print("   ðŸ”„ Used SAME reliable logic as remix cleanup")
-            else:
-                print("ðŸ’¥ SEQUENTIAL CARPET BOMBING FAILED")
-                print("   âŒ Even carpet bombing could not clear the slots")
-            
             return success
-            
         except Exception as e:
-            print(f"âŒ Error in sequential carpet bombing for return: {e}")
+            print(f"â Œ Error in carpet bombing return: {e}")
             return False
+                    
 
     def _execute_cdp_return(self, center_x, center_y, domain_adj):
         try:
@@ -6836,6 +7100,9 @@ class SprunkiGamePlayer:
     def showcase_single_icon_corrected(self, current_icon, mode="Normal", listen_duration=15, progress_callback=None):
         """Enhanced version with resource management"""
         try:
+            obs_controller = self.obs_controller
+            icon_index = current_icon.get('index', -1)
+
             if not self.config or not current_icon:
                 return False
 
@@ -6844,96 +7111,60 @@ class SprunkiGamePlayer:
                 self.resource_manager = ResourceManager()
 
             # Find target slot
-            target_slot = self._find_slot_by_index(3)
+            layout = self.config['layout']
+            slots = layout.get('slots', [])
+            center_slot_index = self.calculate_center_slot_index(slots)
+            target_slot = self._find_slot_by_index(center_slot_index)
             if not target_slot:
                 return False
+
+            showcase_context = {"operation": "icon_showcase", "icon_index": icon_index, "mode": mode}
+
+            if obs_controller:
+                obs_controller.log_event_timestamp("start_icon_showcase", f"Start showcase cycle for icon {icon_index}", showcase_context)
             
-            icon_index = current_icon.get('index', -1)
+            # --- GIAI ĐOẠN KÉO THẢ ---
+            if obs_controller:
+                obs_controller.log_event_timestamp("start_drag", f"Dragging icon {icon_index}", {"success": None})
             
-            print(f"STARTING ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
+            drag_success = self.corrected_drag_and_drop(current_icon, target_slot, False, True)
             
-            # PHASE 0: Enhanced cleanup with resource management
-            try:
-                self.execute_fast_showcase_cleanup()
-            except Exception as e:
-                print(f"Cleanup warning: {e}")
-                # Continue anyway
-            
-            # PHASE 1: Drag with exception handling
-            try:
-                drag_success = self.corrected_drag_and_drop(current_icon, target_slot, False, True)
-                if not drag_success:
-                    print(f"Failed to drag icon {icon_index}")
-                    return False
-            except Exception as e:
-                print(f"Drag error: {e}")
+            if obs_controller:
+                obs_controller.log_event_timestamp("end_drag", f"Drag for icon {icon_index} {'succeeded' if drag_success else 'failed'}", {"success": drag_success})
+
+            if not drag_success:
+                if obs_controller:
+                    obs_controller.log_event_timestamp("icon_showcase_failed", f"Drag failed for icon {icon_index}", {"stage": "drag"})
                 return False
+
+            if self.should_stop: return False
             
-            if self.should_stop:
-                return False
-            
-            # PHASE 2: ENHANCED LISTENING with memory-safe updates
-            print(f"PHASE 2: Listening to music for {listen_duration}s...")
-            
-            # Track memory usage
-            initial_memory = psutil.Process().memory_info().rss / 1024 / 1024
-            
+            # --- GIAI ĐOẠN NGHE NHẠC ---
+            if obs_controller:
+                obs_controller.log_event_timestamp("start_listen", f"Listening to icon {icon_index} for {listen_duration}s", {"duration": listen_duration})
+
             for countdown in range(listen_duration, 0, -1):
-                if self.should_stop:
-                    return False
-                
-                # Memory-safe progress update
-                try:
-                    if progress_callback and hasattr(self, 'thread_safe_progress_callback'):
-                        self.thread_safe_progress_callback(f"Listening {mode} icon {icon_index + 1} ({countdown}s)")
-                    elif progress_callback:
-                        # Fallback with exception handling
-                        try:
-                            progress_callback(f"Listening {mode} icon {icon_index + 1} ({countdown}s)")
-                        except Exception as gui_error:
-                            print(f"GUI update failed: {gui_error}")
-                            # Continue without GUI updates to prevent crash
-                except Exception as callback_error:
-                    print(f"Progress callback error: {callback_error}")
-                
-                # Memory monitoring every 5 seconds
-                if countdown % 5 == 0:
-                    try:
-                        current_memory = psutil.Process().memory_info().rss / 1024 / 1024
-                        memory_increase = current_memory - initial_memory
-                        
-                        if memory_increase > 50:  # More than 50MB increase
-                            print(f"Memory increase detected: {memory_increase:.1f}MB - forcing cleanup")
-                            gc.collect()  # Force garbage collection
-                            
-                    except Exception as memory_error:
-                        print(f"Memory monitoring error: {memory_error}")
-                
+                if self.should_stop: return False
                 time.sleep(1)
-            
-            if self.should_stop:
-                return False
-            
-            # PHASE 3: Return with enhanced error handling
-            try:
-                return_success = self.execute_smart_return_with_auto_recovery(
-                    target_slot, f"showcase_{mode}_icon_{icon_index}", max_retries=2, use_cdp=True
-                )
-                
+
+            if obs_controller:
+                obs_controller.log_event_timestamp("end_listen", f"Finished listening to icon {icon_index}")
+
+            if self.should_stop: return False
+
+            # --- GIAI ĐOẠN TRẢ VỀ ---
+            if obs_controller:
+                obs_controller.log_event_timestamp("start_return", f"Returning icon {icon_index}")
+
+            return_success = self.corrected_return_icon(target_slot, use_cdp=True)
+
+            if obs_controller:
                 if return_success:
-                    print(f"Icon {icon_index + 1} returned successfully")
+                     obs_controller.log_event_timestamp("end_icon_showcase", f"End showcase cycle for icon {icon_index}")
                 else:
-                    print(f"Return warning for icon {icon_index}")
-                    # Try emergency cleanup
-                    try:
-                        self._execute_emergency_return_click(target_slot)
-                    except:
-                        pass
-                
-            except Exception as return_error:
-                print(f"Return error: {return_error}")
-                # Continue anyway, don't fail entire showcase
-            
+                    # Ghi nhận lỗi nếu return thất bại (dù corrected_return_icon trả về True)
+                    obs_controller.log_event_timestamp("icon_showcase_failed", f"Return process for icon {icon_index} required a restart.", {"stage": "return"})
+
             # Force cleanup after each icon
             try:
                 if hasattr(self, 'resource_manager'):
@@ -7152,34 +7383,50 @@ class SprunkiGamePlayer:
         return remix_library
     
     def create_remix_from_pattern(self, pattern, remix_number, avoid_horror_icon=False):
-        """Create remix from pattern with option to avoid horror icon - WORKS WITH LIMITED ICONS"""
+        """
+        Tạo remix từ pattern, đảm bảo các icon được chọn nằm trong giới hạn thực tế
+        của file JSON - FLEXIBLE ICON COUNT.
+        """
         try:
             selected_icons = []
             
-            # ðŸŽ¯ NEW: Create icon_groups based on LIMITED icons (0-18)
-            limited_icon_groups = {
-                'beats': list(range(0, min(5, 19))),      # 0-4
-                'effects': list(range(5, min(10, 19))),   # 5-9
-                'melodies': list(range(10, min(15, 19))), # 10-14
-                'vocals': list(range(15, min(19, 19)))    # 15-18
+            if not self.config or 'layout' not in self.config or 'icons' not in self.config['layout']:
+                print("❌ Cannot create remix: Config with icon layout not available.")
+                return None
+                
+            all_icons_from_json = self.config['layout']['icons']
+            total_icons_available = len(all_icons_from_json)
+            print(f"🎼 Creating remix based on {total_icons_available} available icons.")
+
+            # --- LOGIC TẠO NHÓM ICON LINH HOẠT MỚI ---
+            # Tạo icon groups động dựa trên số lượng icon thực tế
+            dynamic_icon_groups = {
+                'beats': [i['index'] for i in all_icons_from_json if 0 <= i.get('index', -1) <= 4],
+                'effects': [i['index'] for i in all_icons_from_json if 5 <= i.get('index', -1) <= 9],
+                'melodies': [i['index'] for i in all_icons_from_json if 10 <= i.get('index', -1) <= 14],
+                # Vocals là TẤT CẢ các icon còn lại từ index 15 trở đi
+                'vocals': [i['index'] for i in all_icons_from_json if i.get('index', -1) >= 15]
             }
-            
-            icon_groups_to_use = limited_icon_groups.copy()
-            
+
             if avoid_horror_icon:
-                # Remove icon 19 from vocals group (15-19 -> 15-18)
-                icon_groups_to_use['vocals'] = list(range(15, 19))  # Remove index 19
-                print(f"ðŸš¨ Avoiding horror icon (19) for normal mode remix")
-            
-            print(f"ðŸŽ¯ Using limited icon groups (0-19): {icon_groups_to_use}")
-            
+                # Nếu cần tránh icon 19, ta loại nó ra khỏi nhóm vocals
+                if 19 in dynamic_icon_groups['vocals']:
+                    dynamic_icon_groups['vocals'].remove(19)
+                    print(f"👻 Avoiding horror icon (19) for normal mode remix.")
+
             for group_name, count in [('beats', pattern['beats']), 
-                                    ('effects', pattern['effects']),
-                                    ('melodies', pattern['melodies']), 
-                                    ('vocals', pattern['vocals'])]:
+                                      ('effects', pattern['effects']),
+                                      ('melodies', pattern['melodies']), 
+                                      ('vocals', pattern['vocals'])]:
                 if count > 0:
-                    available_icons = icon_groups_to_use[group_name].copy()
-                    selected = random.sample(available_icons, min(count, len(available_icons)))
+                    available_icons_in_group = dynamic_icon_groups.get(group_name, [])
+                    
+                    if not available_icons_in_group:
+                        print(f"   ⚠️ No icons available for group '{group_name}', skipping.")
+                        continue
+                        
+                    num_to_select = min(count, len(available_icons_in_group))
+                    selected = random.sample(available_icons_in_group, num_to_select)
                     selected_icons.extend(selected)
             
             random.shuffle(selected_icons)
@@ -7188,14 +7435,118 @@ class SprunkiGamePlayer:
             
             return {
                 'name': remix_name,
-                'description': f"{pattern['description']} ({pattern_counts}) [LIMITED 0-19]",
+                'description': f"{pattern['description']} ({pattern_counts})",
                 'icons': selected_icons,
                 'pattern': pattern['name']
             }
         except Exception as e:
-            print("Error creating remix from pattern: " + str(e))
+            print(f"❌ Error creating remix from pattern: {e}")
             return None
-    
+
+    def _adjust_sum_to_target(self, counts: Dict[str, int], target_sum: int) -> Dict[str, int]:
+        """Hàm trợ giúp để điều chỉnh tổng các số đếm cho khớp với target_sum."""
+        current_sum = sum(counts.values())
+        diff = target_sum - current_sum
+
+        # Sắp xếp các loại theo giá trị hiện tại để ưu tiên điều chỉnh
+        # Ưu tiên thêm/bớt vào 'beats' và 'effects'
+        priority = ['beats', 'effects', 'melodies', 'vocals']
+        
+        while diff != 0:
+            if diff > 0: # Cần thêm
+                # Thêm vào thành phần có giá trị nhỏ nhất trong danh sách ưu tiên
+                key_to_increment = min(priority, key=lambda k: counts.get(k, 0))
+                counts[key_to_increment] = counts.get(key_to_increment, 0) + 1
+                diff -= 1
+            else: # Cần bớt
+                # Bớt từ thành phần có giá trị lớn nhất (và > 0)
+                key_to_decrement = max(priority, key=lambda k: counts.get(k, 0))
+                if counts.get(key_to_decrement, 0) > 0:
+                    counts[key_to_decrement] -= 1
+                    diff += 1
+                else: # Nếu không thể bớt được nữa, dừng lại để tránh số âm
+                    break 
+        return counts
+
+    def generate_dynamic_patterns(self, total_slots: int):
+        """
+        Tạo các pattern remix một cách linh động dựa trên tổng số slot có sẵn.
+        LUÔN tạo tất cả các loại pattern.
+        """
+        print(f"🎼 Generating dynamic remix patterns for {total_slots} slots...")
+        if total_slots <= 0:
+            self.remix_patterns = [] # Xóa các pattern cũ nếu không có slot
+            return []
+
+        dynamic_patterns = []
+
+        # 1. Khuôn mẫu "Balanced" (Cân bằng)
+        balanced_counts = {
+            'beats': max(1, round(total_slots * 0.40)),
+            'effects': max(1, round(total_slots * 0.30)),
+            'melodies': max(1, round(total_slots * 0.20)),
+            'vocals': max(0, round(total_slots * 0.10))
+        }
+        balanced_counts = self._adjust_sum_to_target(balanced_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'Balanced {total_slots}-Slot', 
+            'description': f'Bản phối cân bằng cho {total_slots} slot', 
+            **balanced_counts
+        })
+
+        # 2. Khuôn mẫu "Beat Heavy" (Nhiều nhịp điệu)
+        beat_heavy_counts = {
+            'beats': max(2, round(total_slots * 0.60)),
+            'effects': max(1, round(total_slots * 0.20)),
+            'melodies': max(1, round(total_slots * 0.10)),
+            'vocals': max(1, round(total_slots * 0.10))
+        }
+        if beat_heavy_counts['beats'] >= total_slots - 2:
+            beat_heavy_counts['beats'] = total_slots - 3
+        beat_heavy_counts = self._adjust_sum_to_target(beat_heavy_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'Beat Heavy {total_slots}-Slot', 
+            'description': f'Bản phối tập trung vào nhịp điệu', 
+            **beat_heavy_counts
+        })
+        
+        # 3. Khuôn mẫu "Melodic & Atmospheric" (Giai điệu & Không khí)
+        melodic_counts = {
+            'beats': max(1, round(total_slots * 0.25)),
+            'effects': max(1, round(total_slots * 0.35)),
+            'melodies': max(1, round(total_slots * 0.30)),
+            'vocals': max(1, round(total_slots * 0.10))
+        }
+        melodic_counts = self._adjust_sum_to_target(melodic_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'Melodic {total_slots}-Slot', 
+            'description': f'Bản phối tập trung giai điệu và hiệu ứng', 
+            **melodic_counts
+        })
+
+        # 4. Khuôn mẫu "No Vocals"
+        no_vocals_counts = {
+            'beats': max(2, round(total_slots * 0.50)),
+            'effects': max(2, round(total_slots * 0.30)),
+            'melodies': max(1, round(total_slots * 0.20)),
+            'vocals': 0
+        }
+        no_vocals_counts = self._adjust_sum_to_target(no_vocals_counts, total_slots)
+        dynamic_patterns.append({
+            'name': f'No Vocals {total_slots}-Slot', 
+            'description': f'Bản phối không lời', 
+            **no_vocals_counts
+        })
+
+        print(f"✅ Generated {len(dynamic_patterns)} dynamic patterns:")
+        for p in dynamic_patterns:
+            icon_total = p['beats'] + p['effects'] + p['melodies'] + p['vocals']
+            print(f"   - {p['name']}: B={p['beats']}, E={p['effects']}, M={p['melodies']}, V={p['vocals']} (Total: {icon_total})")
+
+        # Cập nhật thuộc tính của class để các hàm khác sử dụng
+        self.remix_patterns = dynamic_patterns
+        return dynamic_patterns
+
     def _find_slot_by_index(self, slot_index):
         if not self.config:
             return None
@@ -7205,7 +7556,30 @@ class SprunkiGamePlayer:
             if slot.get('index') == slot_index:
                 return slot
         return None
-    
+
+    def calculate_center_slot_index(self, slots: list) -> int:
+        """
+        [TÍNH NĂNG MỚI] Tính toán index của slot trung tâm một cách linh động.
+        """
+        try:
+            total_slots = len(slots)
+            if total_slots == 0:
+                print("⚠️ No slots found, defaulting to center index 3")
+                return 3 # Trả về fallback an toàn
+
+            # Tính toán index của slot ở giữa (0-based)
+            # Ví dụ: 7 slots (0-6) -> (7-1)//2 = 3
+            # Ví dụ: 9 slots (0-8) -> (9-1)//2 = 4
+            center_index = (total_slots - 1) // 2
+            
+            print(f"📊 Slot calculation: {total_slots} slots → center index {center_index}")
+            
+            return center_index
+            
+        except Exception as e:
+            print(f"❌ Error calculating center slot: {e}, falling back to index 3")
+            return 3  # Fallback về giá trị an toàn nếu có lỗi
+
     def get_drag_statistics(self):
         return self.drag_stats.get_stats()
 
@@ -7251,7 +7625,7 @@ class SprunkiGamePlayer:
     # ================================================================
 
     def showcase_all_icons_corrected(self, mode="Normal", skip_icon_19=False, listen_duration=15, progress_callback=None):
-            """ENHANCED: Showcase all icons with verification system - NOW PASSES ICON OBJECTS"""
+            """ENHANCED: Showcase all icons with verification system - FLEXIBLE ICON COUNT"""
             try:
                 if not self.config:
                     return False
@@ -7259,52 +7633,49 @@ class SprunkiGamePlayer:
                 layout = self.config['layout']
                 all_icons = layout['icons']
                 
-                # --- CENTRALIZED ICON FILTERING LOGIC ---
+                # --- LOGIC LỌC ICON LINH HOẠT MỚI ---
                 icons_to_showcase = []
-                if mode == "Normal":
-                    # For Normal mode, ALWAYS use icons with index 0-18
-                    icons_to_showcase = [icon for icon in all_icons if icon.get('index', 999) <= 18]
-                    print(f"ðŸŽ¯ Normal Mode: Filtering to icons 0-18. Found {len(icons_to_showcase)} icons.")
-                elif mode == "Horror":
-                    # For Horror mode, use icons 0-19
-                    icons_to_showcase = [icon for icon in all_icons if icon.get('index', 999) <= 19]
-                    print(f"ðŸ‘» Horror Mode: Filtering to icons 0-19. Found {len(icons_to_showcase)} icons.")
+                if skip_icon_19:
+                    # Chế độ Normal của video có Horror: Lấy TẤT CẢ icon, TRỪ icon 19.
+                    icons_to_showcase = [icon for icon in all_icons if icon.get('index') != 19]
+                    logger.info(f"Normal Mode (Horror exists): Filtering out icon 19. Processing {len(icons_to_showcase)} icons.")
                 else:
-                    # Fallback for other modes
+                    # Chế độ Normal (không có horror) hoặc chế độ Horror: Lấy TẤT CẢ icon.
                     icons_to_showcase = all_icons
+                    logger.info(f"{mode} Mode: Processing all {len(icons_to_showcase)} available icons.")
 
-                print(f"\nÃ°Å¸Å½Âª STARTING ENHANCED {mode.upper()} SHOWCASE")
-                print(f"ðŸ“Š Will showcase {len(icons_to_showcase)} icons with verification system")
+                print(f"\n🎬 STARTING ENHANCED {mode.upper()} SHOWCASE")
+                print(f"📄 Will showcase {len(icons_to_showcase)} icons with verification system")
                 if self.characters_available:
-                    print("ðŸ”  Drag verification: ENABLED")
+                    print("✅ Drag verification: ENABLED")
                 else:
-                    print("âš ï¸  Drag verification: DISABLED (fallback mode)")
+                    print("⚠️ Drag verification: DISABLED (fallback mode)")
                 print("="*60)
                 
                 success_count = 0
-                # --- LOOP DIRECTLY THROUGH ICON OBJECTS ---
                 for icon_object in icons_to_showcase:
                     if self.should_stop:
                         break
                     
-                    # Pass the entire icon object to the handler function
                     if self.showcase_single_icon_corrected(icon_object, mode, listen_duration, progress_callback):
                         success_count += 1
                     else:
                         icon_index = icon_object.get('index', 'unknown')
-                        print(f"âš ï¸  Failed to showcase icon {icon_index}")
+                        print(f"⚠️ Failed to showcase icon {icon_index}")
                 
-                print(f"\nÃ¢Å“â€¦ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
-                print(f"ðŸ“Š Success: {success_count}/{len(icons_to_showcase)} icons")
+                print(f"\n✅ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
+                print(f"📊 Success: {success_count}/{len(icons_to_showcase)} icons")
                 print("="*60)
                 return success_count == len(icons_to_showcase)
                 
             except Exception as e:
-                print("â Œ Error in enhanced " + mode + " showcase: " + str(e))
+                print("❌ Error in enhanced " + mode + " showcase: " + str(e))
                 return False
 
     def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
-        """ENHANCED: Play remix with verification system"""
+        """
+        [FIXED & CHUẨN HÓA] Play remix, TRUYỀN obs_controller và context xuống các hàm cấp dưới.
+        """
         try:
             if not self.config or not remix_data:
                 return False
@@ -7319,56 +7690,45 @@ class SprunkiGamePlayer:
             emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             
             print(f"\n{emoji} STARTING ENHANCED REMIX: {remix_name}")
-            if self.characters_available:
-                print("ðŸ” Verification system ENABLED for all drags")
-            else:
-                print("âš ï¸ Verification system DISABLED - using fallback")
-            print("="*60)
             
-            # Phase 1: Drag all icons to slots with verification
-            print("ðŸŽ¯ PHASE 1: Dragging all icons to slots with verification...")
+            # === BƯỚC 1: Lấy obs_controller và tạo context ===
+            obs_controller = self.obs_controller
+            remix_metadata = {
+                "remix_name": remix_name,
+                "icon_indices": remix_icons,
+                "pattern": remix_data.get('pattern', 'unknown')
+            }
+            
+            # Phase 1: Drag all icons to slots
+            print("ðŸŽ¯ PHASE 1: Dragging all icons to slots for remix...")
             for slot_position, icon_index in enumerate(remix_icons):
-                if self.should_stop:
-                    return False
+                if self.should_stop: return False
                 
-                # Validate indices
                 if icon_index >= len(icons) or slot_position >= len(slots):
-                    print(f"âš ï¸ Invalid index: icon {icon_index} or slot {slot_position}")
                     continue
                 
                 current_icon = icons[icon_index]
                 target_slot = slots[slot_position]
-                
-                if progress_callback:
-                    progress_callback(f"{emoji} {remix_name}: Icon {icon_index} â†’ Slot {slot_position}")
-                
-                print(f"  ðŸŽ¯ Dragging icon {icon_index} to slot {slot_position} with verification...")
-                
-                # Use enhanced drag with verification
-                use_cdp = True  # Can be customized
-                if not self.corrected_drag_and_drop(current_icon, target_slot, False, use_cdp):
-                    print(f"  âŒ Failed to drag icon {icon_index} with verification")
-                    continue
-                
-                # Short delay between drags
-                time.sleep(0.3)
-            
-            if self.should_stop:
-                return False
-            
-            # Phase 2: Listen to remix music - THREAD SAFE
-            print(f"PHASE 2: Enjoying remix for {listen_duration}s...")
-            if progress_callback:
-                try:
-                    self.thread_safe_progress_callback(f"Enjoying {remix_name}")
-                except Exception as e:
-                    print(f"Progress callback warning: {e}")
 
+                if not self.corrected_drag_and_drop(current_icon, target_slot, False, use_cdp=True):
+                    continue
+                time.sleep(0.3)
+
+                if self.should_stop: return False
+            
+            # === BƯỚC 2: GHI TIMESTAMP BẮT ĐẦU NGHE NHẠC ===
+            if obs_controller:
+                obs_controller.log_event_timestamp(
+                    "start_remix_playback", 
+                    f"Start playback for {remix_name}", 
+                    {"mode": mode, **remix_metadata}
+                )
+
+            # Phase 2: Listen to remix music
+            print(f"PHASE 2: Enjoying remix for {listen_duration}s...")
             for countdown in range(listen_duration, 0, -1):
-                if self.should_stop:
-                    return False
+                if self.should_stop: return False
                 
-                # THREAD SAFE: Only update every 3 seconds to reduce GUI pressure
                 if progress_callback and countdown % 3 == 0:
                     try:
                         self.thread_safe_progress_callback(f"Enjoying {remix_name} ({countdown}s)")
@@ -7377,31 +7737,38 @@ class SprunkiGamePlayer:
                 
                 time.sleep(1)
             
-            if self.should_stop:
-                return False
+            if self.should_stop: return False
             
-            # Phase 3: Smart batch return with mode detection
+            # === BƯỚC 3: GHI TIMESTAMP KẾT THÚC NGHE NHẠC ===
+            if obs_controller:
+                obs_controller.log_event_timestamp(
+                    "end_remix_playback", 
+                    f"End playback for {remix_name}",
+                    {"mode": mode}
+                )
+
+            # Phase 3: Smart batch return
             print("ðŸ”„ PHASE 3: Smart batch returning with mode detection...")
             if progress_callback:
                 progress_callback(f"ðŸ§¹ Smart cleanup {remix_name}")
 
-            # Set explicit remix mode for batch operations
             self.set_return_mode_explicit(self.RETURN_MODE_REMIX, f"remix_cleanup_{len(remix_icons)}_icons")
-
-            print(f"  ðŸ”„ Using mode-aware batch return for {len(remix_icons)} icons...")
-
-            # Use smart batch return with mode awareness
-            success_count, total_attempted, error_log = self.smart_batch_return_all_slots_with_mode(use_cdp=False)
-
+            
+            # === BƯỚC 4 (FIX): Truyền context và obs_controller xuống hàm dọn dẹp ===
+            # Lời gọi cũ không truyền tham số: self.smart_batch_return_all_slots_with_mode(use_cdp=False)
+            success_count, total_attempted, error_log = self.smart_batch_return_all_slots_with_mode(
+                use_cdp=False, 
+                context=remix_metadata, # Truyền context
+                obs_controller=obs_controller # Truyền controller tường minh
+            )
+            
             if success_count == total_attempted:
                 print(f"  âœ… Smart batch return: {success_count}/{total_attempted} icons returned successfully")
             else:
-                print(f"  âš ï¸ Smart batch return: {success_count}/{total_attempted} icons returned")
+                print(f"  âš ï¸  Smart batch return: {success_count}/{total_attempted} icons returned")
                 if error_log:
                     print(f"  ðŸ“‹ Errors: {len(error_log)} issues encountered")
-                    # Continue anyway, don't fail the entire remix
 
-            # Brief stabilization pause
             time.sleep(0.5)
             
             print(f"âœ… COMPLETED ENHANCED REMIX: {remix_name}")
@@ -7409,7 +7776,7 @@ class SprunkiGamePlayer:
             return True
             
         except Exception as e:
-            print("âŒ Error in enhanced remix " + remix_data.get('name', 'Unknown') + ": " + str(e))
+            print(f"â Œ Error in enhanced remix {remix_data.get('name', 'Unknown')}: {e}")
             return False
 
     def execute_full_showcase_workflow_corrected(self, progress_callback=None):
@@ -7441,7 +7808,15 @@ class SprunkiGamePlayer:
             if has_bonus:
                 if not self.showcase_all_bonus_corrected("Normal", progress_callback=progress_callback):
                     return False
-            
+
+            # Ghi lại sự kiện bắt đầu phần trình diễn remix Normal
+            if self.obs_controller:
+                self.obs_controller.log_event_timestamp(
+                    "start_full_remix_performance",
+                    "Starting Normal full remix performance section",
+                    {"mode": "Normal"}
+                )
+
             # Normal remixes
             if not self.play_all_remixes_corrected("Normal", progress_callback=progress_callback):
                 return False
@@ -7460,7 +7835,15 @@ class SprunkiGamePlayer:
                 if has_bonus:
                     if not self.showcase_all_bonus_corrected("Horror", progress_callback=progress_callback):
                         return False
-                
+
+                # Ghi lại sự kiện bắt đầu phần trình diễn remix Horror
+                if self.obs_controller:
+                    self.obs_controller.log_event_timestamp(
+                        "start_full_remix_performance",
+                        "Starting HORROR remix performance section",
+                        {"mode": "Horror"}
+                    )
+
                 # Horror remixes
                 if not self.play_all_remixes_corrected("Horror", progress_callback=progress_callback):
                     return False
@@ -7531,42 +7914,32 @@ class SprunkiGamePlayer:
             return False
 
     def showcase_all_bonus_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
-        """ENHANCED: Showcase bonus with verification system - LIMITED TO FIRST 20"""
+        """ENHANCED: Showcase bonus with verification system - FLEXIBLE BONUS COUNT"""
         try:
             if not self.config:
                 return False
                 
             layout = self.config['layout']
-            all_bonus_chars = layout.get('bonus', [])
             
-            # LIMIT BONUS TO FIRST 19 (INDEX 0-18) - FIXED
-            limited_bonus = []
-            for bonus in all_bonus_chars:
-                bonus_index = bonus.get('index', 0)  # Default to 0 if no index
-                if bonus_index <= 18:
-                    limited_bonus.append(bonus)
+            # --- LOGIC MỚI: LOẠI BỎ GIỚI HẠN ---
+            # Lấy toàn bộ danh sách bonus mà không lọc theo index.
+            bonus_chars = layout.get('bonus', [])
             
-            print(f"\nðŸŽ¯ BONUS LIMITATION APPLIED:")
-            print(f"   ðŸ“Š Original bonus: {len(all_bonus_chars)}")
-            print(f"   ðŸŽ¯ Limited bonus: {len(limited_bonus)} (index â‰¤19)")
-            
-            if not limited_bonus:
-                print(f"â„¹ï¸ No bonus characters for {mode} mode (after limitation)")
+            if not bonus_chars:
+                print(f"ℹ️  No bonus characters to showcase for {mode} mode.")
                 return True
-            
-            bonus_chars = limited_bonus
             
             target_slot = self._find_slot_by_index(3)
             if not target_slot:
                 return False
             
-            emoji = "ðŸŽ" if mode == "Normal" else "ðŸ‘»"
+            emoji = "🌟" if mode == "Normal" else "👻"
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} BONUS SHOWCASE")
-            print(f"ðŸ“Š Will showcase {len(bonus_chars)} bonus characters")
+            print(f"📄 Will showcase {len(bonus_chars)} bonus characters")
             if self.characters_available:
-                print("ðŸ” Drag verification: ENABLED")
+                print("✅ Drag verification: ENABLED")
             else:
-                print("âš ï¸ Drag verification: DISABLED (fallback mode)")
+                print("⚠️ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
             success_count = 0
@@ -7577,48 +7950,37 @@ class SprunkiGamePlayer:
                 if progress_callback:
                     progress_callback(f"{emoji} Showcasing {mode} bonus {bonus_index + 1}")
                 
-                print(f"{emoji} Showcasing {mode} bonus {bonus_index + 1}")
+                print(f"{emoji} Showcasing {mode} bonus {bonus_index + 1} (Index: {bonus_char.get('index', 'N/A')})")
                 
-                # Drag bonus to slot with enhanced verification
-                use_cdp = True  # Can be customized
+                use_cdp = True
                 if not self.corrected_drag_and_drop(bonus_char, target_slot, False, use_cdp):
-                    print(f"âŒ Failed to drag bonus {bonus_index} with verification")
+                    print(f"❌ Failed to drag bonus {bonus_index} with verification")
                     continue
                 
-                if self.should_stop:
-                    break
+                if self.should_stop: break
                 
-                # Listen to music - THREAD SAFE
                 print(f"Listening to bonus {bonus_index + 1} for {listen_duration}s...")
                 for countdown in range(listen_duration, 0, -1):
-                    if self.should_stop:
-                        break
-                    
-                    # THREAD SAFE: Update every 3 seconds
+                    if self.should_stop: break
                     if progress_callback and countdown % 3 == 0:
-                        try:
-                            self.thread_safe_progress_callback(f"Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
-                        except Exception as e:
-                            print(f"Progress callback warning: {e}")
-                    
+                        try: self.thread_safe_progress_callback(f"Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
+                        except Exception as e: print(f"Progress callback warning: {e}")
                     time.sleep(1)
                 
-                if self.should_stop:
-                    break
+                if self.should_stop: break
                 
-                # Return bonus
-                print(f"ðŸ”„ Returning bonus {bonus_index + 1}...")
+                print(f"🔄 Returning bonus {bonus_index + 1}...")
                 self.corrected_return_icon(target_slot, use_cdp)
                 time.sleep(0.2)
                 success_count += 1
             
-            print(f"\nâœ… ENHANCED {mode.upper()} BONUS SHOWCASE COMPLETED")
-            print(f"ðŸ“Š Success: {success_count}/{len(bonus_chars)} characters")
+            print(f"\n✅ ENHANCED {mode.upper()} BONUS SHOWCASE COMPLETED")
+            print(f"📊 Success: {success_count}/{len(bonus_chars)} characters")
             print("="*60)
             return success_count == len(bonus_chars)
             
         except Exception as e:
-            print("âŒ Error in enhanced " + mode + " bonus showcase: " + str(e))
+            print("❌ Error in enhanced " + mode + " bonus showcase: " + str(e))
             return False
     
     def play_all_remixes_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
@@ -7671,6 +8033,8 @@ class SprunkiGamePlayer:
         UPDATED: Added Phase 3 - Return Icon 19 after transformation
         FIXED: Proper access to icon 19 for horror trigger
         """
+        return_success = False
+
         try:
             if not self.config:
                 return False
@@ -7699,7 +8063,10 @@ class SprunkiGamePlayer:
             print(f"   ✅ Horror trigger ready - will use icon 19 specifically")
             
             # Find slot index 3 (rest of function remains the same)
-            target_slot = self._find_slot_by_index(3)
+            layout = self.config['layout']
+            slots = layout.get('slots', [])
+            center_slot_index = self.calculate_center_slot_index(slots)
+            target_slot = self._find_slot_by_index(center_slot_index)
             if not target_slot:
                 return False
             
@@ -7712,7 +8079,15 @@ class SprunkiGamePlayer:
             else:
                 print("âš ï¸ Verification disabled - using fallback")
             print("="*60)
-            
+
+            # Đánh dấu bắt đầu chuỗi sự kiện trigger
+            if self.obs_controller:
+                self.obs_controller.log_event_timestamp(
+                    "trigger_horror_mode_started",
+                    "Start triggering horror mode sequence",
+                    {"icon_index": horror_icon.get('index', 19)}
+                )
+
             # ================================================================
             # PHASE 1: DRAG ICON 19 TO SLOT 3 (trigger horror mode)
             # ================================================================
@@ -7818,7 +8193,15 @@ class SprunkiGamePlayer:
                 self.corrected_return_icon(target_slot, use_cdp)
                 time.sleep(1.0)
                 print("   âœ… Blind return completed")
-            
+
+            # Đánh dấu KẾT THÚC chuỗi sự kiện trigger SAU KHI đã trả icon về
+            if self.obs_controller:
+                self.obs_controller.log_event_timestamp(
+                    "trigger_horror_mode_ended",
+                    "Horror mode sequence completed and slot is cleared",
+                    {"return_successful": return_success}
+                )
+
             # ================================================================
             # HORROR MODE STATE VALIDATION (existing code with better logging)
             # ================================================================
@@ -8329,7 +8712,7 @@ class SprunkiGamePlayer:
                 self.remix_display_var.set(remix_summary)
     
     def load_config_and_start(self):
-            """Load config and start enhanced auto process"""
+            """Load config, generate dynamic remixes, and start enhanced auto process"""
             try:
                 file_path = filedialog.askopenfilename(
                     title="Choose JSON configuration file",
@@ -8339,11 +8722,9 @@ class SprunkiGamePlayer:
                 if not file_path:
                     return
                 
-                # Load JSON
                 with open(file_path, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
                 
-                # Basic validation
                 if 'currentUrl' not in self.config or 'layout' not in self.config:
                     raise ValueError("Invalid JSON structure")
                 
@@ -8351,7 +8732,6 @@ class SprunkiGamePlayer:
                 if 'icons' not in layout or 'slots' not in layout:
                     raise ValueError("Missing icons or slots in layout")
                 
-                # Check domain support
                 current_url = self.config.get('currentUrl', '').lower()
                 if 'cocrea.world' not in current_url:
                     print(f"âŒ DOMAIN ERROR: This version is optimized for 'cocrea.world' only!")
@@ -8359,12 +8739,18 @@ class SprunkiGamePlayer:
                     print("   ðŸ’¡ Please use a cocrea.world game URL")
                     return
                 
-                # Check hasHorror setting for remix generation
                 game_settings = self.config.get('gameSettings', {})
                 has_horror = game_settings.get('hasHorror', False)
+
+                # 1. Lấy số lượng slot từ file JSON vừa tải
+                total_slots = len(layout.get('slots', []))
+
+                # 2. Gọi hàm mới để tạo các pattern remix động
+                self.generate_dynamic_patterns(total_slots)
                 
-                # Generate remix library with horror-aware logic
-                self.remix_library = self.generate_random_remixes(avoid_horror_icon=has_horror)
+                # 3. Gọi hàm generate_random_remixes, nó sẽ tự động dùng self.remix_patterns mới
+                self.remix_library = self.generate_random_remixes(avoid_horror_icon=not has_horror)
+                
                 self.current_remix_index = 0
                 self.drag_stats = DragOperationStats()
                 self.update_remix_display()

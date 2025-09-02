@@ -409,7 +409,7 @@ class SprunkiGamePlayer:
         '''
 
         # Setup GUI
-        self.setup_gui()
+        #self.setup_gui()
 
         # âœ… CLEANUP: Remove unused safe zone code  
         print("ðŸŽ¯ Initialized SIMPLIFIED return system: Precision Center + Carpet Bombing only")
@@ -7385,7 +7385,7 @@ class SprunkiGamePlayer:
     def create_remix_from_pattern(self, pattern, remix_number, avoid_horror_icon=False):
         """
         Tạo remix từ pattern, đảm bảo các icon được chọn nằm trong giới hạn thực tế
-        của file JSON.
+        của file JSON - FLEXIBLE ICON COUNT.
         """
         try:
             selected_icons = []
@@ -7394,27 +7394,32 @@ class SprunkiGamePlayer:
                 print("❌ Cannot create remix: Config with icon layout not available.")
                 return None
                 
-            total_icons_available = len(self.config['layout']['icons'])
+            all_icons_from_json = self.config['layout']['icons']
+            total_icons_available = len(all_icons_from_json)
             print(f"🎼 Creating remix based on {total_icons_available} available icons.")
 
+            # --- LOGIC TẠO NHÓM ICON LINH HOẠT MỚI ---
             # Tạo icon groups động dựa trên số lượng icon thực tế
             dynamic_icon_groups = {
-                'beats': [i for i in range(0, 5) if i < total_icons_available],
-                'effects': [i for i in range(5, 10) if i < total_icons_available],
-                'melodies': [i for i in range(10, 15) if i < total_icons_available],
-                'vocals': [i for i in range(15, 19) if i < total_icons_available]
+                'beats': [i['index'] for i in all_icons_from_json if 0 <= i.get('index', -1) <= 4],
+                'effects': [i['index'] for i in all_icons_from_json if 5 <= i.get('index', -1) <= 9],
+                'melodies': [i['index'] for i in all_icons_from_json if 10 <= i.get('index', -1) <= 14],
+                # Vocals là TẤT CẢ các icon còn lại từ index 15 trở đi
+                'vocals': [i['index'] for i in all_icons_from_json if i.get('index', -1) >= 15]
             }
 
-            if avoid_horror_icon and 19 in dynamic_icon_groups['vocals']:
-                dynamic_icon_groups['vocals'].remove(19)
-                print(f"👻 Avoiding horror icon (19) for normal mode remix.")
+            if avoid_horror_icon:
+                # Nếu cần tránh icon 19, ta loại nó ra khỏi nhóm vocals
+                if 19 in dynamic_icon_groups['vocals']:
+                    dynamic_icon_groups['vocals'].remove(19)
+                    print(f"👻 Avoiding horror icon (19) for normal mode remix.")
 
             for group_name, count in [('beats', pattern['beats']), 
                                       ('effects', pattern['effects']),
                                       ('melodies', pattern['melodies']), 
                                       ('vocals', pattern['vocals'])]:
                 if count > 0:
-                    available_icons_in_group = dynamic_icon_groups[group_name]
+                    available_icons_in_group = dynamic_icon_groups.get(group_name, [])
                     
                     if not available_icons_in_group:
                         print(f"   ⚠️ No icons available for group '{group_name}', skipping.")
@@ -7620,7 +7625,7 @@ class SprunkiGamePlayer:
     # ================================================================
 
     def showcase_all_icons_corrected(self, mode="Normal", skip_icon_19=False, listen_duration=15, progress_callback=None):
-            """ENHANCED: Showcase all icons with verification system - NOW PASSES ICON OBJECTS"""
+            """ENHANCED: Showcase all icons with verification system - FLEXIBLE ICON COUNT"""
             try:
                 if not self.config:
                     return False
@@ -7628,48 +7633,43 @@ class SprunkiGamePlayer:
                 layout = self.config['layout']
                 all_icons = layout['icons']
                 
-                # --- CENTRALIZED ICON FILTERING LOGIC ---
+                # --- LOGIC LỌC ICON LINH HOẠT MỚI ---
                 icons_to_showcase = []
-                if mode == "Normal":
-                    # For Normal mode, ALWAYS use icons with index 0-18
-                    icons_to_showcase = [icon for icon in all_icons if icon.get('index', 999) <= 18]
-                    print(f"ðŸŽ¯ Normal Mode: Filtering to icons 0-18. Found {len(icons_to_showcase)} icons.")
-                elif mode == "Horror":
-                    # For Horror mode, use icons 0-19
-                    icons_to_showcase = [icon for icon in all_icons if icon.get('index', 999) <= 19]
-                    print(f"ðŸ‘» Horror Mode: Filtering to icons 0-19. Found {len(icons_to_showcase)} icons.")
+                if skip_icon_19:
+                    # Chế độ Normal của video có Horror: Lấy TẤT CẢ icon, TRỪ icon 19.
+                    icons_to_showcase = [icon for icon in all_icons if icon.get('index') != 19]
+                    print(f"ℹ️ Normal Mode (Horror exists): Filtering out icon 19. Processing {len(icons_to_showcase)} icons.")
                 else:
-                    # Fallback for other modes
+                    # Chế độ Normal (không có horror) hoặc chế độ Horror: Lấy TẤT CẢ icon.
                     icons_to_showcase = all_icons
+                    print(f"ℹ️ {mode} Mode: Processing all {len(icons_to_showcase)} available icons.")
 
-                print(f"\nÃ°Å¸Å½Âª STARTING ENHANCED {mode.upper()} SHOWCASE")
-                print(f"ðŸ“Š Will showcase {len(icons_to_showcase)} icons with verification system")
+                print(f"\n🎬 STARTING ENHANCED {mode.upper()} SHOWCASE")
+                print(f"📄 Will showcase {len(icons_to_showcase)} icons with verification system")
                 if self.characters_available:
-                    print("ðŸ”  Drag verification: ENABLED")
+                    print("✅ Drag verification: ENABLED")
                 else:
-                    print("âš ï¸  Drag verification: DISABLED (fallback mode)")
+                    print("⚠️ Drag verification: DISABLED (fallback mode)")
                 print("="*60)
                 
                 success_count = 0
-                # --- LOOP DIRECTLY THROUGH ICON OBJECTS ---
                 for icon_object in icons_to_showcase:
                     if self.should_stop:
                         break
                     
-                    # Pass the entire icon object to the handler function
                     if self.showcase_single_icon_corrected(icon_object, mode, listen_duration, progress_callback):
                         success_count += 1
                     else:
                         icon_index = icon_object.get('index', 'unknown')
-                        print(f"âš ï¸  Failed to showcase icon {icon_index}")
+                        print(f"⚠️ Failed to showcase icon {icon_index}")
                 
-                print(f"\nÃ¢Å“â€¦ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
-                print(f"ðŸ“Š Success: {success_count}/{len(icons_to_showcase)} icons")
+                print(f"\n✅ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
+                print(f"📊 Success: {success_count}/{len(icons_to_showcase)} icons")
                 print("="*60)
                 return success_count == len(icons_to_showcase)
                 
             except Exception as e:
-                print("â Œ Error in enhanced " + mode + " showcase: " + str(e))
+                print("❌ Error in enhanced " + mode + " showcase: " + str(e))
                 return False
 
     def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
@@ -7721,7 +7721,7 @@ class SprunkiGamePlayer:
                 obs_controller.log_event_timestamp(
                     "start_remix_playback", 
                     f"Start playback for {remix_name}", 
-                    remix_metadata
+                    {"mode": mode, **remix_metadata}
                 )
 
             # Phase 2: Listen to remix music
@@ -7743,7 +7743,8 @@ class SprunkiGamePlayer:
             if obs_controller:
                 obs_controller.log_event_timestamp(
                     "end_remix_playback", 
-                    f"End playback for {remix_name}"
+                    f"End playback for {remix_name}",
+                    {"mode": mode}
                 )
 
             # Phase 3: Smart batch return
@@ -7808,11 +7809,12 @@ class SprunkiGamePlayer:
                 if not self.showcase_all_bonus_corrected("Normal", progress_callback=progress_callback):
                     return False
 
-            # Ghi lại sự kiện bắt đầu phần remix
+            # Ghi lại sự kiện bắt đầu phần trình diễn remix Normal
             if self.obs_controller:
                 self.obs_controller.log_event_timestamp(
                     "start_full_remix_performance",
-                    "Starting full remix performance section"
+                    "Starting Normal full remix performance section",
+                    {"mode": "Normal"}
                 )
 
             # Normal remixes
@@ -7834,11 +7836,12 @@ class SprunkiGamePlayer:
                     if not self.showcase_all_bonus_corrected("Horror", progress_callback=progress_callback):
                         return False
 
-                # Ghi lại sự kiện bắt đầu phần horror remix
+                # Ghi lại sự kiện bắt đầu phần trình diễn remix Horror
                 if self.obs_controller:
                     self.obs_controller.log_event_timestamp(
                         "start_full_remix_performance",
-                        "Starting HORROR remix performance section"
+                        "Starting HORROR remix performance section",
+                        {"mode": "Horror"}
                     )
 
                 # Horror remixes
@@ -7911,42 +7914,32 @@ class SprunkiGamePlayer:
             return False
 
     def showcase_all_bonus_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
-        """ENHANCED: Showcase bonus with verification system - LIMITED TO FIRST 20"""
+        """ENHANCED: Showcase bonus with verification system - FLEXIBLE BONUS COUNT"""
         try:
             if not self.config:
                 return False
                 
             layout = self.config['layout']
-            all_bonus_chars = layout.get('bonus', [])
             
-            # LIMIT BONUS TO FIRST 19 (INDEX 0-18) - FIXED
-            limited_bonus = []
-            for bonus in all_bonus_chars:
-                bonus_index = bonus.get('index', 0)  # Default to 0 if no index
-                if bonus_index <= 18:
-                    limited_bonus.append(bonus)
+            # --- LOGIC MỚI: LOẠI BỎ GIỚI HẠN ---
+            # Lấy toàn bộ danh sách bonus mà không lọc theo index.
+            bonus_chars = layout.get('bonus', [])
             
-            print(f"\nðŸŽ¯ BONUS LIMITATION APPLIED:")
-            print(f"   ðŸ“Š Original bonus: {len(all_bonus_chars)}")
-            print(f"   ðŸŽ¯ Limited bonus: {len(limited_bonus)} (index â‰¤19)")
-            
-            if not limited_bonus:
-                print(f"â„¹ï¸ No bonus characters for {mode} mode (after limitation)")
+            if not bonus_chars:
+                print(f"ℹ️  No bonus characters to showcase for {mode} mode.")
                 return True
-            
-            bonus_chars = limited_bonus
             
             target_slot = self._find_slot_by_index(3)
             if not target_slot:
                 return False
             
-            emoji = "ðŸŽ" if mode == "Normal" else "ðŸ‘»"
+            emoji = "🌟" if mode == "Normal" else "👻"
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} BONUS SHOWCASE")
-            print(f"ðŸ“Š Will showcase {len(bonus_chars)} bonus characters")
+            print(f"📄 Will showcase {len(bonus_chars)} bonus characters")
             if self.characters_available:
-                print("ðŸ” Drag verification: ENABLED")
+                print("✅ Drag verification: ENABLED")
             else:
-                print("âš ï¸ Drag verification: DISABLED (fallback mode)")
+                print("⚠️ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
             success_count = 0
@@ -7957,48 +7950,37 @@ class SprunkiGamePlayer:
                 if progress_callback:
                     progress_callback(f"{emoji} Showcasing {mode} bonus {bonus_index + 1}")
                 
-                print(f"{emoji} Showcasing {mode} bonus {bonus_index + 1}")
+                print(f"{emoji} Showcasing {mode} bonus {bonus_index + 1} (Index: {bonus_char.get('index', 'N/A')})")
                 
-                # Drag bonus to slot with enhanced verification
-                use_cdp = True  # Can be customized
+                use_cdp = True
                 if not self.corrected_drag_and_drop(bonus_char, target_slot, False, use_cdp):
-                    print(f"âŒ Failed to drag bonus {bonus_index} with verification")
+                    print(f"❌ Failed to drag bonus {bonus_index} with verification")
                     continue
                 
-                if self.should_stop:
-                    break
+                if self.should_stop: break
                 
-                # Listen to music - THREAD SAFE
                 print(f"Listening to bonus {bonus_index + 1} for {listen_duration}s...")
                 for countdown in range(listen_duration, 0, -1):
-                    if self.should_stop:
-                        break
-                    
-                    # THREAD SAFE: Update every 3 seconds
+                    if self.should_stop: break
                     if progress_callback and countdown % 3 == 0:
-                        try:
-                            self.thread_safe_progress_callback(f"Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
-                        except Exception as e:
-                            print(f"Progress callback warning: {e}")
-                    
+                        try: self.thread_safe_progress_callback(f"Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
+                        except Exception as e: print(f"Progress callback warning: {e}")
                     time.sleep(1)
                 
-                if self.should_stop:
-                    break
+                if self.should_stop: break
                 
-                # Return bonus
-                print(f"ðŸ”„ Returning bonus {bonus_index + 1}...")
+                print(f"🔄 Returning bonus {bonus_index + 1}...")
                 self.corrected_return_icon(target_slot, use_cdp)
                 time.sleep(0.2)
                 success_count += 1
             
-            print(f"\nâœ… ENHANCED {mode.upper()} BONUS SHOWCASE COMPLETED")
-            print(f"ðŸ“Š Success: {success_count}/{len(bonus_chars)} characters")
+            print(f"\n✅ ENHANCED {mode.upper()} BONUS SHOWCASE COMPLETED")
+            print(f"📊 Success: {success_count}/{len(bonus_chars)} characters")
             print("="*60)
             return success_count == len(bonus_chars)
             
         except Exception as e:
-            print("âŒ Error in enhanced " + mode + " bonus showcase: " + str(e))
+            print("❌ Error in enhanced " + mode + " bonus showcase: " + str(e))
             return False
     
     def play_all_remixes_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
@@ -8051,6 +8033,8 @@ class SprunkiGamePlayer:
         UPDATED: Added Phase 3 - Return Icon 19 after transformation
         FIXED: Proper access to icon 19 for horror trigger
         """
+        return_success = False
+
         try:
             if not self.config:
                 return False
@@ -8095,7 +8079,15 @@ class SprunkiGamePlayer:
             else:
                 print("âš ï¸ Verification disabled - using fallback")
             print("="*60)
-            
+
+            # Đánh dấu bắt đầu chuỗi sự kiện trigger
+            if self.obs_controller:
+                self.obs_controller.log_event_timestamp(
+                    "trigger_horror_mode_started",
+                    "Start triggering horror mode sequence",
+                    {"icon_index": horror_icon.get('index', 19)}
+                )
+
             # ================================================================
             # PHASE 1: DRAG ICON 19 TO SLOT 3 (trigger horror mode)
             # ================================================================
@@ -8201,7 +8193,15 @@ class SprunkiGamePlayer:
                 self.corrected_return_icon(target_slot, use_cdp)
                 time.sleep(1.0)
                 print("   âœ… Blind return completed")
-            
+
+            # Đánh dấu KẾT THÚC chuỗi sự kiện trigger SAU KHI đã trả icon về
+            if self.obs_controller:
+                self.obs_controller.log_event_timestamp(
+                    "trigger_horror_mode_ended",
+                    "Horror mode sequence completed and slot is cleared",
+                    {"return_successful": return_success}
+                )
+
             # ================================================================
             # HORROR MODE STATE VALIDATION (existing code with better logging)
             # ================================================================
