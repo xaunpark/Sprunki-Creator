@@ -1254,7 +1254,7 @@ class UnifiedProcessingManager:
                 self.logger.error(f"⚠️ Error during BOTH MODE final cleanup: {e}")
     
     def _process_master_mode(self, item: ProcessingItem) -> bool:
-        """Enhanced Master mode with comprehensive cleanup"""
+        """Enhanced Master mode that understands WorkflowReport."""
         game_environment_ready = False
         recording_active = False
         browser_opened = False
@@ -1263,70 +1263,44 @@ class UnifiedProcessingManager:
             master_filename = f"{getattr(item, 'project_slug', 'default_project')}-showcase.mp4"
             self.logger.info(f"Executing master workflow for {item.display_name}")
             
-            # STEP 1: OBS Setup
+            # Steps 1-4: Setup OBS, Game Environment, and Start Recording (no change)
             if not self.master_controller.obs_controller.full_setup(use_full_screen=True):
                 raise Exception("OBS setup failed")
-            
-            # STEP 2: OBS Filename (make it critical)
-            self.logger.info(f"🎬 Setting OBS output path to: {self.master_controller.obs_controller.current_project_folder}")
-            self.logger.info(f"🎬 Setting OBS filename to: {master_filename}")
             if not self.master_controller.obs_controller.force_obs_filename(master_filename):
-                raise Exception("OBS filename setup failed")  # Changed from warning to exception
-            
-            # Verify OBS setup
-            self.logger.info(f"🎬 OBS configured - Expected output: {os.path.join(self.master_controller.obs_controller.current_project_folder, master_filename)}")
-            
-            # STEP 3: Game Environment Setup
-            self.logger.info("🌐 Setting up game environment...")
+                raise Exception("OBS filename setup failed")
             if not self.master_controller.game_player.setup_game_environment(first_setup=True):
                 raise Exception("Game environment setup failed")
-            
             game_environment_ready = True
             browser_opened = True
-            self.logger.info("✅ Game environment ready")
-            
-            # STEP 4: Start Recording
-            self.logger.info("🔴 Starting Master mode recording...")
             if not self.master_controller.obs_controller.start_recording():
                 raise Exception("Could not start recording")
-            
             recording_active = True
-            self.logger.info("✅ Master recording started")
             
-            # STEP 5: Execute Full Showcase Workflow
+            # STEP 5: Execute Full Showcase Workflow and get detailed report
             self.logger.info("🎮 Executing full showcase workflow...")
-            workflow_success = self.master_controller.game_player.execute_full_showcase_workflow_corrected()
+            workflow_report = self.master_controller.game_player.execute_full_showcase_workflow_corrected()
             
-            if not workflow_success:
-                raise Exception("Master workflow execution failed")
+            # Log any issues from the report
+            if workflow_report.issues:
+                self.logger.warning("Workflow completed with issues:")
+                for issue in workflow_report.issues:
+                    self.logger.warning(f"   - {issue}")
+
+            # Intelligent success check based on the report
+            if not workflow_report.was_successful:
+                # This is a business logic failure (e.g., no icons)
+                raise Exception(f"Master workflow failed: {workflow_report.message}")
             
-            self.logger.info("✅ Showcase workflow completed")
+            self.logger.info(f"✅ Showcase workflow completed: {workflow_report.message}")
             
             # STEP 6: Stop Recording
             self.logger.info("🛑 Stopping Master recording...")
             stop_success, output_path = self.master_controller.obs_controller.stop_recording()
             recording_active = False
             
-            if not stop_success:
-                raise Exception("Failed to stop recording")
-                
-            # Log actual output path
-            self.logger.info(f"🎬 Master recording stopped successfully")
-            self.logger.info(f"📁 Actual output file path: {output_path}")
-            if output_path:
-                actual_dir = os.path.dirname(output_path)
-                expected_dir = self.master_controller.obs_controller.current_project_folder
-                self.logger.info(f"📁 Expected directory: {expected_dir}")
-                self.logger.info(f"📁 Actual directory: {actual_dir}")
-                if actual_dir != expected_dir:
-                    self.logger.warning(f"⚠️ OUTPUT PATH MISMATCH! File saved to wrong directory!")
-                else:
-                    self.logger.info(f"✅ Output path correct - file saved in project folder")
+            if not stop_success or not output_path:
+                raise Exception("Failed to stop recording or no output file generated")
             
-            if not output_path:
-                raise Exception("No output file generated")
-            
-            # SUCCESS
             item.output_files.append(output_path)
             self.logger.info(f"✅ Master video saved: {output_path}")
             item.master_mode_status = "success"
@@ -1334,11 +1308,11 @@ class UnifiedProcessingManager:
             
         except Exception as e:
             self.logger.error(f"Master mode error: {e}")
+            item.error_message = str(e) # Store the specific error
             item.master_mode_status = "failure"
             return False
             
         finally:
-            # 🔥 COMPREHENSIVE CLEANUP
             self._cleanup_master_mode(recording_active, game_environment_ready, browser_opened)
 
     def _cleanup_master_mode(self, recording_active, game_environment_ready, browser_opened):
@@ -1389,144 +1363,98 @@ class UnifiedProcessingManager:
             self.logger.error(f"Error during Master mode cleanup: {e}")
     
     def _process_individual_mode(self, item: ProcessingItem) -> bool:
-        """Enhanced Individual mode with SafeOperationManager"""
-        safe_ops = None
-        
-        try:
-            self.logger.info(f"Executing enhanced individual workflow for {item.display_name}")
+            """Enhanced Individual mode with SafeOperationManager and intelligent success checking."""
+            safe_ops = None
+            meaningful_content_generated = False
             
-            if not self.master_controller.obs_controller.full_setup(use_full_screen=False):
-                raise Exception("OBS setup failed for individual mode")
-            
-            if not self.master_controller.game_player.setup_game_environment(first_setup=False):
-                raise Exception("Game environment re-setup failed")
+            try:
+                self.logger.info(f"Executing enhanced individual workflow for {item.display_name}")
+                
+                # Setup steps (remain the same, will raise exception on technical failure)
+                if not self.master_controller.obs_controller.full_setup(use_full_screen=False):
+                    raise Exception("OBS setup failed for individual mode")
+                if not self.master_controller.game_player.setup_game_environment(first_setup=False):
+                    raise Exception("Game environment re-setup failed")
+                if not item.json_data or 'layout' not in item.json_data:
+                    raise Exception("Invalid JSON data - missing layout")
+                
+                layout = item.json_data['layout']
+                icons = layout['icons']
+                slots = layout['slots']
+                game_settings = item.json_data.get('gameSettings', {})
+                has_horror = game_settings.get('hasHorror', False)
+                
+                # If there are no icons AND no remixes can be made, it's a failure
+                if not icons:
+                    self.logger.warning("No icons found in JSON. Individual mode cannot produce meaningful content.")
+                    raise Exception("Individual mode failed: No icons available to record.")
 
-            if not item.json_data or 'layout' not in item.json_data:
-                raise Exception("Invalid JSON data - missing layout")
-            layout = item.json_data['layout']
-            icons = layout['icons']
-            slots = layout['slots']
-            game_settings = item.json_data.get('gameSettings', {})
-            has_horror = game_settings.get('hasHorror', False)
-            
-            # Calculate center slot index dynamically
-            center_slot_index = self._calculate_center_slot_index(slots)
-            self.logger.info(f"🎯 Using center slot index {center_slot_index} out of {len(slots)} total slots")
-            
-            target_slot = self.master_controller.game_player._find_slot_by_index(center_slot_index)
-            if not target_slot:
-                raise Exception(f"Could not find slot at center index {center_slot_index}")
-            
-            # Log detailed slot information
-            self.logger.info(f"🎯 Target slot details: index={center_slot_index}, coords=({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
-            self.logger.info(f"🎯 This is the slot that will receive the icon and be used for return operation")
-            
-            # 🔥 INITIALIZE SAFE OPERATION MANAGER
-            safe_ops = SafeOperationManager(
-                self.master_controller.game_player,
-                self.master_controller.obs_controller,
-                self.logger
-            )
-            
-            output_files = []
-            
-            # ================================================================
-            # PHASE 1: SAFE INDIVIDUAL ICON RECORDING
-            # ================================================================
-            self.logger.info("🔹 PHASE 1: Safe individual icon recording...")
-            
-            ### <<< THAY ĐỔI BẮT ĐẦU: Lọc icon cho Normal Mode >>>
-            # Lọc danh sách icon để chỉ lấy những icon có index từ 0 đến 18
-            normal_icons_to_process = [icon for icon in icons if icon.get('index', 999) <= 18]
-            self.logger.info(f"Individual (Normal Mode): Found {len(normal_icons_to_process)} icons to process (index <= 18)")
+                center_slot_index = self._calculate_center_slot_index(slots)
+                target_slot = self.master_controller.game_player._find_slot_by_index(center_slot_index)
+                if not target_slot:
+                    raise Exception(f"Could not find slot at center index {center_slot_index}")
 
-            # Lặp qua danh sách icon đã được lọc
-            for current_icon in normal_icons_to_process:
-                if self.should_stop:
-                    break
-                
-                while self.is_paused and not self.should_stop:
-                    time.sleep(0.5)
-                
-                if self.should_stop:
-                    break
-                
-                # Lấy index thực sự từ đối tượng icon để đặt tên file
-                icon_index = current_icon.get('index')
-                filename = f"n-{icon_index}.mp4"
-                
-                # 🔥 USE SAFE OPERATION
-                success, output_path, error_msg = safe_ops.safe_single_icon_operation(
-                    current_icon, target_slot, filename, recording_duration=14
+                safe_ops = SafeOperationManager(
+                    self.master_controller.game_player, self.master_controller.obs_controller, self.logger
                 )
                 
-                if success and output_path:
-                    output_files.append(output_path)
-                    self.logger.info(f"✅ Icon {icon_index} recorded successfully")
-                else:
-                    self.logger.warning(f"⚠️ Icon {icon_index} failed: {error_msg}")
+                output_files = []
                 
+                # PHASE 1: Normal icons
+                self.logger.info("🔹 PHASE 1: Safe individual icon recording (Normal)...")
+                normal_icons_to_process = [icon for icon in icons if icon.get('index', 999) <= 18]
+                for current_icon in normal_icons_to_process:
+                    if self.should_stop: break
+                    filename = f"n-{current_icon.get('index')}.mp4"
+                    success, output_path, _ = safe_ops.safe_single_icon_operation(
+                        current_icon, target_slot, filename
+                    )
+                    if success and output_path:
+                        output_files.append(output_path)
+                        meaningful_content_generated = True
+
+                # PHASE 2: Horror icons
+                if has_horror and not self.should_stop:
+                    self.logger.info("🔹 PHASE 2: Safe individual icon recording (Horror)...")
+                    if self.master_controller.game_player.trigger_horror_mode_transition_corrected():
+                        horror_icons_to_process = icons # Process all icons in horror mode
+                        for current_icon in horror_icons_to_process:
+                            if self.should_stop: break
+                            filename = f"h-{current_icon.get('index')}.mp4"
+                            success, output_path, _ = safe_ops.safe_single_icon_operation(
+                                current_icon, target_slot, filename
+                            )
+                            if success and output_path:
+                                output_files.append(output_path)
+                                meaningful_content_generated = True
+
+                # PHASE 3: Remixes
                 if not self.should_stop:
-                    time.sleep(1)
-            ### <<< THAY ĐỔI KẾT THÚC: Lọc icon cho Normal Mode >>>
-            
-            # Process horror mode icons (SAME SAFE PATTERN)
-            if has_horror and not self.should_stop:
-                if self.master_controller.game_player.trigger_horror_mode_transition_corrected():
-                    
-                    ### <<< THAY ĐỔI BẮT ĐẦU: Lọc icon cho Horror Mode >>>
-                    # Lọc danh sách icon để chỉ lấy những icon có index từ 0 đến 18 theo yêu cầu
-                    horror_icons_to_process = [icon for icon in icons if icon.get('index', 999) <= 18]
-                    self.logger.info(f"Individual (Horror Mode): Found {len(horror_icons_to_process)} icons to process (index <= 18)")
-                    
-                    # Lặp qua danh sách icon đã được lọc
-                    for current_icon in horror_icons_to_process:
-                        if self.should_stop:
-                            break
-                        
-                        # Lấy index thực sự từ đối tượng icon để đặt tên file
-                        icon_index = current_icon.get('index')
-                        filename = f"h-{icon_index}.mp4"
-                        
-                        # 🔥 SAFE HORROR OPERATION
-                        success, output_path, error_msg = safe_ops.safe_single_icon_operation(
-                            current_icon, target_slot, filename, recording_duration=14
-                        )
-                        
-                        if success and output_path:
-                            output_files.append(output_path)
-                            self.logger.info(f"✅ Horror icon {icon_index} recorded successfully")
-                        else:
-                            self.logger.warning(f"⚠️ Horror icon {icon_index} failed: {error_msg}")
-                        
-                        if not self.should_stop:
-                            time.sleep(1)
-                    ### <<< THAY ĐỔI KẾT THÚC: Lọc icon cho Horror Mode >>>
-            
-            # ================================================================
-            # PHASE 2: SAFE REMIX RECORDING
-            # ================================================================
-            if not self.should_stop:
-                self.logger.info("🎵 PHASE 2: Safe remix recording...")
-                remix_files = self._safe_record_individual_remixes(item, icons, slots, safe_ops)
-                output_files.extend(remix_files)
-            
-            item.output_files.extend(output_files)
-            self.logger.info("✅ Enhanced Individual Mode completed with safe operations!")
-            item.individual_mode_status = "success"
-            return len(output_files) > 0
-            
-        except Exception as e:
-            self.logger.error(f"Individual mode error: {e}")
-            item.individual_mode_status = "failure"
-            return False
-        finally:
-            # 🔥 EMERGENCY CLEANUP
-            if safe_ops:
-                safe_ops.emergency_cleanup_all()
-            
-            if self.master_controller.game_player:
-                self.master_controller.game_player.close_game_window()
+                    self.logger.info("🎵 PHASE 3: Safe remix recording...")
+                    remix_files = self._safe_record_individual_remixes(item, icons, slots, safe_ops)
+                    if remix_files:
+                        output_files.extend(remix_files)
+                        meaningful_content_generated = True
+
+                # Final success check based on meaningful content
+                if not meaningful_content_generated:
+                    raise Exception("Individual mode finished, but no videos were successfully generated.")
+
+                item.output_files.extend(output_files)
+                self.logger.info("✅ Enhanced Individual Mode completed with safe operations!")
+                item.individual_mode_status = "success"
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"Individual mode error: {e}")
+                item.error_message = str(e)
+                item.individual_mode_status = "failure"
+                return False
+            finally:
+                if safe_ops:
+                    safe_ops.emergency_cleanup_all()
+                if self.master_controller.game_player:
+                    self.master_controller.game_player.close_game_window()
 
     def _safe_record_individual_remixes(self, item, icons, slots, safe_ops) -> List[str]:
         """Safe remix recording using SafeOperationManager"""

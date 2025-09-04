@@ -7625,52 +7625,51 @@ class SprunkiGamePlayer:
     # ================================================================
 
     def showcase_all_icons_corrected(self, mode="Normal", skip_icon_19=False, listen_duration=15, progress_callback=None):
-            """ENHANCED: Showcase all icons with verification system - FLEXIBLE ICON COUNT"""
-            try:
-                if not self.config:
-                    return False
-                    
-                layout = self.config['layout']
-                all_icons = layout['icons']
-                
-                # --- LOGIC LỌC ICON LINH HOẠT MỚI ---
-                icons_to_showcase = []
-                if skip_icon_19:
-                    # Chế độ Normal của video có Horror: Lấy TẤT CẢ icon, TRỪ icon 19.
-                    icons_to_showcase = [icon for icon in all_icons if icon.get('index') != 19]
-                    print(f"ℹ️ Normal Mode (Horror exists): Filtering out icon 19. Processing {len(icons_to_showcase)} icons.")
-                else:
-                    # Chế độ Normal (không có horror) hoặc chế độ Horror: Lấy TẤT CẢ icon.
-                    icons_to_showcase = all_icons
-                    print(f"ℹ️ {mode} Mode: Processing all {len(icons_to_showcase)} available icons.")
+        """ENHANCED: Showcase all icons - FLEXIBLE & RESILIENT"""
+        try:
+            if not self.config:
+                return 0, 0 # success_count, total_count
 
-                print(f"\n🎬 STARTING ENHANCED {mode.upper()} SHOWCASE")
-                print(f"📄 Will showcase {len(icons_to_showcase)} icons with verification system")
-                if self.characters_available:
-                    print("✅ Drag verification: ENABLED")
+            layout = self.config['layout']
+            all_icons = layout['icons']
+            
+            icons_to_showcase = []
+            if skip_icon_19:
+                icons_to_showcase = [icon for icon in all_icons if icon.get('index') != 19]
+                print(f"ℹ️ {mode} Mode: Filtering out icon 19. Processing {len(icons_to_showcase)} icons.")
+            else:
+                icons_to_showcase = all_icons
+                print(f"ℹ️ {mode} Mode: Processing all {len(icons_to_showcase)} available icons.")
+
+            total_count = len(icons_to_showcase)
+            if total_count == 0:
+                return 0, 0
+
+            print(f"\n🎬 STARTING ENHANCED {mode.upper()} SHOWCASE")
+            print(f"📄 Will showcase {total_count} icons")
+            print("="*60)
+            
+            success_count = 0
+            for icon_object in icons_to_showcase:
+                if self.should_stop:
+                    break
+                
+                if self.showcase_single_icon_corrected(icon_object, mode, listen_duration, progress_callback):
+                    success_count += 1
                 else:
-                    print("⚠️ Drag verification: DISABLED (fallback mode)")
-                print("="*60)
+                    icon_index = icon_object.get('index', 'unknown')
+                    print(f"⚠️ Failed to showcase icon {icon_index}, but continuing with the next one.") # Thông báo và tiếp tục
+
+            print(f"\n✅ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
+            print(f"📊 Success: {success_count}/{total_count} icons")
+            print("="*60)
+            
+            # Trả về cả số lượng thành công và tổng số
+            return success_count, total_count
                 
-                success_count = 0
-                for icon_object in icons_to_showcase:
-                    if self.should_stop:
-                        break
-                    
-                    if self.showcase_single_icon_corrected(icon_object, mode, listen_duration, progress_callback):
-                        success_count += 1
-                    else:
-                        icon_index = icon_object.get('index', 'unknown')
-                        print(f"⚠️ Failed to showcase icon {icon_index}")
-                
-                print(f"\n✅ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
-                print(f"📊 Success: {success_count}/{len(icons_to_showcase)} icons")
-                print("="*60)
-                return success_count == len(icons_to_showcase)
-                
-            except Exception as e:
-                print("❌ Error in enhanced " + mode + " showcase: " + str(e))
-                return False
+        except Exception as e:
+            print("❌ Error in enhanced " + mode + " showcase: " + str(e))
+            return 0, len(self.config['layout']['icons']) if self.config else 0
 
     def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
         """
@@ -7780,11 +7779,7 @@ class SprunkiGamePlayer:
             return False
 
     def execute_full_showcase_workflow_corrected(self, progress_callback=None):
-        """
-        ENHANCED: Execute full workflow with verification system AND
-        FAIL-SAFE logic for Horror Mode. If Normal Mode completes,
-        the job is considered a success even if Horror Mode fails later.
-        """
+        """ENHANCED: Execute full workflow with verification system"""
         try:
             # --- SETUP ---
             if not self.config:
@@ -7795,13 +7790,12 @@ class SprunkiGamePlayer:
             has_horror = game_settings.get('hasHorror', False)
             has_bonus = game_settings.get('hasBonus', False)
             
-            print("\n" + "="*70)
-            print("🚀 STARTING ENHANCED FULL SHOWCASE WORKFLOW (with Fail-Safe)")
-            if self.characters_available or self.putted_chars_available:
-                print("   ✅ Drag verification system: ENABLED")
+            print("\nðŸŽª STARTING ENHANCED FULL SHOWCASE WORKFLOW")
+            if self.characters_available:
+                print("ðŸ” Drag verification system: ENABLED")
             else:
-                print("   ⚠️ Drag verification system: DISABLED (using fallback logic)")
-            print("="*70)
+                print("âš ï¸ Drag verification system: DISABLED (fallback mode)")
+            print("="*60)
             
             # ================================================================
             # == PHASE 1: NORMAL MODE (Safety Checkpoint)
@@ -7812,20 +7806,18 @@ class SprunkiGamePlayer:
             print("\n" + "─"*25 + " 😇 PHASE 1: NORMAL MODE 😇 " + "─"*25)
 
             if progress_callback:
-                progress_callback("😇 Starting Normal Mode Showcase...")
+                progress_callback("ðŸŽª Starting Enhanced Normal Mode...")
             
-            # 1. Normal icons (skip icon 19 if horror mode exists)
+            # Normal icons (skip icon 19 if horror mode exists)
             if not self.showcase_all_icons_corrected("Normal", skip_icon_19=has_horror, progress_callback=progress_callback):
-                print("❌ WORKFLOW FAILED: Showcase of Normal icons failed.")
-                return False # Thất bại ở phần Normal -> toàn bộ job thất bại
+                return False
             
-            # 2. Normal bonus (if any)
+            # Normal bonus (if any)
             if has_bonus:
                 if not self.showcase_all_bonus_corrected("Normal", progress_callback=progress_callback):
-                    print("❌ WORKFLOW FAILED: Showcase of Normal bonus failed.")
                     return False
 
-            # 3. Normal remixes
+            # Ghi lại sự kiện bắt đầu phần trình diễn remix Normal
             if self.obs_controller:
                 self.obs_controller.log_event_timestamp(
                     "start_full_remix_performance",
@@ -7833,70 +7825,94 @@ class SprunkiGamePlayer:
                     {"mode": "Normal"}
                 )
 
+            # Normal remixes
             if not self.play_all_remixes_corrected("Normal", progress_callback=progress_callback):
-                print("❌ WORKFLOW FAILED: Playback of Normal remixes failed.")
                 return False
             
-            print("\n" + "✅"*20)
-            print("✅ SAFETY CHECKPOINT REACHED: NORMAL MODE COMPLETED SUCCESSFULLY.")
-            print("   The generated video is guaranteed to be valuable up to this point.")
-            print("✅"*20 + "\n")
-
-            # ================================================================
-            # == PHASE 2: HORROR MODE (với cơ chế Fail-Safe)
-            # ================================================================
-            # Từ thời điểm này trở đi, nếu có lỗi, job vẫn được coi là thành công.
-            
+            # === HORROR MODE (if available) ===
             if has_horror and not self.should_stop:
-                print("\n" + "─"*25 + " 👻 PHASE 2: HORROR MODE 👻 " + "─"*25)
-                print("   ⚠️ Entering Fail-Safe section. Any failure from this point will NOT cause the job to fail.")
+                # Trigger horror mode
+                if not self.trigger_horror_mode_transition_corrected(progress_callback=progress_callback):
+                    return False
                 
-                try:
-                    # Bọc toàn bộ logic của Horror Mode trong một khối try...except riêng
-                    
-                    # 4. Trigger horror mode
-                    if not self.trigger_horror_mode_transition_corrected(progress_callback=progress_callback):
-                        raise RuntimeError("Failed to trigger or verify horror mode transition.")
-                    
-                    # 5. Horror showcase (all icons 0-19)
-                    if not self.showcase_all_icons_corrected("Horror", skip_icon_19=False, progress_callback=progress_callback):
-                        raise RuntimeError("Failed during horror icon showcase.")
-                    
-                    # 6. Horror bonus
-                    if has_bonus:
-                        if not self.showcase_all_bonus_corrected("Horror", progress_callback=progress_callback):
-                            raise RuntimeError("Failed during horror bonus showcase.")
-                    
-                    # 7. Horror remixes
-                    if self.obs_controller:
-                        self.obs_controller.log_event_timestamp(
-                            "start_full_remix_performance",
-                            "Starting HORROR remix performance section",
-                            {"mode": "Horror"}
-                        )
-
-                    if not self.play_all_remixes_corrected("Horror", progress_callback=progress_callback):
-                        raise RuntimeError("Failed during horror remix playback.")
+                # Horror showcase (all icons 0-19)
+                if not self.showcase_all_icons_corrected("Horror", skip_icon_19=False, progress_callback=progress_callback):
+                    return False
                 
-                except Exception as horror_error:
-                    # Đây là phần xử lý "Fail-Safe"
-                    print("\n" + "!"*70)
-                    print(f"⚠️ HORROR MODE FAILED: {horror_error}")
-                    print("✅ FAIL-SAFE ACTIVATED: The job will be marked as SUCCESSFUL because Normal Mode content was completed.")
-                    print("   This prevents useless retries. The final video will contain only the Normal Mode part.")
-                    print("!"*70 + "\n")
-                    
-                    # Ghi chú lại lỗi để có thể xem lại sau
-                    # (Logic này sẽ được thêm vào UnifiedProcessingManager hoặc CreatorService nếu cần)
+                # Horror bonus
+                if has_bonus:
+                    if not self.showcase_all_bonus_corrected("Horror", progress_callback=progress_callback):
+                        return False
 
-            # ================================================================
-            # == PHASE 3: FINAL CLEANUP AND REPORTING
-            # ================================================================
+                # Ghi lại sự kiện bắt đầu phần trình diễn remix Horror
+                if self.obs_controller:
+                    self.obs_controller.log_event_timestamp(
+                        "start_full_remix_performance",
+                        "Starting HORROR remix performance section",
+                        {"mode": "Horror"}
+                    )
+
+                # Horror remixes
+                if not self.play_all_remixes_corrected("Horror", progress_callback=progress_callback):
+                    return False
+            
             if progress_callback:
-                progress_callback("🎉 Enhanced full showcase workflow completed!")
+                progress_callback("ðŸŽ‰ Enhanced full showcase workflow completed!")
 
-            print("\n🎉 ENHANCED FULL SHOWCASE WORKFLOW COMPLETED (SUCCESS STATUS)!")
+            print("\nðŸŽ‰ ENHANCED FULL SHOWCASE WORKFLOW COMPLETED!")
             print(self.get_drag_statistics())
+
+            # ================================================================
+            # ðŸ§¹ FINAL SMART CLEANUP & VALIDATION
+            # ================================================================
+            print("\nðŸ§¹ FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
+            print("="*70)
+
+            try:
+                # Smart batch cleanup validation - ensure all slots are clean
+                print("ðŸ”„ Phase 1: Smart batch cleanup validation...")
+                cleanup_success_count, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
+                
+                if cleanup_total == 0:
+                    print("âœ… No cleanup needed - all slots already clean")
+                elif cleanup_success_count == cleanup_total:
+                    print(f"âœ… Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned perfectly")
+                else:
+                    print(f"âš ï¸ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned")
+                    if cleanup_errors:
+                        print(f"   ðŸ“‹ Cleanup issues: {len(cleanup_errors)} errors")
+                        for error in cleanup_errors[:2]:  # Show first 2 errors
+                            print(f"      - {error}")
+                
+                # Comprehensive workflow validation
+                print("\nðŸ” Phase 2: Comprehensive workflow validation...")
+                is_complete, remaining_issues, recommendations = self.validate_workflow_completion()
+                
+                if is_complete:
+                    print("âœ… WORKFLOW VALIDATION: PERFECT COMPLETION! ðŸŽ‰")
+                    print("   ðŸ›¡ï¸ All slots clean")
+                    print("   ðŸ“Š State consistency verified")
+                    print("   ðŸŽ¯ Cross-contamination: NONE")
+                else:
+                    print(f"âš ï¸ WORKFLOW VALIDATION: {len(remaining_issues)} issues detected")
+                    print("ðŸ“‹ Issues found:")
+                    for issue in remaining_issues[:3]:  # Show first 3 issues
+                        print(f"   âŒ {issue}")
+                    
+                    if recommendations:
+                        print("ðŸ’¡ Recommendations:")
+                        for rec in recommendations[:2]:  # Show first 2 recommendations
+                            print(f"   ðŸ’¡ {rec}")
+                
+                # Enhanced summary
+                print("\nðŸ“Š ENHANCED WORKFLOW SUMMARY:")
+                summary = self.get_enhanced_workflow_summary()
+                print(summary)
+                
+            except Exception as e:
+                print(f"âš ï¸ Error during final validation: {e}")
+                print("ðŸ“Š Basic statistics:")
+                print(self.get_drag_statistics())
 
             print("\n" + "─"*25 + " 🧹 FINAL CLEANUP & VALIDATION 🧹 " + "─"*25)
             # ... (phần báo cáo và dọn dẹp cuối cùng như cũ, không thay đổi) ...
@@ -7910,16 +7926,20 @@ class SprunkiGamePlayer:
             except Exception as e:
                 print(f"   ⚠️ Error during final validation/cleanup: {e}")
             print("="*70)
-            
-            # Luôn trả về True ở cuối cùng nếu đã qua được Phase 1 (Normal Mode)
             return True
             
+        except FileNotFoundError:
+            print(f"❌ JSON file not found: {getattr(self, '_original_json_path', 'unknown')}")
+            return False
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON format error: {e}")
+            return False
+        except PermissionError:
+            print(f"❌ Permission denied writing to JSON file")
+            return False
         except Exception as e:
-            # Lỗi này chỉ xảy ra nếu có vấn đề nghiêm trọng ở Phase 1 (Normal Mode)
-            print(f"❌ CRITICAL WORKFLOW ERROR (in Normal Mode): {e}")
-            import traceback
-            traceback.print_exc()
-            return False 
+            print("âŒ Error in enhanced full showcase workflow: " + str(e))
+            return False
 
     def showcase_all_bonus_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
         """ENHANCED: Showcase bonus with verification system - FLEXIBLE BONUS COUNT"""
@@ -8730,6 +8750,8 @@ class SprunkiGamePlayer:
                 if not file_path:
                     return
                 
+                self._original_json_path = file_path      
+
                 with open(file_path, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
                 
