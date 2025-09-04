@@ -166,82 +166,44 @@ class SprunkiJSONGenerator:
                     }
                 });
                 
-                // =====================================================
-                // UPDATED: Bottom Half Only + Coordinate-Based Sorting
-                // =====================================================
-                console.log("🎬 Bắt đầu quá trình lấy icons (Bottom Half + Coordinate Sorting)...");
+                console.log("🎬 Bắt đầu quá trình lấy icons (Logic đơn giản - Không sắp xếp)...");
 
-                // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ 
+                // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ (Không đổi)
                 console.log("🔶️ Bước 1: Tìm các sprite 'Icons' đang hiện thị...");
                 const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
                 console.log(`✦ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
 
-                // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ VÀ LỌC NỬA DƯỚI MÀN HÌNH
-                console.log("🔶️ Bước 2: Chuyển đổi tọa độ và lọc icons ở nửa dưới màn hình...");
-                const iconsWithPixelCoords = visibleIcons.map((icon) => {
+                // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ, LỌC NỬA DƯỚI VÀ GÁN INDEX TRỰC TIẾP (Không có sắp xếp)
+                console.log("🔶️ Bước 2: Chuyển đổi tọa độ, lọc và gán index theo thứ tự gốc...");
+                const icons = visibleIcons.map((icon, index) => {
+                    // Chuyển đổi tọa độ
                     const pixelCoords = toPixelWithMenu(icon.x, icon.y);
                     return {
                         originalIcon: icon,
                         x: pixelCoords.x,
-                        y: pixelCoords.y
+                        y: pixelCoords.y,
+                        // Giữ lại index gốc từ mảng `visibleIcons`
+                        originalIndexInVisibleList: index 
                     };
-                }).filter(icon => icon.y >= 540); // Chỉ lấy icons ở nửa dưới màn hình (y >= 540)
-                
-                console.log(`✦ Sau khi lọc nửa dưới: ${iconsWithPixelCoords.length} icons.`);
-
-                // Bước 3: SẮP XẾP THEO TỌA ĐỘ (TRÊN XUỐNG DƯỚI, TRÁI SANG PHẢI)
-                console.log("🔶️ Bước 3: Sắp xếp icons theo tọa độ (từ trên xuống dưới, trái sang phải)...");
-                
-                // Tolerance cho việc xác định cùng hàng (các icon cùng hàng có thể lệch y một chút)
-                const ROW_TOLERANCE = 30;
-                
-                // Nhóm icons thành các hàng dựa trên tọa độ y
-                const sortedByY = iconsWithPixelCoords.sort((a, b) => a.y - b.y);
-                const rows = [];
-                
-                sortedByY.forEach(icon => {
-                    // Tìm hàng phù hợp (y gần nhau trong khoảng tolerance)
-                    let foundRow = false;
-                    for (let row of rows) {
-                        if (Math.abs(row[0].y - icon.y) <= ROW_TOLERANCE) {
-                            row.push(icon);
-                            foundRow = true;
-                            break;
-                        }
-                    }
-                    
-                    // Nếu không tìm thấy hàng phù hợp, tạo hàng mới
-                    if (!foundRow) {
-                        rows.push([icon]);
-                    }
-                });
-                
-                console.log(`✦ Tạo được ${rows.length} hàng icons.`);
-                
-                // Sắp xếp từng hàng theo x (trái sang phải) và ghép lại
-                const finalSortedIcons = [];
-                rows.forEach((row, rowIndex) => {
-                    // Sắp xếp icons trong hàng theo x
-                    row.sort((a, b) => a.x - b.x);
-                    console.log(`✦ Hàng ${rowIndex + 1}: ${row.length} icons`);
-                    finalSortedIcons.push(...row);
-                });
-
-                // Bước 4: TẠO MẢNG KẾT QUẢ CUỐI CÙNG
-                console.log("🔶️ Bước 4: Gán index tuần tự mới...");
-                const icons = finalSortedIcons.map((iconData, index) => {
+                })
+                // Lọc các icon ở nửa dưới màn hình
+                .filter(icon => icon.y >= 540) 
+                // Gán index cuối cùng tuần tự cho danh sách SAU KHI LỌC
+                .map((iconData, finalIndex) => {
                     return {
                         x: iconData.x,
                         y: iconData.y,
-                        index: index // Gán index tuần tự 0, 1, 2... theo thứ tự sau khi sắp xếp
+                        index: finalIndex // Gán index tuần tự 0, 1, 2... cho các icon hợp lệ
                     };
                 });
-
-                console.log("✦ HOÀN THÀNH! Icons được tạo theo logic Bottom Half + Coordinate Sorting:");
+                
+                console.log(`✦ Sau khi lọc nửa dưới, có ${icons.length} icons hợp lệ.`);
+                console.log("✦ HOÀN THÀNH! Icons được tạo theo logic đơn giản (Không sắp xếp theo tọa độ):");
                 console.table(icons);
+
                 // =====================================================
-                // END: UPDATED Bottom Half + Coordinate Sorting
-                // =====================================================
+                // >>> END OF CHANGES
+                // =====================================================                
                 
                 // Get slots coordinates
                 const poloSprites = allTargets.filter(t => t.sprite.name.startsWith('Polo '));
@@ -485,88 +447,42 @@ class SprunkiJSONGenerator:
                             return document.title || 'Untitled Game';
                         }
                         
-                        // 🔍REMOVED: calculateRecordingArea function - now handled by Python OpenCV
-                        // Recording area will be calculated in Python using OpenCV layout analysis
-                        
-                        // =====================================================
-                        // UPDATED: Function getIconsWithHybridLogic (Logic Mới)
-                        // =====================================================
-                        function getIconsWithHybridLogic(allTargets) {
-                            console.log("🎬 Bắt đầu quá trình lấy icons (Bottom Half + Coordinate Sorting)...");
+                        function getIconsWithSimplifiedLogic(allTargets) {
+                            console.log("🎬 Bắt đầu quá trình lấy icons (Logic đơn giản - Không sắp xếp)...");
 
-                            // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ 
+                            // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ (Không đổi)
                             console.log("🔶️ Bước 1: Tìm các sprite 'Icons' đang hiện thị...");
                             const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
                             console.log(`✦ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
 
-                            // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ VÀ LỌC NỬA DƯỚI MÀN HÌNH
-                            console.log("🔶️ Bước 2: Chuyển đổi tọa độ và lọc icons ở nửa dưới màn hình...");
-                            const iconsWithPixelCoords = visibleIcons.map((icon) => {
+                            // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ, LỌC VÀ GÁN INDEX TRỰC TIẾP (Không có sắp xếp)
+                            console.log("🔶️ Bước 2: Chuyển đổi tọa độ, lọc và gán index theo thứ tự gốc...");
+                            const finalLayoutIcons = visibleIcons.map((icon, index) => {
                                 const pixelCoords = toPixelWithMenu(icon.x, icon.y);
                                 return {
                                     originalIcon: icon,
                                     x: pixelCoords.x,
-                                    y: pixelCoords.y
+                                    y: pixelCoords.y,
+                                    originalIndexInVisibleList: index
                                 };
-                            }).filter(icon => icon.y >= 540); // Chỉ lấy icons ở nửa dưới màn hình (y >= 540)
-                            
-                            console.log(`✦ Sau khi lọc nửa dưới: ${iconsWithPixelCoords.length} icons.`);
-
-                            // Bước 3: SẮP XẾP THEO TỌA ĐỘ (TRÊN XUỐNG DƯỚI, TRÁI SANG PHẢI)
-                            console.log("🔶️ Bước 3: Sắp xếp icons theo tọa độ (từ trên xuống dưới, trái sang phải)...");
-                            
-                            // Tolerance cho việc xác định cùng hàng
-                            const ROW_TOLERANCE = 30;
-                            
-                            // Nhóm icons thành các hàng dựa trên tọa độ y
-                            const sortedByY = iconsWithPixelCoords.sort((a, b) => a.y - b.y);
-                            const rows = [];
-                            
-                            sortedByY.forEach(icon => {
-                                // Tìm hàng phù hợp (y gần nhau trong khoảng tolerance)
-                                let foundRow = false;
-                                for (let row of rows) {
-                                    if (Math.abs(row[0].y - icon.y) <= ROW_TOLERANCE) {
-                                        row.push(icon);
-                                        foundRow = true;
-                                        break;
-                                    }
-                                }
-                                
-                                // Nếu không tìm thấy hàng phù hợp, tạo hàng mới
-                                if (!foundRow) {
-                                    rows.push([icon]);
-                                }
-                            });
-                            
-                            console.log(`✦ Tạo được ${rows.length} hàng icons.`);
-                            
-                            // Sắp xếp từng hàng theo x (trái sang phải) và ghép lại
-                            const finalSortedIcons = [];
-                            rows.forEach((row, rowIndex) => {
-                                // Sắp xếp icons trong hàng theo x
-                                row.sort((a, b) => a.x - b.x);
-                                console.log(`✦ Hàng ${rowIndex + 1}: ${row.length} icons`);
-                                finalSortedIcons.push(...row);
-                            });
-
-                            // Bước 4: TẠO MẢNG KẾT QUẢ CUỐI CÙNG
-                            console.log("🔶️ Bước 4: Gán index tuần tự mới...");
-                            const finalLayoutIcons = finalSortedIcons.map((iconData, index) => {
+                            })
+                            .filter(icon => icon.y >= 540)
+                            .map((iconData, finalIndex) => {
                                 return {
                                     x: iconData.x,
                                     y: iconData.y,
-                                    index: index // Gán index tuần tự 0, 1, 2... theo thứ tự sau khi sắp xếp
+                                    index: finalIndex
                                 };
                             });
 
-                            console.log("✦ HOÀN THÀNH! Icons được tạo theo logic Bottom Half + Coordinate Sorting:");
+                            console.log(`✦ Sau khi lọc nửa dưới, có ${finalLayoutIcons.length} icons hợp lệ.`);
+                            console.log("✦ HOÀN THÀNH! Icons được tạo theo logic đơn giản (Không sắp xếp theo tọa độ):");
                             console.table(finalLayoutIcons);
                             
                             return finalLayoutIcons;
                         }
                         // =====================================================
-                        // END: UPDATED Function getIconsWithHybridLogic
+                        // >>> END OF CHANGES
                         // =====================================================
 
                         const vm = findVM();
@@ -575,7 +491,8 @@ class SprunkiJSONGenerator:
                         const customPageTitle = await getCustomPageTitle();
                         const allTargets = vm.runtime.targets.map(t => t);
                         
-                        const icons = getIconsWithHybridLogic(allTargets);
+                        // Sử dụng hàm logic mới
+                        const icons = getIconsWithSimplifiedLogic(allTargets);
                         
                         // =====================================================
                         // FIXED: Sắp xếp slots theo tọa độ X (nhất quán với js_get_state_and_coordinates)
