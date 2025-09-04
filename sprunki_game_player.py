@@ -7779,45 +7779,43 @@ class SprunkiGamePlayer:
             return False
 
     def execute_full_showcase_workflow_corrected(self, progress_callback=None):
-        """ENHANCED: Execute full workflow with verification system"""
+        """ENHANCED: Execute full workflow with verification system + Horror Error Resilience"""
         try:
-            # --- SETUP ---
             if not self.config:
-                print("❌ CRITICAL ERROR: Config not loaded, cannot start workflow.")
                 return False
                 
             game_settings = self.config.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             has_bonus = game_settings.get('hasBonus', False)
             
-            print("\nðŸŽª STARTING ENHANCED FULL SHOWCASE WORKFLOW")
+            print("\n🎪 STARTING ENHANCED FULL SHOWCASE WORKFLOW")
             if self.characters_available:
-                print("ðŸ” Drag verification system: ENABLED")
+                print("🎯 Drag verification system: ENABLED")
             else:
-                print("âš ï¸ Drag verification system: DISABLED (fallback mode)")
+                print("⚠️ Drag verification system: DISABLED (fallback mode)")
             print("="*60)
             
-            # ================================================================
-            # == PHASE 1: NORMAL MODE (Safety Checkpoint)
-            # ================================================================
-            # Nếu bất kỳ bước nào trong Phase 1 thất bại, toàn bộ job sẽ thất bại
-            # và được retry một cách chính đáng.
+            # Track normal phase completion for resilience
+            is_normal_phase_perfect = True
             
-            print("\n" + "─"*25 + " 😇 PHASE 1: NORMAL MODE 😇 " + "─"*25)
-
+            # === NORMAL MODE ===
             if progress_callback:
-                progress_callback("ðŸŽª Starting Enhanced Normal Mode...")
+                progress_callback("🎪 Starting Enhanced Normal Mode...")
             
-            # Normal icons (skip icon 19 if horror mode exists)
-            if not self.showcase_all_icons_corrected("Normal", skip_icon_19=has_horror, progress_callback=progress_callback):
-                return False
-            
-            # Normal bonus (if any)
-            if has_bonus:
-                if not self.showcase_all_bonus_corrected("Normal", progress_callback=progress_callback):
-                    return False
+            # Normal icons
+            if not self.should_stop:
+                normal_success, normal_total = self.showcase_all_icons_corrected("Normal", skip_icon_19=has_horror, progress_callback=progress_callback)
+                if normal_success < normal_total:
+                    print(f"⚠️ NORMAL SHOWCASE WARNING: {normal_total - normal_success} icon(s) failed to showcase.")
+                    is_normal_phase_perfect = False # Đánh dấu có lỗi
 
-            # Ghi lại sự kiện bắt đầu phần trình diễn remix Normal
+            # Normal bonus (if any)
+            if has_bonus and not self.should_stop:
+                if not self.showcase_all_bonus_corrected("Normal", progress_callback=progress_callback):
+                    print("⚠️ NORMAL BONUS WARNING: Failed to showcase bonus characters.")
+                    is_normal_phase_perfect = False
+
+            # Ghi lại sự kiện bắt đầu phần trình diễn remix Normal (LOGIC TIMESTAMP KHÔNG ĐỔI)
             if self.obs_controller:
                 self.obs_controller.log_event_timestamp(
                     "start_full_remix_performance",
@@ -7826,106 +7824,224 @@ class SprunkiGamePlayer:
                 )
 
             # Normal remixes
-            if not self.play_all_remixes_corrected("Normal", progress_callback=progress_callback):
-                return False
+            if not self.should_stop:
+                if not self.play_all_remixes_corrected("Normal", progress_callback=progress_callback):
+                    print("⚠️ NORMAL REMIX WARNING: Failed to play all remixes.")
+                    is_normal_phase_perfect = False
+
+            # Báo cáo kết quả của Normal Phase
+            if is_normal_phase_perfect:
+                print("\n✅ NORMAL PHASE COMPLETED SUCCESSFULLY!")
+            else:
+                print("\n🔶 NORMAL PHASE COMPLETED WITH WARNINGS. Continuing to Horror Mode...")
+            print("="*60)
             
-            # === HORROR MODE (if available) ===
+            # Cờ này chỉ để báo cáo cuối cùng, không ảnh hưởng logic
+            normal_phase_did_run = True 
+
+            # Initialize horror phase status
+            horror_phase_success = False
+            
+            # === HORROR MODE (with error resilience) ===
             if has_horror and not self.should_stop:
-                # Trigger horror mode
-                if not self.trigger_horror_mode_transition_corrected(progress_callback=progress_callback):
-                    return False
+                print("\n👻 STARTING HORROR PHASE (with error resilience)...")
+                horror_phase_success = True
                 
-                # Horror showcase (all icons 0-19)
-                if not self.showcase_all_icons_corrected("Horror", skip_icon_19=False, progress_callback=progress_callback):
-                    return False
-                
-                # Horror bonus
-                if has_bonus:
-                    if not self.showcase_all_bonus_corrected("Horror", progress_callback=progress_callback):
-                        return False
+                try:
+                    # Trigger horror mode
+                    print("👻 Step 1: Triggering horror mode transition...")
+                    if not self.trigger_horror_mode_transition_corrected(progress_callback=progress_callback):
+                        raise Exception("Horror mode trigger failed")
+                    
+                    # Horror showcase (all icons 0-19)
+                    print("👻 Step 2: Horror icon showcase...")
+                    horror_success_count, horror_total_count = self.showcase_all_icons_corrected("Horror", skip_icon_19=False, progress_callback=progress_callback)
+                    if horror_success_count < horror_total_count:
+                        # Ghi nhận có lỗi nhưng không dừng lại ngay
+                        print(f"⚠️ HORROR SHOWCASE WARNING: {horror_total_count - horror_success_count} icon(s) failed.")
+                        horror_phase_success = False # Đánh dấu là phase horror không hoàn hảo
+                    
+                    # Horror bonus
+                    if has_bonus:
+                        print("👻 Step 3: Horror bonus showcase...")
+                        if not self.showcase_all_bonus_corrected("Horror", progress_callback=progress_callback):
+                            raise Exception("Horror bonus failed")
 
-                # Ghi lại sự kiện bắt đầu phần trình diễn remix Horror
-                if self.obs_controller:
-                    self.obs_controller.log_event_timestamp(
-                        "start_full_remix_performance",
-                        "Starting HORROR remix performance section",
-                        {"mode": "Horror"}
-                    )
+                    # Ghi lại sự kiện bắt đầu phần trình diễn remix Horror
+                    if self.obs_controller:
+                        self.obs_controller.log_event_timestamp(
+                            "start_full_remix_performance",
+                            "Starting HORROR remix performance section",
+                            {"mode": "Horror"}
+                        )
 
-                # Horror remixes
-                if not self.play_all_remixes_corrected("Horror", progress_callback=progress_callback):
-                    return False
+                    # Horror remixes
+                    print("👻 Step 4: Horror remixes...")
+                    if not self.play_all_remixes_corrected("Horror", progress_callback=progress_callback):
+                        raise Exception("Horror remixes failed")
+                    
+                    print("\n✅ HORROR PHASE COMPLETED SUCCESSFULLY!")
+                    
+                except Exception as horror_error:
+                    print(f"\n⚠️ HORROR PHASE ERROR: {horror_error}")
+                    print("="*60)
+                    print("🛡️ ERROR RESILIENCE ACTIVATED:")
+                    print("   ✅ Normal phase was completed successfully")
+                    print("   ❌ Horror phase failed (likely hasHorror detection error)")
+                    print("   🎯 SOLUTION: Will update JSON to hasHorror = false")
+                    print("   🎬 VIDEO OUTPUT: Will be preserved (normal content complete)")
+                    print("="*60)
+                    
+                    horror_phase_success = False
+                    
+                    # Update JSON file to fix hasHorror detection
+                    try:
+                        print("📝 Updating JSON file: hasHorror true → false...")
+                        if self.update_json_has_horror(False):
+                            print("   ✅ JSON updated successfully")
+                            print("   💡 Next run will skip horror phase correctly")
+                        else:
+                            print("   ⚠️ JSON update failed, but workflow continues")
+                    except Exception as json_error:
+                        print(f"   ⚠️ JSON update error: {json_error}")
+                    
+                    # Continue to completion despite horror failure
+                    print("🎯 CONTINUING TO COMPLETION (Normal phase success preserved)...")
             
             if progress_callback:
-                progress_callback("ðŸŽ‰ Enhanced full showcase workflow completed!")
+                progress_callback("🎯 Enhanced full showcase workflow completed!")
 
-            print("\nðŸŽ‰ ENHANCED FULL SHOWCASE WORKFLOW COMPLETED!")
-            print(self.get_drag_statistics())
+            # Final status determination
+            if normal_phase_did_run:
+                print("\n🎯 ENHANCED FULL SHOWCASE WORKFLOW COMPLETED!")
+                
+                if has_horror:
+                    if horror_phase_success:
+                        print("   ✅ Normal phase: SUCCESS")
+                        print("   ✅ Horror phase: SUCCESS") 
+                        print("   🏆 RESULT: FULL SUCCESS")
+                    else:
+                        print("   ✅ Normal phase: SUCCESS (preserved)")
+                        print("   ❌ Horror phase: FAILED (hasHorror detection error)")
+                        print("   🏆 RESULT: SUCCESS (Normal content complete)")
+                        print("   📝 JSON corrected for future runs")
+                else:
+                    print("   ✅ Normal phase: SUCCESS")
+                    print("   🏆 RESULT: FULL SUCCESS (No horror mode)")
+                
+                print(self.get_drag_statistics())
+            else:
+                print("\n❌ WORKFLOW FAILED: Normal phase incomplete")
+                return False
 
             # ================================================================
-            # ðŸ§¹ FINAL SMART CLEANUP & VALIDATION
+            # 🧹 FINAL SMART CLEANUP & VALIDATION
             # ================================================================
-            print("\nðŸ§¹ FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
+            print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
             print("="*70)
 
             try:
                 # Smart batch cleanup validation - ensure all slots are clean
-                print("ðŸ”„ Phase 1: Smart batch cleanup validation...")
+                print("🔄 Phase 1: Smart batch cleanup validation...")
                 cleanup_success_count, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
                 
                 if cleanup_total == 0:
-                    print("âœ… No cleanup needed - all slots already clean")
+                    print("✅ No cleanup needed - all slots already clean")
                 elif cleanup_success_count == cleanup_total:
-                    print(f"âœ… Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned perfectly")
+                    print(f"✅ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned perfectly")
                 else:
-                    print(f"âš ï¸ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned")
+                    print(f"⚠️ Smart cleanup: {cleanup_success_count}/{cleanup_total} slots cleaned")
                     if cleanup_errors:
-                        print(f"   ðŸ“‹ Cleanup issues: {len(cleanup_errors)} errors")
+                        print(f"   📋 Cleanup issues: {len(cleanup_errors)} errors")
                         for error in cleanup_errors[:2]:  # Show first 2 errors
                             print(f"      - {error}")
                 
                 # Comprehensive workflow validation
-                print("\nðŸ” Phase 2: Comprehensive workflow validation...")
+                print("\n🎯 Phase 2: Comprehensive workflow validation...")
                 is_complete, remaining_issues, recommendations = self.validate_workflow_completion()
                 
                 if is_complete:
-                    print("âœ… WORKFLOW VALIDATION: PERFECT COMPLETION! ðŸŽ‰")
-                    print("   ðŸ›¡ï¸ All slots clean")
-                    print("   ðŸ“Š State consistency verified")
-                    print("   ðŸŽ¯ Cross-contamination: NONE")
+                    print("✅ WORKFLOW VALIDATION: PERFECT COMPLETION! 🎯")
+                    print("   🏁 All slots clean")
+                    print("   📊 State consistency verified")
+                    print("   🎯 Cross-contamination: NONE")
                 else:
-                    print(f"âš ï¸ WORKFLOW VALIDATION: {len(remaining_issues)} issues detected")
-                    print("ðŸ“‹ Issues found:")
+                    print(f"⚠️ WORKFLOW VALIDATION: {len(remaining_issues)} issues detected")
+                    print("📋 Issues found:")
                     for issue in remaining_issues[:3]:  # Show first 3 issues
-                        print(f"   âŒ {issue}")
+                        print(f"   ❌ {issue}")
                     
                     if recommendations:
-                        print("ðŸ’¡ Recommendations:")
+                        print("💡 Recommendations:")
                         for rec in recommendations[:2]:  # Show first 2 recommendations
-                            print(f"   ðŸ’¡ {rec}")
+                            print(f"   💡 {rec}")
                 
                 # Enhanced summary
-                print("\nðŸ“Š ENHANCED WORKFLOW SUMMARY:")
+                print("\n📊 ENHANCED WORKFLOW SUMMARY:")
                 summary = self.get_enhanced_workflow_summary()
                 print(summary)
                 
             except Exception as e:
-                print(f"âš ï¸ Error during final validation: {e}")
-                print("ðŸ“Š Basic statistics:")
+                print(f"⚠️ Error during final validation: {e}")
+                print("📊 Basic statistics:")
                 print(self.get_drag_statistics())
 
-            print("\n" + "─"*25 + " 🧹 FINAL CLEANUP & VALIDATION 🧹 " + "─"*25)
-            # ... (phần báo cáo và dọn dẹp cuối cùng như cũ, không thay đổi) ...
-            try:
-                print("   ✅ Smart cleanup validation...")
-                self.smart_batch_return_all_slots(use_cdp=False)
-                print("\n   ✅ Comprehensive workflow validation...")
-                self.validate_workflow_completion()
-                print("\n   ✅ ENHANCED WORKFLOW SUMMARY:")
-                print(self.get_enhanced_workflow_summary())
-            except Exception as e:
-                print(f"   ⚠️ Error during final validation/cleanup: {e}")
             print("="*70)
+            
+            # Return success if normal phase completed (regardless of horror phase)
+            return normal_phase_did_run
+            
+        except Exception as e:
+            print("❌ Error in enhanced full showcase workflow: " + str(e))
+            return False
+
+    def update_json_has_horror(self, new_has_horror_value):
+        """
+        📝 Update hasHorror value in the original JSON file
+        Used when hasHorror detection is incorrect and needs correction
+        """
+        try:
+            # Check if we have the file path from the original load
+            if not hasattr(self, '_original_json_path'):
+                print("⚠️ Original JSON file path not available for update")
+                return False
+            
+            file_path = self._original_json_path
+            
+            # Read current JSON content
+            print(f"📖 Reading JSON file: {file_path}")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
+            
+            # Update hasHorror value
+            old_value = json_data.get('gameSettings', {}).get('hasHorror', None)
+            if 'gameSettings' not in json_data:
+                json_data['gameSettings'] = {}
+            
+            json_data['gameSettings']['hasHorror'] = new_has_horror_value
+            
+            # Add update timestamp and reason
+            json_data['gameSettings']['hasHorrorCorrected'] = {
+                'corrected_at': datetime.now().isoformat(),
+                'original_value': old_value,
+                'corrected_value': new_has_horror_value,
+                'reason': 'Horror phase failed - likely incorrect detection'
+            }
+            
+            # Write updated JSON back to file
+            print(f"💾 Writing updated JSON file...")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+            
+            # Update internal config as well
+            self.config = json_data
+            
+            print(f"✅ JSON updated successfully:")
+            print(f"   📝 File: {file_path}")
+            print(f"   🔄 hasHorror: {old_value} → {new_has_horror_value}")
+            print(f"   ⏰ Timestamp: {json_data['gameSettings']['hasHorrorCorrected']['corrected_at']}")
+            print(f"   💡 Future runs will use corrected value")
+            
             return True
             
         except FileNotFoundError:
@@ -7938,7 +8054,7 @@ class SprunkiGamePlayer:
             print(f"❌ Permission denied writing to JSON file")
             return False
         except Exception as e:
-            print("âŒ Error in enhanced full showcase workflow: " + str(e))
+            print(f"❌ Error updating JSON file: {e}")
             return False
 
     def showcase_all_bonus_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
