@@ -122,15 +122,17 @@ class TrackerAPIClient:
             print(f"❌ Get job error: {e}")
             return None
     
-    def update_job_status(self, queue_id: int, status: str, details: Optional[Dict] = None, 
-                         video_files: Optional[Dict] = None, error_log: Optional[str] = None) -> bool:
+    def update_job_status(self, queue_id: int, status: str, details: Optional[Dict] = None,
+                         video_files: Optional[Dict] = None, error_log: Optional[str] = None,
+                         workflow_report: Optional[Dict] = None) -> bool:
         """Update job status in Tracker"""
         try:
             payload = {
                 'status': status,
                 'details': details,
                 'video_files': video_files,
-                'error_log': error_log
+                'error_log': error_log,
+                'workflow_report': workflow_report
             }
             
             response = self.session.put(
@@ -201,6 +203,28 @@ class TrackerAPIClient:
         except Exception as e:
             print(f"❌ Get progress error: {e}")
             return {}
+
+    def update_mod_production_status(self, mod_id: int, manifest_data: Dict) -> bool:
+        """Gửi thông tin từ manifest để cập nhật production_status của mod."""
+        try:
+            summary = manifest_data.get("processingSummary", {})
+            payload = {
+                'status': summary.get('overallStatus'),
+                'mode': summary.get('mode'),
+                'output_path': manifest_data.get("projectInfo", {}).get("outputDirectory"),
+                'produced_at': summary.get('endTime'),
+                'production_details': summary.get('statusDetails')
+            }
+            
+            response = self.session.put(
+                f"{self.tracker_url}/api/mods/{mod_id}/production-status",
+                json=payload,
+                timeout=self.timeout
+            )
+            return response.status_code == 200
+        except Exception as e:
+            print(f"❌ Error updating mod production status: {e}")
+            return False
 
 class CreatorService:
     """
@@ -397,47 +421,61 @@ class CreatorService:
     def _process_job(self, job: Dict) -> bool:
         queue_id = job['id']
         item = None
+        job_successful = False # <<< THAY ĐỔI: Thêm biến để theo dõi kết quả cuối cùng
         try:
             self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
 
-            # Bước 1: Chuyển job thành ProcessingItem
             item = self._convert_job_to_processing_item(job)
 
-            # Bước 2: (NẾU CẦN) Tạo JSON trước
             if item.source_url and not item.json_data:
-                json_success = self.processing_manager._generate_json_for_item(item)
-                if not json_success:
-                    item.status = "failed"
-                    item.error_message = "JSON generation failed"
-                    # Không cần gọi manifest ở đây, block finally sẽ xử lý
-                    return False 
+                if not self.processing_manager._generate_json_for_item(item):
+                    # Lỗi sẽ được ghi trong item, không cần return ngay
+                    raise Exception("JSON generation failed")
 
-            # Bước 3: (NẾU CÓ JSON) Xử lý video
             if item.json_data:
-                video_success = self.processing_manager._process_video_for_item(item)
-                return video_success # Trả về kết quả của việc xử lý video
-
-            # Nếu không có source_url và cũng không có json_data
-            item.status = "failed"
-            item.error_message = "Job has no source URL or JSON data"
-            return False
+                job_successful = self.processing_manager._process_video_for_item(item)
+            else:
+                raise Exception("Job has no source URL or JSON data")
 
         except Exception as e:
             print(f"❌ Critical error in job {queue_id}: {e}")
             if item:
                 item.status = "failed"
                 item.error_message = f"Critical job error: {e}"
-            self.api_client.update_job_status(queue_id, 'failed', error_log=f"Critical job error: {str(e)}")
-            return False
+            job_successful = False
         
         finally:
-            # ===> ĐÂY LÀ ĐIỂM MẤU CHỐT <===
-            # Sau khi mọi thứ kết thúc (dù thành công hay thất bại), 
-            # hãy gọi hàm tạo manifest, giống hệt như logic trong chế độ GUI.
             if item:
-                print(f"Finalizing job {queue_id}. Generating manifest...")
+                from dataclasses import asdict
+                final_status = "completed" if job_successful else "failed"
+                
+                print(f"Finalizing job {queue_id} with status: {final_status.upper()}")
+
+                workflow_report_obj = getattr(item, 'workflow_report', None)
+                workflow_report_dict = asdict(workflow_report_obj) if workflow_report_obj else None
+                
+                self.api_client.update_job_status(
+                    queue_id,
+                    status=final_status,
+                    video_files=self._organize_output_files(item.output_files) if job_successful else None,
+                    error_log=item.error_message,
+                    workflow_report=workflow_report_dict
+                )
+
                 item.end_time = datetime.now()
-                self.processing_manager._generate_manifest_for_item(item)
+
+                manifest_data = self.processing_manager._generate_manifest_for_item(item)
+
+                # --- FIX: Gửi manifest_data để cập nhật production_status của mod ---
+                if manifest_data:
+                    mod_id = job.get('mod_id') # Lấy mod_id từ job gốc
+                    if mod_id:
+                        print(f"Syncing production status for mod {mod_id}...")
+                        self.api_client.update_mod_production_status(mod_id, manifest_data)
+                    else:
+                        print("Warning: mod_id not found in job data, cannot sync production status.")
+            
+        return job_successful
 
     def _process_with_smart_retry(self, item, queue_id: int) -> bool:
         """Process with smart retry for individual steps - PHASE 2"""

@@ -71,7 +71,9 @@ class ProcessingItem:
     json_generation_status: str = "not_started" # "success", "failure", "skipped"
     master_mode_status: str = "not_started"     # "success", "failure", "skipped"
     individual_mode_status: str = "not_started" # "success", "failure", "skipped"
-    
+
+    workflow_report: Optional[Dict[str, Any]] = None
+
     @property
     def display_name(self) -> str:
         if self.source_url:
@@ -574,9 +576,11 @@ class UnifiedProcessingManager:
                 json.dump(manifest_data, f, indent=2, ensure_ascii=False)
             
             self.logger.info(f"✅ Manifest file created successfully: {manifest_path}")
+            return manifest_data
 
         except Exception as e:
             self.logger.error(f"❌ Failed to generate manifest file: {e}")
+            return None
 
     def _calculate_center_slot_index(self, slots):
         """Calculate center slot index for showcase"""
@@ -1290,6 +1294,8 @@ class UnifiedProcessingManager:
             if not workflow_report.was_successful:
                 # This is a business logic failure (e.g., no icons)
                 raise Exception(f"Master workflow failed: {workflow_report.message}")
+            
+            item.workflow_report = workflow_report
             
             self.logger.info(f"✅ Showcase workflow completed: {workflow_report.message}")
             
