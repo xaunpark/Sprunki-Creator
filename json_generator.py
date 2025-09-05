@@ -168,9 +168,9 @@ class SprunkiJSONGenerator:
                 
                 console.log("🎬 Bắt đầu quá trình lấy icons (Logic đơn giản - Không sắp xếp)...");
 
-                // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ (Không đổi)
-                console.log("🔶️ Bước 1: Tìm các sprite 'Icons' đang hiện thị...");
-                const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
+                // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ
+                console.log("🔶️ Bước 1: Tìm các sprite chứa cụm từ 'Icons' đang hiện thị...");
+                const visibleIcons = allTargets.filter(t => t.sprite.name.includes('Icons') && t.visible);
                 console.log(`✦ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
 
                 // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ, LỌC NỬA DƯỚI VÀ GÁN INDEX TRỰC TIẾP (Không có sắp xếp)
@@ -450,9 +450,9 @@ class SprunkiJSONGenerator:
                         function getIconsWithSimplifiedLogic(allTargets) {
                             console.log("🎬 Bắt đầu quá trình lấy icons (Logic đơn giản - Không sắp xếp)...");
 
-                            // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ (Không đổi)
+                            // Bước 1: LẤY CÁC ICON ĐANG HIỆN THỊ
                             console.log("🔶️ Bước 1: Tìm các sprite 'Icons' đang hiện thị...");
-                            const visibleIcons = allTargets.filter(t => t.sprite.name === 'Icons' && t.visible);
+                            const visibleIcons = allTargets.filter(t => t.sprite.name.includes('Icons') && t.visible);
                             console.log(`✦ Tìm thấy ${visibleIcons.length} icons trên màn hình.`);
 
                             // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ, LỌC VÀ GÁN INDEX TRỰC TIẾP (Không có sắp xếp)
