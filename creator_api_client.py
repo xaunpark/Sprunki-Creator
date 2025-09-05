@@ -293,7 +293,8 @@ class CreatorService:
             # Enhanced OBS controller initialization for service mode
             print("🎥 Initializing OBS controller for service mode...")
             self.obs_controller = SprunkiController()
-            
+            self.game_player.obs_controller = self.obs_controller
+
             if not self.obs_controller.load_config_from_dict(config_data):
                 print("❌ OBS Error: Could not load recording area config!")
                 return False
@@ -394,89 +395,49 @@ class CreatorService:
                 time.sleep(30)
     
     def _process_job(self, job: Dict) -> bool:
-        """Process job with performance tracking - PHASE 4 Enhanced"""
         queue_id = job['id']
-        max_job_retries = 3
+        item = None
+        try:
+            self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
+
+            # Bước 1: Chuyển job thành ProcessingItem
+            item = self._convert_job_to_processing_item(job)
+
+            # Bước 2: (NẾU CẦN) Tạo JSON trước
+            if item.source_url and not item.json_data:
+                json_success = self.processing_manager._generate_json_for_item(item)
+                if not json_success:
+                    item.status = "failed"
+                    item.error_message = "JSON generation failed"
+                    # Không cần gọi manifest ở đây, block finally sẽ xử lý
+                    return False 
+
+            # Bước 3: (NẾU CÓ JSON) Xử lý video
+            if item.json_data:
+                video_success = self.processing_manager._process_video_for_item(item)
+                return video_success # Trả về kết quả của việc xử lý video
+
+            # Nếu không có source_url và cũng không có json_data
+            item.status = "failed"
+            item.error_message = "Job has no source URL or JSON data"
+            return False
+
+        except Exception as e:
+            print(f"❌ Critical error in job {queue_id}: {e}")
+            if item:
+                item.status = "failed"
+                item.error_message = f"Critical job error: {e}"
+            self.api_client.update_job_status(queue_id, 'failed', error_log=f"Critical job error: {str(e)}")
+            return False
         
-        # 🆕 PHASE 4: Record job start
-        self.performance_analyzer.record_job_start(queue_id, {
-            'mod_title': job.get('mod_title', 'Unknown'),
-            'production_mode': job.get('production_mode', 'unknown'),
-            'mod_game_url': job.get('mod_game_url', '')
-        })
-        
-        for job_attempt in range(1, max_job_retries + 1):
-            try:
-                print(f"📋 Job {queue_id} - Attempt {job_attempt}/{max_job_retries}")
-                
-                processing_item = self._convert_job_to_processing_item(job)
-                
-                self.api_client.update_job_status(queue_id, 'processing', {
-                    'stage': 'starting',
-                    'started_by': self.api_client.service_name,
-                    'attempt': job_attempt
-                })
-                
-                success = self._process_with_smart_retry(processing_item, queue_id)
-                
-                if success:
-                    print(f"✅ Job {queue_id} completed successfully on attempt {job_attempt}")
-                    
-                    # 🆕 PHASE 4: Record successful completion
-                    self.performance_analyzer.record_job_completion(queue_id, True, {
-                        'attempt': job_attempt,
-                        'output_files_count': len(processing_item.output_files)
-                    })
-                    
-                    return True
-                else:
-                    if job_attempt < max_job_retries:
-                        print(f"❌ Job {queue_id} failed on attempt {job_attempt}, will retry")
-                        
-                        # 🆕 PHASE 4: Record retry
-                        self.performance_analyzer.record_job_retry(queue_id, {
-                            'attempt': job_attempt,
-                            'reason': 'job_failed'
-                        })
-                        
-                        job_retry_delay = min(30 * job_attempt, 120)
-                        print(f"⏳ Waiting {job_retry_delay}s before job retry...")
-                        time.sleep(job_retry_delay)
-                        
-                        self.api_client.update_job_progress(
-                            queue_id, 'retry', f'job_retry_{job_attempt}', 0.0, 'active',
-                            metadata={'job_attempt': job_attempt + 1}
-                        )
-                        # 🆕 PHASE 4: Track performance
-                        self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-                    else:
-                        print(f"❌ Job {queue_id} failed after {max_job_retries} attempts")
-                        
-                        # 🆕 PHASE 4: Record failed completion
-                        self.performance_analyzer.record_job_completion(queue_id, False, {
-                            'attempt': job_attempt,
-                            'failure_reason': 'max_retries_exceeded'
-                        })
-                        
-                        self.api_client.update_job_status(queue_id, 'failed', 
-                            error_log=f"Job failed after {max_job_retries} attempts")
-                        return False
-                        
-            except Exception as e:
-                print(f"❌ Critical error in job {queue_id}, attempt {job_attempt}: {e}")
-                if job_attempt == max_job_retries:
-                    # 🆕 PHASE 4: Record exception completion
-                    self.performance_analyzer.record_job_completion(queue_id, False, {
-                        'attempt': job_attempt,
-                        'failure_reason': 'critical_exception',
-                        'exception': str(e)
-                    })
-                    
-                    self.api_client.update_job_status(queue_id, 'failed', 
-                        error_log=f"Critical job error: {str(e)}")
-                    return False
-        
-        return False
+        finally:
+            # ===> ĐÂY LÀ ĐIỂM MẤU CHỐT <===
+            # Sau khi mọi thứ kết thúc (dù thành công hay thất bại), 
+            # hãy gọi hàm tạo manifest, giống hệt như logic trong chế độ GUI.
+            if item:
+                print(f"Finalizing job {queue_id}. Generating manifest...")
+                item.end_time = datetime.now()
+                self.processing_manager._generate_manifest_for_item(item)
 
     def _process_with_smart_retry(self, item, queue_id: int) -> bool:
         """Process with smart retry for individual steps - PHASE 2"""
