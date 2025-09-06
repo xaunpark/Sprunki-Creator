@@ -289,6 +289,19 @@ class CreatorService:
             print(f"❌ CRITICAL: Failed to initialize processing config: {e}")
             self.processing_manager.config = None
 
+    @property
+    def root(self):
+        """
+        Dummy 'root' property to ensure compatibility with UnifiedProcessingManager,
+        which was designed with a Tkinter root in mind.
+        """
+        class DummyRoot:
+            def after(self, ms, func, *args):
+                # In service mode, we don't use Tkinter's event loop.
+                # This no-op function prevents crashes if manager's queue logic is ever called.
+                pass
+        return DummyRoot()
+
     def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
         """Initialize game player and OBS controller for a specific job."""
         try:
@@ -376,6 +389,18 @@ class CreatorService:
         
         # 🆕 PHASE 4: Stop performance monitoring
         self.performance_analyzer.stop_monitoring()
+
+        # Thêm logic dọn dẹp toàn diện khi dừng service
+        try:
+            print("🧹 Performing comprehensive cleanup on service stop...")
+            if hasattr(self, 'obs_controller') and self.obs_controller:
+                print("   -> Cleaning up OBS controller...")
+                self.obs_controller.comprehensive_obs_cleanup()
+            if hasattr(self, 'game_player') and self.game_player:
+                print("   -> Cleaning up game player (closing browser)...")
+                self.game_player.close_game_window()
+        except Exception as e:
+            print(f"⚠️ Error during final cleanup: {e}")
         
         if self.processing_thread:
             self.processing_thread.join(timeout=5)
