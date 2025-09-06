@@ -308,9 +308,23 @@ class CreatorService:
                 print(f"❌ Unsupported Domain: {current_url}")
                 return False
 
+            # === START OF FIX ===
+            # Lấy số lượng slot từ dữ liệu JSON để tạo remix động
+            layout_data = config_data.get('layout', {})
+            total_slots = len(layout_data.get('slots', []))
+            
+            if total_slots > 0:
+                print(f"✅ Detected {total_slots} slots. Generating dynamic remix patterns...")
+                # Gọi hàm tạo pattern động - ĐÂY LÀ BƯỚC QUAN TRỌNG BỊ THIẾU
+                self.game_player.generate_dynamic_patterns(total_slots)
+            else:
+                print("⚠️ Warning: No slots detected in JSON. Remixes may not be generated correctly.")
+            # === END OF FIX ===
+            
             game_settings = config_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             
+            # Bây giờ, hàm này sẽ sử dụng các pattern động vừa được tạo
             self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
             self.game_player.current_remix_index = 0
             
