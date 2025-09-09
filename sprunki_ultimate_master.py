@@ -506,15 +506,23 @@ class UnifiedProcessingManager:
             source_url = item.json_data.get('currentUrl', item.source_url or '')
             domain = urlparse(source_url).netloc.replace('www.', '') if source_url else ''
 
-            # Xác định overallStatus
+            # Xác định overallStatus với logic nghiêm ngặt hơn
             if item.status == "completed":
-                overall_status = "success"
+                # Nếu cả hai mode đều thành công (trong chế độ "both"), hoặc mode đơn lẻ thành công
+                if (item.mode == "both" and item.master_mode_status == "success" and item.individual_mode_status == "success") or \
+                   (item.mode != "both" and item.status == "completed"):
+                    overall_status = "success"
+                else:
+                    # Trường hợp "both" nhưng chỉ một mode thành công
+                    overall_status = "partial_success"
             elif item.status == "failed":
-                overall_status = "failure"
-            elif item.master_mode_status == 'success' or item.individual_mode_status == 'success':
-                overall_status = 'partial_success'
+                # Nếu job thất bại, nhưng một trong hai mode lại thành công (trường hợp hiếm)
+                if item.mode == "both" and (item.master_mode_status == "success" or item.individual_mode_status == "success"):
+                    overall_status = "partial_success"
+                else:
+                    overall_status = "failure"
             else:
-                overall_status = 'failure'
+                overall_status = item.status # pending, processing...
 
             # 2. Xây dựng cấu trúc manifest
             manifest_data = {
@@ -1193,33 +1201,25 @@ class UnifiedProcessingManager:
             self.logger.info(f"   🎭 Individual mode: {'✅ Success' if individual_success else '❌ Failed'} ({individual_output_count} files)")
             self.logger.info(f"   📁 Total output files: {total_output_files}")
             self.logger.info(f"   📂 Output directory: {self.master_controller.obs_controller.current_project_folder}")
-            
-            # Determine final success status
-            if master_success and individual_success:
+
+            # Cập nhật trạng thái chi tiết cho manifest
+            item.master_mode_status = "success" if master_success else "failure"
+            item.individual_mode_status = "success" if individual_success else "failure"
+
+            # Determine final success status based on strict rules
+            final_success = master_success and individual_success
+
+            if final_success:
                 self.logger.info("🎉 BOTH MODE: COMPLETE SUCCESS!")
-                self.logger.info("   Both Master and Individual modes completed successfully")
-                self.logger.info("   Full video package available: Master showcase + Individual icons + Remixes")
-                return True
-                
-            elif master_success and not individual_success:
-                self.logger.warning("🔶 BOTH MODE: PARTIAL SUCCESS (Master only)")
-                self.logger.warning("   Master mode succeeded but Individual mode failed")
-                self.logger.warning("   Available: Master showcase video only")
-                # BOTH mode requires both to succeed for true success
-                return False
-                
-            elif not master_success and individual_success:
-                self.logger.warning("🔶 BOTH MODE: PARTIAL SUCCESS (Individual only)")
-                self.logger.warning("   Individual mode succeeded but Master mode failed")
-                self.logger.warning("   Available: Individual icons + Remix videos only")
-                # BOTH mode requires both to succeed for true success
-                return False
-                
+                self.logger.info("   Both Master and Individual modes met their success thresholds.")
             else:
-                self.logger.error("💥 BOTH MODE: COMPLETE FAILURE")
-                self.logger.error("   Both Master and Individual modes failed")
-                self.logger.error("   No video output generated")
-                return False
+                self.logger.error("💥 BOTH MODE: FAILED TO MEET THRESHOLDS")
+                if not master_success:
+                    self.logger.error("   - Master mode did not meet success criteria.")
+                if not individual_success:
+                    self.logger.error("   - Individual mode did not meet success criteria.")
+            
+            return final_success
                 
         except Exception as e:
             self.logger.error(f"💥 Critical error in BOTH mode processing: {e}")
@@ -1447,14 +1447,36 @@ class UnifiedProcessingManager:
                         output_files.extend(remix_files)
                         meaningful_content_generated = True
 
-                # Final success check based on meaningful content
-                if not meaningful_content_generated:
-                    raise Exception("Individual mode finished, but no videos were successfully generated.")
-
+                # Final success check based on thresholds
                 item.output_files.extend(output_files)
-                self.logger.info("✅ Enhanced Individual Mode completed with safe operations!")
-                item.individual_mode_status = "success"
-                return True
+
+                total_icons_expected = len(normal_icons_to_process)
+                if has_horror:
+                    total_icons_expected += len(icons) # All icons in horror mode
+
+                total_remixes_expected = 3
+                
+                # Đếm số file thực tế được tạo ra
+                actual_icon_videos = len([f for f in output_files if 'remix' not in os.path.basename(f).lower()])
+                actual_remix_videos = len(remix_files)
+
+                icon_rate = actual_icon_videos / total_icons_expected if total_icons_expected > 0 else 1.0
+                remix_rate = actual_remix_videos / total_remixes_expected if total_remixes_expected > 0 else 1.0
+                
+                ICON_THRESHOLD = 0.8  # 80%
+                REMIX_THRESHOLD = 2/3 # At least 2 out of 3 remixes
+
+                is_successful = (icon_rate >= ICON_THRESHOLD and remix_rate >= REMIX_THRESHOLD)
+
+                if is_successful:
+                    self.logger.info(f"✅ Enhanced Individual Mode completed successfully (Icons: {icon_rate:.0%}, Remixes: {remix_rate:.0%})")
+                    item.individual_mode_status = "success"
+                    return True
+                else:
+                    item.error_message = f"Individual mode failed thresholds (Icons: {icon_rate:.0%}, Remixes: {remix_rate:.0%})"
+                    self.logger.error(item.error_message)
+                    item.individual_mode_status = "failure"
+                    return False
                 
             except Exception as e:
                 self.logger.error(f"Individual mode error: {e}")

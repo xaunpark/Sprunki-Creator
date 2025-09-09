@@ -8004,24 +8004,40 @@ class SprunkiGamePlayer:
                         report.issues.append(f"Failed to auto-correct JSON: {json_error}")
             
             # === FINAL DETERMINATION OF SUCCESS ===
-            meaningful_content_generated = (report.normal_icons_showcased > 0) or \
-                                         (report.horror_icons_showcased > 0) or \
-                                         (report.normal_remixes_played > 0 and self.config['layout'].get('icons')) or \
-                                         (report.horror_remixes_played > 0 and self.config['layout'].get('icons'))
+            # Tính toán các tỷ lệ thành công
+            normal_icon_rate = report.normal_icons_showcased / report.normal_icons_total if report.normal_icons_total > 0 else 1.0
+            normal_remix_rate = report.normal_remixes_played / report.normal_remixes_total if report.normal_remixes_total > 0 else 1.0
+            
+            # Định nghĩa ngưỡng thành công cho Master Mode
+            ICON_SUCCESS_THRESHOLD = 0.8  # 80%
+            REMIX_SUCCESS_THRESHOLD = 0.5 # 50%
 
-            if normal_phase_did_run and meaningful_content_generated:
-                report.was_successful = True
-                report.message = "Workflow completed."
-                if not is_normal_phase_perfect or (has_horror and not is_horror_phase_perfect):
-                    report.message = "Workflow completed with warnings."
-            else:
-                report.was_successful = False
-                if not meaningful_content_generated:
-                    report.message = "Workflow finished, but no meaningful content was generated (e.g., no icons found)."
-                    if not report.issues:
-                        report.issues.append("No meaningful content was generated.")
+            # Kiểm tra thành công của Normal Phase
+            normal_phase_success = (normal_icon_rate >= ICON_SUCCESS_THRESHOLD and 
+                                    normal_remix_rate >= REMIX_SUCCESS_THRESHOLD)
+
+            # Kiểm tra thành công của Horror Phase (nếu có)
+            horror_phase_success = True # Mặc định là True nếu không có horror mode
+            if has_horror:
+                horror_icon_rate = report.horror_icons_showcased / report.horror_icons_total if report.horror_icons_total > 0 else 1.0
+                horror_remix_rate = report.horror_remixes_played / report.horror_remixes_total if report.horror_remixes_total > 0 else 1.0
+                horror_phase_success = (horror_icon_rate >= ICON_SUCCESS_THRESHOLD and 
+                                        horror_remix_rate >= REMIX_SUCCESS_THRESHOLD)
+
+            # Quyết định cuối cùng
+            report.was_successful = normal_phase_success and horror_phase_success
+
+            if report.was_successful:
+                if is_normal_phase_perfect and (not has_horror or is_horror_phase_perfect):
+                    report.message = "Workflow completed perfectly."
                 else:
-                    report.message = "Workflow failed to complete the normal phase."
+                    report.message = f"Workflow completed with partial success (Normal Icons: {normal_icon_rate:.0%}, Remixes: {normal_remix_rate:.0%})."
+            else:
+                report.message = "Workflow failed due to low success rates."
+                if not normal_phase_success:
+                    report.issues.append(f"Normal phase failed thresholds (Icons: {normal_icon_rate:.0%}, Remixes: {normal_remix_rate:.0%}).")
+                if has_horror and not horror_phase_success:
+                    report.issues.append("Horror phase failed thresholds.")
 
             # Final Cleanup and Validation
             print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
