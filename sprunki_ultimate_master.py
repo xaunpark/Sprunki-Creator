@@ -526,6 +526,11 @@ class UnifiedProcessingManager:
                     "sourceUrl": source_url, "projectSlug": item.project_slug,
                     "pageTitle": page_title, "domain": domain, "outputDirectory": project_folder
                 },
+                "layoutSummary": {
+                    "recordingArea": item.json_data.get('layout', {}).get('recordingArea'),
+                    "totalIcons": len(item.json_data.get('layout', {}).get('icons', [])),
+                    "totalSlots": len(item.json_data.get('layout', {}).get('slots', []))
+                },
                 "processingSummary": {
                     "mode": item.mode, "overallStatus": overall_status,
                     "statusDetails": {

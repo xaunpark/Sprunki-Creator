@@ -5809,6 +5809,7 @@ class SprunkiGamePlayer:
                 print("   Executing dynamic drag attempt...")
                 drag_executed = False
                 action_start_time = None
+                drop_time = None
                 end_x, end_y = target_slot['x'], target_slot['y']
 
                 if use_cdp:
@@ -5816,17 +5817,20 @@ class SprunkiGamePlayer:
                     if ws_url:
                         try:
                             ws = websocket.create_connection(ws_url, timeout=30)
-                            drag_executed, action_start_time = self._execute_dynamic_drag_cdp(
-                                ws, start_x, start_y, end_x, end_y, 
-                                self.game_control_type, 
+                            # 🔥 NHẬN VỀ CẢ 2 MỐC THỜI GIAN
+                            drag_executed, action_start_time, drop_time = self._execute_dynamic_drag_cdp(
+                                ws, start_x, start_y, end_x, end_y,
+                                self.game_control_type,
                                 is_first_icon
                             )
                             ws.close()
                         except Exception as cdp_err:
                             print(f"   ⚠️ CDP connection/drag error: {cdp_err}, falling back to PyAutoGUI")
                             drag_executed = False # Đảm bảo fallback được kích hoạt
+                            action_start_time, drop_time = None, None # Reset on error
                     else:
                         print("   ⚠️ WebSocket not available, falling back to PyAutoGUI")
+                        action_start_time, drop_time = None, None
 
                 # Fallback to PyAutoGUI if CDP is disabled or fails
                 if not use_cdp or not drag_executed:
@@ -5878,26 +5882,41 @@ class SprunkiGamePlayer:
                     
                     if verification_success:
                         # Ghi lại timestamp của lần kéo thành công
-                        if obs_controller and action_start_time and obs_controller.recording_start_time is not None:
-                            elapsed_time = action_start_time - obs_controller.recording_start_time
-
-                            # Tạo một sự kiện mới thay vì gọi log_event_timestamp trực tiếp
-                            # để có thể tùy chỉnh timestamp
-                            event_data = {
-                                "event": "successful_drag_started",
-                                "timestamp": round(elapsed_time, 3),
-                                "label": f"Successful drag started for icon {icon.get('index', -1)}",
-                                "metadata": {
-                                    "icon_index": icon.get('index', -1),
-                                    "attempt_number": coord_used
+                        if obs_controller and obs_controller.recording_start_time is not None:
+                            
+                            # 🔥 GHI TIMESTAMP 1: KHI BẮT ĐẦU KÉO
+                            if action_start_time:
+                                elapsed_start_time = action_start_time - obs_controller.recording_start_time
+                                event_start_data = {
+                                    "event": "successful_drag_started",
+                                    "timestamp": round(elapsed_start_time, 3),
+                                    "label": f"Drag started for icon {icon.get('index', -1)}",
+                                    "metadata": {
+                                        "icon_index": icon.get('index', -1),
+                                        "attempt_number": coord_used
+                                    }
                                 }
-                            }
-                            obs_controller.event_timestamps.append(event_data)
-                            print(f"🕒 Video Event Logged: 'successful_drag_started' at {elapsed_time:.3f}s")
+                                obs_controller.event_timestamps.append(event_start_data)
+                                print(f"🕒 Video Event Logged: 'successful_drag_started' at {elapsed_start_time:.3f}s")
+                            
+                            # 🔥 GHI TIMESTAMP 2: KHI THẢ ICON VÀO SLOT
+                            if drop_time:
+                                elapsed_drop_time = drop_time - obs_controller.recording_start_time
+                                event_drop_data = {
+                                    "event": "icon_dropped_successfully",
+                                    "timestamp": round(elapsed_drop_time, 3),
+                                    "label": f"Icon {icon.get('index', -1)} dropped into slot",
+                                    "metadata": {
+                                        "icon_index": icon.get('index', -1),
+                                        "slot_index": target_slot_index
+                                    }
+                                }
+                                obs_controller.event_timestamps.append(event_drop_data)
+                                print(f"🕒 Video Event Logged: 'icon_dropped_successfully' at {elapsed_drop_time:.3f}s")
 
                         print(f"ðŸŽ‰ ENHANCED DRAG VERIFIED successfully at coordinate {coord_used}!")
                         success = True
-                        break # ThoÃ¡t khá»i vÃ²ng láº·p thá»­ tá»a Ä‘á»™ (for coord_index...)
+                        break # ThoÃ¡t khá» i vÃ²ng láº·p thá»­ tá» a Ä‘á»™ (for coord_index...)
                     else:
                         print(f"âŒ DUAL VERIFICATION FAILED at coordinate {coord_used} after 3 attempts.")
                         
@@ -6619,7 +6638,29 @@ class SprunkiGamePlayer:
             return self.domain_adjustments.get(domain, self.domain_adjustments['sprunki.org'])
         except:
             return self.domain_adjustments['sprunki.org']
-    
+
+    def _are_coords_safe(self, *coords):
+        """Kiểm tra xem một bộ tọa độ có hợp lệ và nằm trong màn hình không."""
+        try:
+            screen_width, screen_height = pyautogui.size()
+            # Kiểm tra từng giá trị trong tọa độ (x, y, x2, y2, ...)
+            for i, value in enumerate(coords):
+                if value is None or not isinstance(value, (int, float)):
+                    print(f"   ❌ Tọa độ không hợp lệ (giá trị None hoặc không phải số): {coords}")
+                    return False
+                # Kiểm tra x (vị trí chẵn)
+                if i % 2 == 0 and not (0 <= value < screen_width):
+                    print(f"   ❌ Tọa độ X nằm ngoài màn hình ({value}), kích thước màn hình: {screen_width}")
+                    return False
+                # Kiểm tra y (vị trí lẻ)
+                elif i % 2 != 0 and not (0 <= value < screen_height):
+                    print(f"   ❌ Tọa độ Y nằm ngoài màn hình ({value}), kích thước màn hình: {screen_height}")
+                    return False
+            return True
+        except Exception as e:
+            print(f"   ❌ Lỗi khi kiểm tra tọa độ: {e}")
+            return False
+
     def move_mouse_to_safe_position(self):
         """Move mouse to bottom right corner as required by game"""
         try:
@@ -6689,6 +6730,10 @@ class SprunkiGamePlayer:
 
     def _execute_pyautogui_drag(self, start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon):
         """Execute drag using PyAutoGUI (IMPROVED with stability enhancements)"""
+        # 🔥 KIỂM TRA AN TOÀN TỌA ĐỘ TRƯỚC KHI THỰC HIỆN
+        if not self._are_coords_safe(start_x, start_y, end_x, end_y):
+            print("   ❌ PyAutoGUI drag bị hủy do tọa độ không an toàn.")
+            return False
         try:
             print("🖱️ Executing IMPROVED PyAutoGUI drag operation...")
             
@@ -6884,6 +6929,8 @@ class SprunkiGamePlayer:
             time.sleep(enhanced_drop_wait)
 
             # BƯỚC 6: Thả chuột tại đích
+            drop_time = time.monotonic()
+
             release_params = {
                 "type": "mouseReleased", "x": end_x, "y": end_y, "button": "left",
                 "clickCount": 2 if control_type == "double_click_drag" else 1
@@ -6895,7 +6942,7 @@ class SprunkiGamePlayer:
             self.move_mouse_to_safe_position()
             
             print("   ✅ Upgraded Dynamic CDP drag successful.")
-            return True, action_start_time
+            return True, action_start_time, drop_time
 
         except Exception as e:
             print(f"   ❌ Exception during dynamic CDP drag: {e}")
@@ -7085,8 +7132,12 @@ class SprunkiGamePlayer:
         return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
 
     def _execute_pyautogui_single_click(self, click_x, click_y, domain_adj):
+        # 🔥 KIỂM TRA AN TOÀN TỌA ĐỘ TRƯỚC KHI THỰC HIỆN
+        if not self._are_coords_safe(click_x, click_y):
+            print("   ❌ PyAutoGUI click bị hủy do tọa độ không an toàn.")
+            return False
         try:
-            print(f"ðŸ–±ï¸ Executing PyAutoGUI single click at ({click_x}, {click_y})")
+            print(f"ðŸ–±ï¸  Executing PyAutoGUI single click at ({click_x}, {click_y})")
             
             # ðŸ”§ SAFE: Ensure focus before click (use light focus Ä‘á»ƒ trÃ¡nh click nháº§m)
             self._ensure_focus_before_operation("single click", focus_type="light")
@@ -7156,15 +7207,48 @@ class SprunkiGamePlayer:
             if self.should_stop: return False
             
             # --- GIAI ĐOẠN NGHE NHẠC ---
-            if obs_controller:
-                obs_controller.log_event_timestamp("start_listen", f"Listening to icon {icon_index} for {listen_duration}s", {"duration": listen_duration})
+            # 🔥 Lấy timestamp từ sự kiện drop_successfully thay vì tạo mới
+            listen_start_timestamp = -1.0 # Giá trị mặc định
+            if obs_controller and obs_controller.event_timestamps:
+                # Tìm sự kiện drop cuối cùng được thêm vào
+                last_drop_event = next((event for event in reversed(obs_controller.event_timestamps) if event["event"] == "icon_dropped_successfully"), None)
+                if last_drop_event:
+                    listen_start_timestamp = last_drop_event["timestamp"]
+                    
+                    # Tạo sự kiện start_listen với cùng timestamp
+                    start_listen_event = {
+                        "event": "start_listen",
+                        "timestamp": listen_start_timestamp,
+                        "label": f"Listening to icon {icon_index} for {listen_duration}s",
+                        "metadata": {"duration": listen_duration}
+                    }
+                    obs_controller.event_timestamps.append(start_listen_event)
+                    print(f"🕒 Video Event Logged: 'start_listen' at {listen_start_timestamp:.3f}s (Synced with drop time)")
 
+            # Vòng lặp nghe nhạc vẫn giữ nguyên
             for countdown in range(listen_duration, 0, -1):
                 if self.should_stop: return False
                 time.sleep(1)
 
+            # 🔥 TÍNH TOÁN VÀ GHI LẠI END_LISTEN DỰA TRÊN START_LISTEN
             if obs_controller:
-                obs_controller.log_event_timestamp("end_listen", f"Finished listening to icon {icon_index}")
+                # Kiểm tra xem listen_start_timestamp có tồn tại không (được gán ở khối trên)
+                if listen_start_timestamp >= 0.0:
+                    # Tính toán timestamp kết thúc chính xác
+                    end_listen_timestamp = listen_start_timestamp + listen_duration
+                    
+                    # Tạo sự kiện thủ công với timestamp đã tính
+                    end_listen_event = {
+                        "event": "end_listen",
+                        "timestamp": round(end_listen_timestamp, 3),
+                        "label": f"Finished listening to icon {icon_index}",
+                        "metadata": {}
+                    }
+                    obs_controller.event_timestamps.append(end_listen_event)
+                    print(f"🕒 Video Event Logged: 'end_listen' at {end_listen_timestamp:.3f}s (Calculated)")
+                else:
+                    # Fallback an toàn nếu không tìm thấy start_listen
+                    obs_controller.log_event_timestamp("end_listen", f"Finished listening to icon {icon_index}")
 
             if self.should_stop: return False
 
