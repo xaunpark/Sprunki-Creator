@@ -1759,6 +1759,16 @@ class SprunkiJSONGenerator:
                     print(f"❌ No Skip Intro buttons found - Reason: {reason}")
                     print("⚠️ Will use blind click method only...")
 
+                # === PHASE 1.5: PRESS ANY KEY (NEW) ===
+                print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
+                try:
+                    pyautogui.press('space')
+                    time.sleep(0.5)
+                    pyautogui.press('space')
+                    print("   ✅ 'space' key pressed twice successfully.")
+                except Exception as key_e:
+                    print(f"   ⚠️ Could not press 'space' key: {key_e}")
+
                 # Phase 2: ALWAYS perform blind clicks for additional assurance
                 if smart_clicks_performed > 0:
                     print("🔄 Phase 2: Performing ADDITIONAL blind clicks for triple protection...")
