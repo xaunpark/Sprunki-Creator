@@ -904,11 +904,13 @@ class UnifiedProcessingManager:
                 return False
                 
         except Exception as e:
+            error_msg = f"JSON generation error: {str(e)}"
+            self.logger.error(f"Error for {item.source_url}: {error_msg}", exc_info=True)
+            
             item.status = "failed"
-            item.error_message = f"JSON generation error: {str(e)}"
+            item.error_message = error_msg  # Lưu lỗi chi tiết vào item
             item.end_time = datetime.now()
-            item.json_generation_status = "failure" # GHI LẠI TRẠNG THÁI
-            self.logger.error(f"JSON generation error for {item.source_url}: {e}")
+            item.json_generation_status = "failure"
             return False
     
     def _process_video_for_item(self, item: ProcessingItem) -> bool:
@@ -989,11 +991,12 @@ class UnifiedProcessingManager:
                 return False
                 
         except Exception as e:
-            item.status = "failed"
-            item.error_message = f"Video processing error: {str(e)}"
-            item.end_time = datetime.now()
+            error_msg = f"Video processing error: {str(e)}"
+            self.logger.error(f"Error for {item.display_name}: {error_msg}", exc_info=True)
             
-            self.logger.error(f"Video processing error for {item.display_name}: {e}")
+            item.status = "failed"
+            item.error_message = error_msg # Lưu lỗi chi tiết
+            item.end_time = datetime.now()
             return False
         
         finally:
@@ -1222,12 +1225,14 @@ class UnifiedProcessingManager:
             return final_success
                 
         except Exception as e:
-            self.logger.error(f"💥 Critical error in BOTH mode processing: {e}")
-            self.logger.error("   Unexpected exception during Both mode workflow")
-            
-            # Log partial results for debugging
+            error_msg = f"Critical error in BOTH mode processing: {str(e)}"
+            self.logger.error(error_msg, exc_info=True)
             self.logger.info(f"📊 Partial results at exception: Master={master_success}, Individual={individual_success}")
             
+            # Lưu lỗi vào item để gửi đi
+            item.error_message = error_msg
+            item.master_mode_status = item.master_mode_status if item.master_mode_status != "not_started" else "failure"
+            item.individual_mode_status = item.individual_mode_status if item.individual_mode_status != "not_started" else "failure"
             return False
         
         finally:
@@ -1318,8 +1323,10 @@ class UnifiedProcessingManager:
             return True
             
         except Exception as e:
-            self.logger.error(f"Master mode error: {e}")
-            item.error_message = str(e) # Store the specific error
+            error_msg = f"Master mode workflow failed: {str(e)}"
+            self.logger.error(error_msg, exc_info=True)
+            
+            item.error_message = error_msg # Lưu lỗi chi tiết
             item.master_mode_status = "failure"
             return False
             
@@ -1479,8 +1486,10 @@ class UnifiedProcessingManager:
                     return False
                 
             except Exception as e:
-                self.logger.error(f"Individual mode error: {e}")
-                item.error_message = str(e)
+                error_msg = f"Individual mode workflow failed: {str(e)}"
+                self.logger.error(error_msg, exc_info=True)
+                
+                item.error_message = error_msg # Lưu lỗi chi tiết
                 item.individual_mode_status = "failure"
                 return False
             finally:

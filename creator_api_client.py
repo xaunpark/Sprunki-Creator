@@ -13,6 +13,7 @@ from typing import Dict, Optional, Any
 from datetime import datetime
 from config_manager import get_config
 from performance_analyzer import performance_analyzer
+import logging
 
 # --- FIX: Import necessary components ---
 from sprunki_game_player import SprunkiGamePlayer
@@ -250,6 +251,9 @@ class CreatorService:
         from sprunki_ultimate_master import UnifiedProcessingManager
         self.processing_manager = UnifiedProcessingManager(master_controller=self)
 
+        self.logger = logging.getLogger(self.__class__.__name__)
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
         # 🆕 PHASE 2: Initialize Smart Retry Manager (API-based, no database import)
         self.retry_manager = SmartRetryManager(self.api_client)
 
@@ -458,62 +462,75 @@ class CreatorService:
                 time.sleep(30)
     
     def _process_job(self, job: Dict) -> bool:
+        """
+        [REFACTORED] Orchestrates the job processing with smart retries and detailed reporting.
+        This function now acts as a high-level controller.
+        """
         queue_id = job['id']
         item = None
-        job_successful = False # <<< THAY ĐỔI: Thêm biến để theo dõi kết quả cuối cùng
+        job_successful = False
+        start_time = time.monotonic() ### FIX: Khai báo start_time ở đây ###
+        
         try:
-            self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
-
+            # 1. Convert job to a processable item
             item = self._convert_job_to_processing_item(job)
+            self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
+            
+            ### FIX: Đổi tên phương thức và truyền đúng tham số ###
+            # PerformanceAnalyzer.record_job_start(queue_id, job_info)
+            self.performance_analyzer.record_job_start(queue_id, job)
 
-            if item.source_url and not item.json_data:
-                if not self.processing_manager._generate_json_for_item(item):
-                    # Lỗi sẽ được ghi trong item, không cần return ngay
-                    raise Exception("JSON generation failed")
-
-            if item.json_data:
-                job_successful = self.processing_manager._process_video_for_item(item)
-            else:
-                raise Exception("Job has no source URL or JSON data")
+            # 2. Execute the entire workflow with smart retries for each major step
+            job_successful = self._process_with_smart_retry(item, queue_id)
 
         except Exception as e:
-            print(f"❌ Critical error in job {queue_id}: {e}")
+            error_msg = f"Critical job processing error: {str(e)}"
+            self.logger.error(f"❌ Unhandled exception in job {queue_id}: {error_msg}", exc_info=True)
             if item:
                 item.status = "failed"
-                item.error_message = f"Critical job error: {e}"
+                item.error_message = error_msg
             job_successful = False
+            # Report critical failure immediately
+            self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
         
         finally:
+            # 3. Finalize the job status and report back to the Tracker
             if item:
                 from dataclasses import asdict
                 final_status = "completed" if job_successful else "failed"
                 
-                print(f"Finalizing job {queue_id} with status: {final_status.upper()}")
+                self.logger.info(f"Finalizing job {queue_id} with status: {final_status.upper()}")
 
                 workflow_report_obj = getattr(item, 'workflow_report', None)
                 workflow_report_dict = asdict(workflow_report_obj) if workflow_report_obj else None
+
+                # Generate manifest BEFORE finalizing status
+                item.end_time = datetime.now()
+                manifest_data = self.processing_manager._generate_manifest_for_item(item)
                 
+                # Organize and validate files if successful
+                video_files_payload = self._organize_output_files(item.output_files)
+
                 self.api_client.update_job_status(
                     queue_id,
                     status=final_status,
-                    video_files=self._organize_output_files(item.output_files) if job_successful else None,
+                    video_files=video_files_payload,
                     error_log=item.error_message,
                     workflow_report=workflow_report_dict
                 )
 
-                item.end_time = datetime.now()
-
-                manifest_data = self.processing_manager._generate_manifest_for_item(item)
-
-                # --- FIX: Gửi manifest_data để cập nhật production_status của mod ---
                 if manifest_data:
-                    mod_id = job.get('mod_id') # Lấy mod_id từ job gốc
+                    mod_id = job.get('mod_id')
                     if mod_id:
-                        print(f"Syncing production status for mod {mod_id}...")
+                        self.logger.info(f"Syncing production status for mod {mod_id}...")
                         self.api_client.update_mod_production_status(mod_id, manifest_data)
-                    else:
-                        print("Warning: mod_id not found in job data, cannot sync production status.")
-            
+
+            duration = time.monotonic() - start_time
+            ### FIX: Đổi tên phương thức và truyền đúng tham số (TỐI ƯU) ###
+            # PerformanceAnalyzer.record_job_completion(queue_id, success, final_info)
+            # final_info có thể là một dict rỗng vì duration được tính bên trong.
+            self.performance_analyzer.record_job_completion(queue_id, job_successful, {})
+
         return job_successful
 
     def _process_with_smart_retry(self, item, queue_id: int) -> bool:
@@ -913,66 +930,75 @@ class CreatorService:
             return False
 
     def _organize_output_files(self, output_files: list) -> dict:
-        """Organize and validate output files - PHASE 3 Enhanced"""
-        print(f"📁 Organizing and validating {len(output_files)} output files...")
+        """
+        [FIXED] Organize and validate output files - PHASE 3 Enhanced.
+        Ensures consistent structure and handles single-file cases correctly.
+        """
+        self.logger.info(f"📁 Organizing and validating {len(output_files)} output files...")
         
-        video_files = {
+        # --- START OF FIX ---
+        # Luôn khởi tạo cấu trúc đầy đủ, ngay cả khi không có file nào.
+        final_payload = {
             'master': [],
             'individual': [],
-            'validation_summary': {}
+            'validation_summary': {
+                'total_files': 0, 'valid_files': 0, 'invalid_files': 0,
+                'success_rate': 0.0, 'master_files': 0, 'individual_files': 0
+            }
         }
+        # --- END OF FIX ---
         
         if not output_files:
-            print("⚠️ No output files to organize")
-            return video_files
+            self.logger.warning("⚠️ No output files to organize or validate.")
+            return final_payload # Trả về cấu trúc rỗng nhưng hợp lệ
         
-        # Separate files by type
         master_files = []
         individual_files = []
         
         for file_path in output_files:
             filename = os.path.basename(file_path).lower()
             
-            if any(keyword in filename for keyword in ['showcase', 'master']):
+            # Cải thiện logic phân loại để bắt cả "showcase"
+            if 'showcase' in filename or 'master' in filename:
                 master_files.append(file_path)
             elif any(keyword in filename for keyword in ['individual', 'n-', 'h-', 'remix']):
                 individual_files.append(file_path)
             else:
-                # Unknown type, treat as individual
+                # Nếu không xác định được, giả sử là file individual
+                self.logger.warning(f"Unknown file type for '{filename}', classifying as individual.")
                 individual_files.append(file_path)
         
         # Validate master files
         if master_files:
-            print(f"🎬 Validating {len(master_files)} master file(s)...")
+            self.logger.info(f"🎬 Validating {len(master_files)} master file(s)...")
             master_validation = self.file_validator.validate_batch(master_files, 'video')
-            video_files['master'] = self._process_validation_results(master_validation)
-            
-            print(f"   Master validation: {master_validation['summary']['valid_files']}/{master_validation['summary']['total_files']} valid")
+            final_payload['master'] = self._process_validation_results(master_validation)
+            self.logger.info(f"   Master validation: {master_validation['summary']['valid_files']}/{master_validation['summary']['total_files']} valid")
         
         # Validate individual files
         if individual_files:
-            print(f"🎭 Validating {len(individual_files)} individual file(s)...")
+            self.logger.info(f"🎭 Validating {len(individual_files)} individual file(s)...")
             individual_validation = self.file_validator.validate_batch(individual_files, 'video')
-            video_files['individual'] = self._process_validation_results(individual_validation)
-            
-            print(f"   Individual validation: {individual_validation['summary']['valid_files']}/{individual_validation['summary']['total_files']} valid")
+            final_payload['individual'] = self._process_validation_results(individual_validation)
+            self.logger.info(f"   Individual validation: {individual_validation['summary']['valid_files']}/{individual_validation['summary']['total_files']} valid")
         
         # Create combined validation summary
         total_files = len(master_files) + len(individual_files)
-        total_valid = len(video_files['master']) + len(video_files['individual'])
+        # Lấy số file hợp lệ từ payload đã xử lý
+        total_valid = len(final_payload['master']) + len(final_payload['individual'])
         
-        video_files['validation_summary'] = {
+        final_payload['validation_summary'] = {
             'total_files': total_files,
             'valid_files': total_valid,
             'invalid_files': total_files - total_valid,
             'success_rate': round((total_valid / max(total_files, 1)) * 100, 1),
-            'master_files': len(video_files['master']),
-            'individual_files': len(video_files['individual'])
+            'master_files': len(final_payload['master']),
+            'individual_files': len(final_payload['individual'])
         }
         
-        print(f"✅ File organization completed: {total_valid}/{total_files} files validated successfully")
+        self.logger.info(f"✅ File organization completed: {total_valid}/{total_files} files validated successfully")
         
-        return video_files
+        return final_payload
 
     def _process_validation_results(self, validation_results: dict) -> list:
         """Process validation results and return only valid files with metadata"""
