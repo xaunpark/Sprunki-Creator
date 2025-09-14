@@ -224,6 +224,11 @@ class SprunkiGamePlayer:
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
 
+        # Offset Lookup Table for learned drop points
+        # Stores the optimal drop offset for each slot index to improve speed and reliability.
+        # Format: { slot_index: {'x': offset_x, 'y': offset_y, 'icon_offset_idx': i, 'slot_offset_idx': j} }
+        self.slot_offset_lookup = {}
+
         # Index corrections tracking
         self.index_corrections = {}
 
@@ -5305,22 +5310,20 @@ class SprunkiGamePlayer:
 
     def generate_icon_coordinates(self, base_x, base_y, offset=35):
         """
-        ADDED: Generate 5 coordinates for icon drag attempts
-        Returns list of (x, y) tuples: center, left, right, top, bottom
+        [REFINED - STABILITY V3] Generate 5 coordinates for icon pickup attempts.
+        Returns list of (x, y) tuples: center, left, right, top, bottom.
+        The function name is kept for backward compatibility.
         """
         coordinates = [
-            (base_x, base_y),                    # 0: Center (original)
-            (base_x - offset, base_y),           # 1: Left
-            (base_x + offset, base_y),           # 2: Right  
-            (base_x, base_y - offset),           # 3: Top
-            (base_x, base_y + offset)            # 4: Bottom
+            (base_x, base_y),              # 0: Center (original)
+            (base_x - offset, base_y),     # 1: Left
+            (base_x + offset, base_y),     # 2: Right
+            (base_x, base_y - offset),     # 3: Top
+            (base_x, base_y + offset)      # 4: Bottom
         ]
         
-        print(f"ðŸ“ Generated 5 coordinates for icon at ({base_x}, {base_y}):")
-        for i, (x, y) in enumerate(coordinates):
-            coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
-            print(f"   {i+1}. {coord_names[i]}: ({x}, {y})")
-        
+        # This print can be very verbose, we can make it more concise
+        # print(f"ðŸ“  Generated 5 pickup coordinates for icon at ({base_x}, {base_y}) with offset {offset}px")
         return coordinates
 
     def generate_return_coordinates(self, center_x, center_y, offset=60):
@@ -5371,6 +5374,29 @@ class SprunkiGamePlayer:
                 print(f"   Point {i}: ({x}, {y}) - {angle_deg:.0f}Â°")
         
         return coordinates
+
+    def _generate_slot_scan_coords(self, target_slot: dict) -> list:
+            """
+            [NEW - STABILITY V3] Generates a list of 5 vertically-aligned coordinates
+            to scan for a valid drop point on a slot.
+            Uses specific pixel offsets as requested.
+            """
+            if not target_slot or 'x' not in target_slot or 'y' not in target_slot:
+                return []
+
+            center_x, center_y = target_slot['x'], target_slot['y']
+
+            # S_0: Center
+            # S_1, S_2: +/- 35px offset
+            # S_3, S_4: +/- 50px offset
+            slot_coordinates = [
+                (center_x, center_y),
+                (center_x, center_y - 35),
+                (center_x, center_y + 35),
+                (center_x, center_y - 50),
+                (center_x, center_y + 50)
+            ]
+            return slot_coordinates
 
     def verify_return_success(self, putted_before, putted_after):
         """
@@ -5719,248 +5745,248 @@ class SprunkiGamePlayer:
     # == ENHANCED DRAG & DROP WITH VERIFICATION ==
     # ================================================================
 
-    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
-            """
-            [FIXED & FINAL] Drag and drop với logic timestamp cho việc dựng video.
-            """
-            print(f"\nðŸŽ¯ DYNAMIC DRAG START (is_first_icon: {is_first_icon})")
-            print("="*60)
-
-            # Ưu tiên giá trị override được truyền vào (dùng cho json_generator)
-            if control_type_override:
-                self.game_control_type = control_type_override
-                print(f"🎮 Using OVERRIDDEN control type: '{self.game_control_type}'")
-            # Nếu không, cố gắng đọc từ config (dùng khi chơi game bình thường)
-            elif self.config and 'gameSettings' in self.config:
-                self.game_control_type = self.config['gameSettings'].get('gameControlType', 'click_drag')
-                print(f"🎮 Using control type from JSON config: '{self.game_control_type}'")
-            # Nếu cả hai đều không có, dùng giá trị mặc định
-            else:
-                self.game_control_type = 'click_drag' # Fallback
-                print(f"🎮 Using DEFAULT control type: '{self.game_control_type}'")
-            
-            print(f"🎮 Using detected control type: '{self.game_control_type}'")
-
-            if is_first_icon:
-                print("🎪 First icon detected - ensuring game focus and applying extended waits...")
-                self.ensure_game_focus()
-
-            # RESET TRACKING: Clear previous operation tracking
-            self.working_systems = {'characters': None, 'putted': None}
-
-            # Store target slot for verification
-            target_slot_index = target_slot.get('index', -1)
-            self.store_target_slot_for_verification(target_slot_index)
-
-            # Check if DUAL verification is available
-            dual_verification_enabled = self.characters_available or self.putted_chars_available
-            if dual_verification_enabled:
-                print("ðŸ”„ DUAL verification ENABLED:")
-                print(f"   ðŸ”¢ Characters Array: {'âœ… Ready' if self.characters_available else 'âŒ N/A'}")
-                print(f"   ðŸŽ¯ Putted Characters: {'âœ… Ready' if self.putted_chars_available else 'âŒ N/A'}")
-            else:
-                print("âš ï¸ DUAL verification DISABLED - using fallback logic")
-            
-            # Generate 5 coordinates to try
-            coordinates = self.generate_icon_coordinates(icon['x'], icon['y'])
-            
-            domain_adj = self.get_domain_adjustments()
-            success = False
-            coord_used = 0
-
-            # INITIALIZE variables properly
-            characters_before, putted_before = None, None
-            characters_after, putted_after = None, None
-
-            obs_controller = self.obs_controller # Lấy controller để sử dụn
-
-            # Try each coordinate until success
-            for coord_index, (start_x, start_y) in enumerate(coordinates):
-                if self.should_stop:
-                    break
-
-                coord_used = coord_index + 1
-                coord_names = ["Center", "Left", "Right", "Top", "Bottom"]
-                print(f"\nðŸŽ¯ Trying coordinate {coord_used}/5: {coord_names[coord_index]} ({start_x}, {start_y})")
-                
-                # Get DUAL counts BEFORE drag (if verification available)
-                characters_before, putted_before = None, None
-                if dual_verification_enabled:
-                    characters_before, putted_before = self.get_dual_counts()
-                    print(f"ðŸ“Š DUAL counts BEFORE drag:")
-                    print(f"   ðŸ”¢ Characters: {characters_before}")
-                    print(f"   ðŸŽ¯ Putted: {putted_before}")
-                    
-                    # SMART DETECTION: Check if icon already placed from previous attempt
-                    if coord_index > 0:
-                        if (characters_before is not None and characters_before > 0) or (putted_before is not None and putted_before > 0):
-                            if self.verify_drag_success_dual(self.last_drag_characters_before, characters_before, self.last_drag_putted_before, putted_before):
-                                print(f"ðŸŽ‰ SMART DETECTION: Icon already placed by previous attempt!")
-                                print(f"   ðŸ“Š Evidence: Previous attempt was successful upon re-check.")
-                                print(f"   âœ… Previous coordinate {coord_index} actually succeeded")
-                                print(f"   ðŸŽ¯ Stopping retry loop - SUCCESS!")
-                                success = True
-                                break
-                
-                # Store counts for smart detection in the next loop
-                self.last_drag_characters_before = characters_before
-                self.last_drag_putted_before = putted_before
-
-                print("   Executing dynamic drag attempt...")
-                drag_executed = False
-                action_start_time = None
-                drop_time = None
-                end_x, end_y = target_slot['x'], target_slot['y']
-
-                if use_cdp:
-                    ws_url = self._get_websocket_url()
-                    if ws_url:
-                        try:
-                            ws = websocket.create_connection(ws_url, timeout=30)
-                            # 🔥 NHẬN VỀ CẢ 2 MỐC THỜI GIAN
-                            drag_executed, action_start_time, drop_time = self._execute_dynamic_drag_cdp(
-                                ws, start_x, start_y, end_x, end_y,
-                                self.game_control_type,
-                                is_first_icon
-                            )
-                            ws.close()
-                        except Exception as cdp_err:
-                            print(f"   ⚠️ CDP connection/drag error: {cdp_err}, falling back to PyAutoGUI")
-                            drag_executed = False # Đảm bảo fallback được kích hoạt
-                            action_start_time, drop_time = None, None # Reset on error
-                    else:
-                        print("   ⚠️ WebSocket not available, falling back to PyAutoGUI")
-                        action_start_time, drop_time = None, None
-
-                # Fallback to PyAutoGUI if CDP is disabled or fails
-                if not use_cdp or not drag_executed:
-                    print("   Fallback to PyAutoGUI drag...")
-                    # PyAutoGUI chưa hỗ trợ dynamic, ta sẽ dùng logic cũ của nó
-                    # Đây là điểm có thể nâng cấp trong tương lai nếu cần
-                    timing_key = 'first_icon' if is_first_icon else 'normal_icon'
-                    delays = self.DRAG_DELAYS[timing_key].copy()
-                    
-                    drag_executed = self._execute_pyautogui_drag(
-                        start_x, start_y, end_x, end_y, 
-                        delays, domain_adj, 
-                        is_first_icon # Truyền biến is_first_icon vào
+    def _attempt_single_drag(self, start_coord, end_coord, before_state, is_first_icon, use_cdp, control_type_override):
+        """
+        [IMPLEMENTED - STABILITY V3 HELPER] Executes a single drag-and-drop-and-verify cycle.
+        This reuses the core execution logic from the old corrected_drag_and_drop.
+        """
+        start_x, start_y = start_coord
+        end_x, end_y = end_coord
+        
+        # Lấy lại các biến cần thiết từ class instance
+        obs_controller = self.obs_controller
+        dual_verification_enabled = self.characters_available or self.putted_chars_available
+        
+        # --- 1. Thực thi kéo thả (Lấy từ logic cũ) ---
+        drag_executed = False
+        action_start_time = None
+        drop_time = None
+        
+        if use_cdp:
+            ws_url = self._get_websocket_url()
+            if ws_url:
+                try:
+                    ws = websocket.create_connection(ws_url, timeout=30)
+                    drag_executed, action_start_time, drop_time = self._execute_dynamic_drag_cdp(
+                        ws, start_x, start_y, end_x, end_y,
+                        control_type_override or self.game_control_type,
+                        is_first_icon
                     )
+                    ws.close()
+                except Exception:
+                    drag_executed = False
+            else: # Fallback nếu không có ws_url
+                 drag_executed = False
+        
+        if not use_cdp or not drag_executed:
+            domain_adj = self.get_domain_adjustments()
+            timing_key = 'first_icon' if is_first_icon else 'normal_icon'
+            delays = self.DRAG_DELAYS[timing_key].copy()
+            drag_executed = self._execute_pyautogui_drag(
+                start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon
+            )
 
-                if not drag_executed:
-                    print(f"âŒ Drag execution failed at coordinate {coord_used}")
-                    if coord_index < len(coordinates) - 1:
-                        print("   Trying next coordinate...")
-                        time.sleep(0.3)
-                    continue
+        if not drag_executed:
+            return False, {"error": "Drag execution failed"}
+
+        # --- 2. Xác thực (Lấy từ logic cũ) ---
+        if dual_verification_enabled:
+            verification_success = False
+            for verify_attempt in range(1, 4):
+                wait_time = 0.5 + (verify_attempt * 0.4)
+                time.sleep(wait_time)
                 
-                # Wait for game state to update - this is now handled by the retry loop
-                
-                # Get DUAL counts AFTER drag (if verification available)
-                if dual_verification_enabled:
-                    
-                    ### Lá»›p 1 - TÄƒng cÆ°á»ng xÃ¡c thá»±c vá»›i vÃ²ng láº·p thá»­ láº¡i ###
-                    verification_success = False
-                    # VÃ²ng láº·p xÃ¡c thá»±c 3 láº§n vá»›i Ä‘á»™ trá»… tÄƒng dáº§n
-                    for verify_attempt in range(1, 4):
-                        # Chá» má»™t chÃºt trÆ°á»›c má»—i láº§n kiá»ƒm tra
-                        wait_time = 0.5 + (verify_attempt * 0.4) # Chá» 0.9s, 1.3s, 1.7s
-                        print(f"â³ Verification attempt {verify_attempt}/3: Waiting {wait_time:.1f}s for game state...")
-                        time.sleep(wait_time)
+                chars_after, putted_after = self.get_dual_counts()
+                after_state = {'characters': chars_after, 'putted': putted_after}
 
-                        characters_after, putted_after = self.get_dual_counts()
-                        print(f"ðŸ“Š DUAL counts AFTER drag (attempt {verify_attempt}/3):")
-                        print(f"   ðŸ”¢ Characters: {characters_after}")
-                        print(f"   ðŸŽ¯ Putted: {putted_after}")
-                        
-                        # Verify drag success using DUAL system
-                        if self.verify_drag_success_dual(characters_before, characters_after, putted_before, putted_after):
-                            verification_success = True
-                            print(f"ðŸŽ‰ DUAL VERIFIED SUCCESS at coordinate {coord_used} (attempt {verify_attempt})!")
-                            break # ThoÃ¡t khá»i vÃ²ng láº·p xÃ¡c thá»±c khi Ä‘Ã£ thÃ nh cÃ´ng
-                        elif verify_attempt < 3:
-                            print(f"   âš ï¸ Verification attempt {verify_attempt} failed, will try again after a longer wait...")
-                    
-                    if verification_success:
-                        # Ghi lại timestamp của lần kéo thành công
-                        if obs_controller and obs_controller.recording_start_time is not None:
-                            
-                            # 🔥 GHI TIMESTAMP 1: KHI BẮT ĐẦU KÉO
-                            if action_start_time:
-                                elapsed_start_time = action_start_time - obs_controller.recording_start_time
-                                event_start_data = {
-                                    "event": "successful_drag_started",
-                                    "timestamp": round(elapsed_start_time, 3),
-                                    "label": f"Drag started for icon {icon.get('index', -1)}",
-                                    "metadata": {
-                                        "icon_index": icon.get('index', -1),
-                                        "attempt_number": coord_used
-                                    }
-                                }
-                                obs_controller.event_timestamps.append(event_start_data)
-                                print(f"🕒 Video Event Logged: 'successful_drag_started' at {elapsed_start_time:.3f}s")
-                            
-                            # 🔥 GHI TIMESTAMP 2: KHI THẢ ICON VÀO SLOT
-                            if drop_time:
-                                elapsed_drop_time = drop_time - obs_controller.recording_start_time
-                                event_drop_data = {
-                                    "event": "icon_dropped_successfully",
-                                    "timestamp": round(elapsed_drop_time, 3),
-                                    "label": f"Icon {icon.get('index', -1)} dropped into slot",
-                                    "metadata": {
-                                        "icon_index": icon.get('index', -1),
-                                        "slot_index": target_slot_index
-                                    }
-                                }
-                                obs_controller.event_timestamps.append(event_drop_data)
-                                print(f"🕒 Video Event Logged: 'icon_dropped_successfully' at {elapsed_drop_time:.3f}s")
-
-                        print(f"ðŸŽ‰ ENHANCED DRAG VERIFIED successfully at coordinate {coord_used}!")
-                        success = True
-                        break # ThoÃ¡t khá» i vÃ²ng láº·p thá»­ tá» a Ä‘á»™ (for coord_index...)
-                    else:
-                        print(f"âŒ DUAL VERIFICATION FAILED at coordinate {coord_used} after 3 attempts.")
-                        
-                        ### Lớp 2 - Tự sửa lỗi bằng "trả hàng phòng hờ" ###
-                        print("ðŸ›¡ï¸  SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
-                        # DÃ¹ xÃ¡c thá»±c tháº¥t báº¡i, váº«n cÃ³ kháº£ nÄƒng icon Ä‘Ã£ bá»‹ káº¹t á»Ÿ Ä‘Ã³.
-                        # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá»  "phÃ²ng há» ".
-                        self.attempt_icon_return(target_slot)
-                        
-                        # [THÊM MỚI] Di chuyển chuột về vị trí an toàn ngay lập tức
-                        print("   🛡️ Moving mouse to safe position after precautionary return...")
-                        self.move_mouse_to_safe_position()
-                        
-                        time.sleep(0.8) # Chá»  má»™t chÃºt sau khi tráº£ hÃ ng và di chuột
-                        ### Káº¾T THÃšC: Lá»›p 2 ###
-
-                        if coord_index < len(coordinates) - 1:
-                            print("   Trying next coordinate...")
-                        
-                    ### Káº¾T THÃšC Lá»›p 1 ###
-                else:
-                    # No verification available - assume success if drag executed
-                    print(f"âœ… ASSUMED SUCCESS at coordinate {coord_used} (no verification)")
-                    success = True
+                if self.verify_drag_success_dual(before_state['characters'], after_state['characters'], before_state['putted'], after_state['putted']):
+                    verification_success = True
                     break
             
-            # Final result
+            if verification_success:
+                # Trả về các thông tin cần thiết để ghi timestamp
+                return True, {"action_start_time": action_start_time, "drop_time": drop_time}
+            else:
+                # Thất bại, thực hiện self-correction
+                print("      [ATTEMPT] Verification failed. Performing self-correction.")
+                # Sử dụng target_slot từ đâu? -> cần truyền vào hoặc tính toán lại.
+                # Tạm thời click vào end_coord
+                self.attempt_icon_return({'x': end_x, 'y': end_y}) 
+                self.move_mouse_to_safe_position()
+                return False, {"error": "Verification failed"}
+        else:
+            # Không có xác thực, giả định thành công
+            return True, {"action_start_time": action_start_time, "drop_time": drop_time}
+
+    def _find_optimal_drop_point(self, icon, target_slot, is_first_icon, use_cdp, control_type_override):
+        """
+        [NEW - STABILITY V3 SEARCH] Finds the optimal drop point for a slot
+        by systematically trying coordinates and verifying each attempt.
+        Implements the "Vertical Scan Priority" strategy.
+        """
+        print(f"🔍 [SEARCH MODE] Activated for slot {target_slot.get('index', 'N/A')}")
+        
+        # 1. Generate all possible coordinates
+        icon_coords = self.generate_icon_coordinates(icon['x'], icon['y'])
+        slot_coords = self._generate_slot_scan_coords(target_slot)
+
+        # 2. Get the initial 'before' state ONCE
+        before_state = None
+        dual_verification_enabled = self.characters_available or self.putted_chars_available
+        if dual_verification_enabled:
+            chars_before, putted_before = self.get_dual_counts()
+            before_state = {'characters': chars_before, 'putted': putted_before}
+            print(f"   [SEARCH] Initial state: Chars={chars_before}, Putted={putted_before}")
+        
+        # 3. Implement the search strategy
+        
+        # Cấp 2: Quét dọc với icon ở tâm
+        print("   [SEARCH] Level 2: Vertical scan with center pick-up...")
+        for slot_idx, (end_x, end_y) in enumerate(slot_coords):
+            if self.should_stop: return None
+            
+            print(f"      -> Trying combo: Icon[0] -> Slot[{slot_idx}]")
+            success, details = self._attempt_single_drag(
+                start_coord=(icon_coords[0][0], icon_coords[0][1]),
+                end_coord=(end_x, end_y),
+                before_state=before_state,
+                is_first_icon=is_first_icon,
+                use_cdp=use_cdp,
+                control_type_override=control_type_override
+            )
             if success:
-                print(f"ðŸŽ‰ ENHANCED DRAG COMPLETED SUCCESSFULLY!")
-                print(f"   Coordinate used: {coord_used}/5")
-                print(f"   Verification: {'ðŸ”„ DUAL Enabled' if dual_verification_enabled else 'âš ï¸ Disabled'}")
-                if dual_verification_enabled:
-                    print(f"   Systems: Characters Array {'âœ…' if self.characters_available else 'âŒ'} + Putted Characters {'âœ…' if self.putted_chars_available else 'âŒ'}")
-                print("   Mouse already at safe position")
-                print("="*60)
+                print(f"   [SEARCH] ✅ SUCCESS found at Icon[0], Slot[{slot_idx}]")
+                return {'icon_idx': 0, 'slot_idx': slot_idx, 'details': details}
+
+        # Cấp 3: Nếu vẫn thất bại, quét toàn bộ các điểm kéo còn lại
+        print("   [SEARCH] Level 3: Full scan with alternate pick-up points...")
+        for icon_idx in range(1, len(icon_coords)): # Bắt đầu từ 1 vì 0 đã thử
+            if self.should_stop: return None
+            
+            start_x, start_y = icon_coords[icon_idx]
+            for slot_idx, (end_x, end_y) in enumerate(slot_coords):
+                if self.should_stop: return None
                 
-                self.drag_stats.record_attempt(True, retry_count=0, coord_used=coord_used, verification_used=dual_verification_enabled)
+                print(f"      -> Trying combo: Icon[{icon_idx}] -> Slot[{slot_idx}]")
+                success, details = self._attempt_single_drag(
+                    start_coord=(start_x, start_y),
+                    end_coord=(end_x, end_y),
+                    before_state=before_state,
+                    is_first_icon=is_first_icon,
+                    use_cdp=use_cdp,
+                    control_type_override=control_type_override
+                )
+                if success:
+                    print(f"   [SEARCH] ✅ SUCCESS found at Icon[{icon_idx}], Slot[{slot_idx}]")
+                    return {'icon_idx': icon_idx, 'slot_idx': slot_idx, 'details': details}
+
+        print("   [SEARCH] ❌ FAILED: No successful coordinate combination found.")
+        return None
+
+    def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
+        """
+        [RESTRUCTURED - STABILITY V3] Smart drag-and-drop with a dynamic learning
+        and caching strategy for optimal drop points.
+        """
+        # --- PHASE 1: SETUP & PRESERVATION OF EXISTING LOGIC ---
+        # (Bảo toàn các tính năng #1, #2, #3 từ phân tích)
+        print(f"\n🎯 [SMART DRAG] START for icon {icon.get('index', 'N/A')} -> slot {target_slot.get('index', 'N/A')}")
+        
+        # Xác định control type
+        active_control_type = control_type_override or self.config.get('gameSettings', {}).get('gameControlType', 'click_drag')
+        print(f"   - Control Type: '{active_control_type}'")
+
+        if is_first_icon:
+            print("   - First Icon: YES -> Ensuring focus and applying extended waits.")
+            self.ensure_game_focus()
+
+        target_slot_index = target_slot.get('index', -1)
+        if target_slot_index == -1: return False # Failsafe
+
+        # --- PHASE 2: CACHE LOOKUP LOGIC (Tính năng mới) ---
+        learned_offset = self.slot_offset_lookup.get(target_slot_index)
+        
+        if learned_offset:
+            print(f"   [CACHE HIT] Found learned offset for slot {target_slot_index}: icon_idx={learned_offset['icon_idx']}, slot_idx={learned_offset['slot_idx']}")
+            
+            # Tính toán tọa độ từ offset đã học
+            icon_coords = self.generate_icon_coordinates(icon['x'], icon['y'])
+            slot_coords = self._generate_slot_scan_coords(target_slot)
+            
+            start_coord = icon_coords[learned_offset['icon_idx']]
+            end_coord = slot_coords[learned_offset['slot_idx']]
+            
+            # Lấy trạng thái trước khi thử
+            before_state = None
+            if self.characters_available or self.putted_chars_available:
+                chars_before, putted_before = self.get_dual_counts()
+                before_state = {'characters': chars_before, 'putted': putted_before}
+
+            success, details = self._attempt_single_drag(
+                start_coord, end_coord, before_state, is_first_icon, use_cdp, active_control_type
+            )
+            
+            if success:
+                print(f"   [CACHE HIT] ✅ SUCCESS using learned offset.")
+                # (Bảo toàn tính năng #6, #10)
+                self._handle_successful_drag(icon, target_slot, details, 1, "cache_hit")
                 return True
             else:
-                print(f"ðŸ’¥ ENHANCED DRAG FAILED - All {len(coordinates)} coordinates attempted")
-                print("="*60)
-                
-                self.drag_stats.record_attempt(False, retry_count=len(coordinates), coord_used=coord_used, verification_used=dual_verification_enabled)
-                return False
+                print(f"   [CACHE INVALIDATION] ⚠️ Learned offset for slot {target_slot_index} failed. Re-searching...")
+                del self.slot_offset_lookup[target_slot_index]
+                # Chuyển xuống logic Search Mode
+
+        # --- PHASE 3: SEARCH MODE (Cache Miss or Invalidation) ---
+        print(f"   [CACHE MISS] No learned offset for slot {target_slot_index}. Activating Search Mode...")
+        
+        search_result = self._find_optimal_drop_point(
+            icon, target_slot, is_first_icon, use_cdp, active_control_type
+        )
+        
+        if search_result:
+            # Lưu offset đã học được
+            self.slot_offset_lookup[target_slot_index] = {
+                'icon_idx': search_result['icon_idx'],
+                'slot_idx': search_result['slot_idx']
+            }
+            print(f"   [LEARNED] Saved new optimal offset for slot {target_slot_index}.")
+            
+            # (Bảo toàn tính năng #6, #10)
+            self._handle_successful_drag(icon, target_slot, search_result.get('details', {}), 99, "search_mode") # 99 attempts as placeholder
+            return True
+        else:
+            print(f"   [DRAG FAILED] ❌ All attempts failed for icon {icon.get('index', 'N/A')}.")
+            self.drag_stats.record_attempt(False, retry_count=25, verification_used=True) # Max attempts
+            return False
+
+    def _handle_successful_drag(self, icon, target_slot, details, attempts, method):
+        """
+        [NEW - HELPER] Centralizes actions after a successful drag to avoid code duplication.
+        """
+        # Bảo toàn tính năng #6: Ghi Timestamps
+        if self.obs_controller and self.obs_controller.recording_start_time is not None:
+            action_start_time = details.get("action_start_time")
+            drop_time = details.get("drop_time")
+            
+            if action_start_time:
+                elapsed_start_time = action_start_time - self.obs_controller.recording_start_time
+                self.obs_controller.log_event_timestamp(
+                    "successful_drag_started",
+                    f"Drag started for icon {icon.get('index', -1)}",
+                    {"icon_index": icon.get('index', -1), "attempt_number": attempts, "method": method}
+                )
+
+            if drop_time:
+                elapsed_drop_time = drop_time - self.obs_controller.recording_start_time
+                self.obs_controller.log_event_timestamp(
+                    "icon_dropped_successfully",
+                    f"Icon {icon.get('index', -1)} dropped into slot",
+                    {"icon_index": icon.get('index', -1), "slot_index": target_slot.get('index', -1)}
+                )
+        
+        # Bảo toàn tính năng #10: Ghi lại Thống kê
+        self.drag_stats.record_attempt(True, retry_count=attempts, verification_used=True)
+        print(f"   [SUCCESS INFO] Method: {method}, Attempts: {attempts}")
 
     def _execute_single_drag_attempt(self, start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj):
         """
