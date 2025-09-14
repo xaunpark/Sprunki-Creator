@@ -5920,12 +5920,17 @@ class SprunkiGamePlayer:
                     else:
                         print(f"âŒ DUAL VERIFICATION FAILED at coordinate {coord_used} after 3 attempts.")
                         
-                        ### Lá»›p 2 - Tá»± sá»­a lá»—i báº±ng "tráº£ hÃ ng phÃ²ng há»" ###
-                        print("ðŸ›¡ï¸ SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
+                        ### Lớp 2 - Tự sửa lỗi bằng "trả hàng phòng hờ" ###
+                        print("ðŸ›¡ï¸  SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
                         # DÃ¹ xÃ¡c thá»±c tháº¥t báº¡i, váº«n cÃ³ kháº£ nÄƒng icon Ä‘Ã£ bá»‹ káº¹t á»Ÿ Ä‘Ã³.
-                        # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá» "phÃ²ng há»".
+                        # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá»  "phÃ²ng há» ".
                         self.attempt_icon_return(target_slot)
-                        time.sleep(0.8) # Chá» má»™t chÃºt sau khi tráº£ hÃ ng
+                        
+                        # [THÊM MỚI] Di chuyển chuột về vị trí an toàn ngay lập tức
+                        print("   🛡️ Moving mouse to safe position after precautionary return...")
+                        self.move_mouse_to_safe_position()
+                        
+                        time.sleep(0.8) # Chá»  má»™t chÃºt sau khi tráº£ hÃ ng và di chuột
                         ### Káº¾T THÃšC: Lá»›p 2 ###
 
                         if coord_index < len(coordinates) - 1:

@@ -111,36 +111,49 @@ class SprunkiController:
         self.operation_start_time = time.time()
     
     def create_simple_url_slug(self, url):
-        """Tạo URL slug đơn giản từ URL path - PHASE 1: Optimized"""
+        """
+        [FIXED] Tạo URL slug duy nhất bằng cách kết hợp tên tác giả và tên dự án.
+        Ví dụ: /@author/project-name -> author_project-name
+        """
         try:
             self.operation_start_time = time.time()
             
             parsed_url = urlparse(url)
-            path = parsed_url.path.strip('/')
+            # Tách path thành các phần, loại bỏ các phần tử rỗng (như phần tử đầu tiên sau dấu '/')
+            path_parts = [part for part in parsed_url.path.strip('/').split('/') if part]
             
-            if path:
-                # Lấy phần cuối của path
-                slug = path.split('/')[-1]
+            slug_base = ""
+            # Logic mới để tạo slug an toàn
+            if len(path_parts) >= 2 and path_parts[0].startswith('@'):
+                # Trường hợp chuẩn: /@author/project-name
+                author = path_parts[0][1:]  # Bỏ ký tự '@'
+                project_name = path_parts[1]
+                slug_base = f"{author}_{project_name}"
+            elif len(path_parts) > 0:
+                # Trường hợp chỉ có một phần trong path, hoặc không có '@'
+                slug_base = "_".join(path_parts)
             else:
-                # Nếu không có path, dùng domain
-                domain = parsed_url.netloc.lower()
-                if domain.startswith('www.'):
-                    domain = domain[4:]
-                slug = domain.split('.')[0]
-            
-            # PHASE 1: Faster regex processing
-            slug = re.sub(r'[^a-zA-Z0-9\-]', '-', slug)
-            slug = re.sub(r'-+', '-', slug)  # Loại bỏ dấu gạch ngang liên tiếp
+                # Fallback: dùng domain nếu không có path
+                domain = parsed_url.netloc.lower().replace('www.', '')
+                slug_base = domain.split('.')[0]
+
+            # Dọn dẹp slug để tạo tên file/thư mục hợp lệ
+            import re
+            slug = re.sub(r'[^a-zA-Z0-9\-_]', '-', slug_base) # Chỉ cho phép chữ, số, -, _
+            slug = re.sub(r'[-_]+', '-', slug) # Thay thế nhiều gạch ngang/gạch dưới bằng một gạch ngang
             slug = slug.strip('-')
+
+            # Giới hạn độ dài
+            slug = slug[:70]
             
             self.log_performance("URL Slug Creation", True)
-            print(f"🏷️ URL Slug: '{url}' → '{slug}'")
+            print(f"🏷️ [FIXED] URL Slug: '{url}' → '{slug}'")
             return slug
             
         except Exception as e:
             print(f"❌ Lỗi tạo URL slug: {e}")
             self.log_performance("URL Slug Creation", False)
-            fallback_slug = f"sprunki-{datetime.now().strftime('%Y%m%d')}"
+            fallback_slug = f"sprunki-{datetime.now().strftime('%Y%m%d%H%M%S')}"
             return fallback_slug
     
     def setup_project_folder(self, url):

@@ -5920,12 +5920,17 @@ class SprunkiGamePlayer:
                     else:
                         print(f"âŒ DUAL VERIFICATION FAILED at coordinate {coord_used} after 3 attempts.")
                         
-                        ### Lá»›p 2 - Tá»± sá»­a lá»—i báº±ng "tráº£ hÃ ng phÃ²ng há»" ###
-                        print("ðŸ›¡ï¸ SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
+                        ### Lớp 2 - Tự sửa lỗi bằng "trả hàng phòng hờ" ###
+                        print("ðŸ›¡ï¸  SELF-CORRECTION: Performing a precautionary return to prevent overlapping icons.")
                         # DÃ¹ xÃ¡c thá»±c tháº¥t báº¡i, váº«n cÃ³ kháº£ nÄƒng icon Ä‘Ã£ bá»‹ káº¹t á»Ÿ Ä‘Ã³.
-                        # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá» "phÃ²ng há»".
+                        # Thá»±c hiá»‡n má»™t cÃº click Ä‘á»ƒ tráº£ vá»  "phÃ²ng há» ".
                         self.attempt_icon_return(target_slot)
-                        time.sleep(0.8) # Chá» má»™t chÃºt sau khi tráº£ hÃ ng
+                        
+                        # [THÊM MỚI] Di chuyển chuột về vị trí an toàn ngay lập tức
+                        print("   🛡️ Moving mouse to safe position after precautionary return...")
+                        self.move_mouse_to_safe_position()
+                        
+                        time.sleep(0.8) # Chá»  má»™t chÃºt sau khi tráº£ hÃ ng và di chuột
                         ### Káº¾T THÃšC: Lá»›p 2 ###
 
                         if coord_index < len(coordinates) - 1:
@@ -6053,7 +6058,17 @@ class SprunkiGamePlayer:
                 
             except Exception as e:
                 print(f"âš ï¸ Smart detection failed: {e}, proceeding with blind clicks...")
-            
+
+            # === PHASE 1.5: PRESS ANY KEY (NEW) ===
+            print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
+            try:
+                pyautogui.press('space')
+                time.sleep(0.5)
+                pyautogui.press('space')
+                print("   ✅ 'space' key pressed twice successfully.")
+            except Exception as key_e:
+                print(f"   ⚠️ Could not press 'space' key: {key_e}")
+
             # Phase 2: ALWAYS perform blind clicks for additional assurance
             if smart_clicks_performed > 0:
                 print("ðŸ”„ Phase 2: Performing ADDITIONAL blind CDP clicks for protection...")
@@ -6142,7 +6157,17 @@ class SprunkiGamePlayer:
                     
             except Exception as e:
                 print(f"âš ï¸ Smart detection via WebSocket failed: {e}")
-            
+
+            # === PHASE 1.5: PRESS ANY KEY (NEW) ===
+            print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
+            try:
+                pyautogui.press('space')
+                time.sleep(0.5)
+                pyautogui.press('space')
+                print("   ✅ 'space' key pressed twice successfully.")
+            except Exception as key_e:
+                print(f"   ⚠️ Could not press 'space' key: {key_e}")
+
             # Phase 2: ALWAYS perform aggressive wake-up drags
             if smart_clicks_performed > 0:
                 print("ðŸ”„ Phase 2: Performing ADDITIONAL wake-up drags for protection...")
@@ -6929,8 +6954,6 @@ class SprunkiGamePlayer:
             time.sleep(enhanced_drop_wait)
 
             # BƯỚC 6: Thả chuột tại đích
-            
-            # 🔥 GHI LẠI THỜI ĐIỂM NGAY TRƯỚC KHI THẢ CHUỘT
             drop_time = time.monotonic()
 
             release_params = {
@@ -7233,19 +7256,24 @@ class SprunkiGamePlayer:
                 time.sleep(1)
 
             # 🔥 TÍNH TOÁN VÀ GHI LẠI END_LISTEN DỰA TRÊN START_LISTEN
-            if obs_controller and listen_start_timestamp > 0:
-                end_listen_timestamp = listen_start_timestamp + listen_duration
-                end_listen_event = {
-                    "event": "end_listen",
-                    "timestamp": round(end_listen_timestamp, 3),
-                    "label": f"Finished listening to icon {icon_index}",
-                    "metadata": {}
-                }
-                obs_controller.event_timestamps.append(end_listen_event)
-                print(f"🕒 Video Event Logged: 'end_listen' at {end_listen_timestamp:.3f}s (Calculated)")
-            elif obs_controller:
-                # Fallback nếu không tìm thấy start_listen (trường hợp hiếm)
-                obs_controller.log_event_timestamp("end_listen", f"Finished listening to icon {icon_index}")
+            if obs_controller:
+                # Kiểm tra xem listen_start_timestamp có tồn tại không (được gán ở khối trên)
+                if listen_start_timestamp >= 0.0:
+                    # Tính toán timestamp kết thúc chính xác
+                    end_listen_timestamp = listen_start_timestamp + listen_duration
+                    
+                    # Tạo sự kiện thủ công với timestamp đã tính
+                    end_listen_event = {
+                        "event": "end_listen",
+                        "timestamp": round(end_listen_timestamp, 3),
+                        "label": f"Finished listening to icon {icon_index}",
+                        "metadata": {}
+                    }
+                    obs_controller.event_timestamps.append(end_listen_event)
+                    print(f"🕒 Video Event Logged: 'end_listen' at {end_listen_timestamp:.3f}s (Calculated)")
+                else:
+                    # Fallback an toàn nếu không tìm thấy start_listen
+                    obs_controller.log_event_timestamp("end_listen", f"Finished listening to icon {icon_index}")
 
             if self.should_stop: return False
 
@@ -8001,24 +8029,40 @@ class SprunkiGamePlayer:
                         report.issues.append(f"Failed to auto-correct JSON: {json_error}")
             
             # === FINAL DETERMINATION OF SUCCESS ===
-            meaningful_content_generated = (report.normal_icons_showcased > 0) or \
-                                         (report.horror_icons_showcased > 0) or \
-                                         (report.normal_remixes_played > 0 and self.config['layout'].get('icons')) or \
-                                         (report.horror_remixes_played > 0 and self.config['layout'].get('icons'))
+            # Tính toán các tỷ lệ thành công
+            normal_icon_rate = report.normal_icons_showcased / report.normal_icons_total if report.normal_icons_total > 0 else 1.0
+            normal_remix_rate = report.normal_remixes_played / report.normal_remixes_total if report.normal_remixes_total > 0 else 1.0
+            
+            # Định nghĩa ngưỡng thành công cho Master Mode
+            ICON_SUCCESS_THRESHOLD = 0.8  # 80%
+            REMIX_SUCCESS_THRESHOLD = 0.5 # 50%
 
-            if normal_phase_did_run and meaningful_content_generated:
-                report.was_successful = True
-                report.message = "Workflow completed."
-                if not is_normal_phase_perfect or (has_horror and not is_horror_phase_perfect):
-                    report.message = "Workflow completed with warnings."
-            else:
-                report.was_successful = False
-                if not meaningful_content_generated:
-                    report.message = "Workflow finished, but no meaningful content was generated (e.g., no icons found)."
-                    if not report.issues:
-                        report.issues.append("No meaningful content was generated.")
+            # Kiểm tra thành công của Normal Phase
+            normal_phase_success = (normal_icon_rate >= ICON_SUCCESS_THRESHOLD and 
+                                    normal_remix_rate >= REMIX_SUCCESS_THRESHOLD)
+
+            # Kiểm tra thành công của Horror Phase (nếu có)
+            horror_phase_success = True # Mặc định là True nếu không có horror mode
+            if has_horror:
+                horror_icon_rate = report.horror_icons_showcased / report.horror_icons_total if report.horror_icons_total > 0 else 1.0
+                horror_remix_rate = report.horror_remixes_played / report.horror_remixes_total if report.horror_remixes_total > 0 else 1.0
+                horror_phase_success = (horror_icon_rate >= ICON_SUCCESS_THRESHOLD and 
+                                        horror_remix_rate >= REMIX_SUCCESS_THRESHOLD)
+
+            # Quyết định cuối cùng
+            report.was_successful = normal_phase_success and horror_phase_success
+
+            if report.was_successful:
+                if is_normal_phase_perfect and (not has_horror or is_horror_phase_perfect):
+                    report.message = "Workflow completed perfectly."
                 else:
-                    report.message = "Workflow failed to complete the normal phase."
+                    report.message = f"Workflow completed with partial success (Normal Icons: {normal_icon_rate:.0%}, Remixes: {normal_remix_rate:.0%})."
+            else:
+                report.message = "Workflow failed due to low success rates."
+                if not normal_phase_success:
+                    report.issues.append(f"Normal phase failed thresholds (Icons: {normal_icon_rate:.0%}, Remixes: {normal_remix_rate:.0%}).")
+                if has_horror and not horror_phase_success:
+                    report.issues.append("Horror phase failed thresholds.")
 
             # Final Cleanup and Validation
             print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")

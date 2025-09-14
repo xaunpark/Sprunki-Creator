@@ -707,29 +707,40 @@ class UnifiedProcessingManager:
             return False
     
     def _create_project_slug_from_url(self, url: str) -> str:
-        """Create project slug from URL"""
+        """
+        [FIXED] Tạo URL slug duy nhất bằng cách kết hợp tên tác giả và tên dự án.
+        Ví dụ: /@author/project-name -> author_project-name
+        """
         try:
             from urllib.parse import urlparse
             import re
             
             parsed_url = urlparse(url)
-            path = parsed_url.path.strip('/')
+            # Tách path thành các phần, loại bỏ các phần tử rỗng
+            path_parts = [part for part in parsed_url.path.strip('/').split('/') if part]
             
-            if path:
-                slug = path.split('/')[-1]
+            slug_base = ""
+            if len(path_parts) >= 2 and path_parts[0].startswith('@'):
+                # Trường hợp chuẩn: /@author/project-name
+                author = path_parts[0][1:]
+                project_name = path_parts[1]
+                slug_base = f"{author}_{project_name}"
+            elif len(path_parts) > 0:
+                # Trường hợp khác
+                slug_base = "_".join(path_parts)
             else:
-                domain = parsed_url.netloc.lower()
-                if domain.startswith('www.'):
-                    domain = domain[4:]
-                slug = domain.split('.')[0]
+                domain = parsed_url.netloc.lower().replace('www.', '')
+                slug_base = domain.split('.')[0]
             
-            slug = re.sub(r'[^a-zA-Z0-9\-]', '-', slug)
-            slug = re.sub(r'-+', '-', slug).strip('-')
+            slug = re.sub(r'[^a-zA-Z0-9\-_]', '-', slug_base)
+            slug = re.sub(r'[-_]+', '-', slug)
+            slug = slug.strip('-')
+            slug = slug[:70]
             
-            return slug or "sprunki-game"
+            return slug or f"sprunki-game-{len(self.queue)}"
             
         except Exception:
-            return f"sprunki-{len(self.queue)}"
+            return f"sprunki-game-{len(self.queue)}"
     
     def remove_queue_item(self, index: int) -> bool:
         """Remove item from queue by index"""
