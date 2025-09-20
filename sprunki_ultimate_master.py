@@ -931,31 +931,24 @@ class UnifiedProcessingManager:
             if not item.start_time:
                 item.start_time = datetime.now()
             
-            # ✨ SETUP PROJECT FOLDER TRƯỚC KHI INITIALIZE
-            # Lấy output base directory từ config.json
+            # BƯỚC 1: Tạo project_folder một lần duy nhất ở đây, dựa trên slug đã có
             config_manager = self.master_controller.config_manager
             output_base_dir = config_manager.get('output.base_directory', "C:\\Output")
             project_slug = getattr(item, 'project_slug', 'default_project')
             project_folder = os.path.join(output_base_dir, project_slug)
             os.makedirs(project_folder, exist_ok=True)
+            self.logger.info(f"✅ [MASTER] Project folder defined: {project_folder}")
             
-            self.logger.info(f"📁 Created project folder from config: {project_folder}")
-            self.logger.info(f"📁 Config base directory: {output_base_dir}")
-            
-            # Initialize components
+            # BƯỚC 2: Khởi tạo các component
             if not self.master_controller._initialize_components(item.json_data):
                 raise Exception("Failed to initialize components")
             
-            # ✨ SET PROJECT FOLDER CHO OBS CONTROLLER NGAY SAU KHI INITIALIZE
+            # BƯỚC 3: GÁN project_folder cho OBS Controller NGAY LẬP TỨC
             if hasattr(self.master_controller, 'obs_controller') and self.master_controller.obs_controller:
                 self.master_controller.obs_controller.current_project_folder = project_folder
-                self.logger.info(f"✅ OBS controller project folder set to: {project_folder}")
-                
-                # Verify project folder is set correctly
-                actual_folder = self.master_controller.obs_controller.current_project_folder
-                self.logger.info(f"🔍 Verification - OBS current_project_folder: {actual_folder}")
+                self.logger.info(f"✅ [MASTER] OBS controller's project folder explicitly set to: {project_folder}")
             else:
-                self.logger.error("❌ OBS controller not available after initialization!")
+                self.logger.error("❌ OBS controller not found after initialization!")
                 raise Exception("OBS controller not available")
             
             self.logger.info(f"📁 All videos will be saved to: {project_folder}")

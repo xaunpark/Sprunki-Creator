@@ -589,70 +589,6 @@ class SprunkiGamePlayer:
                 self.check_react_components = True
                 self.check_run_button_dom = True
 
-    def create_simple_url_slug(self, url):
-        """Tạo URL slug đơn giản từ URL path - copied from sprunki_obs_controller.py"""
-        try:
-            from urllib.parse import urlparse
-            import re
-            
-            parsed_url = urlparse(url)
-            path = parsed_url.path.strip('/')
-            
-            if path:
-                # Lấy phần cuối của path
-                slug = path.split('/')[-1]
-            else:
-                # Nếu không có path, dùng domain
-                domain = parsed_url.netloc.lower()
-                if domain.startswith('www.'):
-                    domain = domain[4:]
-                slug = domain.split('.')[0]
-            
-            # Faster regex processing
-            slug = re.sub(r'[^a-zA-Z0-9\-]', '-', slug)
-            slug = re.sub(r'-+', '-', slug)  # Loại bỏ dấu gạch ngang liên tiếp
-            slug = slug.strip('-')
-            
-            # Ensure we have a valid slug
-            if not slug or len(slug) < 1:
-                from datetime import datetime
-                slug = f"sprunki-{datetime.now().strftime('%Y%m%d-%H%M')}"
-            
-            print(f"🏷️ URL Slug: '{url}' → '{slug}'")
-            return slug
-            
-        except Exception as e:
-            print(f"❌ Error creating URL slug: {e}")
-            from datetime import datetime
-            fallback_slug = f"sprunki-{datetime.now().strftime('%Y%m%d-%H%M')}"
-            return fallback_slug
-
-    def setup_project_folder(self, url):
-        """Tạo folder project đơn giản - copied from sprunki_obs_controller.py"""
-        try:
-            slug = self.create_simple_url_slug(url)
-            project_folder = os.path.join(self.base_output_dir, slug)
-            
-            # Create folder with exist_ok for faster execution
-            os.makedirs(project_folder, exist_ok=True)
-            
-            # Store project info
-            self.current_project_folder = project_folder
-            self.project_slug = slug
-            
-            print(f"📁 Project folder created: {project_folder}")
-            print(f"🏷️ Project slug: {slug}")
-            
-            return project_folder
-            
-        except Exception as e:
-            print(f"❌ Error creating project folder: {e}")
-            # Fallback to base directory
-            self.current_project_folder = self.base_output_dir  
-            self.project_slug = "fallback"
-            print(f"📁 Using fallback folder: {self.base_output_dir}")
-            return self.base_output_dir
-
     def get_project_folder(self):
         """Get current project folder for external use (OBS Controller integration)"""
         return self.current_project_folder or self.base_output_dir
@@ -687,8 +623,20 @@ class SprunkiGamePlayer:
                 print("❌ No URL available for project setup")
                 return False
             
-            # Setup or update project folder
-            project_folder = self.setup_project_folder(target_url)
+            # [FIXED] Do not create project folder here. Rely on the one set by the master controller.
+            # The main purpose of this function is now to create necessary subfolders.
+            if not self.current_project_folder or not os.path.exists(self.current_project_folder):
+                print(f"❌ Cannot prepare project: self.current_project_folder is not set or does not exist.")
+                print(f"   Value: {self.current_project_folder}")
+                # Fallback: create a folder based on URL slug just in case
+                print("   [FALLBACK] Creating a project folder now...")
+                from urllib.parse import urlparse
+                import re
+                slug = re.sub(r'[^a-zA-Z0-9\-]', '-', urlparse(target_url).path.split('/')[-1])
+                self.current_project_folder = os.path.join(self.base_output_dir, slug)
+                os.makedirs(self.current_project_folder, exist_ok=True)
+
+            project_folder = self.current_project_folder
             
             # Ensure all necessary subfolders exist
             subfolders = ['session_reports', 'screenshots', 'recordings']
@@ -6425,26 +6373,8 @@ class SprunkiGamePlayer:
                 else:
                     progress_callback("🌐 Fresh Chrome launch for Individual Mode...")
 
-            # 📁 NEW: Setup project folder from URL
-            print("📁 Setting up project folder from URL...")
-            if progress_callback:
-                progress_callback("📁 Creating project folder...")
-
+            print("✅ [GAME PLAYER] Environment setup started. Project folder is managed by a higher-level controller.")
             current_url = self.config['currentUrl']
-            project_folder = self.setup_project_folder(current_url)
-
-            print(f"📁 Project folder ready: {project_folder}")
-            print(f"🏷️ Project slug: {self.project_slug}")
-
-            # Tạo thêm subfolder cho các loại file khác nhau
-            try:
-                session_reports_dir = os.path.join(project_folder, "session_reports")
-                screenshots_dir = os.path.join(project_folder, "screenshots") 
-                os.makedirs(session_reports_dir, exist_ok=True)
-                os.makedirs(screenshots_dir, exist_ok=True)
-                print(f"📁 Subfolders created: session_reports, screenshots")
-            except Exception as e:
-                print(f"❌ Warning: Could not create subfolders: {e}")
 
             print("🌍 Opening game in Chrome debug mode...")
 
