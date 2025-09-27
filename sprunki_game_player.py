@@ -5841,7 +5841,13 @@ class SprunkiGamePlayer:
         print(f"\n🎯 [SMART DRAG] START for icon {icon.get('index', 'N/A')} -> slot {target_slot.get('index', 'N/A')}")
         
         # Xác định control type
-        active_control_type = control_type_override or self.config.get('gameSettings', {}).get('gameControlType', 'click_drag')
+        if control_type_override:
+            active_control_type = control_type_override
+        elif self.config and isinstance(self.config, dict):
+            active_control_type = self.config.get('gameSettings', {}).get('gameControlType', 'click_drag')
+        else:
+            active_control_type = 'click_drag' # Fallback an toàn
+            
         print(f"   - Control Type: '{active_control_type}'")
 
         if is_first_icon:
@@ -6621,22 +6627,27 @@ class SprunkiGamePlayer:
             return self.domain_adjustments['sprunki.org']
 
     def _are_coords_safe(self, *coords):
-        """Kiểm tra xem một bộ tọa độ có hợp lệ và nằm trong màn hình không."""
+        """
+        [ENHANCED] Kiểm tra xem tọa độ có hợp lệ, nằm trong màn hình,
+        VÀ KHÔNG nằm ở các góc fail-safe.
+        """
         try:
             screen_width, screen_height = pyautogui.size()
-            # Kiểm tra từng giá trị trong tọa độ (x, y, x2, y2, ...)
-            for i, value in enumerate(coords):
-                if value is None or not isinstance(value, (int, float)):
-                    print(f"   ❌ Tọa độ không hợp lệ (giá trị None hoặc không phải số): {coords}")
+            margin = 1 # Một vùng đệm nhỏ cách các cạnh màn hình
+            
+            # Kiểm tra từng cặp tọa độ (x, y)
+            for i in range(0, len(coords), 2):
+                x, y = coords[i], coords[i+1]
+
+                if x is None or y is None or not all(isinstance(v, (int, float)) for v in [x, y]):
+                    print(f"   ❌ Tọa độ không hợp lệ (giá trị None hoặc không phải số): ({x}, {y})")
                     return False
-                # Kiểm tra x (vị trí chẵn)
-                if i % 2 == 0 and not (0 <= value < screen_width):
-                    print(f"   ❌ Tọa độ X nằm ngoài màn hình ({value}), kích thước màn hình: {screen_width}")
+                
+                # Kiểm tra xem có nằm trong vùng an toàn không (cách các cạnh 1 pixel)
+                if not (margin <= x < screen_width - margin and margin <= y < screen_height - margin):
+                    print(f"   ❌ Tọa độ ({x}, {y}) quá gần hoặc nằm ngoài cạnh màn hình ({screen_width}x{screen_height}). Fail-safe có thể bị kích hoạt.")
                     return False
-                # Kiểm tra y (vị trí lẻ)
-                elif i % 2 != 0 and not (0 <= value < screen_height):
-                    print(f"   ❌ Tọa độ Y nằm ngoài màn hình ({value}), kích thước màn hình: {screen_height}")
-                    return False
+            
             return True
         except Exception as e:
             print(f"   ❌ Lỗi khi kiểm tra tọa độ: {e}")
@@ -7732,15 +7743,27 @@ class SprunkiGamePlayer:
             print("="*60)
             
             success_count = 0
+            consecutive_failures = 0
+            FAILURE_THRESHOLD = 3  # Ngưỡng: 3 icon thất bại liên tiếp
+
             for icon_object in icons_to_showcase:
                 if self.should_stop:
                     break
                 
                 if self.showcase_single_icon_corrected(icon_object, mode, listen_duration, progress_callback):
                     success_count += 1
+                    consecutive_failures = 0  # Reset khi thành công
                 else:
                     icon_index = icon_object.get('index', 'unknown')
                     print(f"⚠️ Failed to showcase icon {icon_index}, but continuing with the next one.")
+                    consecutive_failures += 1
+
+                # [NEW] Kích hoạt ngắt mạch nếu vượt ngưỡng
+                if consecutive_failures >= FAILURE_THRESHOLD:
+                    print(f"🚨 [CIRCUIT BREAKER] Tripped after {consecutive_failures} consecutive icon failures.")
+                    print("   - Aborting showcase. This mod may be incompatible or have a persistent issue.")
+                    # Trả về kết quả hiện tại, hàm cha sẽ đánh giá là thất bại
+                    return success_count, total_count
 
             print(f"\n✅ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
             print(f"📊 Success: {success_count}/{total_count} icons")
@@ -8184,6 +8207,9 @@ class SprunkiGamePlayer:
             print("="*60)
             
             success_count = 0
+            consecutive_failures = 0
+            REMIX_FAILURE_THRESHOLD = 2 # Ngưỡng: 2 remix thất bại liên tiếp
+
             for remix_index, remix in enumerate(self.remix_library):
                 if self.should_stop:
                     break
@@ -8195,8 +8221,16 @@ class SprunkiGamePlayer:
                 
                 if self.play_complete_remix_corrected(remix, mode, listen_duration, progress_callback):
                     success_count += 1
+                    consecutive_failures = 0
                 else:
                     print(f"⚠️ Failed to play remix: {remix['name']}, continuing...")
+                    consecutive_failures += 1
+
+                # [NEW] Kích hoạt ngắt mạch cho remix
+                if consecutive_failures >= REMIX_FAILURE_THRESHOLD:
+                    print(f"🚨 [CIRCUIT BREAKER] Tripped after {consecutive_failures} consecutive remix failures.")
+                    print("   - Aborting remix session.")
+                    return success_count, total_count
                 
                 if remix_index < total_count - 1 and not self.should_stop:
                     time.sleep(2.0)

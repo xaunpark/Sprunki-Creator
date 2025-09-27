@@ -1421,6 +1421,7 @@ class UnifiedProcessingManager:
                 )
                 
                 output_files = []
+                remix_files = []
                 
                 # PHASE 1: Normal icons
                 self.logger.info("🔹 PHASE 1: Safe individual icon recording (Normal)...")

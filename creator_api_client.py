@@ -460,16 +460,69 @@ class CreatorService:
             except Exception as e:
                 print(f"⚠️ Heartbeat error: {e}")
                 time.sleep(30)
-    
+
+    def _job_watchdog(self, queue_id, job_start_time):
+        """
+        [NEW] Watchdog thread to monitor job execution time.
+        """
+        # Lấy timeout từ config, fallback về 60 phút
+        job_timeout_minutes = self.config_manager.get('processing.job_timeout_minutes', 60)
+        job_timeout_seconds = job_timeout_minutes * 60
+        
+        while time.monotonic() - job_start_time < job_timeout_seconds:
+            # Kiểm tra xem job còn đang chạy hay không
+            if not self.current_job or self.current_job.get('id') != queue_id:
+                # Job đã kết thúc (thành công hoặc thất bại) trước khi timeout
+                self.logger.info(f"🐶 Watchdog for job {queue_id}: Job finished normally. Exiting.")
+                return
+            
+            # Ngủ một khoảng rồi kiểm tra lại
+            time.sleep(60) # Kiểm tra mỗi phút
+
+        # Nếu vòng lặp kết thúc, nghĩa là job đã timeout
+        if self.current_job and self.current_job.get('id') == queue_id:
+            error_msg = f"Job timed out after {job_timeout_minutes} minutes."
+            self.logger.error(f"🚨 [WATCHDOG] Job {queue_id} timed out!")
+            
+            # Cập nhật trạng thái job là thất bại
+            self.api_client.update_job_status(
+                queue_id,
+                status='failed',
+                error_log=f"WATCHDOG: {error_msg}"
+            )
+            
+            # Cố gắng dọn dẹp (gọi hàm stop, hàm này sẽ cố gắng dọn dẹp OBS/browser)
+            # Chúng ta không dừng toàn bộ service, chỉ dừng job hiện tại
+            # Đây là một hành động mạnh, cần cẩn thận
+            self.logger.info(f"🐶 Watchdog for job {queue_id}: Attempting emergency cleanup...")
+            try:
+                if hasattr(self, 'obs_controller') and self.obs_controller:
+                    self.obs_controller.comprehensive_obs_cleanup()
+                if hasattr(self, 'game_player') and self.game_player:
+                    self.game_player.close_game_window()
+            except Exception as e:
+                self.logger.error(f"🐶 Watchdog cleanup error for job {queue_id}: {e}")
+            
+            # Sau khi dọn dẹp, reset current_job để vòng lặp chính có thể lấy job mới
+            self.current_job = None
+
     def _process_job(self, job: Dict) -> bool:
         """
-        [REFACTORED] Orchestrates the job processing with smart retries and detailed reporting.
-        This function now acts as a high-level controller.
+        [REFACTORED & WATCHDOG ENABLED] Orchestrates job processing.
         """
         queue_id = job['id']
         item = None
         job_successful = False
-        start_time = time.monotonic() ### FIX: Khai báo start_time ở đây ###
+        start_time = time.monotonic()
+        
+        # [NEW] Start the watchdog timer for this job
+        watchdog_thread = threading.Thread(
+            target=self._job_watchdog,
+            args=(queue_id, start_time),
+            daemon=True
+        )
+        watchdog_thread.start()
+        self.logger.info(f"🐶 Watchdog started for job {queue_id}.")
         
         try:
             # 1. Convert job to a processable item
@@ -658,11 +711,15 @@ class CreatorService:
         
         game_url = job.get('mod_game_url')
         
+        # [FIX] Đảm bảo game_url luôn là một chuỗi để tránh lỗi type hint.
+        # Nếu không có URL, một slug dựa trên thời gian sẽ được tạo ra bên trong _create_slug_from_url.
+        url_for_slug = game_url or ""
+
         item = ProcessingItem(
             source_url=game_url,
             mode=job['production_mode'],
             # SỬA ĐỔI QUAN TRỌNG: Gọi hàm mới và truyền URL vào
-            project_slug=self._create_slug_from_url(game_url)
+            project_slug=self._create_slug_from_url(url_for_slug)
         )
         return item
     
