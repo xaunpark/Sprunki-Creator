@@ -352,8 +352,9 @@ class SafeOperationManager:
 class UnifiedProcessingManager:
     """Manages the complete pipeline: URLs → JSON Generation → Video Processing"""
     
-    def __init__(self, master_controller):
+    def __init__(self, master_controller, stop_event=None):
         self.master_controller = master_controller
+        self.stop_event = stop_event or threading.Event()
         self.queue: List[ProcessingItem] = []
         self.config: Optional[ProcessingConfig] = None
         self.current_item_index: int = 0
@@ -2436,7 +2437,7 @@ class SprunkiUltimateMaster:
             print("⚙️ Initializing and linking components for new job...")
             
             # 1. Tạo các component chính
-            self.game_player = SprunkiGamePlayer()
+            self.game_player = SprunkiGamePlayer(stop_event=self.processing_manager.stop_event)
             self.obs_controller = SprunkiController()
             
             # 2. LIÊN KẾT CÁC COMPONENT

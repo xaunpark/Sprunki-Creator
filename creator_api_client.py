@@ -249,7 +249,8 @@ class CreatorService:
         # self.config = None #Dòng này bây giờ không cần nữa và có thể bị ghi đè. Tốt nhất nên xóa.
         
         from sprunki_ultimate_master import UnifiedProcessingManager
-        self.processing_manager = UnifiedProcessingManager(master_controller=self)
+        self._stop_event = threading.Event()
+        self.processing_manager = UnifiedProcessingManager(master_controller=self, stop_event=self._stop_event)
 
         self.logger = logging.getLogger(self.__class__.__name__)
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -265,6 +266,7 @@ class CreatorService:
 
         # --- FIX: Initialize the processing config for the manager ---
         self._initialize_processing_config()
+        self._stop_event = threading.Event() # [NEW] Global stop event
         print("🤖 Creator Service initialized with API-based Smart Retry Manager")
 
     # --- FIX: New method to create and set the ProcessingConfig ---
@@ -354,6 +356,9 @@ class CreatorService:
                 print("❌ OBS Error: Could not load recording area config!")
                 return False
             
+            # [NEW] Truyền cờ stop vào game_player
+            self.game_player.stop_event = self._stop_event
+            
             self.config = config_data
             print("✅ Components initialized successfully.")
             return True
@@ -373,6 +378,7 @@ class CreatorService:
             return False
         
         self.running = True
+        self._stop_event.clear() # Reset a cờ stop
 
         # 🆕 PHASE 4: Start performance monitoring
         self.performance_analyzer.start_monitoring()
@@ -390,7 +396,8 @@ class CreatorService:
         """Stop Creator service with performance cleanup - PHASE 4 Enhanced"""
         print("🛑 Stopping Creator Service...")
         self.running = False
-        
+        self._stop_event.set() # Kích hoạt cờ stop
+
         # 🆕 PHASE 4: Stop performance monitoring
         self.performance_analyzer.stop_monitoring()
 
@@ -417,7 +424,7 @@ class CreatorService:
         """Main processing loop - polls for jobs"""
         print("🔄 Processing loop started")
         
-        while self.running:
+        while self.running and not self._stop_event.is_set():
             try:
                 job = self.api_client.get_next_job()
                 
@@ -449,7 +456,7 @@ class CreatorService:
     
     def _heartbeat_loop(self):
         """Heartbeat loop - reports status to Tracker"""
-        while self.running:
+        while self.running and not self._stop_event.is_set():
             try:
                 status = "busy" if self.current_job else "online"
                 current_job_id = self.current_job['id'] if self.current_job else None
@@ -469,7 +476,7 @@ class CreatorService:
         job_timeout_minutes = self.config_manager.get('processing.job_timeout_minutes', 60)
         job_timeout_seconds = job_timeout_minutes * 60
         
-        while time.monotonic() - job_start_time < job_timeout_seconds:
+        while not self._stop_event.is_set() and time.monotonic() - job_start_time < job_timeout_seconds:
             # Kiểm tra xem job còn đang chạy hay không
             if not self.current_job or self.current_job.get('id') != queue_id:
                 # Job đã kết thúc (thành công hoặc thất bại) trước khi timeout
@@ -484,12 +491,19 @@ class CreatorService:
             error_msg = f"Job timed out after {job_timeout_minutes} minutes."
             self.logger.error(f"🚨 [WATCHDOG] Job {queue_id} timed out!")
             
+            # [NEW] Hành động đầu tiên là kích hoạt cờ dừng toàn cục
+            self._stop_event.set()
+            
             # Cập nhật trạng thái job là thất bại
             self.api_client.update_job_status(
                 queue_id,
                 status='failed',
                 error_log=f"WATCHDOG: {error_msg}"
             )
+
+            # Đợi một chút để thread chính có cơ hội tự dừng
+            self.logger.info(f"🐶 Watchdog for job {queue_id}: Waiting 5s for graceful shutdown...")
+            time.sleep(5)
             
             # Cố gắng dọn dẹp (gọi hàm stop, hàm này sẽ cố gắng dọn dẹp OBS/browser)
             # Chúng ta không dừng toàn bộ service, chỉ dừng job hiện tại
@@ -527,13 +541,19 @@ class CreatorService:
         try:
             # 1. Convert job to a processable item
             item = self._convert_job_to_processing_item(job)
+            
+            # [NEW] Truyền stop_event xuống các tầng dưới
+            if item:
+                # Giả định ProcessingItem có thể nhận một cờ stop_event
+                # Nếu không, chúng ta cần truyền nó qua các hàm xử lý
+                # Tạm thời, chúng ta sẽ dựa vào việc các hàm con kiểm tra cờ toàn cục
+                pass
+            
             self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
             
-            ### FIX: Đổi tên phương thức và truyền đúng tham số ###
-            # PerformanceAnalyzer.record_job_start(queue_id, job_info)
             self.performance_analyzer.record_job_start(queue_id, job)
 
-            # 2. Execute the entire workflow with smart retries for each major step
+            # 2. Execute the workflow, nó sẽ tự dừng nếu stop_event được set
             job_successful = self._process_with_smart_retry(item, queue_id)
 
         except Exception as e:
@@ -543,7 +563,6 @@ class CreatorService:
                 item.status = "failed"
                 item.error_message = error_msg
             job_successful = False
-            # Report critical failure immediately
             self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
         
         finally:

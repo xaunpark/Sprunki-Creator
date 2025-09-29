@@ -22,10 +22,16 @@ import math
 import psutil
 import gc
 import weakref
+import logging
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from sprunki_obs_controller import SprunkiController
 from dataclasses import dataclass, field
+
+class WorkflowIncompatibleError(Exception):
+    """Custom exception raised when the workflow detects a persistent,
+    unrecoverable incompatibility with the current game mod."""
+    pass
 
 @dataclass
 class WorkflowReport:
@@ -158,7 +164,13 @@ class DragOperationStats:
         """
 
 class SprunkiGamePlayer:
-    def __init__(self):
+    def __init__(self, stop_event=None): # [MODIFIED] Nhận stop_event
+        # [NEW] Initialize logger for this class
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # [MODIFIED] Lưu lại cờ dừng, tạo mới nếu không được cung cấp
+        self.stop_event = stop_event or threading.Event()
+
         # Load configuration from config.json (like json_generator.py)
         self.load_config()
 
@@ -802,7 +814,7 @@ class SprunkiGamePlayer:
             max_retries = self.page_verification_retries
             
             for attempt in range(1, max_retries + 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     return False
                 
                 print(f"ðŸ” Page verification attempt {attempt}/{max_retries}")
@@ -867,17 +879,20 @@ class SprunkiGamePlayer:
             print("   Proceeding anyway with image detection...")
             return True  # Don't block workflow on verification errors
 
-    def verify_game_components_ready(self):
+    def verify_game_components_ready(self, timeout_override: Optional[float] = None):
         """
-        ðŸŽ® Smart Game Load Verification System
-        Checks if game components are ready before proceeding with Run button detection
+        [MODIFIED] Smart Game Load Verification System.
+        Now accepts a timeout_override for fail-fast scenarios.
         """
         try:
             if not self.game_verification_enabled:
                 print("ðŸŽ® Game verification disabled, assuming game ready")
                 return True
             
-            print(f"\nðŸŽ® SMART GAME VERIFICATION")
+            # [MODIFIED] Use override or default timeout from config
+            timeout = timeout_override if timeout_override is not None else self.game_verification_timeout
+            
+            print(f"\nðŸŽ® SMART GAME VERIFICATION (Timeout: {timeout}s)")
             print("="*70)
             
             # JavaScript for game component verification
@@ -1046,10 +1061,10 @@ class SprunkiGamePlayer:
             """
             
             start_time = time.time()
-            max_attempts = 3
+            max_attempts = 20
             
             for attempt in range(1, max_attempts + 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     return False
                 
                 print(f"ðŸŽ® Game verification attempt {attempt}/{max_attempts}")
@@ -1093,27 +1108,25 @@ class SprunkiGamePlayer:
                 else:
                     print(f"   âš ï¸ Game verification JavaScript failed")
                 
-                # Check timeout
+                # [MODIFIED] Check timeout using the determined timeout value
                 elapsed = time.time() - start_time
-                if elapsed > self.game_verification_timeout:
-                    print(f"âš ï¸ Game verification timeout ({self.game_verification_timeout}s exceeded)")
-                    print("   Proceeding anyway with image detection...")
-                    return True
+                if elapsed > timeout:
+                    print(f"âš ï¸  Game verification timeout ({timeout}s exceeded)")
+                    # [MODIFIED] Trả về False khi timeout, thay vì True
+                    return False
                 
                 # Wait before next attempt
                 if attempt < max_attempts:
-                    print(f"   â³ Waiting {self.game_verification_interval}s before next check...")
+                    print(f"   â ³ Waiting {self.game_verification_interval}s before next check...")
                     time.sleep(self.game_verification_interval)
             
-            # All attempts failed, but don't block the workflow
-            print(f"âš ï¸ Game verification failed after {max_attempts} attempts")
-            print("   Proceeding anyway with image detection...")
-            return True
+            # All attempts failed within the timeout
+            print(f"âš ï¸  Game verification failed after {max_attempts} attempts")
+            return False
             
         except Exception as e:
-            print(f"âš ï¸ Error in game verification: {e}")
-            print("   Proceeding anyway with image detection...")
-            return True
+            print(f"âš ï¸  Error in game verification: {e}")
+            return False # Trả về False khi có lỗi
 
     def verify_page_fully_loaded_lightweight(self, target_url):
         """Lightweight version for continuous monitoring"""
@@ -1629,45 +1642,25 @@ class SprunkiGamePlayer:
             return None
 
     def navigate_and_prepare_game(self, url):
-        """Navigate to game URL using Chrome debug mode with Continuous Monitoring + Extension Support"""
+        """
+        [REWRITTEN - FINAL STRATEGY] A robust setup process that patiently
+        waits for game components, providing the most reliable way to handle
+        both valid and invalid (404, etc.) pages.
+        """
         try:
-            print(f"ðŸŒ Opening game URL with Chrome debug session: {url}")
-            print(f"ðŸ”§ Service Mode: Enhanced error handling enabled")
-            print(f"ðŸ›¡ï¸ Windows API quirks: Will handle 'success as error' cases")
-            print(f"ðŸ”Œ Extension Support: Optimized for extension compatibility")
-            
-            # Complete cleanup first
+            print(f"\n🚀 STARTING GAME SETUP (FINAL STRATEGY): {url}")
+            print("======================================================================")
+            self.game_url = url
+
+            # --- PHASE 1: BROWSER LAUNCH (Không thay đổi) ---
+            print("PHASE 1: Launching Browser and Loading Page...")
             self.cleanup_chrome_complete()
             time.sleep(2)
             
-            self.game_url = url
-            
-            # Find uBlock extension (AdBlocker)
-            extensions_dir = os.path.join(os.getcwd(), 'extensions')
-            ublock_path = None
-            if os.path.exists(extensions_dir):
-                subdirs = [d for d in os.listdir(extensions_dir) if os.path.isdir(os.path.join(extensions_dir, d))]
-                if subdirs: 
-                    ublock_path = os.path.join(extensions_dir, subdirs[0])
-            
-            if not ublock_path:
-                print("âš ï¸ uBlock Origin not found in 'extensions' folder - continuing without AdBlocker")
-            else:
-                print(f"âœ… Found AdBlocker: {ublock_path}")
-            
-            # Find Chrome executable
-            chrome_exe = None
-            for path in self.chrome_paths:
-                if os.path.exists(path): 
-                    chrome_exe = path
-                    break
-                    
+            chrome_exe = next((path for path in self.chrome_paths if os.path.exists(path)), None)
             if not chrome_exe:
-                print("âŒ CRITICAL ERROR: Google Chrome not found")
-                print("   ðŸ’¡ Please install Google Chrome or check chrome_paths in config.json")
-                return False
+                raise RuntimeError("Critical Error: Google Chrome not found.")
             
-            # Build Chrome command with debug mode + EXTENSION-FRIENDLY cleanup flags
             chrome_cmd = [
                 chrome_exe, 
                 f"--remote-debugging-port={self.debugging_port}", 
@@ -1702,318 +1695,71 @@ class SprunkiGamePlayer:
                 
                 url
             ]
-
-            # ðŸ†• ENHANCED EXTENSION LOADING
-            extension_paths = []
-
-            # Add uBlock Origin if available
-            if ublock_path:
-                extension_paths.append(ublock_path)
-                print(f"   ðŸ“¦ Adding uBlock Origin: {ublock_path}")
-
-            # ðŸ†• AUTO-DETECT: TÃ¬m cÃ¡c extensions khÃ¡c trong profile (náº¿u cÃ³)
-            try:
-                profile_extensions_dir = os.path.join(os.getcwd(), self.user_data_dir, "Default", "Extensions")
-                if os.path.exists(profile_extensions_dir):
-                    existing_extensions = os.listdir(profile_extensions_dir)
-                    print(f"   ðŸ“¦ Found {len(existing_extensions)} existing extensions in profile")
-                    
-                    # Log existing extensions (khÃ´ng load thÃªm, chá»‰ thÃ´ng bÃ¡o)
-                    for ext_id in existing_extensions[:3]:  # Show first 3
-                        print(f"      - Extension ID: {ext_id}")
-                else:
-                    print("   ðŸ“¦ No existing extensions directory found (fresh profile)")
-                    
-            except Exception as e:
-                print(f"   âš ï¸ Could not check existing extensions: {e}")
-
-            # Add all extension paths to Chrome command
-            if extension_paths:
-                extensions_arg = ",".join(extension_paths)
-                chrome_cmd.insert(-1, f"--load-extension={extensions_arg}")
-                print(f"   âœ… Loading {len(extension_paths)} extensions: {extensions_arg}")
-            else:
-                print("   â„¹ï¸ No additional extensions to load")
-
-            # ðŸ†• LOG Chrome flags for verification
-            print("ðŸ”§ Chrome startup flags applied:")
-            print("   âœ… Safe cleanup flags: session clearing, popup blocking")  
-            print("   âœ… Restore popup disabled: no 'Chrome didn't shut down correctly'")
-            print("   âœ… Game-friendly: JavaScript, networking, timers enabled")
-            print("   âœ… Automation-optimized: no background throttling")
-            print("   âœ… Extension-compatible: background mode preserved")
-            print(f"   ðŸ“Š Total flags: {len([f for f in chrome_cmd if f.startswith('--')])} flags")
             
-            print("ðŸ”§ Launching Chrome with debug mode and AdBlocker...")
             self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            print(f"â³ Waiting {self.page_load_wait}s for Chrome and AdBlocker to initialize...")
+            print(f"   -> Waiting {self.page_load_wait}s for page to initialize...")
             time.sleep(self.page_load_wait)
             
-            # Find game window
-            game_window = None
-            for _ in range(10): 
-                possible_windows = gw.getWindowsWithTitle('cocrea.world')
-                if not possible_windows: 
-                    possible_windows = gw.getWindowsWithTitle('Chrome')
-                if possible_windows: 
-                    game_window = possible_windows[0]
-                    break
-                time.sleep(1)
-                
-            if not game_window: 
-                print("âŒ CRITICAL ERROR: Could not find the game window")
-                print("   ðŸ’¡ Chrome may have failed to start or game page didn't load")
+            game_window = next((w for w in gw.getWindowsWithTitle('cocrea.world') or gw.getWindowsWithTitle('Chrome') if w.title), None)
+            if not game_window:
+                raise RuntimeError("Critical Error: Could not find the game window.")
+            
+            self.safe_activate_window(game_window)
+            self.safe_maximize_window(game_window)
+            self.ensure_game_focus_light()
+            print("   -> Browser is ready.\n")
+
+            # --- PHASE 2: PATIENTLY VERIFY GAME COMPONENTS (Logic quyết định duy nhất) ---
+            # Đây là logic cốt lõi. Nếu trang là 404, nó sẽ không có component game và sẽ timeout.
+            # Nếu là trang game, nó sẽ chờ cho đến khi component xuất hiện.
+            print(f"PHASE 2: Patiently Verifying Game Components (Timeout: {self.game_verification_timeout}s)...")
+            
+            # Chúng ta sẽ gọi hàm verify_game_components_ready với timeout mặc định (dài) từ config
+            if not self.verify_game_components_ready():
+                # Nếu sau 120 giây mà vẫn không tìm thấy component game, chúng ta có thể chắc chắn
+                # đây là trang lỗi (404, sign-in) hoặc một game bị hỏng nặng.
+                print(f"❌ SETUP FAILED: Game components did not appear within {self.game_verification_timeout}s.")
+                print("   This could be a 404/error page or a broken game mod.")
+                self.cleanup_chrome_complete()
                 return False
-                
-            print(f"ðŸŽ¯ Found game window: '{game_window.title}'. Activating...")
-
-            # ðŸ”§ ENHANCED: Safe window operations vá»›i error handling
-            try:
-                print("   ðŸ”„ Attempting to activate window...")
-                game_window.activate()
-                print("   âœ… Window activation completed")
-                time.sleep(0.5)
-            except Exception as e:
-                # Handle the "Error code from Windows: 0" issue
-                error_msg = str(e).lower()
-                if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
-                    print("   âœ… Window activation completed (Windows quirk - success reported as error)")
-                else:
-                    print(f"   âš ï¸ Window activation warning: {e}")
-                    # Continue anyway - not critical
-
-            try:
-                print("   ðŸ”„ Attempting to maximize window...")
-                game_window.maximize()
-                print("   âœ… Window maximization completed")
-                time.sleep(2)
-            except Exception as e:
-                # Handle the "Error code from Windows: 0" issue
-                error_msg = str(e).lower()
-                if "error code from windows: 0" in error_msg or "operation completed successfully" in error_msg:
-                    print("   âœ… Window maximization completed (Windows quirk - success reported as error)")
-                else:
-                    print(f"   âš ï¸ Window maximization warning: {e}")
-                    # Continue anyway - not critical
-                time.sleep(2)
-
-            # ðŸ”§ NEW: Additional focus ensuring for service mode
-            print("ðŸŽ¯ Ensuring enhanced focus for service mode...")
-            self.ensure_game_focus_light()  # ðŸ†• Use SAFE focus method
-
-            print("âœ… Window setup completed - ready for game operations")
-
-            # ðŸ”§ WINDOW VERIFICATION: Ensure window is responsive after operations
-            try:
-                # Test if window is responsive
-                window_title = game_window.title
-                window_rect = game_window.rect if hasattr(game_window, 'rect') else None
-                print(f"âœ… Window verification: Title='{window_title}', Responsive=True")
-            except Exception as e:
-                print(f"âš ï¸ Window verification warning: {e}")
-                print("ðŸ’¡ Window may still be functional - continuing")
-
-            print("ðŸŽ¯ Proceeding with game setup...")
-
-            # ================================================================
-            # ðŸ”„ NEW: CONTINUOUS MONITORING SYSTEM (REPLACES SMART VERIFICATION)
-            # ================================================================
-            print(f"\nðŸ”„ STARTING CONTINUOUS MONITORING SYSTEM")
-            print("="*70)
             
-            both_ready = self.wait_for_complete_game_readiness(url)
-            
-            if both_ready:
-                print("âœ… CONTINUOUS MONITORING SUCCESS: Both page and game fully ready!")
-                print("ðŸŽ¯ Proceeding immediately to Run button detection...")
-                time.sleep(self.stabilization_wait)  # Brief stabilization
-            else:
-                print("âš ï¸ CONTINUOUS MONITORING TIMEOUT: Proceeding with limited reliability...")
-                print("ðŸ’¡ Run button detection may have lower success rate")
-                time.sleep(3)  # Brief pause before proceeding
-            
-            print("ðŸŽ¯ Continuous monitoring completed - starting Run button detection...")
-            print("="*70)
-            
-            # ================================================================
-            # ðŸ”§ ENHANCED: CDP-Only Run button detection (NO REFRESH POLICY)
-            # ================================================================
+            print("   -> ✅ Game components found. The page is a valid game. Proceeding to interaction.\n")
 
-            run_button_clicked = False
-            max_retries = self.game_config.get('run_button_max_retries', 3)
+            # --- PHASE 3: INTERACTION (RUN & FULLSCREEN) ---
+            print("PHASE 3: Interacting with Game Interface...")
 
-            for attempt in range(1, max_retries + 1):
-                print(f"\n--- ðŸ—¯ï¸ Finding 'Run' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
-                
-                if attempt > 1:
-                    # âœ… NO MORE REFRESH - Just wait more patiently
-                    print("   -> Action: Waiting patiently for Run button (NO PAGE REFRESH)")
-                    continuous_config = self.app_config.get('continuous_monitoring', {})
-                    patient_wait = continuous_config.get('patient_retry_wait_seconds', 30)
-                    print(f"   -> â³ Patient wait: {patient_wait}s for dynamic loading...")
-                    time.sleep(patient_wait)
-                else:
-                    # First attempt - using continuous monitoring results
-                    print("   -> Using continuous monitoring results (optimal timing)")
-                
-                # ðŸ”§ SERVICE MODE FIX: Ensure window activation before clicking Run button
-                print("   -> ðŸ”§ Ensuring window activation for service mode...")
-                try:
-                    possible_windows = gw.getWindowsWithTitle('cocrea.world')
-                    if not possible_windows: 
-                        possible_windows = gw.getWindowsWithTitle('Chrome')
-                    if possible_windows:
-                        target_window = possible_windows[0]
-                        target_window.activate()
-                        time.sleep(0.5)
-                        print(f"   -> âœ… Window re-activated: '{target_window.title}'")
-                    else:
-                        print("   -> âš ï¸ Could not find window to activate")
-                except Exception as e:
-                    print(f"   -> âš ï¸ Window activation failed: {e}")
-                
-                print("   -> ðŸ” Searching for 'Run' button via CDP-ONLY...")
-
-                # ðŸ”§ SERVICE MODE FIX: Final activation before detector
-                print("   -> ðŸ”§ Final window activation before Run button detection...")
-                try:
-                    possible_windows = gw.getWindowsWithTitle('cocrea.world')
-                    if not possible_windows: 
-                        possible_windows = gw.getWindowsWithTitle('Chrome')
-                    if possible_windows:
-                        target_window = possible_windows[0]
-                        target_window.activate()
-                        target_window.restore()
-                        target_window.maximize()
-                        time.sleep(1.0)  # Critical wait
-                        print(f"   -> âœ… Final activation complete: '{target_window.title}'")
-                    else:
-                        print("   -> âš ï¸ Could not find window for final activation")
-                except Exception as e:
-                    print(f"   -> âš ï¸ Final activation failed: {e}")
-
-                # ðŸš€ CDP-ONLY Run button detection
-                if self._click_run_button_cdp_only():
-                    print(f"ðŸ” Verifying Run button click had effect...")
-                    
-                    # Wait for game to start loading
-                    time.sleep(3)
-                    
-                    # Verify game actually started (look for game elements)
-                    ws_url = self._get_websocket_url()
-                    if ws_url:  # âœ… Kiá»ƒm tra None trÆ°á»›c khi sá»­ dá»¥ng
-                        ws_verify = websocket.create_connection(ws_url, timeout=10)
-                        verify_response = self._send_cdp_command(ws_verify, {
-                            "method": "Runtime.evaluate",
-                            "params": {"expression": "!!document.querySelector('.style_gandi-player-wrapper__WCs0P, canvas')", "returnByValue": True}
-                        })
-                        ws_verify.close()
-                        
-                        game_loaded = False
-                        if verify_response and 'result' in verify_response:
-                            game_loaded = verify_response.get('result', {}).get('result', {}).get('value', False)
-                    else:
-                        print("âš ï¸ WebSocket not available for verification")
-                        game_loaded = True  # Assume success if can't verify
-                    
-                    if game_loaded:
-                        print(f"âœ… SUCCESS: Run button effect VERIFIED on attempt {attempt}.")
-                        run_button_clicked = True
-                        break
-                    else:
-                        print(f"âŒ Run button clicked but no game loading detected")
-                        print(f"ðŸ”„ Treating as failure - will retry with patience")
-                else:
-                    print(f"âŒ FAILED: Run button not found via CDP on attempt {attempt}.")
-                    if attempt < max_retries:
-                        print("   -> Will wait patiently and retry (no refresh policy)")
-                    else:
-                        print(f"âŒ Setup Error: Could not find 'Run' button after {max_retries} patient attempts.")
-                        return False
-                        
-            if not run_button_clicked: 
+            if not self._click_run_button_cdp_only():
+                print("❌ SETUP FAILED: Could not find or click the 'Run' button.")
+                self.cleanup_chrome_complete()
                 return False
-                
-            print(f"\nâ³ Waiting {self.game_load_wait}s for game to load after clicking Run...")
+            
+            print(f"   -> Waiting {self.game_load_wait}s for game to load after Run click...")
             time.sleep(self.game_load_wait)
-            
-            # ================================================================
-            # ðŸ“º FULLSCREEN BUTTON DETECTION (MODIFIED WITH PATIENT RETRY LOGIC)
-            # ================================================================
-            fullscreen_clicked = False
-            max_retries = 3
 
-            for attempt in range(1, max_retries + 1):
-                print(f"\n--- ðŸ“º Finding 'Fullscreen' Button via CDP-ONLY - Attempt {attempt}/{max_retries} ---")
-
-                if attempt > 1:
-                    print("   -> Action: Patient wait for Fullscreen button (NO PAGE REFRESH)")
-                    continuous_config = self.app_config.get('continuous_monitoring', {})
-                    patient_wait = continuous_config.get('patient_retry_wait_seconds', 30)
-                    print(f"   -> â³ Patient wait: {patient_wait}s for fullscreen button...")
-                    time.sleep(patient_wait)
-
-                    # Re-maximize window after patient wait, no reload
-                    print("   -> ðŸ”§ Re-activating window after patient wait...")
-                    try:
-                        possible_windows = gw.getWindowsWithTitle('cocrea.world')
-                        if not possible_windows: 
-                            possible_windows = gw.getWindowsWithTitle('Chrome')
-                        if possible_windows:
-                            target_window = possible_windows[0]
-                            target_window.activate()
-                            target_window.restore()
-                            target_window.maximize()
-                            time.sleep(1.0)
-                            print(f"   -> âœ… Window re-activated after patient wait")
-                    except Exception as e:
-                        print(f"   -> âš ï¸ Re-activate failed: {e}")
-                    
-                    # Wait for fullscreen button to stabilize
-                    time.sleep(max(self.stabilization_wait, 8))
-
-                # Attempt to click the fullscreen button
-                fullscreen_success = self._click_fullscreen_button_cdp_only(wait_time=self.fullscreen_wait)
-                
-                if fullscreen_success:
-                    print(f"âœ… SUCCESS: Fullscreen button clicked on attempt {attempt}.")
-                    fullscreen_clicked = True
-                    time.sleep(2)
-                    break # Exit the loop on success
-                else:
-                    print(f"âŒ FAILED: Fullscreen button not found or clicked on attempt {attempt}.")
-                    if attempt == max_retries:
-                        print(f"âŒ CRITICAL FAILURE: Could not click Fullscreen button after {max_retries} patient attempts.")
-                        self.cleanup_chrome_complete()
-                        return False # Fail the entire process after the last attempt
-
-            # Final check after the loop to ensure it was successful
-            if not fullscreen_clicked:
-                print("âŒ Setup Error: Fullscreen button process failed after all patient retries.")
+            if not self._click_fullscreen_button_cdp_only():
+                print("❌ SETUP FAILED: Could not find or click the 'Fullscreen' button.")
+                self.cleanup_chrome_complete()
                 return False
 
-            # Press F11 for true fullscreen only after a successful click
-            print("âŒ¨ï¸ Pressing F11 for true fullscreen mode...")
+            print("   -> Pressing F11 for true fullscreen mode...")
             pyautogui.press('f11')
             time.sleep(3)
-            
-            # ðŸ†• EXTENSION HEALTH CHECK
-            print("ðŸ” Verifying extension compatibility after setup...")
-            extension_health = self.check_extension_health()
 
-            if extension_health:
-                print("âœ… Extensions are working properly with new Chrome flags")
-            else:
-                print("âš ï¸ Extensions may have issues, but continuing anyway...")
-            
-            print("âœ… Game setup completed with Continuous Monitoring System + Extension Support. Ready for automation.")
+            print("\n✅ GAME SETUP COMPLETED SUCCESSFULLY. Ready for automation.")
+            print("======================================================================")
             return True
-            
+
         except Exception as e:
-            messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
-            print(f"âŒ Failed to navigate and prepare game: {e}")
+            # Khối except không đổi
+            print(f"❌ CRITICAL ERROR during game setup: {e}")
+            import traceback
+            traceback.print_exc()
             self.cleanup_chrome_complete()
+            try:
+                messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
+            except:
+                pass
             return False
 
     def check_extension_health(self):
@@ -2145,14 +1891,32 @@ class SprunkiGamePlayer:
                 tabs = response.json()
                 print(f"   📋 Found {len(tabs)} tabs from Chrome debug endpoint")
                 
-                # Find cocrea.world tab
+                # [FIXED] Find the EXACT tab for the current job's URL
                 target_tab = None
+                
+                # self.game_url được thiết lập ở đầu hàm navigate_and_prepare_game
+                current_job_url = self.game_url or ""
+
+                if not current_job_url:
+                    self.logger.error("Cannot get WebSocket URL because self.game_url is not set.")
+                    return None
+
+                # Tìm tab có URL khớp chính xác nhất
                 for tab in tabs:
-                    if (tab.get('type') == 'page' and 
-                        'cocrea.world' in tab.get('url', '').lower()):
+                    tab_url = tab.get('url', '')
+                    if tab.get('type') == 'page' and current_job_url in tab_url:
                         target_tab = tab
-                        print(f"   🎯 Found cocrea.world tab: {tab.get('title', 'Unknown')[:50]}...")
+                        print(f"   🎯 [EXACT MATCH] Found target tab: {tab.get('title', 'Unknown')[:50]}...")
                         break
+                
+                # Fallback: nếu không tìm thấy khớp chính xác, thử tìm bất kỳ tab cocrea nào
+                if not target_tab:
+                    print(f"   ⚠️ Could not find exact match for {current_job_url}. Falling back to first available cocrea tab...")
+                    for tab in tabs:
+                        if tab.get('type') == 'page' and 'cocrea.world' in tab.get('url', '').lower():
+                            target_tab = tab
+                            print(f"   🎯 [FALLBACK] Found cocrea.world tab: {tab.get('title', 'Unknown')[:50]}...")
+                            break
                 
                 if not target_tab:
                     print(f"   ⚠️ No cocrea.world tab found in {len(tabs)} tabs")
@@ -2284,7 +2048,7 @@ class SprunkiGamePlayer:
             command['id'] = command_id
             ws.send(json.dumps(command))
             
-            max_wait_time = 15
+            max_wait_time = 30 
             start_time = time.time()
             
             while time.time() - start_time < max_wait_time:
@@ -4097,7 +3861,7 @@ class SprunkiGamePlayer:
             total_clicks = 0
             
             for wave_num, wave_points in enumerate(waves[:max_waves], 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                     
                 print(f"\nðŸŒŠ WAVE {wave_num}/{total_waves}")
@@ -4156,7 +3920,7 @@ class SprunkiGamePlayer:
             clicks_executed = 0
             
             for i, (x, y) in enumerate(wave_points, 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                     
                 # Execute click
@@ -4407,7 +4171,7 @@ class SprunkiGamePlayer:
             print(f"   ðŸ”„ Max retries: {max_retries}")
             
             for attempt in range(1, max_retries + 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                     
                 print(f"\nðŸ”„ ATTEMPT {attempt}/{max_retries}")
@@ -4533,7 +4297,7 @@ class SprunkiGamePlayer:
             print(f"   ðŸŽ¯ Phase 1: Main grid execution ({len(grid_points)} points)")
             
             for i, (x, y) in enumerate(grid_points, 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                     
                 # Execute single click
@@ -4580,7 +4344,7 @@ class SprunkiGamePlayer:
             base_coords_per_slot = 2  # Start with 2 coordinates per slot
             
             for set_num in range(1, max_sets + 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                     
                 print(f"\nðŸŽ¯ CARPET SET {set_num}/{max_sets}")
@@ -4770,7 +4534,7 @@ class SprunkiGamePlayer:
             
             # Process each slot sequentially
             for slot_index in sorted_slot_indices:
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                 
                 slot_coords = slots_coords[slot_index]
@@ -4979,7 +4743,7 @@ class SprunkiGamePlayer:
             
             # Process each slot in smart order
             for slot_index in active_slot_indices:
-                if self.should_stop:
+                if self.stop_event.is_set():
                     error_log.append(f"Slot {slot_index}: Emergency stop requested")
                     break
                 
@@ -5014,7 +4778,7 @@ class SprunkiGamePlayer:
                 max_retries = 2
                 
                 for retry in range(max_retries):
-                    if self.should_stop:
+                    if self.stop_event.is_set():
                         break
                     
                     if retry > 0:
@@ -5397,7 +5161,7 @@ class SprunkiGamePlayer:
         print(f"ðŸŽ¯ Executing {method} method on {len(coordinates)} coordinates...")
         
         for i, (click_x, click_y) in enumerate(coordinates):
-            if self.should_stop:
+            if self.stop_event.is_set():
                 break
                 
             try:
@@ -5791,7 +5555,9 @@ class SprunkiGamePlayer:
         # Cấp 2: Quét dọc với icon ở tâm
         print("   [SEARCH] Level 2: Vertical scan with center pick-up...")
         for slot_idx, (end_x, end_y) in enumerate(slot_coords):
-            if self.should_stop: return None
+            if self.stop_event.is_set():
+                self.logger.warning("Stop event detected during search mode (level 2).")
+                return None
             
             print(f"      -> Trying combo: Icon[0] -> Slot[{slot_idx}]")
             success, details = self._attempt_single_drag(
@@ -5809,11 +5575,11 @@ class SprunkiGamePlayer:
         # Cấp 3: Nếu vẫn thất bại, quét toàn bộ các điểm kéo còn lại
         print("   [SEARCH] Level 3: Full scan with alternate pick-up points...")
         for icon_idx in range(1, len(icon_coords)): # Bắt đầu từ 1 vì 0 đã thử
-            if self.should_stop: return None
+            if self.stop_event.is_set(): return None
             
             start_x, start_y = icon_coords[icon_idx]
             for slot_idx, (end_x, end_y) in enumerate(slot_coords):
-                if self.should_stop: return None
+                if self.stop_event.is_set(): return None
                 
                 print(f"      -> Trying combo: Icon[{icon_idx}] -> Slot[{slot_idx}]")
                 success, details = self._attempt_single_drag(
@@ -6164,7 +5930,7 @@ class SprunkiGamePlayer:
             sleep_between_drags = total_duration / num_drags
             
             for i in range(num_drags):
-                if self.should_stop: 
+                if self.stop_event.is_set(): 
                     return False
                 start_x = center_x + random.randint(-100, 100)
                 start_y = center_y + random.randint(-100, 100)
@@ -7196,7 +6962,7 @@ class SprunkiGamePlayer:
                     obs_controller.log_event_timestamp("icon_showcase_failed", f"Drag failed for icon {icon_index}", {"stage": "drag"})
                 return False
 
-            if self.should_stop: return False
+            if self.stop_event.is_set(): return False
             
             # --- GIAI ĐOẠN NGHE NHẠC ---
             # 🔥 Lấy timestamp từ sự kiện drop_successfully thay vì tạo mới
@@ -7219,7 +6985,7 @@ class SprunkiGamePlayer:
 
             # Vòng lặp nghe nhạc vẫn giữ nguyên
             for countdown in range(listen_duration, 0, -1):
-                if self.should_stop: return False
+                if self.stop_event.is_set(): return False
                 time.sleep(1)
 
             # 🔥 TÍNH TOÁN VÀ GHI LẠI END_LISTEN DỰA TRÊN START_LISTEN
@@ -7242,7 +7008,7 @@ class SprunkiGamePlayer:
                     # Fallback an toàn nếu không tìm thấy start_listen
                     obs_controller.log_event_timestamp("end_listen", f"Finished listening to icon {icon_index}")
 
-            if self.should_stop: return False
+            if self.stop_event.is_set(): return False
 
             # --- GIAI ĐOẠN TRẢ VỀ ---
             if obs_controller:
@@ -7370,7 +7136,7 @@ class SprunkiGamePlayer:
             base_coords = config['base_coords_per_slot']
             
             for set_num in range(1, max_sets + 1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                     
                 print(f"   ðŸ’¥ Fast set {set_num}/{max_sets}")
@@ -7389,7 +7155,7 @@ class SprunkiGamePlayer:
                 
                 # Execute all slots in this set
                 for slot in sorted_slots:
-                    if self.should_stop:
+                    if self.stop_event.is_set():
                         break
                         
                     # Generate coordinates for this slot
@@ -7747,7 +7513,8 @@ class SprunkiGamePlayer:
             FAILURE_THRESHOLD = 3  # Ngưỡng: 3 icon thất bại liên tiếp
 
             for icon_object in icons_to_showcase:
-                if self.should_stop:
+                if self.stop_event.is_set(): # [MODIFIED]
+                    self.logger.warning("Stop event detected, aborting icon showcase.")
                     break
                 
                 if self.showcase_single_icon_corrected(icon_object, mode, listen_duration, progress_callback):
@@ -7758,12 +7525,11 @@ class SprunkiGamePlayer:
                     print(f"⚠️ Failed to showcase icon {icon_index}, but continuing with the next one.")
                     consecutive_failures += 1
 
-                # [NEW] Kích hoạt ngắt mạch nếu vượt ngưỡng
+                # [REFINED] Kích hoạt ngắt mạch nếu vượt ngưỡng bằng cách ném Exception
                 if consecutive_failures >= FAILURE_THRESHOLD:
-                    print(f"🚨 [CIRCUIT BREAKER] Tripped after {consecutive_failures} consecutive icon failures.")
-                    print("   - Aborting showcase. This mod may be incompatible or have a persistent issue.")
-                    # Trả về kết quả hiện tại, hàm cha sẽ đánh giá là thất bại
-                    return success_count, total_count
+                    error_msg = f"Circuit breaker tripped after {consecutive_failures} consecutive icon failures. Mod is likely incompatible."
+                    print(f"🚨 [CIRCUIT BREAKER] {error_msg}")
+                    raise WorkflowIncompatibleError(error_msg)
 
             print(f"\n✅ ENHANCED {mode.upper()} SHOWCASE COMPLETED")
             print(f"📊 Success: {success_count}/{total_count} icons")
@@ -7805,7 +7571,7 @@ class SprunkiGamePlayer:
             # Phase 1: Drag all icons to slots
             print("ðŸŽ¯ PHASE 1: Dragging all icons to slots for remix...")
             for slot_position, icon_index in enumerate(remix_icons):
-                if self.should_stop: return False
+                if self.stop_event.is_set(): return False
                 
                 if icon_index >= len(icons) or slot_position >= len(slots):
                     continue
@@ -7817,7 +7583,7 @@ class SprunkiGamePlayer:
                     continue
                 time.sleep(0.3)
 
-                if self.should_stop: return False
+                if self.stop_event.is_set(): return False
             
             # === BƯỚC 2: GHI TIMESTAMP BẮT ĐẦU NGHE NHẠC ===
             if obs_controller:
@@ -7830,7 +7596,7 @@ class SprunkiGamePlayer:
             # Phase 2: Listen to remix music
             print(f"PHASE 2: Enjoying remix for {listen_duration}s...")
             for countdown in range(listen_duration, 0, -1):
-                if self.should_stop: return False
+                if self.stop_event.is_set(): return False
                 
                 if progress_callback and countdown % 3 == 0:
                     try:
@@ -7840,7 +7606,7 @@ class SprunkiGamePlayer:
                 
                 time.sleep(1)
             
-            if self.should_stop: return False
+            if self.stop_event.is_set(): return False
             
             # === BƯỚC 3: GHI TIMESTAMP KẾT THÚC NGHE NHẠC ===
             if obs_controller:
@@ -8052,13 +7818,29 @@ class SprunkiGamePlayer:
             print(self.get_enhanced_workflow_summary())
             print("="*70)
             
-            return report
+        except WorkflowIncompatibleError as e:
+            print(f"🛑 Workflow halted by Circuit Breaker: {e}")
+            report.was_successful = False
+            report.message = f"Workflow failed: {e}"
+            report.issues.append(str(e))
+            # Không cần làm gì thêm, khối finally sẽ xử lý dọn dẹp
             
         except Exception as e:
             print("❌ Critical error in full showcase workflow: " + str(e))
             report.was_successful = False
             report.message = f"Critical error: {e}"
             report.issues.append(f"Critical error: {e}")
+
+        finally:
+            # Cleanup luôn được chạy dù thành công, thất bại hay có lỗi
+            print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
+            print("="*70)
+            self.smart_batch_return_all_slots(use_cdp=False)
+            self.validate_workflow_completion()
+            print("\n📊 ENHANCED WORKFLOW SUMMARY:")
+            print(self.get_enhanced_workflow_summary())
+            print("="*70)
+            
             return report
 
     def update_json_has_horror(self, new_has_horror_value):
@@ -8154,7 +7936,7 @@ class SprunkiGamePlayer:
             
             success_count = 0
             for bonus_index, bonus_char in enumerate(bonus_chars):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                 
                 if progress_callback:
@@ -8167,17 +7949,17 @@ class SprunkiGamePlayer:
                     print(f"❌ Failed to drag bonus {bonus_index} with verification")
                     continue
                 
-                if self.should_stop: break
+                if self.stop_event.is_set(): break
                 
                 print(f"Listening to bonus {bonus_index + 1} for {listen_duration}s...")
                 for countdown in range(listen_duration, 0, -1):
-                    if self.should_stop: break
+                    if self.stop_event.is_set(): break
                     if progress_callback and countdown % 3 == 0:
                         try: self.thread_safe_progress_callback(f"Listening {mode} bonus {bonus_index + 1} ({countdown}s)")
                         except Exception as e: print(f"Progress callback warning: {e}")
                     time.sleep(1)
                 
-                if self.should_stop: break
+                if self.stop_event.is_set(): break
                 
                 print(f"🔄 Returning bonus {bonus_index + 1}...")
                 self.corrected_return_icon(target_slot, use_cdp)
@@ -8211,7 +7993,7 @@ class SprunkiGamePlayer:
             REMIX_FAILURE_THRESHOLD = 2 # Ngưỡng: 2 remix thất bại liên tiếp
 
             for remix_index, remix in enumerate(self.remix_library):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     break
                 
                 self.current_remix_index = remix_index
@@ -8226,11 +8008,11 @@ class SprunkiGamePlayer:
                     print(f"⚠️ Failed to play remix: {remix['name']}, continuing...")
                     consecutive_failures += 1
 
-                # [NEW] Kích hoạt ngắt mạch cho remix
+                # [REFINED] Kích hoạt ngắt mạch cho remix bằng cách ném Exception
                 if consecutive_failures >= REMIX_FAILURE_THRESHOLD:
-                    print(f"🚨 [CIRCUIT BREAKER] Tripped after {consecutive_failures} consecutive remix failures.")
-                    print("   - Aborting remix session.")
-                    return success_count, total_count
+                    error_msg = f"Circuit breaker tripped after {consecutive_failures} consecutive remix failures."
+                    print(f"🚨 [CIRCUIT BREAKER] {error_msg}")
+                    raise WorkflowIncompatibleError(error_msg)
                 
                 if remix_index < total_count - 1 and not self.should_stop:
                     time.sleep(2.0)
@@ -8319,7 +8101,7 @@ class SprunkiGamePlayer:
             # ================================================================
             print(f"PHASE 2: Waiting for horror transformation ({transition_duration}s)...")
             for countdown in range(transition_duration, 0, -1):
-                if self.should_stop:
+                if self.stop_event.is_set():
                     return False
                 
                 # THREAD SAFE: Update every 5 seconds for longer transitions
@@ -8331,7 +8113,7 @@ class SprunkiGamePlayer:
                 
                 time.sleep(1)
             
-            if self.should_stop:
+            if self.stop_event.is_set():
                 return False
             
             print("âœ… ENHANCED HORROR MODE TRANSITION COMPLETED!")
@@ -8971,7 +8753,12 @@ class SprunkiGamePlayer:
                 self.remix_library = self.generate_random_remixes(avoid_horror_icon=not has_horror)
                 
                 self.current_remix_index = 0
+                # Drag operation statistics (enhanced)
                 self.drag_stats = DragOperationStats()
+
+                # [NEW - GLOBAL STOP] Event to signal a global stop request.
+                # This will be overridden by the master controller if provided.
+                self.stop_event = threading.Event()
                 self.update_remix_display()
 
                 # Check domain support

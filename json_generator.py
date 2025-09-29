@@ -67,7 +67,9 @@ class SprunkiJSONGenerator:
         Its main role is to hold the specialized JavaScript snippets.
         """
         self.master_controller = master_controller
-        self.game_player = SprunkiGamePlayer()
+        # [MODIFIED] Không cần truyền stop_event ở đây vì json_generator
+        # có luồng sống riêng và ngắn. Nó sẽ tự tạo stop_event mặc định.
+        self.game_player = SprunkiGamePlayer() 
         self.ws_url = None
 
         # JavaScript for comprehensive state capture (coordinates + game data)
