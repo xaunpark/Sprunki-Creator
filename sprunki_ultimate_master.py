@@ -352,9 +352,9 @@ class SafeOperationManager:
 class UnifiedProcessingManager:
     """Manages the complete pipeline: URLs → JSON Generation → Video Processing"""
     
-    def __init__(self, master_controller, stop_event=None):
+    def __init__(self, master_controller):
         self.master_controller = master_controller
-        self.stop_event = stop_event or threading.Event()
+        self.stop_event = threading.Event() # <-- TẠO MỘT CỜ MẶC ĐỊNH
         self.queue: List[ProcessingItem] = []
         self.config: Optional[ProcessingConfig] = None
         self.current_item_index: int = 0
@@ -364,14 +364,24 @@ class UnifiedProcessingManager:
         
         # JSON Generator
         self.json_generator = SprunkiJSONGenerator(master_controller)
-        
+        # Gán cờ stop mặc định ban đầu. Nó sẽ được cập nhật bởi set_stop_event.
+        if hasattr(self.json_generator, 'game_player'):
+            self.json_generator.game_player.stop_event = self.stop_event
+
         # Statistics
         self.total_completed: int = 0
         self.total_failed: int = 0
         self.total_skipped: int = 0
         
         self.setup_logging()
-    
+
+    def set_stop_event(self, stop_event: threading.Event):
+        self.stop_event = stop_event
+        if hasattr(self.json_generator, 'game_player'):
+            self.json_generator.game_player.stop_event = stop_event
+        if hasattr(self.master_controller, 'game_player') and self.master_controller.game_player:
+            self.master_controller.game_player.stop_event = stop_event
+
     def setup_logging(self):
         """Setup logging"""
         self.logger = logging.getLogger('UnifiedProcessingManager')
@@ -941,7 +951,7 @@ class UnifiedProcessingManager:
             self.logger.info(f"✅ [MASTER] Project folder defined: {project_folder}")
             
             # BƯỚC 2: Khởi tạo các component
-            if not self.master_controller._initialize_components(item.json_data):
+            if not self.master_controller._initialize_components(item.json_data, self.stop_event):
                 raise Exception("Failed to initialize components")
             
             # BƯỚC 3: GÁN project_folder cho OBS Controller NGAY LẬP TỨC
@@ -2429,15 +2439,17 @@ class SprunkiUltimateMaster:
             except:
                 pass
     
-    def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
+    def _initialize_components(self, config_data: Dict[str, Any], stop_event: Optional[threading.Event] = None) -> bool:
         """
         [CHUẨN HÓA] Khởi tạo và liên kết các component cho một job.
         """
         try:
             print("⚙️ Initializing and linking components for new job...")
-            
+
+            active_stop_event = stop_event or self.processing_manager.stop_event
+
             # 1. Tạo các component chính
-            self.game_player = SprunkiGamePlayer(stop_event=self.processing_manager.stop_event)
+            self.game_player = SprunkiGamePlayer(stop_event=active_stop_event)
             self.obs_controller = SprunkiController()
             
             # 2. LIÊN KẾT CÁC COMPONENT
