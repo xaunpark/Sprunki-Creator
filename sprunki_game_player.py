@@ -5532,17 +5532,16 @@ class SprunkiGamePlayer:
 
     def _find_optimal_drop_point(self, icon, target_slot, is_first_icon, use_cdp, control_type_override):
         """
-        [NEW - STABILITY V3 SEARCH] Finds the optimal drop point for a slot
-        by systematically trying coordinates and verifying each attempt.
-        Implements the "Vertical Scan Priority" strategy.
+        [ADAPTIVE SEARCH - MAX 5 ATTEMPTS] Finds the optimal drop point using a
+        weighted, adaptive 3-level search strategy to fail-fast on problematic icons.
         """
-        print(f"🔍 [SEARCH MODE] Activated for slot {target_slot.get('index', 'N/A')}")
+        print(f"🔍 [ADAPTIVE SEARCH] Activated for slot {target_slot.get('index', 'N/A')}")
         
-        # 1. Generate all possible coordinates
+        # 1. Generate all possible coordinates (chỉ dùng khi cần)
         icon_coords = self.generate_icon_coordinates(icon['x'], icon['y'])
         slot_coords = self._generate_slot_scan_coords(target_slot)
 
-        # 2. Get the initial 'before' state ONCE
+        # 2. Get the initial 'before' state ONCE to save performance
         before_state = None
         dual_verification_enabled = self.characters_available or self.putted_chars_available
         if dual_verification_enabled:
@@ -5550,51 +5549,49 @@ class SprunkiGamePlayer:
             before_state = {'characters': chars_before, 'putted': putted_before}
             print(f"   [SEARCH] Initial state: Chars={chars_before}, Putted={putted_before}")
         
-        # 3. Implement the search strategy
-        
-        # Cấp 2: Quét dọc với icon ở tâm
-        print("   [SEARCH] Level 2: Vertical scan with center pick-up...")
-        for slot_idx, (end_x, end_y) in enumerate(slot_coords):
-            if self.stop_event.is_set():
-                self.logger.warning("Stop event detected during search mode (level 2).")
-                return None
-            
-            print(f"      -> Trying combo: Icon[0] -> Slot[{slot_idx}]")
-            success, details = self._attempt_single_drag(
-                start_coord=(icon_coords[0][0], icon_coords[0][1]),
-                end_coord=(end_x, end_y),
-                before_state=before_state,
-                is_first_icon=is_first_icon,
-                use_cdp=use_cdp,
-                control_type_override=control_type_override
-            )
-            if success:
-                print(f"   [SEARCH] ✅ SUCCESS found at Icon[0], Slot[{slot_idx}]")
-                return {'icon_idx': 0, 'slot_idx': slot_idx, 'details': details}
+        # Helper function to log attempts
+        def log_attempt(level, icon_idx, slot_idx):
+            print(f"      -> [Lvl {level}] Trying combo: Icon[{icon_idx}] -> Slot[{slot_idx}]")
 
-        # Cấp 3: Nếu vẫn thất bại, quét toàn bộ các điểm kéo còn lại
-        print("   [SEARCH] Level 3: Full scan with alternate pick-up points...")
-        for icon_idx in range(1, len(icon_coords)): # Bắt đầu từ 1 vì 0 đã thử
+        # === CẤP ĐỘ 1: "ĐIỂM VÀNG" (1 LẦN THỬ) ===
+        log_attempt(1, 0, 0)
+        success, details = self._attempt_single_drag(
+            icon_coords[0], slot_coords[0], before_state, is_first_icon, use_cdp, control_type_override
+        )
+        if success:
+            print("   [SEARCH] ✅ SUCCESS on Golden Path (Lvl 1).")
+            return {'icon_idx': 0, 'slot_idx': 0, 'details': details}
+        
+        # === CẤP ĐỘ 2: "QUÉT DỌC THÔNG MINH" (TỐI ĐA 2 LẦN THỬ) ===
+        print("   [SEARCH] Lvl 1 failed. Proceeding to Lvl 2: Vertical Scan.")
+        vertical_scan_indices = [1, 2] # Chỉ thử điểm Trên và Dưới
+        for slot_idx in vertical_scan_indices:
             if self.stop_event.is_set(): return None
             
-            start_x, start_y = icon_coords[icon_idx]
-            for slot_idx, (end_x, end_y) in enumerate(slot_coords):
-                if self.stop_event.is_set(): return None
-                
-                print(f"      -> Trying combo: Icon[{icon_idx}] -> Slot[{slot_idx}]")
-                success, details = self._attempt_single_drag(
-                    start_coord=(start_x, start_y),
-                    end_coord=(end_x, end_y),
-                    before_state=before_state,
-                    is_first_icon=is_first_icon,
-                    use_cdp=use_cdp,
-                    control_type_override=control_type_override
-                )
-                if success:
-                    print(f"   [SEARCH] ✅ SUCCESS found at Icon[{icon_idx}], Slot[{slot_idx}]")
-                    return {'icon_idx': icon_idx, 'slot_idx': slot_idx, 'details': details}
+            log_attempt(2, 0, slot_idx)
+            success, details = self._attempt_single_drag(
+                icon_coords[0], slot_coords[slot_idx], before_state, is_first_icon, use_cdp, control_type_override
+            )
+            if success:
+                print(f"   [SEARCH] ✅ SUCCESS on Vertical Scan (Lvl 2) at Slot[{slot_idx}].")
+                return {'icon_idx': 0, 'slot_idx': slot_idx, 'details': details}
+        
+        # === CẤP ĐỘ 3: "QUÉT CHÉO PHẢN ỨNG" (TỐI ĐA 2 LẦN THỬ) ===
+        print("   [SEARCH] Lvl 2 failed. Proceeding to Lvl 3: Pick-up Point Scan.")
+        cross_scan_indices = [1, 3] # Chỉ thử điểm lấy Trái và Trên
+        for icon_idx in cross_scan_indices:
+            if self.stop_event.is_set(): return None
 
-        print("   [SEARCH] ❌ FAILED: No successful coordinate combination found.")
+            log_attempt(3, icon_idx, 0)
+            success, details = self._attempt_single_drag(
+                icon_coords[icon_idx], slot_coords[0], before_state, is_first_icon, use_cdp, control_type_override
+            )
+            if success:
+                print(f"   [SEARCH] ✅ SUCCESS on Pick-up Scan (Lvl 3) at Icon[{icon_idx}].")
+                return {'icon_idx': icon_idx, 'slot_idx': 0, 'details': details}
+
+        # Nếu tất cả 5 lần thử đều thất bại
+        print("   [SEARCH] ❌ FAILED: All 5 adaptive attempts failed. Concluding drag as impossible.")
         return None
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
