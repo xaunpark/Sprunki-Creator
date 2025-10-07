@@ -1856,7 +1856,8 @@ class SprunkiJSONGenerator:
                 final_confidence = 0
                 final_detection_method = "no_horror_detected"
                 final_visual_result = {}
-                
+                final_is_icon_19_disabled = False
+
                 # ============================
                 # CAPTURE A: Initial State (Screenshot + Phase)
                 # ============================
@@ -2025,6 +2026,7 @@ class SprunkiJSONGenerator:
                                     "pageTitle": page_title,
                                     "gameSettings": {
                                         "hasHorror": final_has_horror,
+                                        "isIcon19Disabled": final_is_icon_19_disabled,
                                         "hasBonus": len(layout_state.get('layout', {}).get('bonus', [])) > 0,
                                         "gameControlType": game_control_type,
                                         "controlDetectionDetails": game_control_details,
@@ -2078,210 +2080,250 @@ class SprunkiJSONGenerator:
                     print(f"🎯 Dragging icon 19 from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
                     
                     # Use optimized drag
-                    drag_success = self.game_player.corrected_drag_and_drop(
+                    drag_success_B = self.game_player.corrected_drag_and_drop(
                         icon=icon_coords, 
                         target_slot=slot_coords, 
                         is_first_icon=True,
                         use_cdp=True,
                         control_type_override=game_control_type
                     )
-                    if not drag_success:
-                        print("❌ Drag failed but continuing...")
-                    
-                    time.sleep(25)  # Single wait, no progressive delays
-                    
-                    # State B extraction (optimized with single retry)
-                    print("📊 Extracting state B after icon 19...")
-                    
-                    response = self._send_cdp_command(ws, {
-                        "method": "Runtime.evaluate", 
-                        "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
-                    })
-                    
-                    state_B = None
-                    if response and 'result' in response:
-                        result_data = response.get('result', {}).get('result', {})
-                        if 'value' in result_data:
-                            state_B = result_data['value']
-                    
-                    # Single retry for State B if failed
-                    if not state_B or "error" in state_B:
-                        print("🔄 State B retry (single attempt)...")
-                        time.sleep(5)
+
+                    # --- LOGIC MỚI: XỬ LÝ "ICON 19 CHẾT" ---
+                    if not drag_success_B:
+                        print("⚠️ Drag icon 19 FAILED verification. Activating control test...")
+                        # Kéo một icon bình thường để kiểm tra xem có phải chỉ icon 19 bị lỗi không
+                        control_icon = next((i for i in state_A.get('icons', []) if i.get('index') == 1), None)
+                        control_slot = next((s for s in state_A.get('slots', []) if s.get('index') == 1), None)
+                        
+                        if control_icon and control_slot:
+                            print("   -> Performing control drag: Icon 1 to Slot 1...")
+                            control_drag_success = self.game_player.corrected_drag_and_drop(
+                                icon=control_icon, 
+                                target_slot=control_slot, 
+                                is_first_icon=False,
+                                use_cdp=True,
+                                control_type_override=game_control_type
+                            )
+                            
+                            if control_drag_success:
+                                print("   ✅ Control drag SUCCEEDED. Conclusion: Icon 19 is disabled.")
+                                # Kết luận: Icon 19 bị vô hiệu hóa, không có horror
+                                final_has_horror = False
+                                final_is_icon_19_disabled = True # Đánh dấu icon 19 bị lỗi
+                                final_detection_method = "icon_19_disabled_control_test_passed"
+                                final_confidence = 0.95
+                                
+                                # Quan trọng: Dọn dẹp bàn cờ sau khi test
+                                self.game_player.corrected_return_icon(control_slot, use_cdp=True)
+                                
+                                # Đi thẳng đến bước cuối cùng (Final Layout)
+                                # Bỏ qua các bước Capture B, so sánh A vs B, và kéo icon cao nhất
+                                # Tạo một biến để bỏ qua các bước sau
+                                skip_to_final_layout = True
+                            else:
+                                print("   ❌ Control drag FAILED. Conclusion: Entire drag system is unstable.")
+                                raise Exception("Drag system unstable: Both icon 19 and control icon failed.")
+                        else:
+                            raise Exception("Cannot perform control test: Icon 1 or Slot 1 not found.")
+                    else:
+                        # Nếu kéo icon 19 thành công, tiếp tục quy trình bình thường
+                        print("✅ Drag icon 19 SUCCEEDED verification. Proceeding with normal checks...")
+                        skip_to_final_layout = False
+                        time.sleep(25)  # Single wait, no progressive delays
+
+                    if not skip_to_final_layout:                    
+                        # State B extraction (optimized with single retry)
+                        print("📊 Extracting state B after icon 19...")
+                        
                         response = self._send_cdp_command(ws, {
                             "method": "Runtime.evaluate", 
                             "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
                         })
+                        
+                        state_B = None
                         if response and 'result' in response:
                             result_data = response.get('result', {}).get('result', {})
                             if 'value' in result_data:
                                 state_B = result_data['value']
-                    
-                    if not state_B or "error" in state_B:
-                        print("❌ Failed to get state B after retry")
-                        raise Exception("State B extraction failed")
-                    
-                    phase_B = self.find_phase_variable(state_B)
-                    print(f"✅ State B captured - Phase B: {phase_B}")
-                    
-                    # Capture screenshot B
-                    screenshot_B = None
-                    if extended_area:
-                        screenshot_B = self.capture_icons_area_screenshot(extended_area)
-                        if screenshot_B is not None:
-                            print(f"✅ Screenshot B captured - Size: {screenshot_B.shape}")
+                        
+                        # Single retry for State B if failed
+                        if not state_B or "error" in state_B:
+                            print("🔄 State B retry (single attempt)...")
+                            time.sleep(5)
+                            response = self._send_cdp_command(ws, {
+                                "method": "Runtime.evaluate", 
+                                "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
+                            })
+                            if response and 'result' in response:
+                                result_data = response.get('result', {}).get('result', {})
+                                if 'value' in result_data:
+                                    state_B = result_data['value']
+                        
+                        if not state_B or "error" in state_B:
+                            print("❌ Failed to get state B after retry")
+                            raise Exception("State B extraction failed")
+                        
+                        phase_B = self.find_phase_variable(state_B)
+                        print(f"✅ State B captured - Phase B: {phase_B}")
+                        
+                        # Capture screenshot B
+                        screenshot_B = None
+                        if extended_area:
+                            screenshot_B = self.capture_icons_area_screenshot(extended_area)
+                            if screenshot_B is not None:
+                                print(f"✅ Screenshot B captured - Size: {screenshot_B.shape}")
 
-                    # Initialize final result variables
-                    final_has_horror = False
-                    final_confidence = 0
-                    final_detection_method = "no_horror_detected"
-                    final_visual_result = {}
-                    
-                    # ============================
-                    # COMPARE A vs B: Phase Comparison
-                    # ============================
-                    print("\n🔍 COMPARE A vs B: Phase Comparison")
-                    print(f"📊 Comparing Phase A ({phase_A}) vs Phase B ({phase_B})")
-                    
-                    phase_A_str = str(phase_A) if phase_A is not None else None
-                    phase_B_str = str(phase_B) if phase_B is not None else None
-                    horror_detected_phase_AB = False
-                    
-                    if phase_A_str is not None and phase_B_str is not None:
-                        has_horror_phase_AB = (phase_A_str == "1" and phase_B_str == "2")
-                        if has_horror_phase_AB:
-                            print(f"🎯 SUCCESS! Phase A vs B: {phase_A_str} → {phase_B_str} = hasHorror TRUE")
-                            final_has_horror = True
-                            final_confidence = 1.0
-                            final_detection_method = "phase_A_vs_B_icon_19"
-                            final_visual_result = {
-                                'phase_before': phase_A, 'phase_after': phase_B, 'method': 'phase_1_to_2',
-                                'horror_icon_index': 19, 'comparison': 'A_vs_B'
-                            }
-                            horror_detected_phase_AB = True
-                        else:
-                            print(f"❌ No horror in phase A vs B: {phase_A_str} → {phase_B_str}")
-                    
-                    # ============================
-                    # COMPARE A vs B: Screenshot Comparison
-                    # ============================
-                    if not horror_detected_phase_AB and screenshot_A is not None and screenshot_B is not None:
-                        print("🔍 Comparing Screenshot A vs Screenshot B...")
-                        visual_result_AB = self.detect_horror_extended_area(screenshot_A, screenshot_B)
-                        if visual_result_AB and visual_result_AB['has_horror']:
-                            print("🎯 SUCCESS! Screenshot A vs B detected hasHorror TRUE")
-                            final_has_horror = True
-                            final_confidence = visual_result_AB['confidence']
-                            final_detection_method = f"screenshot_A_vs_B_{visual_result_AB['method']}_icon_19"
-                            final_visual_result = visual_result_AB
-                            final_visual_result['horror_icon_index'] = 19
-                            final_visual_result['comparison'] = 'A_vs_B'
-                        else:
-                            print("❌ No horror in screenshot A vs B")
-                    
-                    # ============================
-                    # IF NO HORROR YET: Try Highest Index Icon
-                    # ============================
-                    if not final_has_horror:
-                        print("\n🔍 NO HORROR YET: Try Highest Index Icon")
+                        # Initialize final result variables
+                        final_has_horror = False
+                        final_confidence = 0
+                        final_detection_method = "no_horror_detected"
+                        final_visual_result = {}
                         
-                        # Get layout for highest index (same WebSocket)
-                        response = self._send_cdp_command(ws, {
-                            "method": "Runtime.evaluate", 
-                            "params": {"expression": self.js_full_layout, "awaitPromise": True, "returnByValue": True}
-                        })
+                        # ============================
+                        # COMPARE A vs B: Phase Comparison
+                        # ============================
+                        print("\n🔍 COMPARE A vs B: Phase Comparison")
+                        print(f"📊 Comparing Phase A ({phase_A}) vs Phase B ({phase_B})")
                         
-                        current_layout_data = None
-                        if response and 'result' in response:
-                            result_data = response.get('result', {}).get('result', {})
-                            if 'value' in result_data:
-                                current_layout_data = result_data['value']
+                        phase_A_str = str(phase_A) if phase_A is not None else None
+                        phase_B_str = str(phase_B) if phase_B is not None else None
+                        horror_detected_phase_AB = False
                         
-                        if current_layout_data:
-                            available_icons = current_layout_data.get('layout', {}).get('icons', [])
-                            valid_icons = [icon for icon in available_icons if icon.get('x') is not None and icon.get('y') is not None]
-                            high_index_icons = [icon for icon in valid_icons if icon.get('index', 0) > 19]
-
-                            if high_index_icons:
-                                highest_index_icon = max(high_index_icons, key=lambda x: x.get('index', 0))
-                                highest_index = highest_index_icon.get('index', 0)
-                                print(f"🎯 Found highest index icon: {highest_index}")
-                                
-                                available_slots = current_layout_data.get('layout', {}).get('slots', [])
-                                slot_4_coords = next((slot for slot in available_slots if slot.get('index') == 4), None)
-                                
-                                if slot_4_coords and slot_4_coords.get('x') is not None:
-                                    print(f"🎯 Dragging icon {highest_index} to slot 4...")
-                                    
-                                    drag_success_C = self.game_player.corrected_drag_and_drop(
-                                        icon=highest_index_icon, 
-                                        target_slot=slot_4_coords, 
-                                        is_first_icon=False, 
-                                        use_cdp=True,
-                                        control_type_override=game_control_type
-                                    )
-                                    if drag_success_C:
-                                        time.sleep(25)
-                                        
-                                        # State C extraction (optimized)
-                                        response = self._send_cdp_command(ws, {
-                                            "method": "Runtime.evaluate", 
-                                            "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
-                                        })
-                                        
-                                        state_C = None
-                                        if response and 'result' in response:
-                                            result_data = response.get('result', {}).get('result', {})
-                                            if 'value' in result_data:
-                                                state_C = result_data['value']
-                                        
-                                        if state_C:
-                                            phase_C = self.find_phase_variable(state_C)
-                                            print(f"✅ State C captured - Phase C: {phase_C}")
-                                            
-                                            screenshot_C = None
-                                            if extended_area:
-                                                screenshot_C = self.capture_icons_area_screenshot(extended_area)
-                                            
-                                            # Phase A vs C comparison
-                                            phase_C_str = str(phase_C) if phase_C is not None else None
-                                            if phase_A_str is not None and phase_C_str is not None:
-                                                has_horror_phase_AC = (phase_A_str == "1" and phase_C_str == "2")
-                                                if has_horror_phase_AC:
-                                                    print(f"🎯 SUCCESS! Phase A vs C: {phase_A_str} → {phase_C_str} = hasHorror TRUE")
-                                                    final_has_horror = True
-                                                    final_confidence = 1.0
-                                                    final_detection_method = f"phase_A_vs_C_icon_{highest_index}"
-                                                    final_visual_result = {
-                                                        'phase_before': phase_A, 'phase_after': phase_C, 'method': 'phase_1_to_2',
-                                                        'horror_icon_index': highest_index, 'comparison': 'A_vs_C'
-                                                    }
-                                                else:
-                                                    # Screenshot A vs C comparison
-                                                    if screenshot_A is not None and screenshot_C is not None:
-                                                        visual_result_AC = self.detect_horror_extended_area(screenshot_A, screenshot_C)
-                                                        if visual_result_AC and visual_result_AC['has_horror']:
-                                                            print("🎯 SUCCESS! Screenshot A vs C detected hasHorror TRUE")
-                                                            final_has_horror = True
-                                                            final_confidence = visual_result_AC['confidence']
-                                                            final_detection_method = f"screenshot_A_vs_C_{visual_result_AC['method']}_icon_{highest_index}"
-                                                            final_visual_result = visual_result_AC
-                                                            final_visual_result['horror_icon_index'] = highest_index
-                                                            final_visual_result['comparison'] = 'A_vs_C'
-                                                        else:
-                                                            final_detection_method = "all_methods_exhausted"
-                                            else:
-                                                final_detection_method = "phase_comparison_failed"
-                                        else:
-                                            final_detection_method = "failed_state_C"
-                                    else:
-                                        final_detection_method = "failed_drag_highest_index"
-                                else:
-                                    final_detection_method = "slot_4_unavailable"
+                        if phase_A_str is not None and phase_B_str is not None:
+                            has_horror_phase_AB = (phase_A_str == "1" and phase_B_str == "2")
+                            if has_horror_phase_AB:
+                                print(f"🎯 SUCCESS! Phase A vs B: {phase_A_str} → {phase_B_str} = hasHorror TRUE")
+                                final_has_horror = True
+                                final_confidence = 1.0
+                                final_detection_method = "phase_A_vs_B_icon_19"
+                                final_visual_result = {
+                                    'phase_before': phase_A, 'phase_after': phase_B, 'method': 'phase_1_to_2',
+                                    'horror_icon_index': 19, 'comparison': 'A_vs_B'
+                                }
+                                horror_detected_phase_AB = True
                             else:
-                                final_detection_method = "no_high_index_icons"
-                        else:
-                            final_detection_method = "layout_data_unavailable"
+                                print(f"❌ No horror in phase A vs B: {phase_A_str} → {phase_B_str}")
+                        
+                        # ============================
+                        # COMPARE A vs B: Screenshot Comparison
+                        # ============================
+                        if not horror_detected_phase_AB and screenshot_A is not None and screenshot_B is not None:
+                            print("🔍 Comparing Screenshot A vs Screenshot B...")
+                            visual_result_AB = self.detect_horror_extended_area(screenshot_A, screenshot_B)
+                            if visual_result_AB and visual_result_AB['has_horror']:
+                                print("🎯 SUCCESS! Screenshot A vs B detected hasHorror TRUE")
+                                final_has_horror = True
+                                final_confidence = visual_result_AB['confidence']
+                                final_detection_method = f"screenshot_A_vs_B_{visual_result_AB['method']}_icon_19"
+                                final_visual_result = visual_result_AB
+                                final_visual_result['horror_icon_index'] = 19
+                                final_visual_result['comparison'] = 'A_vs_B'
+                            else:
+                                print("❌ No horror in screenshot A vs B")
+                        
+                        # ============================
+                        # IF NO HORROR YET: Try Highest Index Icon
+                        # ============================
+                        if not final_has_horror:
+                            print("\n🔍 NO HORROR YET: Try Highest Index Icon")
+                            
+                            # Get layout for highest index (same WebSocket)
+                            response = self._send_cdp_command(ws, {
+                                "method": "Runtime.evaluate", 
+                                "params": {"expression": self.js_full_layout, "awaitPromise": True, "returnByValue": True}
+                            })
+                            
+                            current_layout_data = None
+                            if response and 'result' in response:
+                                result_data = response.get('result', {}).get('result', {})
+                                if 'value' in result_data:
+                                    current_layout_data = result_data['value']
+                            
+                            if current_layout_data:
+                                available_icons = current_layout_data.get('layout', {}).get('icons', [])
+                                valid_icons = [icon for icon in available_icons if icon.get('x') is not None and icon.get('y') is not None]
+                                high_index_icons = [icon for icon in valid_icons if icon.get('index', 0) > 19]
+
+                                if high_index_icons:
+                                    highest_index_icon = max(high_index_icons, key=lambda x: x.get('index', 0))
+                                    highest_index = highest_index_icon.get('index', 0)
+                                    print(f"🎯 Found highest index icon: {highest_index}")
+                                    
+                                    available_slots = current_layout_data.get('layout', {}).get('slots', [])
+                                    slot_4_coords = next((slot for slot in available_slots if slot.get('index') == 4), None)
+                                    
+                                    if slot_4_coords and slot_4_coords.get('x') is not None:
+                                        print(f"🎯 Dragging icon {highest_index} to slot 4...")
+                                        
+                                        drag_success_C = self.game_player.corrected_drag_and_drop(
+                                            icon=highest_index_icon, 
+                                            target_slot=slot_4_coords, 
+                                            is_first_icon=False, 
+                                            use_cdp=True,
+                                            control_type_override=game_control_type
+                                        )
+                                        if drag_success_C:
+                                            time.sleep(25)
+                                            
+                                            # State C extraction (optimized)
+                                            response = self._send_cdp_command(ws, {
+                                                "method": "Runtime.evaluate", 
+                                                "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
+                                            })
+                                            
+                                            state_C = None
+                                            if response and 'result' in response:
+                                                result_data = response.get('result', {}).get('result', {})
+                                                if 'value' in result_data:
+                                                    state_C = result_data['value']
+                                            
+                                            if state_C:
+                                                phase_C = self.find_phase_variable(state_C)
+                                                print(f"✅ State C captured - Phase C: {phase_C}")
+                                                
+                                                screenshot_C = None
+                                                if extended_area:
+                                                    screenshot_C = self.capture_icons_area_screenshot(extended_area)
+                                                
+                                                # Phase A vs C comparison
+                                                phase_C_str = str(phase_C) if phase_C is not None else None
+                                                if phase_A_str is not None and phase_C_str is not None:
+                                                    has_horror_phase_AC = (phase_A_str == "1" and phase_C_str == "2")
+                                                    if has_horror_phase_AC:
+                                                        print(f"🎯 SUCCESS! Phase A vs C: {phase_A_str} → {phase_C_str} = hasHorror TRUE")
+                                                        final_has_horror = True
+                                                        final_confidence = 1.0
+                                                        final_detection_method = f"phase_A_vs_C_icon_{highest_index}"
+                                                        final_visual_result = {
+                                                            'phase_before': phase_A, 'phase_after': phase_C, 'method': 'phase_1_to_2',
+                                                            'horror_icon_index': highest_index, 'comparison': 'A_vs_C'
+                                                        }
+                                                    else:
+                                                        # Screenshot A vs C comparison
+                                                        if screenshot_A is not None and screenshot_C is not None:
+                                                            visual_result_AC = self.detect_horror_extended_area(screenshot_A, screenshot_C)
+                                                            if visual_result_AC and visual_result_AC['has_horror']:
+                                                                print("🎯 SUCCESS! Screenshot A vs C detected hasHorror TRUE")
+                                                                final_has_horror = True
+                                                                final_confidence = visual_result_AC['confidence']
+                                                                final_detection_method = f"screenshot_A_vs_C_{visual_result_AC['method']}_icon_{highest_index}"
+                                                                final_visual_result = visual_result_AC
+                                                                final_visual_result['horror_icon_index'] = highest_index
+                                                                final_visual_result['comparison'] = 'A_vs_C'
+                                                            else:
+                                                                final_detection_method = "all_methods_exhausted"
+                                                else:
+                                                    final_detection_method = "phase_comparison_failed"
+                                            else:
+                                                final_detection_method = "failed_state_C"
+                                        else:
+                                            final_detection_method = "failed_drag_highest_index"
+                                    else:
+                                        final_detection_method = "slot_4_unavailable"
+                                else:
+                                    final_detection_method = "no_high_index_icons"
+                            else:
+                                final_detection_method = "layout_data_unavailable"
                     
                     # ============================
                     # Final Layout Capture (Fast)
@@ -2333,6 +2375,7 @@ class SprunkiJSONGenerator:
                     "pageTitle": page_title,
                     "gameSettings": {
                         "hasHorror": final_has_horror,
+                        "isIcon19Disabled": final_is_icon_19_disabled,
                         "hasBonus": len(layout_state.get('layout', {}).get('bonus', [])) > 0,
                         "gameControlType": game_control_type,
                         "controlDetectionDetails": game_control_details,

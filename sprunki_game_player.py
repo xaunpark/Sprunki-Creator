@@ -7266,9 +7266,15 @@ class SprunkiGamePlayer:
                 'vocals': [i['index'] for i in all_icons_from_json if i.get('index', -1) >= 15]
             }
 
-            if avoid_horror_icon:
-                # Nếu cần tránh icon 19, ta loại nó ra khỏi nhóm vocals
-                if 19 in dynamic_icon_groups['vocals']:
+            game_settings = self.config.get('gameSettings', {})
+            is_icon_19_disabled = game_settings.get('isIcon19Disabled', False)
+
+            # Luôn loại bỏ icon 19 nếu nó bị vô hiệu hóa, hoặc nếu đang tạo remix cho normal mode
+            if 19 in dynamic_icon_groups['vocals']:
+                if is_icon_19_disabled:
+                    dynamic_icon_groups['vocals'].remove(19)
+                    print(f"🚫 Avoiding disabled icon (19) for remix.")
+                elif avoid_horror_icon:
                     dynamic_icon_groups['vocals'].remove(19)
                     print(f"👻 Avoiding horror icon (19) for normal mode remix.")
 
@@ -7491,12 +7497,20 @@ class SprunkiGamePlayer:
             layout = self.config['layout']
             all_icons = layout['icons']
             
-            icons_to_showcase = []
-            if skip_icon_19:
+            game_settings = self.config.get('gameSettings', {})
+            is_icon_19_disabled = game_settings.get('isIcon19Disabled', False)
+
+            icons_to_showcase = all_icons
+
+            # Luôn loại bỏ icon 19 nếu nó bị đánh dấu là "vô hiệu hóa"
+            if is_icon_19_disabled:
                 icons_to_showcase = [icon for icon in all_icons if icon.get('index') != 19]
-                print(f"ℹ️ {mode} Mode: Filtering out icon 19. Processing {len(icons_to_showcase)} icons.")
+                print(f"ℹ️ {mode} Mode: Filtering out disabled icon 19. Processing {len(icons_to_showcase)} icons.")
+            # Nếu không, áp dụng logic cũ (loại bỏ icon 19 cho normal mode nếu có horror)
+            elif skip_icon_19:
+                icons_to_showcase = [icon for icon in all_icons if icon.get('index') != 19]
+                print(f"ℹ️ {mode} Mode: Filtering out horror icon 19. Processing {len(icons_to_showcase)} icons.")
             else:
-                icons_to_showcase = all_icons
                 print(f"ℹ️ {mode} Mode: Processing all {len(icons_to_showcase)} available icons.")
 
             total_count = len(icons_to_showcase)
