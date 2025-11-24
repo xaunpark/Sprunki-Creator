@@ -1697,7 +1697,20 @@ class SprunkiGamePlayer:
             ]
             
             self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
+
+            print(f"   -> Waiting for browser initialization...")
+            time.sleep(3) # Chờ 1 chút cho Chrome hiện lên hẳn
+
+            # Tiêm cookies ngay khi trình duyệt vừa mở
+            if self.inject_cookies_via_cdp():
+                print("   -> 🔄 Reloading page to apply login session...")
+                # Sau khi set cookie, cần reload lại trang để web nhận diện đăng nhập
+                ws_url = self._get_websocket_url()
+                if ws_url:
+                    ws = websocket.create_connection(ws_url)
+                    self._send_cdp_command(ws, {"method": "Page.reload"})
+                    ws.close()
+
             print(f"   -> Waiting {self.page_load_wait}s for page to initialize...")
             time.sleep(self.page_load_wait)
             
@@ -9198,6 +9211,61 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print(f"âŒ Error during enhanced cleanup: {e}")
+
+    def inject_cookies_via_cdp(self):
+        """
+        Đọc cookies từ file json và tiêm vào trình duyệt qua CDP
+        """
+        cookie_file = "cocrea_cookies.json"
+        if not os.path.exists(cookie_file):
+            print(f"⚠️ Không tìm thấy file {cookie_file}. Chạy ở chế độ Guest.")
+            return False
+
+        try:
+            print(f"🍪 Đang nạp cookies từ {cookie_file}...")
+            with open(cookie_file, 'r', encoding='utf-8') as f:
+                cookies = json.load(f)
+
+            # Kết nối WebSocket
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return False
+            
+            ws = websocket.create_connection(ws_url, timeout=10)
+
+            count = 0
+            for cookie in cookies:
+                # Lọc các trường không cần thiết mà extension có thể xuất ra
+                # CDP Network.setCookie chỉ cần các trường cơ bản
+                
+                # Quan trọng: cocrea.world cần domain chính xác
+                domain = cookie.get('domain', '.cocrea.world')
+                
+                cookie_params = {
+                    "name": cookie.get('name'),
+                    "value": cookie.get('value'),
+                    "domain": domain,
+                    "path": cookie.get('path', '/'),
+                    "secure": cookie.get('secure', True),
+                    "httpOnly": cookie.get('httpOnly', False),
+                    "sameSite": cookie.get('sameSite', 'Lax'),
+                    "expires": cookie.get('expirationDate', None)
+                }
+
+                # Gửi lệnh setCookie qua CDP
+                self._send_cdp_command(ws, {
+                    "method": "Network.setCookie",
+                    "params": cookie_params
+                })
+                count += 1
+
+            ws.close()
+            print(f"✅ Đã tiêm thành công {count} cookies!")
+            return True
+
+        except Exception as e:
+            print(f"❌ Lỗi khi tiêm cookies: {e}")
+            return False
 
 if __name__ == "__main__":
     print("ðŸš€ Starting ENHANCED Sprunki Game Player...")
