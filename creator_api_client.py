@@ -9,7 +9,7 @@ import time
 import requests
 from threading import Thread
 import os
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 from datetime import datetime
 from config_manager import get_config
 from performance_analyzer import performance_analyzer
@@ -24,6 +24,9 @@ from sprunki_ultimate_master import ProcessingConfig
 from collections.abc import Callable
 from smart_retry_manager import SmartRetryManager
 from file_validator import FileQualityValidator
+
+# --- CONFIG: Thư mục chứa file JSON thủ công ---
+MANUAL_JSON_DIR = "manual_jsons"
 
 class TrackerAPIClient:
     def __init__(self, tracker_url="http://localhost:5000"):
@@ -266,7 +269,12 @@ class CreatorService:
         # --- FIX: Initialize the processing config for the manager ---
         self._initialize_processing_config()
         self._stop_event = threading.Event() # [NEW] Global stop event
+        
+        # Ensure manual json directory exists
+        os.makedirs(MANUAL_JSON_DIR, exist_ok=True)
+        
         print("🤖 Creator Service initialized with API-based Smart Retry Manager")
+        print(f"📂 Manual JSON Override directory: {os.path.abspath(MANUAL_JSON_DIR)}")
 
     # --- FIX: New method to create and set the ProcessingConfig ---
     def _initialize_processing_config(self):
@@ -543,6 +551,10 @@ class CreatorService:
             
             item = self._convert_job_to_processing_item(job)
             
+            # --- HIỂN THỊ SLUG ĐỂ USER DỄ COPY ---
+            print(f"🔑 Project Slug: {item.project_slug}")
+            # ---------------------------------------
+
             self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
             
             self.performance_analyzer.record_job_start(queue_id, job)
@@ -604,10 +616,53 @@ class CreatorService:
                 self.logger.error(f"Error during post-job cleanup for {queue_id}: {cleanup_error}")
         return job_successful
 
+    def _check_for_manual_json_override(self, slug: str, job_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """
+        Check if a manual JSON file exists for this job in the manual_jsons directory.
+        Checks by Job ID first, then by Slug.
+        """
+        try:
+            files_to_check = []
+            if job_id:
+                files_to_check.append(f"{job_id}.json")
+            if slug:
+                files_to_check.append(f"{slug}.json")
+            
+            for filename in files_to_check:
+                filepath = os.path.join(MANUAL_JSON_DIR, filename)
+                if os.path.exists(filepath):
+                    self.logger.info(f"🔍 Checking manual JSON: {filepath} ... FOUND!")
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        # Basic validation
+                        if 'layout' in data:
+                            return data, filepath
+                        else:
+                            self.logger.warning(f"⚠️ Manual JSON {filename} found but invalid (missing 'layout')")
+                    except Exception as e:
+                        self.logger.error(f"❌ Error reading manual JSON {filename}: {e}")
+            
+            return None, None
+        except Exception as e:
+            self.logger.error(f"❌ Error in override check: {e}")
+            return None, None
+
     def _process_with_smart_retry(self, item, queue_id: int) -> bool:
         """Process with smart retry for individual steps - PHASE 2"""
         try:
-            # Step 1: JSON Generation (if needed)
+            # --- STEP 0: CHECK MANUAL OVERRIDE ---
+            manual_data, manual_path = self._check_for_manual_json_override(item.project_slug, queue_id)
+            
+            if manual_data:
+                print(f"🟢 MANUAL OVERRIDE DETECTED! Using local JSON file: {manual_path}")
+                item.json_data = manual_data
+                item.json_path = manual_path
+                # Đánh dấu là JSON đã có sẵn để bỏ qua bước sinh tự động
+                self.api_client.update_job_progress(queue_id, 'json_generation', 'manual_override', 100.0, 'completed',
+                    metadata={'override_file': manual_path})
+            
+            # --- Step 1: JSON Generation (ONLY if not overridden) ---
             if item.source_url and not item.json_data:
                 success = self._execute_with_retry(
                     queue_id, 'json_generation',
@@ -618,7 +673,7 @@ class CreatorService:
                 if not success:
                     return False
             
-            # Step 2: Video Processing  
+            # --- Step 2: Video Processing ---
             success = self._execute_with_retry(
                 queue_id, 'video_processing',
                 lambda: self.processing_manager._process_video_for_item(item),

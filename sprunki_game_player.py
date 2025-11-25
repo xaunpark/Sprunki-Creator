@@ -1669,7 +1669,7 @@ class SprunkiGamePlayer:
                 "--incognito", 
                 "--window-size=1280,720", 
                 "--remote-allow-origins=*",
-                
+
                 # ðŸ†• EXTENSION-SAFE CLEANUP FLAGS
                 "--clear-token-service",                    # âœ… Safe: chá»‰ clear auth tokens
                 "--clear-key-system-properties",           # âœ… Safe: chá»‰ clear key system  

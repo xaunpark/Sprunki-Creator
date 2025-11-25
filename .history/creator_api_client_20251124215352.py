@@ -9,7 +9,7 @@ import time
 import requests
 from threading import Thread
 import os
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 from datetime import datetime
 from config_manager import get_config
 from performance_analyzer import performance_analyzer
@@ -19,11 +19,14 @@ import logging
 from sprunki_game_player import SprunkiGamePlayer
 from sprunki_obs_controller import SprunkiController
 # --- FIX: Import ProcessingConfig to create the configuration object ---
-from sprunki_ultimate_master import UnifiedProcessingManager, ProcessingConfig
+from sprunki_ultimate_master import ProcessingConfig
 
 from collections.abc import Callable
 from smart_retry_manager import SmartRetryManager
 from file_validator import FileQualityValidator
+
+# --- CONFIG: Thư mục chứa file JSON thủ công ---
+MANUAL_JSON_DIR = "manual_jsons"
 
 class TrackerAPIClient:
     def __init__(self, tracker_url="http://localhost:5000"):
@@ -242,15 +245,14 @@ class CreatorService:
         self.running = False
         self.processing_thread = None
         self.heartbeat_thread = None
+        self.service_stop_event = threading.Event()        
         self.current_job = None
         
         self.game_player = None
         self.obs_controller = None
-        # self.config = None #Dòng này bây giờ không cần nữa và có thể bị ghi đè. Tốt nhất nên xóa.
         
         from sprunki_ultimate_master import UnifiedProcessingManager
-        self._stop_event = threading.Event()
-        self.processing_manager = UnifiedProcessingManager(master_controller=self, stop_event=self._stop_event)
+        self.processing_manager = UnifiedProcessingManager(master_controller=self)
 
         self.logger = logging.getLogger(self.__class__.__name__)
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -267,7 +269,12 @@ class CreatorService:
         # --- FIX: Initialize the processing config for the manager ---
         self._initialize_processing_config()
         self._stop_event = threading.Event() # [NEW] Global stop event
+        
+        # Ensure manual json directory exists
+        os.makedirs(MANUAL_JSON_DIR, exist_ok=True)
+        
         print("🤖 Creator Service initialized with API-based Smart Retry Manager")
+        print(f"📂 Manual JSON Override directory: {os.path.abspath(MANUAL_JSON_DIR)}")
 
     # --- FIX: New method to create and set the ProcessingConfig ---
     def _initialize_processing_config(self):
@@ -308,18 +315,22 @@ class CreatorService:
                 pass
         return DummyRoot()
 
-    def _initialize_components(self, config_data: Dict[str, Any]) -> bool:
-        """Initialize game player and OBS controller for a specific job."""
+    def _initialize_components(self, config_data: Dict[str, Any], job_stop_event: threading.Event) -> bool:
+        """
+        [REVISED] Initialize game player and OBS controller for a specific job,
+        passing the job-specific stop event.
+        """
         try:
             print("⚙️ Initializing components for new job...")
             
-            # ADDED: Cleanup previous OBS controller if exists
             if hasattr(self, 'obs_controller') and self.obs_controller:
                 print("🧹 Cleaning up previous OBS controller...")
+                self.obs_controller.comprehensive_obs_cleanup()
                 self.obs_controller = None
-                time.sleep(1)  # Brief pause for cleanup
+                time.sleep(1)
             
-            self.game_player = SprunkiGamePlayer()
+            # Khởi tạo GamePlayer VÀ TRUYỀN CỜ DỪNG CỦA JOB VÀO
+            self.game_player = SprunkiGamePlayer(stop_event=job_stop_event)
             self.game_player.config = config_data
             
             current_url = config_data.get('currentUrl', '').lower()
@@ -327,27 +338,21 @@ class CreatorService:
                 print(f"❌ Unsupported Domain: {current_url}")
                 return False
 
-            # === START OF FIX ===
-            # Lấy số lượng slot từ dữ liệu JSON để tạo remix động
             layout_data = config_data.get('layout', {})
             total_slots = len(layout_data.get('slots', []))
             
             if total_slots > 0:
                 print(f"✅ Detected {total_slots} slots. Generating dynamic remix patterns...")
-                # Gọi hàm tạo pattern động - ĐÂY LÀ BƯỚC QUAN TRỌNG BỊ THIẾU
                 self.game_player.generate_dynamic_patterns(total_slots)
             else:
                 print("⚠️ Warning: No slots detected in JSON. Remixes may not be generated correctly.")
-            # === END OF FIX ===
             
             game_settings = config_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             
-            # Bây giờ, hàm này sẽ sử dụng các pattern động vừa được tạo
             self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
             self.game_player.current_remix_index = 0
             
-            # Enhanced OBS controller initialization for service mode
             print("🎥 Initializing OBS controller for service mode...")
             self.obs_controller = SprunkiController()
             self.game_player.obs_controller = self.obs_controller
@@ -375,7 +380,7 @@ class CreatorService:
             return False
         
         self.running = True
-        self._stop_event.clear() # Reset a cờ stop
+        self.service_stop_event.clear()
 
         # 🆕 PHASE 4: Start performance monitoring
         self.performance_analyzer.start_monitoring()
@@ -393,7 +398,7 @@ class CreatorService:
         """Stop Creator service with performance cleanup - PHASE 4 Enhanced"""
         print("🛑 Stopping Creator Service...")
         self.running = False
-        self._stop_event.set() # Kích hoạt cờ stop
+        self.service_stop_event.set()
 
         # 🆕 PHASE 4: Stop performance monitoring
         self.performance_analyzer.stop_monitoring()
@@ -416,19 +421,24 @@ class CreatorService:
             self.heartbeat_thread.join(timeout=5)
         
         print("✅ Creator Service stopped")
-    
+
     def _processing_loop(self):
         """Main processing loop - polls for jobs"""
         print("🔄 Processing loop started")
         
-        while self.running and not self._stop_event.is_set():
+        # SỬA ĐỔI: Vòng lặp while chỉ phụ thuộc vào cờ dừng của service
+        while not self.service_stop_event.is_set():
             try:
+                # Không cần kiểm tra cờ stop ở đây nữa.
+                
                 job = self.api_client.get_next_job()
                 
                 if job:
                     self.current_job = job
+                    
                     print(f"📥 Received job: {job.get('mod_title', 'Unknown Title')} ({job.get('production_mode', 'N/A')})")
                     
+                    # _process_job sẽ tự quản lý cờ stop của riêng nó
                     success = self._process_job(job)
                     
                     if success:
@@ -438,112 +448,118 @@ class CreatorService:
                     
                     self.current_job = None
                 else:
-                    # --- FIX: Add a short pause to the job polling loop ---
-                    # In service mode, we pause here between jobs, not in the manager's loop.
                     if self.processing_manager.config:
                         pause_duration = self.processing_manager.config.pause_between_items
                         print(f"No jobs available. Pausing for {pause_duration}s...")
-                        time.sleep(pause_duration)
+                        # Sử dụng wait() của Event để có thể ngắt ngay lập tức
+                        # thay vì sleep cứng
+                        self.service_stop_event.wait(timeout=pause_duration)
                     else:
-                        time.sleep(30) # Fallback pause
+                        self.service_stop_event.wait(timeout=30)
                 
             except Exception as e:
                 print(f"❌ Processing loop error: {e}")
-                time.sleep(10)
+                self.service_stop_event.wait(timeout=10) # Chờ 10s nếu có lỗi
+        
+        # Log khi vòng lặp kết thúc
+        print("🔄 Processing loop has finished.")
     
     def _heartbeat_loop(self):
         """Heartbeat loop - reports status to Tracker"""
-        while self.running:
+        # SỬA ĐỔI: Chỉ phụ thuộc vào cờ dừng của service
+        while not self.service_stop_event.is_set():
             try:
                 status = "busy" if self.current_job else "online"
                 current_job_id = self.current_job['id'] if self.current_job else None
                 
-                self.api_client.send_heartbeat(status=status, current_job_id=current_job_id)
-                time.sleep(60)
+                performance_stats = self.performance_analyzer.get_performance_summary()
+                
+                self.api_client.send_heartbeat(
+                    status=status, 
+                    current_job_id=current_job_id,
+                    performance_stats=performance_stats
+                )
+
+                # Sử dụng wait() để có thể dừng ngay lập tức
+                self.service_stop_event.wait(timeout=60)
                 
             except Exception as e:
                 print(f"⚠️ Heartbeat error: {e}")
-                time.sleep(30)
+                # Chờ một khoảng ngắn hơn nếu có lỗi
+                if not self.service_stop_event.is_set():
+                    self.service_stop_event.wait(timeout=30)
+        
+        # Log khi vòng lặp kết thúc
+        print("❤️ Heartbeat loop has finished.")
 
-    def _job_watchdog(self, queue_id, job_start_time):
+    def _job_watchdog(self, queue_id, job_start_time, job_stop_event: threading.Event):
         """
-        [NEW] Watchdog thread to monitor job execution time.
+        [REVISED] Watchdog thread to monitor job execution time.
+        Uses a job-specific stop event.
         """
-        # Lấy timeout từ config, fallback về 60 phút
         job_timeout_minutes = self.config_manager.get('processing.job_timeout_minutes', 60)
         job_timeout_seconds = job_timeout_minutes * 60
         
-        while time.monotonic() - job_start_time < job_timeout_seconds:
-            # Kiểm tra xem job còn đang chạy hay không
-            if not self.current_job or self.current_job.get('id') != queue_id:
-                # Job đã kết thúc (thành công hoặc thất bại) trước khi timeout
-                self.logger.info(f"🐶 Watchdog for job {queue_id}: Job finished normally. Exiting.")
-                return
-            
-            # Ngủ một khoảng rồi kiểm tra lại
-            time.sleep(60) # Kiểm tra mỗi phút
+        # wait() sẽ trả về False nếu timeout, True nếu event được set.
+        # Điều này cho phép chúng ta thoát sớm nếu job hoàn thành trước khi timeout.
+        job_finished_before_timeout = job_stop_event.wait(timeout=job_timeout_seconds)
 
-        # Nếu vòng lặp kết thúc, nghĩa là job đã timeout
-        if self.current_job and self.current_job.get('id') == queue_id:
+        # Nếu vòng lặp kết thúc vì timeout (wait() trả về False) VÀ service chưa bị dừng
+        if not job_finished_before_timeout and not self.service_stop_event.is_set():
             error_msg = f"Job timed out after {job_timeout_minutes} minutes."
             self.logger.error(f"🚨 [WATCHDOG] Job {queue_id} timed out!")
             
+            # Kích hoạt cờ dừng của JOB này
+            job_stop_event.set()
+            
             # Cập nhật trạng thái job là thất bại
+            # Chúng ta không cần dọn dẹp ở đây nữa, khối finally của _process_job sẽ xử lý
             self.api_client.update_job_status(
                 queue_id,
                 status='failed',
                 error_log=f"WATCHDOG: {error_msg}"
             )
-            
-            # Cố gắng dọn dẹp (gọi hàm stop, hàm này sẽ cố gắng dọn dẹp OBS/browser)
-            # Chúng ta không dừng toàn bộ service, chỉ dừng job hiện tại
-            # Đây là một hành động mạnh, cần cẩn thận
-            self.logger.info(f"🐶 Watchdog for job {queue_id}: Attempting emergency cleanup...")
-            try:
-                if hasattr(self, 'obs_controller') and self.obs_controller:
-                    self.obs_controller.comprehensive_obs_cleanup()
-                if hasattr(self, 'game_player') and self.game_player:
-                    self.game_player.close_game_window()
-            except Exception as e:
-                self.logger.error(f"🐶 Watchdog cleanup error for job {queue_id}: {e}")
-            
-            # Sau khi dọn dẹp, reset current_job để vòng lặp chính có thể lấy job mới
-            self.current_job = None
+        elif job_finished_before_timeout:
+             self.logger.info(f"🐶 Watchdog for job {queue_id}: Job finished normally. Exiting.")
+        elif self.service_stop_event.is_set():
+             self.logger.info(f"🐶 Watchdog for job {queue_id}: Service is stopping. Exiting.")
 
     def _process_job(self, job: Dict) -> bool:
         """
-        [REFACTORED & WATCHDOG ENABLED] Orchestrates job processing.
+        [REVISED & WATCHDOG ENABLED] Orchestrates job processing with a job-specific stop event.
         """
         queue_id = job['id']
         item = None
         job_successful = False
         start_time = time.monotonic()
         
-        # [NEW] Start the watchdog timer for this job
+        # 1. TẠO CỜ DỪNG RIÊNG CHO JOB NÀY
+        job_stop_event = threading.Event()
+        
+        # 2. Bắt đầu Watchdog và truyền cờ stop của job vào
         watchdog_thread = threading.Thread(
             target=self._job_watchdog,
-            args=(queue_id, start_time),
+            args=(queue_id, start_time, job_stop_event),
             daemon=True
         )
         watchdog_thread.start()
         self.logger.info(f"🐶 Watchdog started for job {queue_id}.")
         
         try:
-            # 1. Convert job to a processable item
+            # 3. Truyền cờ stop của job xuống các tầng dưới
+            self.processing_manager.stop_event = job_stop_event
+            
             item = self._convert_job_to_processing_item(job)
             
-            # [NEW] Truyền stop_event xuống các tầng dưới
-            if item:
-                # Giả định ProcessingItem có thể nhận một cờ stop_event
-                # Nếu không, chúng ta cần truyền nó qua các hàm xử lý
-                # Tạm thời, chúng ta sẽ dựa vào việc các hàm con kiểm tra cờ toàn cục
-                pass
-            
+            # --- HIỂN THỊ SLUG ĐỂ USER DỄ COPY ---
+            print(f"🔑 Project Slug: {item.project_slug}")
+            # ---------------------------------------
+
             self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
             
             self.performance_analyzer.record_job_start(queue_id, job)
 
-            # 2. Execute the workflow, nó sẽ tự dừng nếu stop_event được set
+            # 4. Thực thi workflow. Nó sẽ tự dừng nếu job_stop_event được set (bởi watchdog hoặc lỗi)
             job_successful = self._process_with_smart_retry(item, queue_id)
 
         except Exception as e:
@@ -556,7 +572,9 @@ class CreatorService:
             self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
         
         finally:
-            # 3. Finalize the job status and report back to the Tracker
+            # 5. BÁO HIỆU CHO WATCHDOG DỪNG LẠI vì job đã xong (dù thành công hay thất bại)
+            job_stop_event.set()
+
             if item:
                 from dataclasses import asdict
                 final_status = "completed" if job_successful else "failed"
@@ -566,11 +584,9 @@ class CreatorService:
                 workflow_report_obj = getattr(item, 'workflow_report', None)
                 workflow_report_dict = asdict(workflow_report_obj) if workflow_report_obj else None
 
-                # Generate manifest BEFORE finalizing status
                 item.end_time = datetime.now()
                 manifest_data = self.processing_manager._generate_manifest_for_item(item)
                 
-                # Organize and validate files if successful
                 video_files_payload = self._organize_output_files(item.output_files)
 
                 self.api_client.update_job_status(
@@ -588,17 +604,65 @@ class CreatorService:
                         self.api_client.update_mod_production_status(mod_id, manifest_data)
 
             duration = time.monotonic() - start_time
-            ### FIX: Đổi tên phương thức và truyền đúng tham số (TỐI ƯU) ###
-            # PerformanceAnalyzer.record_job_completion(queue_id, success, final_info)
-            # final_info có thể là một dict rỗng vì duration được tính bên trong.
             self.performance_analyzer.record_job_completion(queue_id, job_successful, {})
-
+            
+            # Dọn dẹp các component của job hiện tại
+            try:
+                if hasattr(self, 'obs_controller') and self.obs_controller:
+                    self.obs_controller.comprehensive_obs_cleanup()
+                if hasattr(self, 'game_player') and self.game_player:
+                    self.game_player.close_game_window()
+            except Exception as cleanup_error:
+                self.logger.error(f"Error during post-job cleanup for {queue_id}: {cleanup_error}")
         return job_successful
+
+    def _check_for_manual_json_override(self, slug: str, job_id: int) -> Tuple[Optional[Dict], Optional[str]]:
+        """
+        Check if a manual JSON file exists for this job in the manual_jsons directory.
+        Checks by Job ID first, then by Slug.
+        """
+        try:
+            files_to_check = []
+            if job_id:
+                files_to_check.append(f"{job_id}.json")
+            if slug:
+                files_to_check.append(f"{slug}.json")
+            
+            for filename in files_to_check:
+                filepath = os.path.join(MANUAL_JSON_DIR, filename)
+                if os.path.exists(filepath):
+                    self.logger.info(f"🔍 Checking manual JSON: {filepath} ... FOUND!")
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        # Basic validation
+                        if 'layout' in data:
+                            return data, filepath
+                        else:
+                            self.logger.warning(f"⚠️ Manual JSON {filename} found but invalid (missing 'layout')")
+                    except Exception as e:
+                        self.logger.error(f"❌ Error reading manual JSON {filename}: {e}")
+            
+            return None, None
+        except Exception as e:
+            self.logger.error(f"❌ Error in override check: {e}")
+            return None, None
 
     def _process_with_smart_retry(self, item, queue_id: int) -> bool:
         """Process with smart retry for individual steps - PHASE 2"""
         try:
-            # Step 1: JSON Generation (if needed)
+            # --- STEP 0: CHECK MANUAL OVERRIDE ---
+            manual_data, manual_path = self._check_for_manual_json_override(item.project_slug, queue_id)
+            
+            if manual_data:
+                print(f"🟢 MANUAL OVERRIDE DETECTED! Using local JSON file: {manual_path}")
+                item.json_data = manual_data
+                item.json_path = manual_path
+                # Đánh dấu là JSON đã có sẵn để bỏ qua bước sinh tự động
+                self.api_client.update_job_progress(queue_id, 'json_generation', 'manual_override', 100.0, 'completed',
+                    metadata={'override_file': manual_path})
+            
+            # --- Step 1: JSON Generation (ONLY if not overridden) ---
             if item.source_url and not item.json_data:
                 success = self._execute_with_retry(
                     queue_id, 'json_generation',
@@ -609,7 +673,7 @@ class CreatorService:
                 if not success:
                     return False
             
-            # Step 2: Video Processing  
+            # --- Step 2: Video Processing ---
             success = self._execute_with_retry(
                 queue_id, 'video_processing',
                 lambda: self.processing_manager._process_video_for_item(item),
@@ -790,118 +854,98 @@ class CreatorService:
             return False
     
     def _process_video_for_item(self, item, queue_id: int) -> bool:
-            """Process video with detailed progress reporting - [FIXED LOGIC]"""
+            """
+            [REVISED & FIXED] Process video with detailed progress reporting and correct
+            stop_event propagation.
+            """
             try:
-                # 🆕 START: Initialize progress tracking
+                # === START: PRE-FLIGHT CHECK ===
+                if not item.json_data:
+                    error_msg = "Cannot process video: item.json_data is missing."
+                    self.logger.error(error_msg)
+                    self.api_client.update_job_status(queue_id, 'failed', error_log=error_msg)
+                    return False
+                # === END: PRE-FLIGHT CHECK ===
+
+                # --- Initialize progress tracking ---
                 self.api_client.update_job_progress(
                     queue_id, 'initialization', 'starting', 0.0, 'active',
                     metadata={'item_mode': item.mode, 'project_slug': item.project_slug}
                 )
-                # 🆕 PHASE 4: Track performance
-                self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-                print(f"🎥 Processing video for item: {item.project_slug}")
-                print(f"📊 Mode: {item.mode}")
-                print(f"🔗 URL: {item.source_url}")
-                print(f"📋 JSON data available: {item.json_data is not None}")
+                self.performance_analyzer.record_job_progress(queue_id, 'initialization', 0.0)
                 
-                # 🆕 PROGRESS: Component initialization
+                self.logger.info(f"🎥 Processing video for item: {item.project_slug} (Mode: {item.mode})")
+
+                # --- Component initialization (FIXED CALL) ---
                 self.api_client.update_job_progress(
                     queue_id, 'initialization', 'components', 10.0, 'active'
                 )
-                # 🆕 PHASE 4: Track performance
-                self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0) 
+                
+                # === BẮT ĐẦU SỬA ĐỔI ===
+                # Lấy cờ stop của job hiện tại từ processing_manager
+                job_stop_event = self.processing_manager.stop_event 
 
-                if not self._initialize_components(item.json_data):
+                # Truyền cờ stop vào hàm _initialize_components
+                if not self._initialize_components(item.json_data, job_stop_event):
+                # === KẾT THÚC SỬA ĐỔI ===
+                    error_details = "Failed to initialize components (GamePlayer/OBS)."
                     self.api_client.update_job_progress(
                         queue_id, 'initialization', 'components', 0.0, 'failed',
-                        error_details="Failed to initialize components"
+                        error_details=error_details
                     )
-
-                    # 🆕 PHASE 4: Track performance
-                    self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
+                    item.error_message = error_details
                     return False
                 
-                # 🆕 PROGRESS: OBS connection test
+                # --- OBS connection test ---
                 self.api_client.update_job_progress(
                     queue_id, 'initialization', 'obs_test', 25.0, 'active'
                 )
 
-                # 🆕 PHASE 4: Track performance
-                self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
                 if hasattr(self, 'obs_controller') and self.obs_controller:
-                    print("🔍 Testing OBS connection...")
+                    self.logger.info("🔍 Testing OBS connection...")
                     test_ws = self.obs_controller.connect_obs_fast()
                     if test_ws:
-                        print("✅ OBS connection test successful")
-                        self.api_client.update_job_progress(
-                            queue_id, 'initialization', 'obs_test', 40.0, 'completed'
-                        )
-
-                        # 🆕 PHASE 4: Track performance
-                        self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
+                        self.logger.info("✅ OBS connection test successful")
+                        self.api_client.update_job_progress(queue_id, 'initialization', 'obs_test', 40.0, 'completed')
                         test_ws.close()
                     else:
-                        print("❌ OBS connection test failed")
+                        error_details = "OBS connection test failed before video processing."
+                        self.logger.error(f"❌ {error_details}")
                         self.api_client.update_job_progress(
                             queue_id, 'initialization', 'obs_test', 0.0, 'failed',
-                            error_details="OBS connection test failed before video processing"
+                            error_details=error_details
                         )
-
-                        # 🆕 PHASE 4: Track performance
-                        self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
+                        item.error_message = error_details
                         return False
                 
-                # 🆕 PROGRESS: Start main processing
+                # --- Start main processing ---
                 self.api_client.update_job_progress(
                     queue_id, 'video_processing', 'starting', 50.0, 'active'
                 )
 
-                # 🆕 PHASE 4: Track performance
-                self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
-                # Enhanced processing with progress callbacks
                 success = self._process_with_progress_callbacks(item, queue_id)
                 
-                # --- START OF FIX ---
-                # KIỂM TRA NGAY LẬP TỨC KẾT QUẢ CỦA BƯỚC XỬ LÝ VIDEO
-                # Nếu bước xử lý logic nghiệp vụ (ví dụ: kéo thả icon) thất bại,
-                # thì dừng lại ngay và báo lỗi, không cần kiểm tra file video nữa.
+                # --- Early exit on core workflow failure ---
                 if not success:
                     self.logger.error(f"❌ Video processing workflow failed for item {item.project_slug} (mode: {item.mode}). Skipping file validation.")
-                    # Cập nhật trạng thái cuối cùng là 'failed'
-                    self.api_client.update_job_status(queue_id, 'failed',
-                        error_log=item.error_message or f"Core video processing failed for mode '{item.mode}'. Check workflow logs.")
-                    # Trả về False ngay lập tức để toàn bộ job được đánh dấu là thất bại
                     return False
                 
-                # Khối code dưới đây CHỈ chạy KHI 'success' là True.
+                # --- File validation ---
                 self.logger.info(f"✅ Video processing workflow completed for {item.project_slug}. Proceeding to file validation.")
                 
-                # PHASE 3: Validate output files before marking as completed
                 print(f"🔍 Validating output files for quality control...")
-                
                 self.api_client.update_job_progress(
                     queue_id, 'validation', 'files', 95.0, 'active',
                     metadata={'output_files_count': len(item.output_files)}
                 )
 
-                # 🆕 PHASE 4: Track performance
-                self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
-                # Organize and validate files
                 video_files = self._organize_output_files(item.output_files)
                 validation_summary = video_files.get('validation_summary', {})
                 
-                # Check if validation meets minimum requirements
-                validation_success = self._check_validation_requirements(validation_summary, item.mode)
+                validation_success = self._check_validation_requirements(validation_summary, item)
                 
                 if validation_success:
-                    print(f"✅ File validation passed: {validation_summary['success_rate']}% success rate")
-                    
+                    self.logger.info(f"✅ File validation passed: {validation_summary.get('success_rate', 0)}% success rate")
                     self.api_client.update_job_progress(
                         queue_id, 'completion', 'finalizing', 100.0, 'completed',
                         metadata={
@@ -909,52 +953,27 @@ class CreatorService:
                             'total_valid_files': validation_summary.get('valid_files', 0)
                         }
                     )
-
-                    # 🆕 PHASE 4: Track performance
-                    self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
-                    # Update traditional status with validation metadata
-                    self.api_client.update_job_status(queue_id, 'completed', 
-                        details={
-                            'completion_time': datetime.now().isoformat(),
-                            'file_validation': validation_summary
-                        },
-                        video_files=video_files)
-                    
-                    return True # Trả về True cho job thành công
+                    return True
                 else:
                     failure_reason = f"Validation failed: {validation_summary.get('invalid_files', 0)} invalid files out of {validation_summary.get('total_files', 0)}."
-                    print(f"❌ File validation failed: {validation_summary.get('success_rate', 0)}% success rate. Reason: {failure_reason}")
+                    self.logger.error(f"❌ File validation failed: {validation_summary.get('success_rate', 0)}% success rate. Reason: {failure_reason}")
                     
                     self.api_client.update_job_progress(
-                        queue_id, 'validation', 'failed', 0.0, 'failed',
+                        queue_id, 'validation', 'failed', 95.0, 'failed',
                         error_details=failure_reason
                     )
-
-                    # 🆕 PHASE 4: Track performance
-                    self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
-                    self.api_client.update_job_status(queue_id, 'failed',
-                        error_log=f"File validation failed: {validation_summary.get('success_rate', 0)}% success rate")
-                    
-                    return False # Trả về False cho job thất bại
-                    
+                    item.error_message = failure_reason
+                    return False
+                        
             except Exception as e:
-                print(f"❌ Video processing error: {e}")
-                import traceback
-                traceback.print_exc()
+                error_msg = f"Critical exception in _process_video_for_item: {str(e)}"
+                self.logger.error(error_msg, exc_info=True)
                 
-                # 🆕 EXCEPTION: Critical error
                 self.api_client.update_job_progress(
                     queue_id, 'error', 'exception', 0.0, 'failed',
-                    error_details=f"Critical exception: {str(e)}"
+                    error_details=error_msg
                 )
-
-                # 🆕 PHASE 4: Track performance
-                self.performance_analyzer.record_job_progress(queue_id, 'retry', 0.0)
-
-                self.api_client.update_job_status(queue_id, 'failed',
-                    error_log=f"Video processing error: {str(e)}")
+                item.error_message = error_msg
                 return False
 
     def _process_with_progress_callbacks(self, item, queue_id: int) -> bool:
