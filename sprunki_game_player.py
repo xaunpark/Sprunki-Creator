@@ -1713,6 +1713,43 @@ class SprunkiGamePlayer:
                 ws_url = self._get_websocket_url()
                 if ws_url:
                     ws = websocket.create_connection(ws_url)
+
+                    # =======================================================================
+                    # TỰ ĐỘNG CLICK OK CHO TẤT CẢ JS ALERT/POPUP
+                    # =======================================================================
+                    # Đoạn này sẽ ghi đè hàm alert/confirm gốc của trình duyệt
+                    js_override = """
+                        // Ghi đè hàm alert (thông báo 1 nút OK)
+                        window.alert = function(message) { 
+                            console.log('🚫 Đã chặn Alert: ' + message); 
+                            return true; 
+                        };
+
+                        // Ghi đè hàm confirm (hộp thoại Yes/No) -> Luôn trả về True (Yes/OK)
+                        window.confirm = function(message) { 
+                            console.log('🚫 Đã chặn Confirm (Auto Yes): ' + message); 
+                            return true; 
+                        };
+
+                        // Ghi đè hàm prompt (nhập liệu) -> Trả về rỗng
+                        window.prompt = function(message) { 
+                            console.log('🚫 Đã chặn Prompt: ' + message); 
+                            return null; 
+                        };
+                        
+                        // Chặn sự kiện hiển thị dialog nếu có (BeforeUnload)
+                        window.onbeforeunload = null;
+                    """
+
+                    self._send_cdp_command(ws, {
+                        "method": "Page.addScriptToEvaluateOnNewDocument",
+                        "params": {
+                            "source": js_override
+                        }
+                    })
+                    print("   -> 🛡️ Anti-Popup Shield activated (Auto-Click OK).")
+                    # =======================================================================
+
                     self._send_cdp_command(ws, {"method": "Page.reload"})
                     ws.close()
 
