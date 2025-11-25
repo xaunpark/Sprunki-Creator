@@ -1669,7 +1669,12 @@ class SprunkiGamePlayer:
                 "--incognito", 
                 "--window-size=1280,720", 
                 "--remote-allow-origins=*",
-                
+
+                # --- CẶP BÀI TRÙNG ĐỂ TẮT HOÀN TOÀN YÊU CẦU QUYỀN---
+                "--use-fake-ui-for-media-stream",     # 1. Tự động đồng ý quyền Micro/Cam
+                "--test-type",                        # 2. ✅ QUAN TRỌNG: Tắt thông báo cảnh báo màu vàng của Chrome
+                # ---------------------------------------
+
                 # ðŸ†• EXTENSION-SAFE CLEANUP FLAGS
                 "--clear-token-service",                    # âœ… Safe: chá»‰ clear auth tokens
                 "--clear-key-system-properties",           # âœ… Safe: chá»‰ clear key system  
