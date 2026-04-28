@@ -1,0 +1,208 @@
+# 🍪 Hướng dẫn Inject Cookies vào Chrome Automation
+
+## Tổng quan hệ thống hiện tại
+
+Hệ thống `sprunki_game_player.py` đã có sẵn:
+- Method [inject_cookies_via_cdp()](file:///G:/VS-Project/Sprunki/sprunki_game_player.py#L9257-L9310) — đọc cookies từ JSON và inject qua CDP
+- File [cocrea_cookies.json](file:///G:/VS-Project/Sprunki/cocrea_cookies.json) — chứa cookies đã export
+- Gọi inject tại [navigate_and_prepare_game](file:///G:/VS-Project/Sprunki/sprunki_game_player.py#L1709-L1754) — ngay sau khi Chrome mở
+
+---
+
+## Bước 1: Export cookies từ trình duyệt
+
+### Cách A: Dùng Extension "EditThisCookie" hoặc "Cookie-Editor" (Khuyến nghị)
+
+1. **Cài extension** [Cookie-Editor](https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm) trên Chrome cá nhân
+2. **Đăng nhập** vào `cocrea.world` bằng tay trên Chrome cá nhân
+3. **Mở Cookie-Editor** → Click icon extension → Click **Export** (chọn JSON format)
+4. **Paste** nội dung vào file `cocrea_cookies.json` trong thư mục project
+
+### Cách B: Dùng DevTools thủ công
+
+1. Mở Chrome → Đăng nhập `cocrea.world`
+2. Nhấn `F12` → Tab **Application** → **Cookies** → `https://www.cocrea.world`
+3. Ghi lại từng cookie (name, value, domain, path, secure, httpOnly, sameSite, expires)
+4. Tạo JSON theo format ở Bước 2
+
+---
+
+## Bước 2: Format file `cocrea_cookies.json`
+
+> [!IMPORTANT]
+> File JSON phải theo đúng format này. Cookie quan trọng nhất là `token` và `cookie-user-id`.
+
+```json
+[
+  {
+    "domain": ".cocrea.world",
+    "expirationDate": 1779545963,
+    "httpOnly": false,
+    "name": "token",
+    "path": "/",
+    "sameSite": "unspecified",
+    "secure": false,
+    "value": "YOUR_TOKEN_VALUE_HERE"
+  },
+  {
+    "domain": ".cocrea.world",
+    "expirationDate": 1769886716,
+    "httpOnly": false,
+    "name": "cookie-user-id",
+    "path": "/",
+    "sameSite": "unspecified",
+    "secure": false,
+    "value": "YOUR_USER_ID_HERE"
+  }
+]
+```
+
+> [!TIP]
+> Bạn chỉ cần 2 cookies chính: `token` và `cookie-user-id`. Các cookies khác (ads, tracking) là không bắt buộc nhưng có thể giúp trang load bình thường hơn.
+
+---
+
+## Bước 3: Cách inject hoạt động (đã có sẵn)
+
+Flow hiện tại trong code:
+
+```mermaid
+sequenceDiagram
+    participant App as GamePlayer
+    participant Chrome as Chrome Browser
+    participant CDP as CDP WebSocket
+    participant Web as cocrea.world
+
+    App->>Chrome: Mở Chrome với --user-data-dir
+    App->>Chrome: Chờ 3 giây khởi động
+    App->>CDP: Kết nối WebSocket
+    App->>CDP: Network.setCookie (từng cookie)
+    CDP->>Chrome: Set cookies vào browser
+    App->>CDP: Page.reload
+    CDP->>Chrome: Reload trang
+    Chrome->>Web: Request với cookies mới
+    Web-->>Chrome: Response (đã đăng nhập)
+```
+
+Code inject đã sẵn tại [inject_cookies_via_cdp](file:///G:/VS-Project/Sprunki/sprunki_game_player.py#L9257-L9310):
+
+```python
+def inject_cookies_via_cdp(self):
+    cookie_file = "cocrea_cookies.json"
+    # Đọc cookies từ file
+    with open(cookie_file, 'r') as f:
+        cookies = json.load(f)
+    
+    # Kết nối CDP WebSocket
+    ws = websocket.create_connection(ws_url, timeout=10)
+    
+    # Inject từng cookie
+    for cookie in cookies:
+        self._send_cdp_command(ws, {
+            "method": "Network.setCookie",
+            "params": {
+                "name": cookie["name"],
+                "value": cookie["value"],
+                "domain": cookie["domain"],
+                ...
+            }
+        })
+    
+    # Sau đó Page.reload để áp dụng
+```
+
+---
+
+## Bước 4: Vấn đề `--incognito` và cách fix
+
+> [!WARNING]
+> Code hiện tại dùng `--incognito` (line 1669). Điều này khiến cookies **không được lưu lại** sau khi đóng Chrome.
+
+### Hai lựa chọn:
+
+| | Giữ `--incognito` | Bỏ `--incognito` |
+|---|---|---|
+| **Session persist** | ❌ Không — phải inject mỗi lần | ✅ Có — đăng nhập 1 lần là đủ |
+| **Cache sạch** | ✅ Luôn sạch | ❌ Có thể cache cũ gây lỗi |
+| **Cookies file** | ⚠️ Phải update thủ công khi hết hạn | Không cần |
+| **Phù hợp khi** | Chạy nhiều account, cần isolate | Chỉ dùng 1 account cố định |
+
+### Nếu muốn bỏ `--incognito` (persistent login):
+
+Sửa line 1669 trong [sprunki_game_player.py](file:///G:/VS-Project/Sprunki/sprunki_game_player.py#L1669):
+
+```diff
+-                "--incognito", 
++                # "--incognito",  # Đã bỏ để giữ login session
+```
+
+Sau đó đăng nhập **1 lần bằng tay**:
+1. Chạy app, Chrome mở lên
+2. Đăng nhập cocrea.world thủ công
+3. Đóng Chrome
+4. Từ lần sau, session tự động được load từ `chrome_debug_profile`
+
+---
+
+## Bước 5: Tự động update cookies (Nâng cao)
+
+Nếu bạn giữ `--incognito`, thêm method export cookies **trước khi đóng Chrome** để cập nhật file:
+
+```python
+def export_cookies_from_browser(self):
+    """Export cookies hiện tại từ browser ra file JSON"""
+    try:
+        ws_url = self._get_websocket_url()
+        if not ws_url:
+            return False
+        
+        ws = websocket.create_connection(ws_url, timeout=10)
+        
+        # Lấy tất cả cookies của domain cocrea.world
+        response = self._send_cdp_command(ws, {
+            "method": "Network.getCookies",
+            "params": {
+                "urls": ["https://www.cocrea.world", "https://cocrea.world"]
+            }
+        })
+        
+        ws.close()
+        
+        if response and 'result' in response:
+            cookies = response['result'].get('cookies', [])
+            
+            # Chuyển format CDP → file format
+            export_cookies = []
+            for c in cookies:
+                export_cookies.append({
+                    "domain": c.get('domain'),
+                    "expirationDate": c.get('expires', 0),
+                    "httpOnly": c.get('httpOnly', False),
+                    "name": c.get('name'),
+                    "path": c.get('path', '/'),
+                    "sameSite": c.get('sameSite', 'Lax'),
+                    "secure": c.get('secure', False),
+                    "value": c.get('value')
+                })
+            
+            with open("cocrea_cookies.json", 'w', encoding='utf-8') as f:
+                json.dump(export_cookies, f, indent=4, ensure_ascii=False)
+            
+            print(f"✅ Exported {len(export_cookies)} cookies to cocrea_cookies.json")
+            return True
+            
+    except Exception as e:
+        print(f"❌ Export cookies failed: {e}")
+        return False
+```
+
+---
+
+## Quick Checklist
+
+- [ ] Đăng nhập cocrea.world trên Chrome cá nhân
+- [ ] Export cookies bằng Cookie-Editor extension
+- [ ] Paste vào `G:\VS-Project\Sprunki\cocrea_cookies.json`
+- [ ] Đảm bảo có cookie `token` và `cookie-user-id`
+- [ ] (Tùy chọn) Bỏ `--incognito` nếu muốn persistent login
+- [ ] Chạy thử và kiểm tra log xem có "Đã tiêm thành công X cookies"
