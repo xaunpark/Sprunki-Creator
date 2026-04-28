@@ -9254,6 +9254,22 @@ class SprunkiGamePlayer:
         except Exception as e:
             print(f"âŒ Error during enhanced cleanup: {e}")
 
+    def _normalize_samesite(self, raw_value):
+        """
+        Chuyển đổi sameSite từ format Cookie-Editor sang format CDP.
+        Cookie-Editor export: "no_restriction", "unspecified", "lax", "strict"
+        CDP yêu cầu chính xác: "None", "Lax", "Strict"
+        """
+        mapping = {
+            "no_restriction": "None",
+            "none": "None",
+            "lax": "Lax",
+            "strict": "Strict",
+            "unspecified": "Lax",  # Default an toàn
+        }
+        normalized = raw_value.lower().strip() if raw_value else "lax"
+        return mapping.get(normalized, "Lax")
+
     def inject_cookies_via_cdp(self):
         """
         Đọc cookies từ file json và tiêm vào trình duyệt qua CDP
@@ -9271,42 +9287,77 @@ class SprunkiGamePlayer:
             # Kết nối WebSocket
             ws_url = self._get_websocket_url()
             if not ws_url:
+                print("❌ Không thể kết nối WebSocket để inject cookies")
                 return False
             
             ws = websocket.create_connection(ws_url, timeout=10)
 
-            count = 0
+            success_count = 0
+            fail_count = 0
             for cookie in cookies:
-                # Lọc các trường không cần thiết mà extension có thể xuất ra
-                # CDP Network.setCookie chỉ cần các trường cơ bản
-                
-                # Quan trọng: cocrea.world cần domain chính xác
                 domain = cookie.get('domain', '.cocrea.world')
+                
+                # FIX: Chuyển đổi sameSite từ Cookie-Editor format → CDP format
+                raw_samesite = cookie.get('sameSite', 'Lax')
+                cdp_samesite = self._normalize_samesite(raw_samesite)
+                
+                # FIX: Chrome bắt buộc secure=true khi sameSite=None
+                secure = cookie.get('secure', False)
+                if cdp_samesite == "None":
+                    secure = True
                 
                 cookie_params = {
                     "name": cookie.get('name'),
                     "value": cookie.get('value'),
                     "domain": domain,
                     "path": cookie.get('path', '/'),
-                    "secure": cookie.get('secure', True),
+                    "secure": secure,
                     "httpOnly": cookie.get('httpOnly', False),
-                    "sameSite": cookie.get('sameSite', 'Lax'),
-                    "expires": cookie.get('expirationDate', None)
+                    "sameSite": cdp_samesite,
+                    "expires": cookie.get('expirationDate', -1),
+                    # FIX: Thêm URL để CDP xác định domain chính xác
+                    "url": f"https://{domain.lstrip('.')}"
                 }
 
                 # Gửi lệnh setCookie qua CDP
-                self._send_cdp_command(ws, {
+                response = self._send_cdp_command(ws, {
                     "method": "Network.setCookie",
                     "params": cookie_params
                 })
-                count += 1
+                
+                # Kiểm tra kết quả từng cookie
+                cookie_ok = True
+                if response and 'result' in response:
+                    cookie_ok = response['result'].get('success', False)
+                
+                if cookie_ok:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    print(f"   ⚠️ Cookie '{cookie.get('name')}' inject FAILED (sameSite={raw_samesite}→{cdp_samesite})")
 
             ws.close()
-            print(f"✅ Đã tiêm thành công {count} cookies!")
-            return True
+            
+            if fail_count > 0:
+                print(f"⚠️ Inject cookies: {success_count} thành công, {fail_count} thất bại")
+            else:
+                print(f"✅ Đã tiêm thành công tất cả {success_count} cookies!")
+            
+            # Chỉ cần token và cookie-user-id là đủ để đăng nhập
+            key_cookies = [c.get('name') for c in cookies]
+            has_token = 'token' in key_cookies
+            has_user_id = 'cookie-user-id' in key_cookies
+            if has_token and has_user_id:
+                print(f"✅ Cookies đăng nhập quan trọng: token=✓, cookie-user-id=✓")
+            else:
+                print(f"⚠️ THIẾU cookies đăng nhập: token={'✓' if has_token else '✗'}, cookie-user-id={'✓' if has_user_id else '✗'}")
+            
+            return success_count > 0
 
         except Exception as e:
             print(f"❌ Lỗi khi tiêm cookies: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 if __name__ == "__main__":
