@@ -10,7 +10,7 @@ pyautogui
 pygetwindow
 pywin32
 requests
-scikit-image  # <--- Đã sửa
+scikit-image
 tqdm
 websocket-client
 websockets

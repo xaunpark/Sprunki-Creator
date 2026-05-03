@@ -326,11 +326,11 @@ class SprunkiGamePlayer:
         self.health_check_interval = 30  # Check every 30s
         self.session_start_time = None
 
-        # JavaScript for finding ALL Skip Intro buttons (Multi-Target Detection)
+        # JavaScript for finding action buttons (skip/play/start/intro) - Multi-Target Detection
         self.js_find_skip_intro = '''
-        new Promise(async (resolve, reject) => {
+        new Promise((resolve) => {
             try {
-                console.log("ðŸ” [GAME PLAYER] Searching for ALL Skip Intro buttons...");
+                console.log("[GAME PLAYER] Searching for action buttons (skip/play/start/intro)...");
                 
                 function findVM() {
                     if (window.__vm && window.__vm.runtime) return window.__vm;
@@ -365,77 +365,89 @@ class SprunkiGamePlayer:
                 
                 const vm = findVM();
                 if (!vm) {
-                    console.log("âŒ [GAME PLAYER] VM not found - cannot search for Skip Intro buttons");
                     resolve({ found: false, count: 0, buttons: [], reason: "vm_not_found" });
                     return;
                 }
                 
-                const allTargets = vm.runtime.targets.map(t => t);
-                console.log(`ðŸŽ¯ [GAME PLAYER] Total targets found: ${allTargets.length}`);
+                const keywords = ['skip', 'play', 'start', 'intro'];
+                const priorityMap = { 'skip': 1, 'play': 2, 'start': 2, 'intro': 3 };
+                const excludeNames = ['icons', 'mute'];
                 
-                // Find ALL targets with name "Intro" and costume "Skip"
-                const introTargets = allTargets.filter(target => {
-                    if (target.sprite.name !== "Intro") {
-                        return false;
+                const allTargets = vm.runtime.targets;
+                const actionButtons = [];
+                
+                for (let i = 0; i < allTargets.length; i++) {
+                    const target = allTargets[i];
+                    if (target.isStage) continue;
+                    if (!target.visible) continue;
+                    if (!target.sprite) continue;
+                    if (target.size <= 0) continue;
+                    
+                    const spriteName = (target.sprite.name || '').toLowerCase();
+                    const currentCostumeName = (target.sprite.costumes[target.currentCostume]?.name || '').toLowerCase();
+                    
+                    // Exclude known non-button sprites
+                    if (excludeNames.some(ex => spriteName.includes(ex))) continue;
+                    
+                    // Match keyword in current costume name (preferred) or sprite name
+                    let matchedKeyword = null;
+                    let matchSource = null;
+                    
+                    for (const kw of keywords) {
+                        if (currentCostumeName.includes(kw)) {
+                            matchedKeyword = kw;
+                            matchSource = 'costume';
+                            break;
+                        }
+                    }
+                    if (!matchedKeyword) {
+                        for (const kw of keywords) {
+                            if (spriteName.includes(kw)) {
+                                matchedKeyword = kw;
+                                matchSource = 'name';
+                                break;
+                            }
+                        }
                     }
                     
-                    const hasSkipCostume = target.sprite.costumes.some(costume => 
-                        costume.name === "Skip"
-                    );
-                    
-                    return hasSkipCostume;
-                });
-                
-                console.log(`ðŸ” [GAME PLAYER] Found ${introTargets.length} 'Intro' targets with 'Skip' costume`);
-                
-                if (introTargets.length === 0) {
-                    console.log("â„¹ï¸ [GAME PLAYER] No Skip Intro buttons found");
-                    resolve({ found: false, count: 0, buttons: [], reason: "target_not_found" });
-                    return;
-                }
-                
-                // Process ALL intro targets
-                const skipIntroButtons = [];
-                
-                introTargets.forEach((target, index) => {
-                    console.log(`\\nðŸŽ¯ [GAME PLAYER] Processing Intro Target ${index + 1}/${introTargets.length}:`);
-                    console.log(`   - Logic Position: (${target.x}, ${target.y})`);
-                    console.log(`   - Visible: ${target.visible}`);
-                    console.log(`   - Current Costume: ${target.sprite.costumes[target.currentCostume]?.name || 'Unknown'}`);
+                    if (!matchedKeyword) continue;
                     
                     const pixelCoords = toPixelWithMenu(target.x, target.y);
+                    if (pixelCoords.x === null || pixelCoords.y === null) continue;
+                    if (pixelCoords.x < 0 || pixelCoords.x > 1920 || pixelCoords.y < 0 || pixelCoords.y > 1080) continue;
                     
-                    if (pixelCoords.x !== null && pixelCoords.y !== null) {
-                        const buttonInfo = {
-                            index: index + 1,
-                            x: pixelCoords.x,
-                            y: pixelCoords.y,
-                            logicX: target.x,
-                            logicY: target.y,
-                            visible: target.visible,
-                            targetName: target.sprite.name,
-                            currentCostumeName: target.sprite.costumes[target.currentCostume]?.name || 'Unknown'
-                        };
-                        
-                        skipIntroButtons.push(buttonInfo);
-                        console.log(`   âœ… [GAME PLAYER] Converted to pixel: (${pixelCoords.x}, ${pixelCoords.y}) - ${target.visible ? 'VISIBLE' : 'HIDDEN'}`);
-                    }
+                    actionButtons.push({
+                        index: i,
+                        x: pixelCoords.x,
+                        y: pixelCoords.y,
+                        logicX: Math.round(target.x),
+                        logicY: Math.round(target.y),
+                        visible: target.visible,
+                        targetName: target.sprite.name,
+                        currentCostumeName: target.sprite.costumes[target.currentCostume]?.name || 'Unknown',
+                        matchedKeyword: matchedKeyword,
+                        matchSource: matchSource,
+                        priority: priorityMap[matchedKeyword] || 99
+                    });
+                }
+                
+                // Sort by priority (lower number = click first)
+                actionButtons.sort((a, b) => a.priority - b.priority);
+                
+                console.log(`[GAME PLAYER] Found ${actionButtons.length} action button(s)`);
+                actionButtons.forEach(btn => {
+                    console.log(`  [P${btn.priority}] ${btn.targetName} / ${btn.currentCostumeName} @ (${btn.x}, ${btn.y}) - ${btn.matchedKeyword} via ${btn.matchSource}`);
                 });
                 
-                const visibleButtons = skipIntroButtons.filter(btn => btn.visible);
-                
-                console.log(`\\nðŸ“Š [GAME PLAYER] BUTTONS SUMMARY: Total: ${skipIntroButtons.length}, Visible: ${visibleButtons.length}`);
-                
                 resolve({
-                    found: skipIntroButtons.length > 0,
-                    count: skipIntroButtons.length,
-                    buttons: skipIntroButtons,
-                    visibleCount: visibleButtons.length,
-                    reason: skipIntroButtons.length > 0 ? "success" : "no_valid_buttons"
+                    found: actionButtons.length > 0,
+                    count: actionButtons.length,
+                    buttons: actionButtons,
+                    reason: actionButtons.length > 0 ? "success" : "no_action_buttons_found"
                 });
                 
             } catch(e) { 
-                console.error("âŒ [GAME PLAYER] Error searching for Skip Intro buttons:", e);
+                console.error("[GAME PLAYER] Error searching for action buttons:", e);
                 resolve({ found: false, count: 0, buttons: [], reason: "error", error: e.toString() }); 
             }
         });
@@ -5809,53 +5821,64 @@ class SprunkiGamePlayer:
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
-            print(f"ðŸ” ENHANCED CDP SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} blind clicks...")
+            print(f"\U0001f50d CDP SKIP/PLAY DETECTION: Looping scan + {self.intro_skip_clicks} blind clicks...")
             
-            # Phase 1: Smart detection and clicks
-            print("ðŸ“ Phase 1: Searching for ALL Skip Intro buttons via CDP...")
-            
+            # Phase 1: Looping smart detection (scan -> click -> wait -> rescan)
+            print("\U0001f50d Phase 1: Scanning for action buttons (skip/play/start/intro)...")
+            max_scan_rounds = 5
+            scan_interval = 2.0
             smart_clicks_performed = 0
-            all_buttons = []
+            rounds_completed = 0
             
             try:
-                # Execute JavaScript to find ALL Skip Intro buttons
-                response = self._send_cdp_command(ws, {
-                    "method": "Runtime.evaluate", 
-                    "params": {"expression": self.js_find_skip_intro, "awaitPromise": True, "returnByValue": True}
-                })
-                
-                if response and 'result' in response:
-                    skip_result = response.get('result', {}).get('result', {}).get('value')
+                for scan_round in range(1, max_scan_rounds + 1):
+                    rounds_completed = scan_round
+                    print(f"\n\U0001f504 Scan round {scan_round}/{max_scan_rounds}...")
                     
-                    if skip_result and skip_result.get('found'):
-                        all_buttons = skip_result.get('buttons', [])
-                        button_count = skip_result.get('count', 0)
-                        visible_count = skip_result.get('visibleCount', 0)
+                    response = self._send_cdp_command(ws, {
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": self.js_find_skip_intro, "awaitPromise": True, "returnByValue": True}
+                    })
+                    
+                    buttons = []
+                    if response and 'result' in response:
+                        result = response.get('result', {}).get('result', {}).get('value')
+                        if result and result.get('found'):
+                            buttons = result.get('buttons', [])
+                    
+                    if not buttons:
+                        print(f"   \u2139\ufe0f No action buttons found in round {scan_round}")
+                        if smart_clicks_performed > 0:
+                            print("   \u2705 Previous clicks were made, panels likely cleared")
+                        break
+                    
+                    print(f"   \U0001f3af Found {len(buttons)} action button(s):")
+                    for i, button in enumerate(buttons):
+                        x, y = button['x'], button['y']
+                        keyword = button.get('matchedKeyword', '?')
+                        priority = button.get('priority', 99)
+                        name = button.get('targetName', '?')
+                        costume = button.get('currentCostumeName', '?')
                         
-                        print(f"âœ… Found {button_count} Skip Intro buttons (Visible: {visible_count})")
-                        
-                        # Click ALL buttons found
-                        for i, button in enumerate(all_buttons):
-                            button_num = i + 1
-                            x, y = button['x'], button['y']
-                            visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
-                            costume_name = button.get('currentCostumeName', 'Unknown')
-                            
-                            print(f"ðŸŽ¯ CDP clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
-                            
-                            # Click this specific button via CDP
-                            self._simulate_click_via_cdp(ws, x, y)
-                            time.sleep(0.8)  # Wait between clicks
-                            
-                            smart_clicks_performed += 1
-                        
-                        print(f"âœ… Smart CDP clicks completed: {smart_clicks_performed} buttons clicked!")
-                    else:
-                        reason = skip_result.get('reason', 'unknown') if skip_result else 'no_result'
-                        print(f"â„¹ï¸ No Skip Intro buttons found via CDP - Reason: {reason}")
+                        print(f"      [{i+1}] P{priority} '{keyword}' - {name}/{costume} @ ({x}, {y})")
+                        self._simulate_click_via_cdp(ws, x, y)
+                        time.sleep(0.8)
+                        smart_clicks_performed += 1
+                    
+                    print(f"   \u2705 Clicked {len(buttons)} button(s) in round {scan_round}")
+                    
+                    if scan_round < max_scan_rounds:
+                        print(f"   \u23f3 Waiting {scan_interval}s before next scan...")
+                        time.sleep(scan_interval)
                 
+                if smart_clicks_performed > 0:
+                    print(f"\n\u2705 Smart detection completed: {smart_clicks_performed} total clicks across {rounds_completed} round(s)")
+                else:
+                    print(f"\n\u2139\ufe0f No action buttons detected in {rounds_completed} round(s)")
+                    
             except Exception as e:
-                print(f"âš ï¸ Smart detection failed: {e}, proceeding with blind clicks...")
+                print(f"\u26a0\ufe0f Smart detection failed: {e}, proceeding with blind clicks...")
+
 
             # === PHASE 1.5: PRESS ANY KEY (NEW) ===
             print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
@@ -5883,13 +5906,13 @@ class SprunkiGamePlayer:
             
             # Summary
             if smart_clicks_performed > 0:
-                print("ðŸŽ‰ ENHANCED CDP SKIP INTRO COMPLETED:")
-                print(f"   âœ… Smart clicks: {smart_clicks_performed} buttons via CDP")
+                print("ðŸŽ‰ CDP SKIP/PLAY DETECTION COMPLETED:")
+                print(f"   âœ… Smart clicks: {smart_clicks_performed} action buttons via CDP")
                 print(f"   âœ… Blind clicks: {self.intro_skip_clicks} additional CDP clicks")
                 print("   ðŸ›¡ï¸ Dual protection ensures maximum success rate")
             else:
-                print("ðŸŽ‰ STANDARD CDP SKIP INTRO COMPLETED:")
-                print("   âš ï¸ Smart clicks: N/A (No buttons found)")
+                print("ðŸŽ‰ STANDARD CDP FALLBACK COMPLETED:")
+                print("   âš ï¸ Smart clicks: N/A (No action buttons found)")
                 print(f"   âœ… Blind clicks: {self.intro_skip_clicks} CDP clicks")
                 print("   ðŸ”„ Standard method used as fallback")
             
