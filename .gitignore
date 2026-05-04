@@ -40,3 +40,5 @@ extensions/
 JSON/
 output/
 temp/
+
+config.json

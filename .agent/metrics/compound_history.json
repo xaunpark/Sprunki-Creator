@@ -1,0 +1,70 @@
+[
+  {
+    "date": "2026-05-04",
+    "solutions": {
+      "total": 0,
+      "hit_rate": 0,
+      "zombies": 0
+    },
+    "workflows": {
+      "invocations": 3,
+      "top": [
+        {
+          "name": "/review",
+          "count": 1
+        },
+        {
+          "name": "/explore",
+          "count": 1
+        },
+        {
+          "name": "/compound",
+          "count": 1
+        }
+      ],
+      "unused_count": 24,
+      "unused": [
+        "/adr",
+        "/changelog",
+        "/compound_health",
+        "/create-agent-skill",
+        "/cycle",
+        "/deploy-docs",
+        "/doc",
+        "/generate_command",
+        "/heal-skill",
+        "/housekeeping",
+        "/plan",
+        "/plan_review",
+        "/promote_pattern",
+        "/release-docs",
+        "/report-bug",
+        "/reproduce-bug",
+        "/resolve_pr",
+        "/resolve_todo",
+        "/skill-review",
+        "/specs",
+        "/triage",
+        "/triage-sprint",
+        "/work",
+        "/xcode-test"
+      ]
+    },
+    "skills": {
+      "invocations": 0,
+      "top": []
+    },
+    "todos": {
+      "active": 0,
+      "avg_quality": 0
+    },
+    "drift": {
+      "plan_drift": 0,
+      "spec_drift": 0
+    },
+    "explorations": {
+      "count": 0
+    },
+    "health_grade": "F"
+  }
+]
