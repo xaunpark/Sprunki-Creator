@@ -6207,10 +6207,10 @@ class SprunkiGamePlayer:
             if progress_callback:
                 progress_callback("🗃️ Clearing browsing data and preparing fresh session...")
             
-            print("🗃️ Pre-setup cleanup: Clearing all browsing data...")
-            self.cleanup_chrome_complete()
+            # NOTE: cleanup_chrome_complete() removed here — navigate_and_prepare_game()
+            # already calls it internally with its own port verification loop.
+            print("🗃️ Pre-setup cleanup: Clearing browsing cache data...")
             self.force_clear_chrome_data()
-            time.sleep(3)
             print("✅ Pre-setup cleanup completed")
 
             # 🌐 BROWSER LAUNCH (existing logic, keep as-is)

@@ -49,8 +49,8 @@
       "cocrea.world"
     ],
     "default_timeout": 30,
-    "page_load_wait": 30,
-    "game_load_wait": 10,
+    "page_load_wait": 8,
+    "game_load_wait": 5,
     "max_pagedown_attempts": 5,
     "fullscreen_wait": 8,
     "intro_skip_clicks": 10,
