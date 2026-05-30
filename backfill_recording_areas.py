@@ -56,6 +56,31 @@ def has_manifest_backup(project_dir: Path) -> bool:
     return any(project_dir.glob("manifest.json.bak-*"))
 
 
+def manifest_has_new_recording_area(manifest: Dict[str, Any]) -> bool:
+    layout_summary = manifest.get("layoutSummary", {})
+    area = layout_summary.get("recordingArea")
+    if not isinstance(area, dict):
+        return False
+    if manifest.get("recordingAreas") is not None:
+        return False
+    if layout_summary.get("recordingAreaMode") is not None:
+        return False
+    try:
+        return (
+            int(area.get("width", 0)) == 700
+            and int(area.get("height", 0)) == 480
+            and str(area.get("aspectRatio", "")) == "35:24"
+        )
+    except Exception:
+        return False
+
+
+def should_skip_project(project_dir: Path, manifest: Dict[str, Any], no_skip_existing_backup: bool) -> bool:
+    if no_skip_existing_backup:
+        return False
+    return has_manifest_backup(project_dir) and manifest_has_new_recording_area(manifest)
+
+
 def prompt_path(prompt: str, must_exist: bool = True) -> Path:
     while True:
         raw = input(prompt).strip().strip('"')
@@ -257,14 +282,15 @@ def batch_backfill(root_dir: Path, no_skip_existing_backup: bool = False) -> Non
         print("\n" + "=" * 80)
         print(f"[{index}/{len(projects)}] {project_dir.name}")
 
-        if has_manifest_backup(project_dir) and not no_skip_existing_backup:
-            print("Skipping: manifest.json backup already exists, assuming this project was already backfilled.")
-            summary["skipped"].append(str(project_dir))
-            continue
-
         try:
             manifest_path = find_manifest(project_dir, None)
             manifest = read_json(manifest_path)
+            if should_skip_project(project_dir, manifest, no_skip_existing_backup):
+                print("Skipping: backup exists and manifest already has new 700x480 recordingArea.")
+                summary["skipped"].append(str(project_dir))
+                continue
+            if has_manifest_backup(project_dir) and not no_skip_existing_backup:
+                print("Backup exists, but manifest is not in the new format; running backfill again.")
             source_json_path = find_source_json(project_dir, manifest, None)
             backfill(project_dir, manifest_path, source_json_path)
             summary["processed"].append(str(project_dir))
