@@ -1,24 +1,30 @@
 """
-Backfill per-segment recordingArea metadata for an already-recorded showcase.
+Backfill the single fixed recordingArea for an already-recorded showcase.
 
-This tool does not start OBS and does not record video. It reopens the mod,
-replays only the icon drag/return steps needed to inspect runtime bounds, then
-updates manifest.json and the showcase timestamps file with segment references.
+Current production policy:
+  - one recordingArea per mod, stored at manifest.layoutSummary.recordingArea
+  - fixed size 700x480
+  - bottom anchored to runtime Mute Buttons boundsBottomY, fallback 670
+  - horizontally centered on the center slot when source JSON is available,
+    otherwise centered on the default stage center X=999
+
+This tool does not start OBS, does not record video, and does not drag icons.
+It only opens the mod, injects/uses the runtime inspector, calculates bottomY,
+then updates manifest.json back to the legacy-compatible single recordingArea
+shape.
 
 Usage:
     python backfill_recording_areas.py
-    python backfill_recording_areas.py "G:\\Sprunki OUTPUT\\MyProject"
-    python backfill_recording_areas.py --project "G:\\Sprunki OUTPUT\\MyProject" --json "G:\\Sprunki OUTPUT\\JSON\\MyProject.json"
+    python backfill_recording_areas.py "G:\\SprunkiOUTPUT\\MyProject"
+    python backfill_recording_areas.py --project "G:\\SprunkiOUTPUT\\MyProject" --json "G:\\SprunkiOUTPUT\\JSON\\MyProject.json"
+    python backfill_recording_areas.py --batch-root "D:\\OUTPUT"
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
-import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -46,6 +52,10 @@ def backup_file(path: Path) -> Optional[Path]:
     return backup_path
 
 
+def has_manifest_backup(project_dir: Path) -> bool:
+    return any(project_dir.glob("manifest.json.bak-*"))
+
+
 def prompt_path(prompt: str, must_exist: bool = True) -> Path:
     while True:
         raw = input(prompt).strip().strip('"')
@@ -69,24 +79,6 @@ def find_manifest(project_dir: Path, explicit: Optional[str]) -> Path:
     return path
 
 
-def find_timestamps(project_dir: Path, explicit: Optional[str]) -> Path:
-    if explicit:
-        path = Path(explicit)
-        if not path.exists():
-            raise FileNotFoundError(f"Timestamps file not found: {path}")
-        return path
-
-    candidates = sorted(project_dir.glob("*showcase.timestamps.json"))
-    if not candidates:
-        candidates = sorted(project_dir.glob("*.timestamps.json"))
-    if not candidates:
-        raise FileNotFoundError(f"No timestamps JSON found in project folder: {project_dir}")
-    if len(candidates) > 1:
-        print("Multiple timestamps files found. Using the newest by modified time:")
-        candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
-
-
 def candidate_json_paths(project_dir: Path, manifest: Dict[str, Any]) -> List[Path]:
     paths: List[Path] = []
     source_json = manifest.get("outputs", {}).get("sourceJson")
@@ -99,8 +91,7 @@ def candidate_json_paths(project_dir: Path, manifest: Dict[str, Any]) -> List[Pa
                 Path.cwd() / "JSON" / source_json_name,
             ])
 
-            config = get_config()
-            configured_json_dir = config.get("output.json_output_directory")
+            configured_json_dir = get_config().get("output.json_output_directory")
             if configured_json_dir:
                 paths.append(Path(configured_json_dir) / source_json_name)
 
@@ -109,6 +100,7 @@ def candidate_json_paths(project_dir: Path, manifest: Dict[str, Any]) -> List[Pa
     configured_json_dir = get_config().get("output.json_output_directory")
     if configured_json_dir:
         search_dirs.append(Path(configured_json_dir))
+
     for search_dir in search_dirs:
         if search_dir.exists():
             paths.extend(sorted(search_dir.glob(f"{project_slug}*.json")))
@@ -116,14 +108,14 @@ def candidate_json_paths(project_dir: Path, manifest: Dict[str, Any]) -> List[Pa
     deduped: List[Path] = []
     seen = set()
     for path in paths:
-        resolved = str(path.resolve()) if path.exists() else str(path)
-        if resolved not in seen:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key not in seen:
             deduped.append(path)
-            seen.add(resolved)
+            seen.add(key)
     return deduped
 
 
-def find_source_json(project_dir: Path, manifest: Dict[str, Any], explicit: Optional[str]) -> Path:
+def find_source_json(project_dir: Path, manifest: Dict[str, Any], explicit: Optional[str]) -> Optional[Path]:
     if explicit:
         path = Path(explicit)
         if not path.exists():
@@ -133,185 +125,91 @@ def find_source_json(project_dir: Path, manifest: Dict[str, Any], explicit: Opti
     for path in candidate_json_paths(project_dir, manifest):
         if path.exists():
             return path
-
-    print("Could not auto-find source JSON. Provide the old JSON file from the JSON folder.")
-    return prompt_path("Source JSON path: ")
+    return None
 
 
-def event_icon_index(event: Dict[str, Any]) -> Optional[int]:
-    metadata = event.get("metadata", {}) or {}
-    for key in ("icon_index", "iconIndex"):
-        value = metadata.get(key)
-        if isinstance(value, int):
+def source_url_from_manifest(manifest: Dict[str, Any]) -> Optional[str]:
+    candidates = [
+        manifest.get("projectInfo", {}).get("sourceUrl"),
+        manifest.get("source", {}).get("value"),
+    ]
+    for value in candidates:
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
             return value
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
     return None
 
 
-def parse_normal_segments(timestamps: Dict[str, Any]) -> List[Dict[str, Any]]:
-    events = sorted(timestamps.get("events", []), key=lambda e: e.get("timestamp", 0))
-    segments: List[Dict[str, Any]] = []
-    last_icon_index: Optional[int] = None
-    inferred_index = 0
+def make_runtime_config(manifest: Dict[str, Any], source_json: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if source_json:
+        config = dict(source_json)
+    else:
+        config = {}
 
-    for event in events:
-        event_type = event.get("event")
-        metadata = event.get("metadata", {}) or {}
+    source_url = config.get("currentUrl") or source_url_from_manifest(manifest)
+    if not source_url:
+        raise RuntimeError("Could not determine source URL from manifest or source JSON")
 
-        if event_type in {"trigger_horror_mode_started"}:
-            break
-        if event_type == "start_full_remix_performance":
-            break
-
-        if event_type == "successful_drag_started":
-            icon_index = event_icon_index(event)
-            if icon_index is not None:
-                last_icon_index = icon_index
-            continue
-
-        if event_type != "start_listen":
-            continue
-
-        icon_index = event_icon_index(event)
-        if icon_index is None:
-            icon_index = last_icon_index
-        if icon_index is None:
-            icon_index = inferred_index
-
-        segment_key = metadata.get("segmentKey") or metadata.get("recordingAreaId") or f"n-{icon_index + 1}"
-        segments.append({
-            "segmentKey": str(segment_key),
-            "iconIndex": int(icon_index),
-            "timestamp": event.get("timestamp"),
-        })
-        inferred_index = max(inferred_index + 1, int(icon_index) + 1)
-        last_icon_index = None
-
-    # Keep first occurrence per segment key in timeline order.
-    unique: List[Dict[str, Any]] = []
-    seen = set()
-    for segment in segments:
-        if segment["segmentKey"] in seen:
-            continue
-        unique.append(segment)
-        seen.add(segment["segmentKey"])
-    return unique
+    config.setdefault("currentUrl", source_url)
+    config.setdefault("layout", {})
+    config.setdefault("gameSettings", {})
+    config["gameSettings"]["hasHorror"] = False
+    return config
 
 
-def find_icon_by_index(config: Dict[str, Any], icon_index: int) -> Optional[Dict[str, Any]]:
-    for icon in config.get("layout", {}).get("icons", []):
-        if icon.get("index") == icon_index:
-            return icon
-    return None
+def public_recording_area(area: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "x": int(area.get("x", 0)),
+        "y": int(area.get("y", 0)),
+        "width": int(area.get("width", 700)),
+        "height": int(area.get("height", 480)),
+        "aspectRatio": area.get("aspectRatio", "35:24"),
+    }
 
 
-def update_timestamps_metadata(timestamps: Dict[str, Any], segments: List[Dict[str, Any]]) -> int:
-    events = sorted(timestamps.get("events", []), key=lambda e: e.get("timestamp", 0))
-    segment_by_icon = {segment["iconIndex"]: segment for segment in segments}
-    segments_by_order = list(segments)
-    last_icon_index: Optional[int] = None
-    listen_order = 0
-    updated = 0
-
-    for event in events:
-        event_type = event.get("event")
-        if event_type == "successful_drag_started":
-            last_icon_index = event_icon_index(event)
-            continue
-        if event_type != "start_listen":
-            continue
-
-        metadata = event.setdefault("metadata", {})
-        icon_index = event_icon_index(event)
-        if icon_index is None:
-            icon_index = last_icon_index
-        segment = segment_by_icon.get(icon_index) if icon_index is not None else None
-        if segment is None and listen_order < len(segments_by_order):
-            segment = segments_by_order[listen_order]
-        listen_order += 1
-        if not segment:
-            continue
-        if metadata.get("segmentKey") != segment["segmentKey"] or metadata.get("recordingAreaId") != segment["segmentKey"]:
-            metadata["segmentKey"] = segment["segmentKey"]
-            metadata["recordingAreaId"] = segment["segmentKey"]
-            updated += 1
-        last_icon_index = None
-
-    return updated
-
-
-def update_manifest(manifest: Dict[str, Any], recording_areas: Dict[str, Any]) -> None:
+def update_manifest(manifest: Dict[str, Any], area: Dict[str, Any]) -> None:
     layout_summary = manifest.setdefault("layoutSummary", {})
-    legacy_area = layout_summary.pop("recordingArea", None)
-    if legacy_area and "legacyRecordingArea" not in layout_summary:
-        layout_summary["legacyRecordingArea"] = legacy_area
-    layout_summary["recordingAreaMode"] = "per_showcase_segment"
-    manifest["recordingAreas"] = recording_areas
+    layout_summary.pop("recordingAreaMode", None)
+    layout_summary.pop("legacyRecordingArea", None)
+    layout_summary["recordingArea"] = public_recording_area(area)
+    manifest.pop("recordingAreas", None)
+
+    processing = manifest.setdefault("processingSummary", {})
+    processing["hasHorror"] = False
+    processing.pop("effectiveMode", None)
+    processing.pop("configuredHasHorror", None)
 
 
-def backfill(project_dir: Path, source_json_path: Path, manifest_path: Path, timestamps_path: Path, no_backup: bool, limit: Optional[int]) -> None:
+def backfill(project_dir: Path, manifest_path: Path, source_json_path: Optional[Path]) -> None:
     manifest = read_json(manifest_path)
-    timestamps = read_json(timestamps_path)
-    config = read_json(source_json_path)
-    segments = parse_normal_segments(timestamps)
-    if limit is not None:
-        segments = segments[:limit]
-
-    if not segments:
-        raise RuntimeError("No normal start_listen segments found in timestamps.")
+    source_json = read_json(source_json_path) if source_json_path else None
+    runtime_config = make_runtime_config(manifest, source_json)
 
     print(f"Project: {project_dir}")
     print(f"Manifest: {manifest_path}")
-    print(f"Timestamps: {timestamps_path}")
-    print(f"Source JSON: {source_json_path}")
-    print(f"Segments to backfill: {len(segments)}")
-    for segment in segments:
-        print(f"  {segment['segmentKey']}: iconIndex={segment['iconIndex']} timestamp={segment.get('timestamp')}")
+    print(f"Source JSON: {source_json_path or '(not found; using manifest URL and default center X)'}")
+    print(f"URL: {runtime_config['currentUrl']}")
 
     player = SprunkiGamePlayer()
-    player.config = config
-    recording_areas: Dict[str, Any] = {}
+    player.config = runtime_config
 
     try:
         if not player.setup_game_environment(first_setup=True):
             raise RuntimeError("Game environment setup failed")
 
-        slots = config.get("layout", {}).get("slots", [])
-        center_slot_index = player.calculate_center_slot_index(slots)
-        target_slot = player._find_slot_by_index(center_slot_index)
-        if not target_slot:
-            raise RuntimeError(f"Center slot not found: index {center_slot_index}")
+        slots = runtime_config.get("layout", {}).get("slots", [])
+        target_slot = None
+        if slots:
+            center_slot_index = player.calculate_center_slot_index(slots)
+            target_slot = player._find_slot_by_index(center_slot_index)
+            if not target_slot:
+                print(f"WARNING: center slot {center_slot_index} not found; using default center X")
+        else:
+            print("WARNING: source JSON has no slots; using default center X")
 
-        for idx, segment in enumerate(segments, 1):
-            icon = find_icon_by_index(config, segment["iconIndex"])
-            if not icon:
-                print(f"Skipping {segment['segmentKey']}: icon index {segment['iconIndex']} not found in JSON")
-                continue
-
-            print(f"\n[{idx}/{len(segments)}] Backfilling {segment['segmentKey']} from icon {segment['iconIndex']}")
-            before_layout = player._inspect_runtime_layout_bounds()
-            drag_success = player.corrected_drag_and_drop(icon, target_slot, is_first_icon=(idx == 1), use_cdp=True)
-            if not drag_success:
-                print(f"  Drag failed for {segment['segmentKey']}; no recordingArea written")
-                continue
-
-            area = player.calculate_runtime_recording_area_after_drop(
-                before_layout if isinstance(before_layout, dict) else {},
-                target_slot,
-                segment["iconIndex"],
-                segment["segmentKey"],
-            )
-            area["backfilledAt"] = datetime.now().isoformat()
-            area["backfillSource"] = {
-                "projectFolder": str(project_dir),
-                "sourceJson": str(source_json_path),
-                "timestamps": str(timestamps_path),
-            }
-            recording_areas[segment["segmentKey"]] = area
-
-            player.corrected_return_icon(target_slot, use_cdp=True)
-            time.sleep(0.2)
+        area = player.calculate_fixed_runtime_recording_area(target_slot, width=700.0, height=480.0)
+        debug = area.get("_runtimeDebug", {})
+        print(f"Detected recordingArea: {public_recording_area(area)}")
+        print(f"Bottom debug: {debug.get('bottomLine')}")
 
     finally:
         try:
@@ -319,38 +217,88 @@ def backfill(project_dir: Path, source_json_path: Path, manifest_path: Path, tim
         except Exception:
             pass
 
-    if not recording_areas:
-        raise RuntimeError("No recordingAreas were detected; files were not updated.")
+    update_manifest(manifest, area)
 
-    existing_areas = manifest.get("recordingAreas", {}) if isinstance(manifest.get("recordingAreas"), dict) else {}
-    merged_areas = {**existing_areas, **recording_areas}
-    update_manifest(manifest, merged_areas)
-    updated_timestamp_events = update_timestamps_metadata(timestamps, segments)
-
-    if not no_backup:
-        manifest_backup = backup_file(manifest_path)
-        timestamps_backup = backup_file(timestamps_path)
-        print(f"Backups: {manifest_backup}, {timestamps_backup}")
+    manifest_backup = backup_file(manifest_path)
+    print(f"Backup: {manifest_backup}")
 
     write_json(manifest_path, manifest)
-    write_json(timestamps_path, timestamps)
-
     print("\nBackfill complete.")
-    print(f"Recording areas written: {len(recording_areas)}")
     print(f"Manifest updated: {manifest_path}")
-    print(f"Timestamps metadata events updated: {updated_timestamp_events}")
+
+
+def iter_batch_projects(root_dir: Path) -> List[Path]:
+    projects: List[Path] = []
+    for child in sorted(root_dir.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir():
+            continue
+        if child.name.lower() == "json":
+            continue
+        if (child / "manifest.json").exists():
+            projects.append(child)
+    return projects
+
+
+def batch_backfill(root_dir: Path, no_skip_existing_backup: bool = False) -> None:
+    projects = iter_batch_projects(root_dir)
+    if not projects:
+        raise RuntimeError(f"No project folders with manifest.json found in {root_dir}")
+
+    print(f"Batch root: {root_dir}")
+    print(f"Projects found: {len(projects)}")
+
+    summary = {
+        "processed": [],
+        "skipped": [],
+        "failed": [],
+    }
+
+    for index, project_dir in enumerate(projects, 1):
+        print("\n" + "=" * 80)
+        print(f"[{index}/{len(projects)}] {project_dir.name}")
+
+        if has_manifest_backup(project_dir) and not no_skip_existing_backup:
+            print("Skipping: manifest.json backup already exists, assuming this project was already backfilled.")
+            summary["skipped"].append(str(project_dir))
+            continue
+
+        try:
+            manifest_path = find_manifest(project_dir, None)
+            manifest = read_json(manifest_path)
+            source_json_path = find_source_json(project_dir, manifest, None)
+            backfill(project_dir, manifest_path, source_json_path)
+            summary["processed"].append(str(project_dir))
+        except Exception as exc:
+            print(f"FAILED: {exc}")
+            summary["failed"].append({"project": str(project_dir), "error": str(exc)})
+
+    print("\n" + "=" * 80)
+    print("Batch backfill complete.")
+    print(f"Processed: {len(summary['processed'])}")
+    print(f"Skipped: {len(summary['skipped'])}")
+    print(f"Failed: {len(summary['failed'])}")
+    if summary["failed"]:
+        print("Failed projects:")
+        for item in summary["failed"]:
+            print(f"  - {item['project']}: {item['error']}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backfill per-segment recordingArea metadata for old showcase recordings.")
-    parser.add_argument("project", nargs="?", help="Project folder containing manifest.json and showcase timestamps")
-    parser.add_argument("--project", dest="project_opt", help="Project folder containing manifest.json and showcase timestamps")
-    parser.add_argument("--json", dest="json_path", help="Old source JSON path")
+    parser = argparse.ArgumentParser(description="Backfill single fixed 700x480 recordingArea into manifest.json.")
+    parser.add_argument("project", nargs="?", help="Project folder containing manifest.json")
+    parser.add_argument("--project", dest="project_opt", help="Project folder containing manifest.json")
+    parser.add_argument("--batch-root", help="Root output folder containing JSON and project subfolders, e.g. D:\\OUTPUT")
+    parser.add_argument("--json", dest="json_path", help="Old source JSON path; optional but recommended for center slot X")
     parser.add_argument("--manifest", help="Manifest path; defaults to <project>/manifest.json")
-    parser.add_argument("--timestamps", help="Timestamps path; defaults to newest *showcase.timestamps.json in project")
-    parser.add_argument("--no-backup", action="store_true", help="Do not create .bak timestamp/manifest backups before writing")
-    parser.add_argument("--limit", type=int, help="Backfill only the first N segments for testing")
+    parser.add_argument("--no-skip-existing-backup", action="store_true", help="In batch mode, process even if manifest.json.bak-* already exists")
     args = parser.parse_args()
+
+    if args.batch_root:
+        root_dir = Path(args.batch_root)
+        if not root_dir.exists() or not root_dir.is_dir():
+            raise FileNotFoundError(f"Batch root folder not found: {root_dir}")
+        batch_backfill(root_dir, no_skip_existing_backup=args.no_skip_existing_backup)
+        return 0
 
     project_raw = args.project_opt or args.project
     project_dir = Path(project_raw) if project_raw else prompt_path("Project folder: ")
@@ -359,10 +307,9 @@ def main() -> int:
 
     manifest_path = find_manifest(project_dir, args.manifest)
     manifest = read_json(manifest_path)
-    timestamps_path = find_timestamps(project_dir, args.timestamps)
     source_json_path = find_source_json(project_dir, manifest, args.json_path)
 
-    backfill(project_dir, source_json_path, manifest_path, timestamps_path, args.no_backup, args.limit)
+    backfill(project_dir, manifest_path, source_json_path)
     return 0
 
 

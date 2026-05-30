@@ -1,0 +1,119 @@
+{
+  "url": "https://www.cocrea.world/@EdgarUbaldo/Sprunki-TheDefinitivePhase8alive",
+  "generatedAt": "2026-05-30T16:09:51.215044",
+  "script": "test_url_production_recording_area.py",
+  "note": "Calls SprunkiGamePlayer.calculate_runtime_recording_area_after_drop directly.",
+  "segments": [
+    {
+      "segmentKey": "n-1",
+      "iconIndex": 0,
+      "dragSuccess": true,
+      "recordingArea": {
+        "x": 898,
+        "y": 338,
+        "width": 349,
+        "height": 299,
+        "bottomY": 638,
+        "aspectRatio": "native",
+        "sourceMethod": "character_bounds_plus_mute_buttons_bottom",
+        "segmentKey": "n-1",
+        "iconIndex": 0,
+        "source": {
+          "bottomLine": {
+            "value": 637.9663052558899,
+            "method": "mute_buttons_boundsBottomY_cluster_median",
+            "cluster": [
+              637.6426611185074,
+              637.6426611185074,
+              637.6426611185074,
+              637.6426611185074,
+              637.6426611185074,
+              637.6426611185074,
+              637.6426611185074,
+              637.6426611185074,
+              637.6426611185074,
+              637.9663052558899,
+              637.9663052558899,
+              637.9663052558899,
+              637.9663052558899,
+              637.9663052558899,
+              637.9663052558899,
+              637.9663052558899,
+              637.9663052558899,
+              637.9663052558899,
+              638.2017207384109,
+              638.2017207384109,
+              638.2017207384109,
+              638.2017207384109,
+              638.2017207384109,
+              638.2017207384109,
+              638.2017207384109,
+              638.2017207384109,
+              638.2017207384109
+            ],
+            "allValues": [
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074,
+              698.8271582007408,
+              638.2017207384109,
+              637.9663052558899,
+              637.6426611185074
+            ],
+            "fallbackUsed": false
+          },
+          "characterCandidate": {
+            "runtimeIndex": 0,
+            "id": "v_6Six93~KfmV|cuHoC-",
+            "name": "Orange (Oren)",
+            "boundsX": 907.998318296671,
+            "boundsY": 348.480644774437,
+            "boundsWidth": 329.07350987792006,
+            "boundsHeight": 362.4998349666595,
+            "distanceToCenterSlot": 2.8781250000000114,
+            "changedAfterDrag": true,
+            "score": -177.121875
+          }
+        },
+        "fallbackUsed": false,
+        "warnings": [
+          "candidate bounds bottom 711.0 exceeds detected bottomY 638.0"
+        ]
+      },
+      "outputs": {
+        "frame": "url_production_recording_area_tests\\Sprunki-TheDefinitivePhase8alive-20260530-160951\\frames\\n-1_frame.png",
+        "overlay": "url_production_recording_area_tests\\Sprunki-TheDefinitivePhase8alive-20260530-160951\\overlays\\n-1_overlay.png",
+        "crop": "url_production_recording_area_tests\\Sprunki-TheDefinitivePhase8alive-20260530-160951\\crops\\n-1_crop.png"
+      }
+    }
+  ]
+}

@@ -327,6 +327,7 @@ class SprunkiGamePlayer:
         self.health_check_interval = 30  # Check every 30s
         self.session_start_time = None
         self.runtime_recording_areas = {}
+        self.runtime_recording_area = None
 
         # JavaScript for finding action buttons (skip/play/start/intro) - Multi-Target Detection
         self.js_find_skip_intro = '''
@@ -2432,6 +2433,62 @@ class SprunkiGamePlayer:
             "aspectRatio": "legacy_96:83_fallback",
             "sourceMethod": "legacy_slot_center_fallback",
         }
+
+    def calculate_fixed_runtime_recording_area(self, target_slot=None, width=700.0, height=480.0):
+        """Calculate the single fixed-size recordingArea for the full showcase."""
+        warnings = []
+        runtime_layout = self._inspect_runtime_layout_bounds()
+        if runtime_layout.get("ok"):
+            bottom_detection = self._detect_recording_bottom_y(runtime_layout)
+        else:
+            warnings.append(f"runtime inspect failed: {runtime_layout.get('error', 'unknown')}")
+            bottom_detection = {
+                "value": 670.0,
+                "method": "fallback_fixed_670",
+                "cluster": [],
+                "allValues": [],
+                "fallbackUsed": True,
+            }
+
+        if target_slot is None:
+            slots = (self.config or {}).get("layout", {}).get("slots", [])
+            center_slot_index = self.calculate_center_slot_index(slots) if slots else 4
+            target_slot = self._find_slot_by_index(center_slot_index) if slots else None
+
+        center_x = float((target_slot or {}).get("x", 999))
+        bottom = float(bottom_detection.get("value", 670.0))
+        left = center_x - float(width) / 2.0
+        top = bottom - float(height)
+
+        if left < 0:
+            left = 0.0
+        if left + width > 1920:
+            left = max(0.0, 1920.0 - float(width))
+        if top < 0:
+            top = 0.0
+        if top + height > 1080:
+            top = max(0.0, 1080.0 - float(height))
+
+        area = {
+            "x": int(round(left)),
+            "y": int(round(top)),
+            "width": int(round(width)),
+            "height": int(round(height)),
+            "aspectRatio": "35:24",
+            "_runtimeDebug": {
+                "bottomY": int(round(bottom)),
+                "sourceMethod": "fixed_700x480_plus_mute_buttons_bottom",
+                "bottomLine": bottom_detection,
+                "centerX": center_x,
+                "fallbackUsed": bool(bottom_detection.get("fallbackUsed")),
+                "warnings": warnings,
+            },
+        }
+        self.runtime_recording_area = area
+        if self.obs_controller:
+            self.obs_controller.set_recording_area(area)
+        print(f"🎯 Runtime fixed recordingArea: {area['x']},{area['y']} {area['width']}x{area['height']}")
+        return area
 
     def _calculate_recording_area_from_candidate(self, candidate, bottom_y, warnings, padding=10.0):
         bx = float(candidate["boundsX"])
@@ -7409,7 +7466,6 @@ class SprunkiGamePlayer:
                 obs_controller.log_event_timestamp("start_icon_showcase", f"Start showcase cycle for icon {icon_index}", showcase_context)
             
             # --- GIAI ĐOẠN KÉO THẢ ---
-            before_runtime_layout = self._inspect_runtime_layout_bounds()
             if obs_controller:
                 obs_controller.log_event_timestamp("start_drag", f"Dragging icon {icon_index}", {"success": None})
             
@@ -7430,13 +7486,6 @@ class SprunkiGamePlayer:
             drop_time = drag_details.get("drop_time") or time.monotonic()
             segment_key = f"n-{icon_index + 1}"
 
-            recording_area = self.calculate_runtime_recording_area_after_drop(
-                before_runtime_layout if isinstance(before_runtime_layout, dict) else {},
-                target_slot,
-                icon_index,
-                segment_key
-            )
-
             if obs_controller:
                 obs_controller.log_event_timestamp(
                     "start_listen",
@@ -7446,8 +7495,6 @@ class SprunkiGamePlayer:
                         "mode": "Normal",
                         "icon_index": icon_index,
                         "segmentKey": segment_key,
-                        "recordingAreaId": segment_key,
-                        "recordingAreaFallbackUsed": bool(recording_area.get("fallbackUsed")),
                     },
                     event_timestamp=drop_time
                 )
@@ -7468,7 +7515,7 @@ class SprunkiGamePlayer:
                 obs_controller.log_event_timestamp(
                     "end_listen",
                     f"Finished listening to icon {icon_index}",
-                    {"segmentKey": segment_key, "recordingAreaId": segment_key},
+                    {"segmentKey": segment_key},
                     event_timestamp=end_listen_abs
                 )
                 end_listen_timestamp = round(end_listen_abs - obs_controller.recording_start_time, 3)
@@ -8156,6 +8203,17 @@ class SprunkiGamePlayer:
             if progress_callback:
                 progress_callback("🎪 Starting Enhanced Normal Mode...")
             
+            # Calculate one fixed recordingArea for the whole showcase.
+            self.runtime_recording_area = None
+            try:
+                slots = self.config.get('layout', {}).get('slots', [])
+                center_slot_index = self.calculate_center_slot_index(slots)
+                target_slot = self._find_slot_by_index(center_slot_index)
+                self.calculate_fixed_runtime_recording_area(target_slot)
+            except Exception as area_error:
+                report.issues.append(f"Runtime recordingArea fallback used: {area_error}")
+                self.calculate_fixed_runtime_recording_area(None)
+
             # Normal icons
             if not self.should_stop:
                 success, total = self.showcase_all_icons_corrected("Normal", skip_icon_19=configured_has_horror, progress_callback=progress_callback)

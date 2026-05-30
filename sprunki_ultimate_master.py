@@ -73,7 +73,7 @@ class ProcessingItem:
     individual_mode_status: str = "not_started" # "success", "failure", "skipped"
 
     workflow_report: Optional[Dict[str, Any]] = None
-    recording_areas: Dict[str, Any] = field(default_factory=dict)
+    recording_area: Optional[Dict[str, Any]] = None
 
     @property
     def display_name(self) -> str:
@@ -540,14 +540,12 @@ class UnifiedProcessingManager:
                     "pageTitle": page_title, "domain": domain, "outputDirectory": project_folder
                 },
                 "layoutSummary": {
-                    "recordingAreaMode": "per_showcase_segment",
+                    "recordingArea": getattr(item, 'recording_area', None) or item.json_data.get('layout', {}).get('recordingArea'),
                     "totalIcons": len(item.json_data.get('layout', {}).get('icons', [])),
                     "totalSlots": len(item.json_data.get('layout', {}).get('slots', []))
                 },
-                "recordingAreas": getattr(item, 'recording_areas', {}) or {},
                 "processingSummary": {
-                    "mode": item.mode, "overallStatus": overall_status,
-                    "effectiveMode": "showcase_only",
+                    "mode": "master" if item.mode in ("both", "individual") else item.mode, "overallStatus": overall_status,
                     "statusDetails": {
                         "jsonGeneration": item.json_generation_status,
                         "masterMode": item.master_mode_status,
@@ -556,13 +554,22 @@ class UnifiedProcessingManager:
                     "startTime": item.start_time.isoformat() if item.start_time else None,
                     "endTime": item.end_time.isoformat() if item.end_time else None,
                     "durationSeconds": (item.end_time - item.start_time).total_seconds() if item.start_time and item.end_time else 0,
-                    "hasHorror": False,
-                    "configuredHasHorror": item.json_data.get('gameSettings', {}).get('hasHorror', False)
+                    "hasHorror": False
                 },
                 "outputs": {}, "errors": []
             }
             
             # 3. Điền thông tin outputs và errors
+            recording_area = manifest_data["layoutSummary"].get("recordingArea")
+            if isinstance(recording_area, dict):
+                manifest_data["layoutSummary"]["recordingArea"] = {
+                    "x": int(recording_area.get("x", 0)),
+                    "y": int(recording_area.get("y", 0)),
+                    "width": int(recording_area.get("width", 0)),
+                    "height": int(recording_area.get("height", 0)),
+                    "aspectRatio": recording_area.get("aspectRatio", "35:24"),
+                }
+
             outputs = {"masterVideo": None, "individualVideos": [], "remixVideos": [], "logFiles": [], "sourceJson": None}
             if item.error_message:
                 manifest_data["errors"].append({"timestamp": datetime.now().isoformat(), "stage": "general", "message": item.error_message})
@@ -1307,7 +1314,7 @@ class UnifiedProcessingManager:
             # STEP 5: Execute Full Showcase Workflow and get detailed report
             self.logger.info("🎮 Executing full showcase workflow...")
             workflow_report = self.master_controller.game_player.execute_full_showcase_workflow_corrected()
-            item.recording_areas = dict(getattr(self.master_controller.obs_controller, 'recording_areas', {}) or {})
+            item.recording_area = getattr(self.master_controller.obs_controller, 'recording_area', None)
             
             # Log any issues from the report
             if workflow_report.issues:

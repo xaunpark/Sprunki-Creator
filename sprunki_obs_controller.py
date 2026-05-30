@@ -75,6 +75,11 @@ class SprunkiController:
         if segment_key and isinstance(recording_area, dict):
             self.recording_areas[segment_key] = recording_area
 
+    def set_recording_area(self, recording_area: dict):
+        """Store the single runtime recordingArea used by external crop tools."""
+        if isinstance(recording_area, dict):
+            self.recording_area = recording_area
+
     def _save_timestamps_to_file(self, video_path: str):
         """Lưu danh sách các timestamp đã ghi lại vào một file JSON tương ứng với video."""
         # Chỉ tạo file nếu có nhiều hơn 2 sự kiện (start/stop mặc định) để tránh file rác
@@ -1191,6 +1196,7 @@ class SprunkiController:
                 self.recording_start_time = time.monotonic()
                 self.event_timestamps = [] # Reset cho video mới
                 self.recording_areas = {}
+                self.recording_area = None
                 self.log_event_timestamp("recording_started", "OBS recording confirmed active")
                 
                 if self.current_filename: print(f"📹 Target filename: {self.current_filename}")
