@@ -3,10 +3,11 @@ Backfill the single fixed recordingArea for an already-recorded showcase.
 
 Current production policy:
   - one recordingArea per mod, stored at manifest.layoutSummary.recordingArea
-  - fixed size 700x480
+  - source area is fixed size 700x480 in live screen coordinates
   - bottom anchored to runtime Mute Buttons boundsBottomY, fallback 670
   - horizontally centered on the center slot when source JSON is available,
     otherwise centered on the default stage center X=999
+  - manifest stores video output coordinates after OBS master crop+scale
 
 This tool does not start OBS, does not record video, and does not drag icons.
 It only opens the mod, injects/uses the runtime inspector, calculates bottomY,
@@ -56,7 +57,7 @@ def has_manifest_backup(project_dir: Path) -> bool:
     return any(project_dir.glob("manifest.json.bak-*"))
 
 
-def manifest_has_new_recording_area(manifest: Dict[str, Any]) -> bool:
+def manifest_has_old_screen_recording_area(manifest: Dict[str, Any]) -> bool:
     layout_summary = manifest.get("layoutSummary", {})
     area = layout_summary.get("recordingArea")
     if not isinstance(area, dict):
@@ -69,6 +70,27 @@ def manifest_has_new_recording_area(manifest: Dict[str, Any]) -> bool:
         return (
             int(area.get("width", 0)) == 700
             and int(area.get("height", 0)) == 480
+            and str(area.get("aspectRatio", "")) == "35:24"
+        )
+    except Exception:
+        return False
+
+
+def manifest_has_new_recording_area(manifest: Dict[str, Any]) -> bool:
+    layout_summary = manifest.get("layoutSummary", {})
+    area = layout_summary.get("recordingArea")
+    if not isinstance(area, dict):
+        return False
+    if manifest.get("recordingAreas") is not None:
+        return False
+    if layout_summary.get("recordingAreaMode") is not None:
+        return False
+    try:
+        width = int(area.get("width", 0))
+        height = int(area.get("height", 0))
+        return (
+            720 <= width <= 740
+            and 490 <= height <= 510
             and str(area.get("aspectRatio", "")) == "35:24"
         )
     except Exception:
@@ -191,6 +213,40 @@ def public_recording_area(area: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def screen_area_to_master_video_area(area: Dict[str, Any]) -> Dict[str, Any]:
+    screen_w = 1920.0
+    screen_h = 1080.0
+    crop_left = 78.0
+    crop_top = 22.0
+    crop_right = 0.0
+    crop_bottom = 22.0
+    content_w = screen_w - crop_left - crop_right
+    content_h = screen_h - crop_top - crop_bottom
+    scale_x = screen_w / content_w
+    scale_y = screen_h / content_h
+
+    x = (float(area["x"]) - crop_left) * scale_x
+    y = (float(area["y"]) - crop_top) * scale_y
+    width = float(area["width"]) * scale_x
+    height = float(area["height"]) * scale_y
+
+    out_x = int(round(max(0.0, min(screen_w - 1.0, x))))
+    out_y = int(round(max(0.0, min(screen_h - 1.0, y))))
+    out_w = int(round(max(1.0, min(screen_w, width))))
+    out_h = int(round(max(1.0, min(screen_h, height))))
+    if out_x + out_w > int(screen_w):
+        out_w = int(screen_w) - out_x
+    if out_y + out_h > int(screen_h):
+        out_h = int(screen_h) - out_y
+    return {
+        "x": out_x,
+        "y": out_y,
+        "width": out_w,
+        "height": out_h,
+        "aspectRatio": area.get("aspectRatio", "35:24"),
+    }
+
+
 def update_manifest(manifest: Dict[str, Any], area: Dict[str, Any]) -> None:
     layout_summary = manifest.setdefault("layoutSummary", {})
     layout_summary.pop("recordingAreaMode", None)
@@ -204,8 +260,25 @@ def update_manifest(manifest: Dict[str, Any], area: Dict[str, Any]) -> None:
     processing.pop("configuredHasHorror", None)
 
 
+def convert_existing_manifest_recording_area(project_dir: Path, manifest_path: Path, manifest: Dict[str, Any]) -> None:
+    area = manifest.get("layoutSummary", {}).get("recordingArea")
+    converted = screen_area_to_master_video_area(area)
+    update_manifest(manifest, converted)
+    manifest_backup = backup_file(manifest_path)
+    print(f"Project: {project_dir}")
+    print("Existing manifest recordingArea is old live-screen 700x480; converting without opening game.")
+    print(f"Converted recordingArea: {public_recording_area(converted)}")
+    print(f"Backup: {manifest_backup}")
+    write_json(manifest_path, manifest)
+    print(f"Manifest updated: {manifest_path}")
+
+
 def backfill(project_dir: Path, manifest_path: Path, source_json_path: Optional[Path]) -> None:
     manifest = read_json(manifest_path)
+    if manifest_has_old_screen_recording_area(manifest):
+        convert_existing_manifest_recording_area(project_dir, manifest_path, manifest)
+        return
+
     source_json = read_json(source_json_path) if source_json_path else None
     runtime_config = make_runtime_config(manifest, source_json)
 
@@ -291,8 +364,12 @@ def batch_backfill(root_dir: Path, no_skip_existing_backup: bool = False) -> Non
             manifest_path = find_manifest(project_dir, None)
             manifest = read_json(manifest_path)
             if should_skip_project(project_dir, manifest, no_skip_existing_backup):
-                print("Skipping: backup exists and manifest already has new 700x480 recordingArea.")
+                print("Skipping: backup exists and manifest already has converted video-coordinate recordingArea.")
                 summary["skipped"].append(str(project_dir))
+                continue
+            if manifest_has_old_screen_recording_area(manifest):
+                convert_existing_manifest_recording_area(project_dir, manifest_path, manifest)
+                summary["processed"].append(str(project_dir))
                 continue
             if has_manifest_backup(project_dir) and not no_skip_existing_backup:
                 print("Backup exists, but manifest is not in the new format; running backfill again.")
@@ -315,7 +392,7 @@ def batch_backfill(root_dir: Path, no_skip_existing_backup: bool = False) -> Non
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backfill single fixed 700x480 recordingArea into manifest.json.")
+    parser = argparse.ArgumentParser(description="Backfill single fixed recordingArea into manifest.json using video output coordinates.")
     parser.add_argument("project", nargs="?", help="Project folder containing manifest.json")
     parser.add_argument("--project", dest="project_opt", help="Project folder containing manifest.json")
     parser.add_argument("--batch-root", help="Root output folder containing JSON and project subfolders, e.g. D:\\OUTPUT")

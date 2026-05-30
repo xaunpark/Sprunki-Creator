@@ -1,0 +1,131 @@
+{
+  "generatedAt": "2026-05-31T01:07:01.597989",
+  "outputRoot": "showcase_recording_area_center_line_crops\\20260531-010701",
+  "projects": [
+    {
+      "project": "G:\\SprunkiOUTPUT\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake",
+      "success": true,
+      "video": "G:\\SprunkiOUTPUT\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake-showcase.mkv",
+      "timestamps": "G:\\SprunkiOUTPUT\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake-showcase.timestamps.json",
+      "segment": "n-1",
+      "frameTimestamp": 10.938,
+      "recordingArea": {
+        "x": 649,
+        "y": 187,
+        "width": 700,
+        "height": 480,
+        "aspectRatio": "35:24"
+      },
+      "measurements": {
+        "cropX": 649,
+        "cropY": 187,
+        "cropWidth": 700,
+        "cropHeight": 480,
+        "centerX": 350.0
+      },
+      "frame": "showcase_recording_area_center_line_crops\\20260531-010701\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake\\n-1_frame.jpg",
+      "cropCenterLine": "showcase_recording_area_center_line_crops\\20260531-010701\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake\\n-1_recording_area_crop_center_line.jpg",
+      "fullOverlay": "showcase_recording_area_center_line_crops\\20260531-010701\\MandyNgan-SprnkiPhase12RemasteredFootlongsTake\\n-1_full_overlay.jpg"
+    },
+    {
+      "project": "G:\\SprunkiOUTPUT\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble",
+      "success": true,
+      "video": "G:\\SprunkiOUTPUT\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble-showcase.mkv",
+      "timestamps": "G:\\SprunkiOUTPUT\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble-showcase.timestamps.json",
+      "segment": "n-1",
+      "frameTimestamp": 11.14,
+      "recordingArea": {
+        "x": 649,
+        "y": 187,
+        "width": 700,
+        "height": 480,
+        "aspectRatio": "35:24"
+      },
+      "measurements": {
+        "cropX": 649,
+        "cropY": 187,
+        "cropWidth": 700,
+        "cropHeight": 480,
+        "centerX": 350.0
+      },
+      "frame": "showcase_recording_area_center_line_crops\\20260531-010701\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble\\n-1_frame.jpg",
+      "cropCenterLine": "showcase_recording_area_center_line_crops\\20260531-010701\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble\\n-1_recording_area_crop_center_line.jpg",
+      "fullOverlay": "showcase_recording_area_center_line_crops\\20260531-010701\\JarenPro-Spr-nkiPhase12RemasteredbutSwapDouble\\n-1_full_overlay.jpg"
+    },
+    {
+      "project": "G:\\SprunkiOUTPUT\\wwwww-Sprunke37-shiftedRemakePhase5",
+      "success": true,
+      "video": "G:\\SprunkiOUTPUT\\wwwww-Sprunke37-shiftedRemakePhase5\\wwwww-Sprunke37-shiftedRemakePhase5-showcase.mkv",
+      "timestamps": "G:\\SprunkiOUTPUT\\wwwww-Sprunke37-shiftedRemakePhase5\\wwwww-Sprunke37-shiftedRemakePhase5-showcase.timestamps.json",
+      "segment": "n-1",
+      "frameTimestamp": 11.078,
+      "recordingArea": {
+        "x": 649,
+        "y": 187,
+        "width": 700,
+        "height": 480,
+        "aspectRatio": "35:24"
+      },
+      "measurements": {
+        "cropX": 649,
+        "cropY": 187,
+        "cropWidth": 700,
+        "cropHeight": 480,
+        "centerX": 350.0
+      },
+      "frame": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunke37-shiftedRemakePhase5\\n-1_frame.jpg",
+      "cropCenterLine": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunke37-shiftedRemakePhase5\\n-1_recording_area_crop_center_line.jpg",
+      "fullOverlay": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunke37-shiftedRemakePhase5\\n-1_full_overlay.jpg"
+    },
+    {
+      "project": "G:\\SprunkiOUTPUT\\wwwww-Sprunke37-shiftedRemakePhase4",
+      "success": true,
+      "video": "G:\\SprunkiOUTPUT\\wwwww-Sprunke37-shiftedRemakePhase4\\wwwww-Sprunke37-shiftedRemakePhase4-showcase.mkv",
+      "timestamps": "G:\\SprunkiOUTPUT\\wwwww-Sprunke37-shiftedRemakePhase4\\wwwww-Sprunke37-shiftedRemakePhase4-showcase.timestamps.json",
+      "segment": "n-1",
+      "frameTimestamp": 11.063,
+      "recordingArea": {
+        "x": 649,
+        "y": 187,
+        "width": 700,
+        "height": 480,
+        "aspectRatio": "35:24"
+      },
+      "measurements": {
+        "cropX": 649,
+        "cropY": 187,
+        "cropWidth": 700,
+        "cropHeight": 480,
+        "centerX": 350.0
+      },
+      "frame": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunke37-shiftedRemakePhase4\\n-1_frame.jpg",
+      "cropCenterLine": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunke37-shiftedRemakePhase4\\n-1_recording_area_crop_center_line.jpg",
+      "fullOverlay": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunke37-shiftedRemakePhase4\\n-1_full_overlay.jpg"
+    },
+    {
+      "project": "G:\\SprunkiOUTPUT\\wwwww-Sprunki37shifted",
+      "success": true,
+      "video": "G:\\SprunkiOUTPUT\\wwwww-Sprunki37shifted\\wwwww-Sprunki37shifted-showcase.mkv",
+      "timestamps": "G:\\SprunkiOUTPUT\\wwwww-Sprunki37shifted\\wwwww-Sprunki37shifted-showcase.timestamps.json",
+      "segment": "n-1",
+      "frameTimestamp": 10.985,
+      "recordingArea": {
+        "x": 649,
+        "y": 187,
+        "width": 700,
+        "height": 480,
+        "aspectRatio": "35:24"
+      },
+      "measurements": {
+        "cropX": 649,
+        "cropY": 187,
+        "cropWidth": 700,
+        "cropHeight": 480,
+        "centerX": 350.0
+      },
+      "frame": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunki37shifted\\n-1_frame.jpg",
+      "cropCenterLine": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunki37shifted\\n-1_recording_area_crop_center_line.jpg",
+      "fullOverlay": "showcase_recording_area_center_line_crops\\20260531-010701\\wwwww-Sprunki37shifted\\n-1_full_overlay.jpg"
+    }
+  ]
+}

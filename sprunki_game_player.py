@@ -2469,26 +2469,65 @@ class SprunkiGamePlayer:
         if top + height > 1080:
             top = max(0.0, 1080.0 - float(height))
 
-        area = {
+        screen_area = {
             "x": int(round(left)),
             "y": int(round(top)),
             "width": int(round(width)),
             "height": int(round(height)),
             "aspectRatio": "35:24",
-            "_runtimeDebug": {
-                "bottomY": int(round(bottom)),
-                "sourceMethod": "fixed_700x480_plus_mute_buttons_bottom",
-                "bottomLine": bottom_detection,
-                "centerX": center_x,
-                "fallbackUsed": bool(bottom_detection.get("fallbackUsed")),
-                "warnings": warnings,
-            },
+        }
+
+        area = self._screen_area_to_master_video_area(screen_area)
+        area["_runtimeDebug"] = {
+            "bottomY": int(round(bottom)),
+            "sourceMethod": "fixed_700x480_plus_mute_buttons_bottom_master_video_coords",
+            "bottomLine": bottom_detection,
+            "centerX": center_x,
+            "fallbackUsed": bool(bottom_detection.get("fallbackUsed")),
+            "warnings": warnings,
+            "screenArea": screen_area,
+            "coordinateSpace": "video_1920x1080_after_obs_master_crop_scale",
         }
         self.runtime_recording_area = area
         if self.obs_controller:
             self.obs_controller.set_recording_area(area)
         print(f"🎯 Runtime fixed recordingArea: {area['x']},{area['y']} {area['width']}x{area['height']}")
         return area
+
+    def _screen_area_to_master_video_area(self, area):
+        """Convert live screen coords to showcase video coords after OBS master crop+scale."""
+        screen_w = 1920.0
+        screen_h = 1080.0
+        crop_left = 78.0
+        crop_top = 22.0
+        crop_right = 0.0
+        crop_bottom = 22.0
+        content_w = screen_w - crop_left - crop_right
+        content_h = screen_h - crop_top - crop_bottom
+        scale_x = screen_w / content_w
+        scale_y = screen_h / content_h
+
+        x = (float(area["x"]) - crop_left) * scale_x
+        y = (float(area["y"]) - crop_top) * scale_y
+        width = float(area["width"]) * scale_x
+        height = float(area["height"]) * scale_y
+
+        out_x = int(round(max(0.0, min(screen_w - 1.0, x))))
+        out_y = int(round(max(0.0, min(screen_h - 1.0, y))))
+        out_w = int(round(max(1.0, min(screen_w, width))))
+        out_h = int(round(max(1.0, min(screen_h, height))))
+        if out_x + out_w > int(screen_w):
+            out_w = int(screen_w) - out_x
+        if out_y + out_h > int(screen_h):
+            out_h = int(screen_h) - out_y
+
+        return {
+            "x": out_x,
+            "y": out_y,
+            "width": out_w,
+            "height": out_h,
+            "aspectRatio": area.get("aspectRatio", "35:24"),
+        }
 
     def _calculate_recording_area_from_candidate(self, candidate, bottom_y, warnings, padding=10.0):
         bx = float(candidate["boundsX"])
