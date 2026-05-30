@@ -254,7 +254,12 @@ def backfill(project_dir: Path, manifest_path: Path, source_json_path: Optional[
 
 def iter_batch_projects(root_dir: Path) -> List[Path]:
     projects: List[Path] = []
-    for child in sorted(root_dir.iterdir(), key=lambda p: p.name.lower()):
+    children = sorted(
+        root_dir.iterdir(),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,
+    )
+    for child in children:
         if not child.is_dir():
             continue
         if child.name.lower() == "json":
