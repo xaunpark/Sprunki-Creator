@@ -34,7 +34,7 @@ except ImportError as e:
 MODE_OPTIONS = {
     "both": {
         "display": "💎 Both Modes",
-        "description": "Master + Individual (complete package with remixes)"
+        "description": "Deprecated alias: runs showcase-only"
     },
     "master": {
         "display": "🎬 Master Mode", 
@@ -42,7 +42,7 @@ MODE_OPTIONS = {
     },
     "individual": {
         "display": "🎭 Individual Mode",
-        "description": "Icons riêng lẻ (recordingArea) + 3 remixes (1920x1080, 20s/bản)"
+        "description": "Deprecated alias: runs showcase-only"
     },
     "skip": {
         "display": "⭐ Skip Item",
@@ -73,6 +73,7 @@ class ProcessingItem:
     individual_mode_status: str = "not_started" # "success", "failure", "skipped"
 
     workflow_report: Optional[Dict[str, Any]] = None
+    recording_areas: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def display_name(self) -> str:
@@ -517,18 +518,11 @@ class UnifiedProcessingManager:
             source_url = item.json_data.get('currentUrl', item.source_url or '')
             domain = urlparse(source_url).netloc.replace('www.', '') if source_url else ''
 
-            # Xác định overallStatus với logic nghiêm ngặt hơn
+            # Xác định overallStatus cho pipeline showcase-only.
             if item.status == "completed":
-                # Nếu cả hai mode đều thành công (trong chế độ "both"), hoặc mode đơn lẻ thành công
-                if (item.mode == "both" and item.master_mode_status == "success" and item.individual_mode_status == "success") or \
-                   (item.mode != "both" and item.status == "completed"):
-                    overall_status = "success"
-                else:
-                    # Trường hợp "both" nhưng chỉ một mode thành công
-                    overall_status = "partial_success"
+                overall_status = "success"
             elif item.status == "failed":
-                # Nếu job thất bại, nhưng một trong hai mode lại thành công (trường hợp hiếm)
-                if item.mode == "both" and (item.master_mode_status == "success" or item.individual_mode_status == "success"):
+                if item.master_mode_status == "success":
                     overall_status = "partial_success"
                 else:
                     overall_status = "failure"
@@ -546,12 +540,14 @@ class UnifiedProcessingManager:
                     "pageTitle": page_title, "domain": domain, "outputDirectory": project_folder
                 },
                 "layoutSummary": {
-                    "recordingArea": item.json_data.get('layout', {}).get('recordingArea'),
+                    "recordingAreaMode": "per_showcase_segment",
                     "totalIcons": len(item.json_data.get('layout', {}).get('icons', [])),
                     "totalSlots": len(item.json_data.get('layout', {}).get('slots', []))
                 },
+                "recordingAreas": getattr(item, 'recording_areas', {}) or {},
                 "processingSummary": {
                     "mode": item.mode, "overallStatus": overall_status,
+                    "effectiveMode": "showcase_only",
                     "statusDetails": {
                         "jsonGeneration": item.json_generation_status,
                         "masterMode": item.master_mode_status,
@@ -560,7 +556,8 @@ class UnifiedProcessingManager:
                     "startTime": item.start_time.isoformat() if item.start_time else None,
                     "endTime": item.end_time.isoformat() if item.end_time else None,
                     "durationSeconds": (item.end_time - item.start_time).total_seconds() if item.start_time and item.end_time else 0,
-                    "hasHorror": item.json_data.get('gameSettings', {}).get('hasHorror', False)
+                    "hasHorror": False,
+                    "configuredHasHorror": item.json_data.get('gameSettings', {}).get('hasHorror', False)
                 },
                 "outputs": {}, "errors": []
             }
@@ -966,9 +963,9 @@ class UnifiedProcessingManager:
             if item.mode == "master":
                 self.logger.info(f"   🎬 Master showcase video: {project_slug}-showcase.mp4")
             elif item.mode == "individual":
-                self.logger.info(f"   🎯 Individual icon videos: n-1.mp4, h-1.mp4, etc.")
+                self.logger.info(f"   🎬 Showcase-only video: {project_slug}-showcase.mp4")
             elif item.mode == "both":
-                self.logger.info(f"   🎪 Both modes: showcase + individual icons in same folder")
+                self.logger.info(f"   🎬 Showcase-only video: {project_slug}-showcase.mp4")
             
             # Setup mode-specific logging to project folder
             self._setup_mode_specific_logging(project_folder, project_slug, item.mode)
@@ -980,12 +977,14 @@ class UnifiedProcessingManager:
                 success = self._process_master_mode(item)
                 
             elif item.mode == "individual":
-                self.logger.info(f"🎭 Processing INDIVIDUAL mode for {item.display_name}")
-                success = self._process_individual_mode(item)
+                self.logger.info(f"🎭 INDIVIDUAL mode is deprecated; running showcase-only workflow for {item.display_name}")
+                item.individual_mode_status = "skipped"
+                success = self._process_master_mode(item)
                 
             elif item.mode == "both":
-                self.logger.info(f"💎 Processing BOTH mode for {item.display_name}")
-                success = self._process_both_mode_enhanced(item)
+                self.logger.info(f"💎 BOTH mode is deprecated; running showcase-only workflow for {item.display_name}")
+                item.individual_mode_status = "skipped"
+                success = self._process_master_mode(item)
                 
             elif item.mode == "skip":
                 self.logger.info(f"⭐ Skipping {item.display_name}")
@@ -1308,6 +1307,7 @@ class UnifiedProcessingManager:
             # STEP 5: Execute Full Showcase Workflow and get detailed report
             self.logger.info("🎮 Executing full showcase workflow...")
             workflow_report = self.master_controller.game_player.execute_full_showcase_workflow_corrected()
+            item.recording_areas = dict(getattr(self.master_controller.obs_controller, 'recording_areas', {}) or {})
             
             # Log any issues from the report
             if workflow_report.issues:
@@ -2460,11 +2460,11 @@ class SprunkiUltimateMaster:
             self.game_player.config = config_data
             
             game_settings = config_data.get('gameSettings', {})
-            has_horror = game_settings.get('hasHorror', False)
+            has_horror = bool(game_settings.get('hasHorror', False))
             total_slots = len(config_data.get('layout', {}).get('slots', []))
             
             self.game_player.generate_dynamic_patterns(total_slots)
-            self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=not has_horror)
+            self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
             self.game_player.current_remix_index = 0
             
             # 4. Nạp config cho OBS controller

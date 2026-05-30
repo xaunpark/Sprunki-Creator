@@ -47,14 +47,18 @@ class SprunkiController:
         self.is_currently_recording = False
         self.recording_start_time = None
         self.event_timestamps = []
+        self.recording_areas = {}
 
-    def log_event_timestamp(self, event_name: str, label: str = "", metadata: Optional[dict] = None):
+    def log_event_timestamp(self, event_name: str, label: str = "", metadata: Optional[dict] = None, event_timestamp: Optional[float] = None):
         """Ghi lại một sự kiện và timestamp tương đối so với thời điểm bắt đầu ghi hình."""
         if not self.is_currently_recording or self.recording_start_time is None:
             return
         
         import time
-        elapsed_time = time.monotonic() - self.recording_start_time
+        if event_timestamp is None:
+            elapsed_time = time.monotonic() - self.recording_start_time
+        else:
+            elapsed_time = event_timestamp - self.recording_start_time
         
         event_data = {
             "event": event_name,
@@ -65,6 +69,11 @@ class SprunkiController:
         
         self.event_timestamps.append(event_data)
         print(f"🕒 Event Logged: '{event_name}' at {elapsed_time:.3f}s")
+
+    def store_recording_area(self, segment_key: str, recording_area: dict):
+        """Store per-showcase-segment crop metadata for manifest generation."""
+        if segment_key and isinstance(recording_area, dict):
+            self.recording_areas[segment_key] = recording_area
 
     def _save_timestamps_to_file(self, video_path: str):
         """Lưu danh sách các timestamp đã ghi lại vào một file JSON tương ứng với video."""
@@ -480,12 +489,11 @@ class SprunkiController:
         try:
             self.operation_start_time = time.time()
             
-            if 'recordingArea' not in config_dict['layout']:
-                print("⚠️ Warning: No recordingArea in config")
-                self.log_performance("Config Loading", False)
-                return False
-                
-            self.recording_area = config_dict['layout']['recordingArea']
+            self.recording_area = config_dict.get('layout', {}).get('recordingArea')
+            if not self.recording_area:
+                print("ℹ️ No static recordingArea in config; showcase mode will record full screen.")
+                self.log_performance("Config Loading", True)
+                return True
             
             # PHASE 1: Quick validation
             required_keys = ['x', 'y', 'width', 'height']
@@ -1182,6 +1190,7 @@ class SprunkiController:
                 self.is_currently_recording = True
                 self.recording_start_time = time.monotonic()
                 self.event_timestamps = [] # Reset cho video mới
+                self.recording_areas = {}
                 self.log_event_timestamp("recording_started", "OBS recording confirmed active")
                 
                 if self.current_filename: print(f"📹 Target filename: {self.current_filename}")

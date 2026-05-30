@@ -14,7 +14,6 @@ import websocket
 from image_detector import ImageDetector
 import numpy as np
 from page_load_verifier import PageLoadVerifier
-from analyze_layout import find_dividing_lines
 
 from sprunki_game_player import SprunkiGamePlayer
 
@@ -523,11 +522,7 @@ class SprunkiJSONGenerator:
                         // =====================================================
                         // END: FIXED slots sorting
                         // =====================================================
-                        
-                        // 🎮NEW: Recording area will be calculated in Python using OpenCV
-                        // Set to null here, will be overridden by Python
-                        const customRecordingArea = null;
-                        
+
                         // =====================================================
                         // NEW: Find Skip Intro Button Logic
                         // =====================================================
@@ -615,7 +610,6 @@ class SprunkiJSONGenerator:
                                 icons: icons, 
                                 slots: slots, 
                                 bonus: [], 
-                                recordingArea: customRecordingArea,  // Will be overridden by Python OpenCV calculation
                                 skipIntroButton: skipIntroButton
                             }
                         };
@@ -673,162 +667,6 @@ class SprunkiJSONGenerator:
         except Exception as e:
             print(f"âš ï¸ Window activation failed for {operation_name}: {e}")
             return False
-
-    def capture_and_analyze_layout(self):
-        """Chụp ảnh màn hình và phân tích layout bằng OpenCV để xác định vùng recording"""
-        try:
-            print("📸 Capturing fullscreen screenshot for layout analysis...")
-            
-            # Ensure window activation for screenshot
-            self.ensure_window_activation("layout analysis screenshot")
-            
-            # Capture fullscreen screenshot
-            screenshot = pyautogui.screenshot()
-            
-            # Save temporary screenshot for analysis
-            temp_screenshot_path = "temp_layout_analysis.png"
-            screenshot.save(temp_screenshot_path)
-            
-            print("🔍 Analyzing layout with OpenCV...")
-            
-            # Use analyze_layout to find dividing lines
-            result = find_dividing_lines(temp_screenshot_path)
-            
-            # Kiểm tra result một cách an toàn
-            if result is None:
-                print("❌ Failed to analyze layout - no dividing lines found")
-                return False
-            
-            # Kiểm tra kiểu dữ liệu của result
-            if not isinstance(result, (tuple, list)) or len(result) < 1:
-                print("❌ Invalid result format from layout analysis")
-                return False
-            
-            # Kiểm tra phần tử đầu tiên
-            first_element = result[0]
-            if not isinstance(first_element, (tuple, list)) or len(first_element) < 2:
-                print("❌ Invalid dividing lines format")
-                return False
-            
-            # An toàn unpack
-            try:
-                dividing_lines = first_element
-                top_line_y, bottom_line_y = dividing_lines[0], dividing_lines[1]
-                
-                # Lấy các phần tử khác nếu có
-                edges = result[1] if len(result) > 1 else None
-                projection = result[2] if len(result) > 2 else None
-                all_peaks = result[3] if len(result) > 3 else None
-                
-            except (IndexError, TypeError, ValueError) as e:
-                print(f"❌ Failed to extract layout data: {e}")
-                return False
-            
-            if top_line_y is None or bottom_line_y is None:
-                print("❌ Failed to find both dividing lines")
-                print(f"   Top line: {top_line_y}, Bottom line: {bottom_line_y}")
-                return False
-            
-            # Store results as instance variables
-            self.top_line_y = top_line_y
-            self.bottom_line_y = bottom_line_y
-            
-            print(f"✅ Layout analysis successful!")
-            print(f"   Top dividing line: Y = {top_line_y}")
-            print(f"   Bottom dividing line: Y = {bottom_line_y}")
-            print(f"   Available height: {bottom_line_y - top_line_y} pixels")
-            
-            # Clean up temporary file
-            try:
-                import os
-                os.remove(temp_screenshot_path)
-            except:
-                pass
-                
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error in layout analysis: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-        
-    def calculate_recording_area_opencv(self, slot_center_x, center_index, total_slots):
-        """Tính toán recording area dựa trên kết quả OpenCV và tọa độ slot center"""
-        try:
-            if not hasattr(self, 'top_line_y') or not hasattr(self, 'bottom_line_y'):
-                print("⌧ Layout analysis not performed yet - cannot calculate recording area with OpenCV")
-                print("💡 This usually means the layout analysis step was skipped or failed")
-                return None
-                
-            if self.top_line_y is None or self.bottom_line_y is None:
-                print("⌧ Invalid dividing lines from OpenCV analysis - cannot calculate recording area")
-                print(f"   Top line: {self.top_line_y}, Bottom line: {self.bottom_line_y}")
-                return None
-            
-            if slot_center_x is None:
-                print("⌧ Slot center X coordinate not available")
-                return None
-                
-            print(f"🎯 Calculating recording area with OpenCV method...")
-            print(f"   📐 Dividing lines detected: Y{self.top_line_y} to Y{self.bottom_line_y}")
-            print(f"   🎯 Slot center (index {center_index}/{total_slots}): X={slot_center_x}")
-            
-            # Step 1: Calculate height (distance between dividing lines)
-            height = self.bottom_line_y - self.top_line_y
-            
-            # Validate height is reasonable
-            if height <= 0:
-                print(f"⌧ Invalid height calculated: {height} (bottom_line_y: {self.bottom_line_y}, top_line_y: {self.top_line_y})")
-                return None
-            
-            if height < 100:  # Too small
-                print(f"⚠️ Very small height detected: {height}px - may be inaccurate")
-            elif height > 800:  # Too large  
-                print(f"⚠️ Very large height detected: {height}px - may be inaccurate")
-            
-            # Step 2: Calculate width maintaining 96:83 aspect ratio
-            width = height * (96 / 83)
-            
-            # Step 3: Calculate X coordinate (centered on slot center)
-            x = slot_center_x - (width / 2)
-            
-            # Step 4: Apply boundary constraints (keep within screen)
-            screen_width = 1920  # Fullscreen width
-            original_x = x
-            
-            if x < 0:
-                x = 0
-                print(f"   ⚠️ X adjusted to 0 (was {original_x:.1f} - would be off-screen left)")
-            elif x + width > screen_width:
-                x = screen_width - width
-                print(f"   ⚠️ X adjusted to {x:.1f} (was {original_x:.1f} - would be off-screen right)")
-            
-            # Y coordinate is exactly the top dividing line
-            y = self.top_line_y
-            
-            recording_area = {
-                'x': int(round(x)),
-                'y': int(y),
-                'width': int(round(width)),
-                'height': int(height),
-                'aspectRatio': "96:83"
-            }
-            
-            print(f"✅ OpenCV Recording Area calculated successfully:")
-            print(f"   📐 Position: ({recording_area['x']}, {recording_area['y']})")
-            print(f"   📐 Size: {recording_area['width']} x {recording_area['height']}")
-            print(f"   📐 Aspect Ratio: {recording_area['aspectRatio']}")
-            print(f"   🎯 Perfect fit between dividing lines: Y{self.top_line_y} to Y{self.bottom_line_y}")
-            print(f"   🎯 Centered on slot center (index {center_index}) at X{slot_center_x}")
-            
-            return recording_area
-            
-        except Exception as e:
-            print(f"⌧ Error calculating recording area with OpenCV: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
     def calculate_slot_center_index(self, slots):
         """Tính toán slot center index dựa trên công thức: (total_slots - 1) // 2"""
@@ -1824,37 +1662,22 @@ class SprunkiJSONGenerator:
 
                 # ### KẾT THÚC THIẾT LẬP DUAL VERIFICATION ### #
 
-                # OpenCV Layout Analysis AFTER entering the actual game
+                # Static layout extraction AFTER entering the actual game
                 print("\n" + "="*70)
-                print("🔍 OPENCV LAYOUT ANALYSIS - Analyzing Game Layout After Game Entry")
+                print("🔍 STATIC LAYOUT EXTRACTION - Capturing Game Layout After Game Entry")
                 print("="*70)
-                print("🖼️ Now that we're in the actual game, we can accurately detect layout regions")
+                print("🖼️ RecordingArea is calculated later during showcase runtime")
                 
-                # Wait a bit for game to fully stabilize after intro skip
-                print("⏳ Waiting for game to fully stabilize after intro skip...")
-                time.sleep(3)
-                
-                # Ensure window is properly focused for screenshot
-                self.ensure_window_activation("post-intro layout analysis")
-                
-                # Capture and analyze layout using OpenCV
-                analysis_success = self.capture_and_analyze_layout()
-                
-                if not analysis_success:
-                    print("❌ CRITICAL: Layout analysis failed - cannot determine recording area")
-                    print("💡 This means we cannot accurately detect the game regions")
-                    print("🔄 Will continue with workflow but recording area may be inaccurate")
-                    # Don't fail completely, just proceed without OpenCV recording area
-                else:
-                    print("✅ OpenCV layout analysis completed successfully!")
-                    print("🖼️ Game regions detected - recording area will be calculated accurately")
-                
+                # Wait briefly for the game to stabilize before static layout extraction.
+                print("⏳ Waiting for game to stabilize before layout extraction...")
+                time.sleep(1)
+
                 print("="*70)
 
                 # Initialize final result variables
                 final_has_horror = False
                 final_confidence = 1.0
-                final_detection_method = "horror_detection_disabled"
+                final_detection_method = "horror_disabled_by_policy"
                 final_visual_result = {}
                 final_is_icon_19_disabled = False
 
@@ -1963,7 +1786,7 @@ class SprunkiJSONGenerator:
                     print(f"   Failure Reason: {game_control_details['failure_reason']}")
                 print("="*70)
 
-                print("📊 Skipping Horror Detection for optimization...")
+                print("📊 Horror detection disabled by showcase-only policy...")
 
                 try:
                     
@@ -1987,19 +1810,7 @@ class SprunkiJSONGenerator:
                         raise Exception("Final layout extraction failed")
                     
                     print("✅ Final layout captured successfully")
-                    
-                    # Calculate OpenCV recording area
-                    slots = layout_state.get('layout', {}).get('slots', [])
-                    center_slot, center_index, total_slots = self.calculate_slot_center_index(slots)
-                    if center_slot and center_slot.get('x') is not None:
-                        opencv_recording_area = self.calculate_recording_area_opencv(center_slot['x'], center_index, total_slots)
-                        if opencv_recording_area:
-                            layout_state['layout']['recordingArea'] = opencv_recording_area
-                            print("✅ Recording area calculated with OpenCV method")
-                        else:
-                            layout_state['layout']['recordingArea'] = None
-                    else:
-                        layout_state['layout']['recordingArea'] = None
+                    layout_state.get('layout', {}).pop('recordingArea', None)
 
                 finally:
                     # Single WebSocket cleanup
@@ -2021,15 +1832,15 @@ class SprunkiJSONGenerator:
                         "hasBonus": len(layout_state.get('layout', {}).get('bonus', [])) > 0,
                         "gameControlType": game_control_type,
                         "controlDetectionDetails": game_control_details,
-                        "detectionMethod": "horror_detection_disabled",
+                        "detectionMethod": "horror_disabled_by_policy",
                         "detectionDetails": {
                             "method": final_detection_method,
                             "confidence": final_confidence,
-                            "logic_flow": "Horror detection intentionally skipped for optimization"
+                            "logic_flow": "Horror detection disabled by showcase-only policy"
                         }
                     },
                     "layout": layout_state.get('layout', {}),
-                    "settings": {"aspectRatio": "96:83"}
+                    "settings": {}
                 }
 
                 json_file_path = self.save_json_file(final_json, output_path, custom_title=page_title)

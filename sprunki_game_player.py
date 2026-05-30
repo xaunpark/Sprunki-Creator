@@ -11,6 +11,7 @@ import os
 import subprocess
 import requests
 import websocket
+import re
 from tkinter import Tk, Button, Label, StringVar, messagebox, filedialog, Frame, Radiobutton, IntVar
 from tkinter.ttk import Progressbar, Combobox
 import keyboard
@@ -325,6 +326,7 @@ class SprunkiGamePlayer:
         self.last_health_check = 0
         self.health_check_interval = 30  # Check every 30s
         self.session_start_time = None
+        self.runtime_recording_areas = {}
 
         # JavaScript for finding action buttons (skip/play/start/intro) - Multi-Target Detection
         self.js_find_skip_intro = '''
@@ -2137,6 +2139,374 @@ class SprunkiGamePlayer:
         except Exception as e:
             print(f"ERROR: CDP command error: {e}")
             return None
+
+    def _inspect_runtime_layout_bounds(self):
+        """Read compact visible target bounds from the live Scratch runtime."""
+        js = r"""
+        new Promise((resolve) => {
+          try {
+            function findVM() {
+              if (window.__vm && window.__vm.runtime) return window.__vm;
+              function getReactKey(el) { return Object.keys(el).find(k => k.startsWith('__react')); }
+              const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
+              for (const selector of selectors) {
+                const elements = document.querySelectorAll(selector);
+                for (const el of elements) {
+                  const reactKey = getReactKey(el);
+                  if (!reactKey) continue;
+                  let fiber = el[reactKey];
+                  let depth = 0;
+                  while (fiber && depth++ < 120) {
+                    const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
+                    if (props?.vm && props.vm.runtime) {
+                      window.__vm = props.vm;
+                      return props.vm;
+                    }
+                    fiber = fiber.return;
+                  }
+                }
+              }
+              return null;
+            }
+
+            const screenW = 1920;
+            const screenH = 1080;
+            const stageW = 640;
+            const stageH = 360;
+            const menuWidth = 78;
+            const viewportW = screenW - menuWidth;
+            const scale = Math.min(viewportW / stageW, screenH / stageH);
+            const canvasW = stageW * scale;
+            const canvasH = stageH * scale;
+            const leftOffset = menuWidth;
+            const topOffset = (screenH - canvasH) / 2;
+            const canvasCenterX = leftOffset + (canvasW / 2);
+            const canvasCenterY = topOffset + (canvasH / 2);
+
+            function toPixel(logicX, logicY) {
+              if (logicX === null || logicY === null || logicX === undefined || logicY === undefined) return { x: null, y: null };
+              return { x: canvasCenterX + (logicX * scale), y: canvasCenterY - (logicY * scale) };
+            }
+
+            function boundsToPixels(bounds) {
+              if (!bounds) return null;
+              const left = Number(bounds.left);
+              const right = Number(bounds.right);
+              const top = Number(bounds.top);
+              const bottom = Number(bounds.bottom);
+              if (![left, right, top, bottom].every(Number.isFinite)) return null;
+              const pTopLeft = toPixel(left, top);
+              const pBottomRight = toPixel(right, bottom);
+              const x = Math.min(pTopLeft.x, pBottomRight.x);
+              const y = Math.min(pTopLeft.y, pBottomRight.y);
+              const width = Math.abs(pBottomRight.x - pTopLeft.x);
+              const height = Math.abs(pBottomRight.y - pTopLeft.y);
+              return {
+                x, y, width, height,
+                topPixelY: y,
+                bottomPixelY: y + height,
+                centerPixelX: x + width / 2,
+                centerPixelY: y + height / 2,
+                raw: { left, right, top, bottom }
+              };
+            }
+
+            function boundsCandidates(target, renderer) {
+              const drawableID = target.drawableID ?? target._drawableID;
+              const out = [];
+              try {
+                if (typeof target.getBounds === 'function') {
+                  const raw = target.getBounds();
+                  out.push({ source: 'target.getBounds', pixelBounds: boundsToPixels(raw) });
+                }
+              } catch (e) {}
+              if (renderer && drawableID !== undefined && drawableID !== null) {
+                for (const name of ['getBounds', 'getBoundsForDrawable']) {
+                  try {
+                    if (typeof renderer[name] === 'function') {
+                      const raw = renderer[name](drawableID);
+                      out.push({ source: `renderer.${name}`, pixelBounds: boundsToPixels(raw) });
+                    }
+                  } catch (e) {}
+                }
+              }
+              return out.filter(c => c.pixelBounds);
+            }
+
+            const vm = findVM();
+            if (!vm) {
+              resolve({ ok: false, error: 'Cannot find Scratch VM' });
+              return;
+            }
+
+            const runtime = vm.runtime;
+            const renderer = runtime.renderer || vm.renderer || null;
+            const allTargets = runtime.targets || [];
+            const targets = allTargets
+              .filter(t => !t.isStage && t.visible)
+              .map((target, runtimeIndex) => {
+                const sprite = target.sprite || {};
+                const name = sprite.name || target.getName?.() || '';
+                const pixel = toPixel(target.x, target.y);
+                const candidates = boundsCandidates(target, renderer);
+                const primary = candidates.find(c => c.pixelBounds)?.pixelBounds || null;
+                return {
+                  runtimeIndex,
+                  id: target.id,
+                  name,
+                  visible: target.visible,
+                  logicX: target.x,
+                  logicY: target.y,
+                  sizePercent: target.size,
+                  direction: target.direction,
+                  currentCostumeIndex: target.currentCostume,
+                  pixelX: pixel.x,
+                  pixelY: pixel.y,
+                  boundsTopY: primary?.topPixelY ?? null,
+                  boundsBottomY: primary?.bottomPixelY ?? null,
+                  boundsCenterX: primary?.centerPixelX ?? null,
+                  boundsCenterY: primary?.centerPixelY ?? null,
+                  boundsX: primary?.x ?? null,
+                  boundsY: primary?.y ?? null,
+                  boundsWidth: primary?.width ?? null,
+                  boundsHeight: primary?.height ?? null,
+                  boundsSources: candidates.map(c => c.source)
+                };
+              });
+
+            resolve({
+              ok: true,
+              capturedAt: new Date().toISOString(),
+              screen: { width: screenW, height: screenH },
+              canvas: { stageW, stageH, menuWidth, scale, canvasW, canvasH, leftOffset, topOffset },
+              targets,
+              muteButtons: targets.filter(t => /mute buttons/i.test(t.name))
+            });
+          } catch (error) {
+            resolve({ ok: false, error: String(error), stack: error?.stack });
+          }
+        });
+        """
+        ws = None
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return {"ok": False, "error": "No CDP websocket URL"}
+            ws = websocket.create_connection(ws_url, timeout=10)
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": js, "awaitPromise": True, "returnByValue": True}
+            })
+            value = response.get('result', {}).get('result', {}).get('value') if response else None
+            return value if isinstance(value, dict) else {"ok": False, "error": "Runtime.evaluate returned no value"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        finally:
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
+
+    def _median(self, values):
+        if not values:
+            return None
+        vals = sorted(values)
+        mid = len(vals) // 2
+        if len(vals) % 2:
+            return vals[mid]
+        return (vals[mid - 1] + vals[mid]) / 2
+
+    def _cluster_values(self, values, threshold=4.0):
+        vals = sorted(values)
+        if not vals:
+            return []
+        clusters = [[vals[0]]]
+        for value in vals[1:]:
+            if abs(value - clusters[-1][-1]) <= threshold:
+                clusters[-1].append(value)
+            else:
+                clusters.append([value])
+        return clusters
+
+    def _detect_recording_bottom_y(self, runtime_layout, fallback=670.0):
+        values = [
+            float(target.get("boundsBottomY"))
+            for target in runtime_layout.get("muteButtons", [])
+            if isinstance(target.get("boundsBottomY"), (int, float)) and 600 <= float(target.get("boundsBottomY")) <= 740
+        ]
+        clusters = self._cluster_values(values)
+        if clusters:
+            best = max(clusters, key=lambda c: (len(c), -abs((self._median(c) or fallback) - fallback)))
+            return {
+                "value": float(self._median(best)),
+                "method": "mute_buttons_boundsBottomY_cluster_median",
+                "cluster": best,
+                "allValues": values,
+                "fallbackUsed": False,
+            }
+        return {
+            "value": float(fallback),
+            "method": "fallback_fixed_670",
+            "cluster": [],
+            "allValues": values,
+            "fallbackUsed": True,
+        }
+
+    def _runtime_target_distance(self, target, x, y):
+        distances = []
+        if isinstance(target.get("pixelX"), (int, float)) and isinstance(target.get("pixelY"), (int, float)):
+            distances.append(math.hypot(float(target["pixelX"]) - x, float(target["pixelY"]) - y))
+        if isinstance(target.get("boundsCenterX"), (int, float)) and isinstance(target.get("boundsCenterY"), (int, float)):
+            distances.append(math.hypot(float(target["boundsCenterX"]) - x, float(target["boundsCenterY"]) - y))
+        return min(distances) if distances else math.inf
+
+    def _find_runtime_character_candidate(self, before_layout, after_layout, target_slot, radius=360.0):
+        before_by_id = {target.get("id"): target for target in (before_layout or {}).get("targets", [])}
+        center_x = float(target_slot.get("x", 999))
+        center_y = float(target_slot.get("y", 524))
+        candidates = []
+        for target in after_layout.get("targets", []):
+            name = target.get("name", "")
+            if "Icons" in name or re.match(r"^Polo\s+\d+", name, re.I) or re.search(r"button|mute|gallery|bars|preview", name, re.I):
+                continue
+            required = ("boundsX", "boundsY", "boundsWidth", "boundsHeight")
+            if not all(isinstance(target.get(key), (int, float)) for key in required):
+                continue
+            distance = self._runtime_target_distance(target, center_x, center_y)
+            if distance > radius:
+                continue
+
+            before_target = before_by_id.get(target.get("id"))
+            changed = before_target is None
+            if before_target:
+                for key in ("pixelX", "pixelY", "boundsX", "boundsY", "boundsWidth", "boundsHeight", "currentCostumeIndex"):
+                    after_value = target.get(key)
+                    before_value = before_target.get(key)
+                    if isinstance(after_value, (int, float)) and isinstance(before_value, (int, float)):
+                        if abs(float(after_value) - float(before_value)) > 1:
+                            changed = True
+                            break
+                    elif after_value != before_value:
+                        changed = True
+                        break
+
+            area = float(target["boundsWidth"]) * float(target["boundsHeight"])
+            score = distance
+            if changed:
+                score -= 150
+            if 10_000 <= area <= 500_000:
+                score -= 30
+            elif area > 800_000:
+                score += 200
+            candidates.append({**target, "distanceToCenterSlot": distance, "changedAfterDrag": changed, "score": score})
+
+        candidates.sort(key=lambda row: (row["score"], row["distanceToCenterSlot"], row.get("name") or ""))
+        return candidates[0] if candidates else None
+
+    def _clamp(self, value, minimum, maximum):
+        return max(minimum, min(value, maximum))
+
+    def _fallback_recording_area(self, target_slot, bottom_y, warnings):
+        center_x = float(target_slot.get("x", 999))
+        top = 170.0
+        bottom = float(bottom_y)
+        height = max(1.0, bottom - top)
+        width = height * 96.0 / 83.0
+        left = center_x - width / 2.0
+        right = center_x + width / 2.0
+        if left < 0:
+            right -= left
+            left = 0
+        if right > 1920:
+            shift = right - 1920
+            left = max(0, left - shift)
+            right = 1920
+        warnings.append("character bounds unavailable; using legacy slot-centered fallback area")
+        return {
+            "x": int(round(left)),
+            "y": int(round(top)),
+            "width": int(round(right - left)),
+            "height": int(round(bottom - top)),
+            "bottomY": int(round(bottom)),
+            "aspectRatio": "legacy_96:83_fallback",
+            "sourceMethod": "legacy_slot_center_fallback",
+        }
+
+    def _calculate_recording_area_from_candidate(self, candidate, bottom_y, warnings, padding=10.0):
+        bx = float(candidate["boundsX"])
+        by = float(candidate["boundsY"])
+        bw = float(candidate["boundsWidth"])
+        bh = float(candidate["boundsHeight"])
+        candidate_bottom = by + bh
+        left = bx - padding
+        right = bx + bw + padding
+        top = by - padding
+        bottom = float(bottom_y)
+
+        if candidate_bottom > bottom:
+            warnings.append(f"candidate bounds bottom {candidate_bottom:.1f} exceeds detected bottomY {bottom:.1f}")
+        if top >= bottom - 20:
+            top = max(0, bottom - (bh + padding))
+            warnings.append("top adjusted because fixed bottom produced invalid height")
+
+        if left < 0:
+            right -= left
+            left = 0
+        if right > 1920:
+            shift = right - 1920
+            left = max(0, left - shift)
+            right = 1920
+        top = self._clamp(top, 0, 1079)
+        bottom = self._clamp(bottom, top + 1, 1080)
+
+        return {
+            "x": int(round(left)),
+            "y": int(round(top)),
+            "width": int(round(right - left)),
+            "height": int(round(bottom - top)),
+            "bottomY": int(round(bottom)),
+            "aspectRatio": "native",
+            "sourceMethod": "character_bounds_plus_mute_buttons_bottom",
+        }
+
+    def calculate_runtime_recording_area_after_drop(self, before_layout, target_slot, icon_index, segment_key):
+        """Calculate and store the per-segment recordingArea while the dropped icon is still on stage."""
+        warnings = []
+        after_layout = self._inspect_runtime_layout_bounds()
+        if not after_layout.get("ok"):
+            warnings.append(f"runtime inspect failed: {after_layout.get('error', 'unknown')}")
+            bottom_detection = {"value": 670.0, "method": "fallback_fixed_670", "fallbackUsed": True}
+            candidate = None
+        else:
+            bottom_detection = self._detect_recording_bottom_y(after_layout)
+            candidate = self._find_runtime_character_candidate(before_layout, after_layout, target_slot)
+
+        bottom_y = bottom_detection.get("value", 670.0)
+        fallback_used = bool(bottom_detection.get("fallbackUsed"))
+        if candidate:
+            area = self._calculate_recording_area_from_candidate(candidate, bottom_y, warnings)
+        else:
+            area = self._fallback_recording_area(target_slot, bottom_y, warnings)
+            fallback_used = True
+
+        area["segmentKey"] = segment_key
+        area["iconIndex"] = icon_index
+        area["source"] = {
+            "bottomLine": bottom_detection,
+            "characterCandidate": {
+                key: candidate.get(key)
+                for key in ("runtimeIndex", "id", "name", "boundsX", "boundsY", "boundsWidth", "boundsHeight", "distanceToCenterSlot", "changedAfterDrag", "score")
+            } if candidate else None,
+        }
+        area["fallbackUsed"] = fallback_used
+        area["warnings"] = warnings
+
+        self.runtime_recording_areas[segment_key] = area
+        if self.obs_controller:
+            self.obs_controller.store_recording_area(segment_key, area)
+        print(f"ðŸŽ¯ Runtime recordingArea for {segment_key}: {area['x']},{area['y']} {area['width']}x{area['height']} fallback={fallback_used}")
+        return area
 
     def ensure_window_activation(self, operation_name="operation"):
         """Optimized window activation - avoid excessive maximize calls"""
@@ -5561,9 +5931,12 @@ class SprunkiGamePlayer:
             domain_adj = self.get_domain_adjustments()
             timing_key = 'first_icon' if is_first_icon else 'normal_icon'
             delays = self.DRAG_DELAYS[timing_key].copy()
+            action_start_time = time.monotonic()
             drag_executed = self._execute_pyautogui_drag(
                 start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon
             )
+            if drag_executed and drop_time is None:
+                drop_time = time.monotonic()
 
         if not drag_executed:
             return False, {"error": "Drag execution failed"}
@@ -5584,7 +5957,7 @@ class SprunkiGamePlayer:
             
             if verification_success:
                 # Trả về các thông tin cần thiết để ghi timestamp
-                return True, {"action_start_time": action_start_time, "drop_time": drop_time}
+                return True, {"action_start_time": action_start_time, "drop_time": drop_time, "verified_at": time.monotonic()}
             else:
                 # Thất bại, thực hiện self-correction
                 print("      [ATTEMPT] Verification failed. Performing self-correction.")
@@ -5595,7 +5968,7 @@ class SprunkiGamePlayer:
                 return False, {"error": "Verification failed"}
         else:
             # Không có xác thực, giả định thành công
-            return True, {"action_start_time": action_start_time, "drop_time": drop_time}
+            return True, {"action_start_time": action_start_time, "drop_time": drop_time, "verified_at": time.monotonic()}
 
     def _find_optimal_drop_point(self, icon, target_slot, is_first_icon, use_cdp, control_type_override):
         """
@@ -5747,25 +6120,37 @@ class SprunkiGamePlayer:
         """
         [NEW - HELPER] Centralizes actions after a successful drag to avoid code duplication.
         """
+        self.last_successful_drag_details = {
+            **(details or {}),
+            "icon_index": icon.get('index', -1),
+            "slot_index": target_slot.get('index', -1),
+            "method": method,
+            "attempt_number": attempts,
+        }
         # Bảo toàn tính năng #6: Ghi Timestamps
         if self.obs_controller and self.obs_controller.recording_start_time is not None:
             action_start_time = details.get("action_start_time")
             drop_time = details.get("drop_time")
+            verified_at = details.get("verified_at")
             
             if action_start_time:
-                elapsed_start_time = action_start_time - self.obs_controller.recording_start_time
                 self.obs_controller.log_event_timestamp(
                     "successful_drag_started",
                     f"Drag started for icon {icon.get('index', -1)}",
-                    {"icon_index": icon.get('index', -1), "attempt_number": attempts, "method": method}
+                    {"icon_index": icon.get('index', -1), "attempt_number": attempts, "method": method},
+                    event_timestamp=action_start_time
                 )
 
             if drop_time:
-                elapsed_drop_time = drop_time - self.obs_controller.recording_start_time
+                metadata = {"icon_index": icon.get('index', -1), "slot_index": target_slot.get('index', -1)}
+                if verified_at:
+                    metadata["verifiedAt"] = round(verified_at - self.obs_controller.recording_start_time, 3)
+                    metadata["verificationDelay"] = round(verified_at - drop_time, 3)
                 self.obs_controller.log_event_timestamp(
                     "icon_dropped_successfully",
                     f"Icon {icon.get('index', -1)} dropped into slot",
-                    {"icon_index": icon.get('index', -1), "slot_index": target_slot.get('index', -1)}
+                    metadata,
+                    event_timestamp=drop_time
                 )
         
         # Bảo toàn tính năng #10: Ghi lại Thống kê
@@ -6779,7 +7164,7 @@ class SprunkiGamePlayer:
 
         except Exception as e:
             print(f"   ❌ Exception during dynamic CDP drag: {e}")
-            return False, None
+            return False, None, None
 
     def corrected_return_icon(self, target_slot, use_cdp=True):
         """
@@ -7024,6 +7409,7 @@ class SprunkiGamePlayer:
                 obs_controller.log_event_timestamp("start_icon_showcase", f"Start showcase cycle for icon {icon_index}", showcase_context)
             
             # --- GIAI ĐOẠN KÉO THẢ ---
+            before_runtime_layout = self._inspect_runtime_layout_bounds()
             if obs_controller:
                 obs_controller.log_event_timestamp("start_drag", f"Dragging icon {icon_index}", {"success": None})
             
@@ -7040,48 +7426,53 @@ class SprunkiGamePlayer:
             if self.stop_event.is_set(): return False
             
             # --- GIAI ĐOẠN NGHE NHẠC ---
-            # 🔥 Lấy timestamp từ sự kiện drop_successfully thay vì tạo mới
-            listen_start_timestamp = -1.0 # Giá trị mặc định
-            if obs_controller and obs_controller.event_timestamps:
-                # Tìm sự kiện drop cuối cùng được thêm vào
-                last_drop_event = next((event for event in reversed(obs_controller.event_timestamps) if event["event"] == "icon_dropped_successfully"), None)
-                if last_drop_event:
-                    listen_start_timestamp = last_drop_event["timestamp"]
-                    
-                    # Tạo sự kiện start_listen với cùng timestamp
-                    start_listen_event = {
-                        "event": "start_listen",
-                        "timestamp": listen_start_timestamp,
-                        "label": f"Listening to icon {icon_index} for {listen_duration}s",
-                        "metadata": {"duration": listen_duration}
-                    }
-                    obs_controller.event_timestamps.append(start_listen_event)
-                    print(f"🕒 Video Event Logged: 'start_listen' at {listen_start_timestamp:.3f}s (Synced with drop time)")
+            drag_details = getattr(self, "last_successful_drag_details", {}) or {}
+            drop_time = drag_details.get("drop_time") or time.monotonic()
+            segment_key = f"n-{icon_index + 1}"
 
-            # Vòng lặp nghe nhạc vẫn giữ nguyên
-            for countdown in range(listen_duration, 0, -1):
-                if self.stop_event.is_set(): return False
-                time.sleep(1)
+            recording_area = self.calculate_runtime_recording_area_after_drop(
+                before_runtime_layout if isinstance(before_runtime_layout, dict) else {},
+                target_slot,
+                icon_index,
+                segment_key
+            )
 
-            # 🔥 TÍNH TOÁN VÀ GHI LẠI END_LISTEN DỰA TRÊN START_LISTEN
             if obs_controller:
-                # Kiểm tra xem listen_start_timestamp có tồn tại không (được gán ở khối trên)
-                if listen_start_timestamp >= 0.0:
-                    # Tính toán timestamp kết thúc chính xác
-                    end_listen_timestamp = listen_start_timestamp + listen_duration
-                    
-                    # Tạo sự kiện thủ công với timestamp đã tính
-                    end_listen_event = {
-                        "event": "end_listen",
-                        "timestamp": round(end_listen_timestamp, 3),
-                        "label": f"Finished listening to icon {icon_index}",
-                        "metadata": {}
-                    }
-                    obs_controller.event_timestamps.append(end_listen_event)
-                    print(f"🕒 Video Event Logged: 'end_listen' at {end_listen_timestamp:.3f}s (Calculated)")
-                else:
-                    # Fallback an toàn nếu không tìm thấy start_listen
-                    obs_controller.log_event_timestamp("end_listen", f"Finished listening to icon {icon_index}")
+                obs_controller.log_event_timestamp(
+                    "start_listen",
+                    f"Listening to icon {icon_index} for {listen_duration}s",
+                    {
+                        "duration": listen_duration,
+                        "mode": "Normal",
+                        "icon_index": icon_index,
+                        "segmentKey": segment_key,
+                        "recordingAreaId": segment_key,
+                        "recordingAreaFallbackUsed": bool(recording_area.get("fallbackUsed")),
+                    },
+                    event_timestamp=drop_time
+                )
+                listen_start_timestamp = round(drop_time - obs_controller.recording_start_time, 3)
+                print(f"🕒 Video Event Logged: 'start_listen' at {listen_start_timestamp:.3f}s (drop_time anchored)")
+            else:
+                listen_start_timestamp = -1.0
+
+            remaining_listen_time = max(0.0, listen_duration - (time.monotonic() - drop_time))
+            listen_deadline = time.monotonic() + remaining_listen_time
+            while time.monotonic() < listen_deadline:
+                if self.stop_event.is_set():
+                    return False
+                time.sleep(min(1.0, max(0.0, listen_deadline - time.monotonic())))
+
+            if obs_controller:
+                end_listen_abs = drop_time + listen_duration
+                obs_controller.log_event_timestamp(
+                    "end_listen",
+                    f"Finished listening to icon {icon_index}",
+                    {"segmentKey": segment_key, "recordingAreaId": segment_key},
+                    event_timestamp=end_listen_abs
+                )
+                end_listen_timestamp = round(end_listen_abs - obs_controller.recording_start_time, 3)
+                print(f"🕒 Video Event Logged: 'end_listen' at {end_listen_timestamp:.3f}s (Calculated)")
 
             if self.stop_event.is_set(): return False
 
@@ -7749,7 +8140,8 @@ class SprunkiGamePlayer:
                 return report
                 
             game_settings = self.config.get('gameSettings', {})
-            has_horror = game_settings.get('hasHorror', False)
+            configured_has_horror = bool(game_settings.get('hasHorror', False))
+            has_horror = False
             has_bonus = game_settings.get('hasBonus', False)
             
             print("\n🎪 STARTING ENHANCED FULL SHOWCASE WORKFLOW")
@@ -7766,7 +8158,7 @@ class SprunkiGamePlayer:
             
             # Normal icons
             if not self.should_stop:
-                success, total = self.showcase_all_icons_corrected("Normal", skip_icon_19=has_horror, progress_callback=progress_callback)
+                success, total = self.showcase_all_icons_corrected("Normal", skip_icon_19=configured_has_horror, progress_callback=progress_callback)
                 report.normal_icons_showcased = success
                 report.normal_icons_total = total
                 if success < total:
@@ -7798,7 +8190,7 @@ class SprunkiGamePlayer:
             if is_normal_phase_perfect:
                 print("\n✅ NORMAL PHASE COMPLETED SUCCESSFULLY!")
             else:
-                print("\n🔶 NORMAL PHASE COMPLETED WITH WARNINGS. Continuing to Horror Mode...")
+                print("\n🔶 NORMAL PHASE COMPLETED WITH WARNINGS. Horror phase is disabled by policy.")
             print("="*60)
             
             normal_phase_did_run = True 
