@@ -1,0 +1,12 @@
+{
+  "generatedAt": "2026-05-31T08:36:47.361570",
+  "timeout": 45.0,
+  "interval": 1.0,
+  "results": [
+    {
+      "url": "https://www.cocrea.world/@Simonthesprnkiguy345/SprunkeTri-Shifted",
+      "success": false,
+      "error": "Could not get Chrome DevTools websocket URL"
+    }
+  ]
+}

@@ -26,9 +26,13 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import pyautogui
+import tkinter.messagebox as messagebox
 
 from config_manager import get_config
 from sprunki_game_player import SprunkiGamePlayer
@@ -260,6 +264,40 @@ def update_manifest(manifest: Dict[str, Any], area: Dict[str, Any]) -> None:
     processing.pop("configuredHasHorror", None)
 
 
+def rescue_mouse_from_failsafe_corner() -> None:
+    """Move the cursor away from PyAutoGUI fail-safe corners, then restore fail-safe."""
+    original_failsafe = pyautogui.FAILSAFE
+    try:
+        pyautogui.FAILSAFE = False
+        screen_w, screen_h = pyautogui.size()
+        pyautogui.moveTo(screen_w // 2, screen_h // 2, duration=0.1)
+        time.sleep(0.1)
+    finally:
+        pyautogui.FAILSAFE = original_failsafe
+
+
+def suppress_tk_messageboxes() -> None:
+    """Prevent modal Tk error popups from blocking unattended backfill batches."""
+    def _log_messagebox(title: str = "", message: str = "", *args, **kwargs) -> bool:
+        print(f"Suppressed popup: {title} - {message}")
+        return True
+
+    messagebox.showerror = _log_messagebox
+    messagebox.showwarning = _log_messagebox
+    messagebox.showinfo = _log_messagebox
+
+
+def setup_game_environment_with_failsafe_retry(player: SprunkiGamePlayer) -> bool:
+    suppress_tk_messageboxes()
+    rescue_mouse_from_failsafe_corner()
+    try:
+        return player.setup_game_environment(first_setup=True)
+    except pyautogui.FailSafeException:
+        print("PyAutoGUI fail-safe triggered during setup; moving mouse to safe center and retrying once.")
+        rescue_mouse_from_failsafe_corner()
+        return player.setup_game_environment(first_setup=True)
+
+
 def convert_existing_manifest_recording_area(project_dir: Path, manifest_path: Path, manifest: Dict[str, Any]) -> None:
     area = manifest.get("layoutSummary", {}).get("recordingArea")
     converted = screen_area_to_master_video_area(area)
@@ -291,7 +329,7 @@ def backfill(project_dir: Path, manifest_path: Path, source_json_path: Optional[
     player.config = runtime_config
 
     try:
-        if not player.setup_game_environment(first_setup=True):
+        if not setup_game_environment_with_failsafe_retry(player):
             raise RuntimeError("Game environment setup failed")
 
         slots = runtime_config.get("layout", {}).get("slots", [])
