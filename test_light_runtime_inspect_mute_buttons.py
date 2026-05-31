@@ -243,6 +243,7 @@ def choose_bottom(values: List[float], fallback: float = 670.0) -> Dict[str, Any
 
 
 def launch_url_light(player: SprunkiGamePlayer, url: str) -> bool:
+    player.game_url = url
     player.cleanup_chrome_complete()
     time.sleep(2)
 

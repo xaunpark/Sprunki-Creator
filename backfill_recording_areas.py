@@ -33,9 +33,13 @@ from typing import Any, Dict, List, Optional
 
 import pyautogui
 import tkinter.messagebox as messagebox
+import websocket
 
 from config_manager import get_config
 from sprunki_game_player import SprunkiGamePlayer
+from test_light_runtime_inspect_mute_buttons import LIGHT_INSPECT_JS, choose_bottom
+from test_light_run_inspect_recording_area import RUN_CLICK_JS, launch_url_light, wait_for_websocket
+from test_recording_area_scaled_comparison_mockups import eval_js
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -251,6 +255,34 @@ def screen_area_to_master_video_area(area: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def center_slot_x_from_config(config: Dict[str, Any]) -> float:
+    slots = config.get("layout", {}).get("slots", [])
+    if not slots:
+        return 999.0
+    center_index = (len(slots) - 1) // 2
+    for slot in slots:
+        if int(slot.get("index", -1)) == center_index:
+            try:
+                return float(slot.get("x", 999.0))
+            except Exception:
+                return 999.0
+    try:
+        return float(slots[center_index].get("x", 999.0))
+    except Exception:
+        return 999.0
+
+
+def area_from_bottom_and_center(bottom_y: float, center_x: float) -> Dict[str, Any]:
+    screen_area = {
+        "x": int(round(center_x - 350.0)),
+        "y": int(round(float(bottom_y) - 480.0)),
+        "width": 700,
+        "height": 480,
+        "aspectRatio": "35:24",
+    }
+    return screen_area_to_master_video_area(screen_area)
+
+
 def update_manifest(manifest: Dict[str, Any], area: Dict[str, Any]) -> None:
     layout_summary = manifest.setdefault("layoutSummary", {})
     layout_summary.pop("recordingAreaMode", None)
@@ -298,6 +330,94 @@ def setup_game_environment_with_failsafe_retry(player: SprunkiGamePlayer) -> boo
         return player.setup_game_environment(first_setup=True)
 
 
+def click_run_with_wait(ws: websocket.WebSocket, timeout: float = 45.0, interval: float = 1.0) -> Dict[str, Any]:
+    started = time.monotonic()
+    last: Dict[str, Any] = {}
+    while time.monotonic() - started < timeout:
+        result = eval_js(ws, RUN_CLICK_JS, timeout=30)
+        last = result
+        if result.get("ok"):
+            result["elapsedSeconds"] = time.monotonic() - started
+            return result
+        time.sleep(interval)
+    return {
+        "ok": False,
+        "reason": "timeout_waiting_for_run_button",
+        "elapsedSeconds": time.monotonic() - started,
+        "lastResult": last,
+    }
+
+
+def calculate_area_with_light_run_inspect(runtime_config: Dict[str, Any], timeout: float = 70.0, interval: float = 1.0) -> Dict[str, Any]:
+    player = SprunkiGamePlayer()
+    player.config = runtime_config
+    ws = None
+    started = time.monotonic()
+    try:
+        url = runtime_config["currentUrl"]
+        print("Trying light backfill path: open URL + Run + runtime inspect, no fullscreen/F11.")
+        launch_url_light(player, url)
+        ws_url = wait_for_websocket(player, timeout=20.0)
+        ws = websocket.create_connection(ws_url, timeout=30)
+
+        run_result = click_run_with_wait(ws, timeout=min(45.0, timeout), interval=1.0)
+        if not run_result.get("ok"):
+            raise RuntimeError(f"light Run click failed: {run_result.get('reason')}")
+
+        time.sleep(max(0.5, getattr(player, "game_load_wait", 5)))
+        while time.monotonic() - started < timeout:
+            data = eval_js(ws, LIGHT_INSPECT_JS, timeout=30)
+            values = data.get("usableBoundsBottomY") or []
+            if data.get("ok") and values:
+                bottom = choose_bottom([float(v) for v in values])
+                center_x = center_slot_x_from_config(runtime_config)
+                area = area_from_bottom_and_center(float(bottom["value"]), center_x)
+                print(f"Light path detected bottomY={bottom['value']} centerX={center_x} area={public_recording_area(area)}")
+                return area
+            time.sleep(interval)
+
+        raise RuntimeError("light inspect timed out without usable Mute Buttons boundsBottomY")
+    finally:
+        if ws:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        try:
+            player.cleanup_chrome_complete()
+        except Exception:
+            pass
+
+
+def calculate_area_with_full_setup(runtime_config: Dict[str, Any]) -> Dict[str, Any]:
+    player = SprunkiGamePlayer()
+    player.config = runtime_config
+    try:
+        if not setup_game_environment_with_failsafe_retry(player):
+            raise RuntimeError("Game environment setup failed")
+
+        slots = runtime_config.get("layout", {}).get("slots", [])
+        target_slot = None
+        if slots:
+            center_slot_index = player.calculate_center_slot_index(slots)
+            target_slot = player._find_slot_by_index(center_slot_index)
+            if not target_slot:
+                print(f"WARNING: center slot {center_slot_index} not found; using default center X")
+        else:
+            print("WARNING: source JSON has no slots; using default center X")
+
+        area = player.calculate_fixed_runtime_recording_area(target_slot, width=700.0, height=480.0)
+        debug = area.get("_runtimeDebug", {})
+        print(f"Full setup detected recordingArea: {public_recording_area(area)}")
+        print(f"Bottom debug: {debug.get('bottomLine')}")
+        return area
+    finally:
+        try:
+            player.close_game_window()
+        except Exception:
+            pass
+
+
 def convert_existing_manifest_recording_area(project_dir: Path, manifest_path: Path, manifest: Dict[str, Any]) -> None:
     area = manifest.get("layoutSummary", {}).get("recordingArea")
     converted = screen_area_to_master_video_area(area)
@@ -325,33 +445,11 @@ def backfill(project_dir: Path, manifest_path: Path, source_json_path: Optional[
     print(f"Source JSON: {source_json_path or '(not found; using manifest URL and default center X)'}")
     print(f"URL: {runtime_config['currentUrl']}")
 
-    player = SprunkiGamePlayer()
-    player.config = runtime_config
-
     try:
-        if not setup_game_environment_with_failsafe_retry(player):
-            raise RuntimeError("Game environment setup failed")
-
-        slots = runtime_config.get("layout", {}).get("slots", [])
-        target_slot = None
-        if slots:
-            center_slot_index = player.calculate_center_slot_index(slots)
-            target_slot = player._find_slot_by_index(center_slot_index)
-            if not target_slot:
-                print(f"WARNING: center slot {center_slot_index} not found; using default center X")
-        else:
-            print("WARNING: source JSON has no slots; using default center X")
-
-        area = player.calculate_fixed_runtime_recording_area(target_slot, width=700.0, height=480.0)
-        debug = area.get("_runtimeDebug", {})
-        print(f"Detected recordingArea: {public_recording_area(area)}")
-        print(f"Bottom debug: {debug.get('bottomLine')}")
-
-    finally:
-        try:
-            player.close_game_window()
-        except Exception:
-            pass
+        area = calculate_area_with_light_run_inspect(runtime_config)
+    except Exception as light_error:
+        print(f"Light path failed, falling back to full setup: {light_error}")
+        area = calculate_area_with_full_setup(runtime_config)
 
     update_manifest(manifest, area)
 
