@@ -6292,6 +6292,226 @@ class SprunkiGamePlayer:
             print(f"❌ Single drag attempt execution error: {e}")
             return False
 
+    def _get_entry_state_js(self):
+        return r'''
+        new Promise((resolve) => {
+            try {
+                function findVM() {
+                    if (window.__vm && window.__vm.runtime) return window.__vm;
+                    function getReactKey(el) { return Object.keys(el).find(k => k.startsWith('__react')); }
+                    const selectors = ['canvas', '.ccw-stage-wrapper', '#stage-canvas-wrapper', '.gandi_stage_stage_1fD7k'];
+                    for (const selector of selectors) {
+                        for (const el of document.querySelectorAll(selector)) {
+                            const reactKey = getReactKey(el);
+                            if (!reactKey) continue;
+                            let fiber = el[reactKey];
+                            let depth = 0;
+                            while (fiber && depth++ < 100) {
+                                const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
+                                if (props?.vm && props.vm.runtime) {
+                                    window.__vm = props.vm;
+                                    return props.vm;
+                                }
+                                fiber = fiber.return;
+                            }
+                        }
+                    }
+                    return null;
+                }
+
+                const toPixelWithMenu = (logicX, logicY) => {
+                    const stageW = 640, stageH = 360, screenW = 1920, screenH = 1080, menuWidth = 78;
+                    const scale = Math.min((screenW - menuWidth) / stageW, screenH / stageH);
+                    const canvasW = stageW * scale;
+                    const canvasH = stageH * scale;
+                    const canvasCenterX = menuWidth + (canvasW / 2);
+                    const canvasCenterY = ((screenH - canvasH) / 2) + (canvasH / 2);
+                    return {
+                        x: Math.round(canvasCenterX + ((logicX || 0) * scale)),
+                        y: Math.round(canvasCenterY - ((logicY || 0) * scale))
+                    };
+                };
+
+                const vm = findVM();
+                if (!vm) {
+                    resolve({ ok: false, reason: 'vm_not_found' });
+                    return;
+                }
+
+                const icons = [];
+                const slots = [];
+                const playButtons = [];
+                const closeIndicators = [];
+                const panelIndicators = [];
+
+                function asItem(target, index) {
+                    const name = target.sprite?.name || '';
+                    const costume = target.sprite?.costumes?.[target.currentCostume]?.name || '';
+                    const pixel = toPixelWithMenu(target.x, target.y);
+                    return {
+                        index,
+                        targetName: name,
+                        currentCostumeName: costume,
+                        visible: !!target.visible,
+                        logicX: Math.round(target.x || 0),
+                        logicY: Math.round(target.y || 0),
+                        x: pixel.x,
+                        y: pixel.y,
+                        size: Math.round(target.size || 0),
+                        layerOrder: target.getLayerOrder ? target.getLayerOrder() : null
+                    };
+                }
+
+                function isCloseIndicator(name, costume) {
+                    const raw = `${name} ${costume}`.trim().toLowerCase();
+                    if (/\b(close|back|return|exit)\b/.test(raw)) return true;
+                    return /(^|[^a-z])x([^a-z]|$)/.test(raw) && /\b(button|btn|close)\b/.test(raw);
+                }
+
+                function isPanelIndicator(name, costume) {
+                    const raw = `${name} ${costume}`.trim().toLowerCase();
+                    if (/\bwarning\b/.test(raw)) {
+                        return /\b(gallery|credits?|settings?|menu|more)\b/.test(raw);
+                    }
+                    return /\b(gallery|credits?|settings?|menu|more)\b.*\b(screen|panel)\b/.test(raw)
+                        || /\b(screen|panel)\b.*\b(gallery|credits?|settings?|menu|more)\b/.test(raw)
+                        || /\bsettings?\b/.test(raw);
+                }
+
+                const targets = vm.runtime.targets || [];
+                for (let i = 0; i < targets.length; i++) {
+                    const target = targets[i];
+                    if (target.isStage || !target.sprite || !target.visible) continue;
+                    const item = asItem(target, i);
+                    const name = item.targetName;
+                    const costume = item.currentCostumeName;
+
+                    if (/icons/i.test(name)) icons.push(item);
+                    if (/^polo\s*\d+/i.test(name)) slots.push(item);
+                    if (/^play button/i.test(name)) playButtons.push(item);
+                    if (isCloseIndicator(name, costume)) closeIndicators.push(item);
+                    if (isPanelIndicator(name, costume)) panelIndicators.push(item);
+                }
+
+                const openPanelIndicators = [...closeIndicators, ...panelIndicators];
+                resolve({
+                    ok: true,
+                    iconCount: icons.length,
+                    slotCount: slots.length,
+                    playButtonCount: playButtons.length,
+                    closeIndicators,
+                    panelIndicators,
+                    openPanelIndicators,
+                    playableCandidate: icons.length > 0 && slots.length > 0 && openPanelIndicators.length === 0
+                });
+            } catch (e) {
+                resolve({ ok: false, reason: 'error', error: String(e) });
+            }
+        });
+        '''
+
+    def _evaluate_entry_state_via_ws(self, ws):
+        response = self._send_cdp_command(ws, {
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": self._get_entry_state_js(),
+                "awaitPromise": True,
+                "returnByValue": True
+            }
+        })
+        if response and 'result' in response:
+            return response.get('result', {}).get('result', {}).get('value')
+        return None
+
+    def _summarize_entry_state(self, state):
+        if not isinstance(state, dict):
+            return "state unavailable"
+        indicators = state.get('openPanelIndicators') or []
+        indicator_names = [
+            f"{item.get('targetName')}/{item.get('currentCostumeName')}@({item.get('x')},{item.get('y')})"
+            for item in indicators[:6]
+        ]
+        summary = (
+            f"icons={state.get('iconCount')}, slots={state.get('slotCount')}, "
+            f"playButtons={state.get('playButtonCount')}, openIndicators={len(indicators)}"
+        )
+        if indicator_names:
+            summary += f" [{'; '.join(indicator_names)}]"
+        return summary
+
+    def _rollback_open_entry_panel_via_ws(self, ws, state):
+        if not isinstance(state, dict):
+            return False
+        close_buttons = state.get('closeIndicators') or []
+        if not close_buttons:
+            return False
+        close_button = sorted(
+            close_buttons,
+            key=lambda item: item.get('layerOrder') if item.get('layerOrder') is not None else -1,
+            reverse=True
+        )[0]
+        print(
+            "   Rolling back opened panel via "
+            f"{close_button.get('targetName')}/{close_button.get('currentCostumeName')} "
+            f"@ ({close_button.get('x')}, {close_button.get('y')})"
+        )
+        self._simulate_click_via_cdp(ws, int(close_button['x']), int(close_button['y']))
+        time.sleep(0.8)
+        return True
+
+    def _trial_action_buttons_via_ws(self, ws, buttons):
+        if not buttons:
+            return {"selected": None, "tested": [], "success": False, "reason": "no_buttons"}
+
+        tested = []
+        for i, button in enumerate(buttons, 1):
+            x, y = int(button['x']), int(button['y'])
+            name = button.get('targetName', '?')
+            costume = button.get('currentCostumeName', '?')
+            print(f"   Trial {i}/{len(buttons)}: {name}/{costume} @ ({x}, {y})")
+
+            before_state = self._evaluate_entry_state_via_ws(ws)
+            self._simulate_click_via_cdp(ws, x, y)
+            time.sleep(1.0)
+            after_state = self._evaluate_entry_state_via_ws(ws)
+            print(f"      After click: {self._summarize_entry_state(after_state)}")
+
+            opened_panel = bool(after_state and after_state.get('openPanelIndicators'))
+            playable_candidate = bool(after_state and after_state.get('playableCandidate'))
+            result = {
+                "button": button,
+                "before": before_state,
+                "after": after_state,
+                "openedPanel": opened_panel,
+                "playableCandidate": playable_candidate
+            }
+
+            if opened_panel:
+                result["result"] = "panel_opened"
+                self._rollback_open_entry_panel_via_ws(ws, after_state)
+                post_rollback = self._evaluate_entry_state_via_ws(ws)
+                result["afterRollback"] = post_rollback
+                print(f"      After rollback: {self._summarize_entry_state(post_rollback)}")
+                tested.append(result)
+                continue
+
+            if playable_candidate:
+                result["result"] = "selected"
+                tested.append(result)
+                print(f"   Selected action candidate: {name}/{costume} @ ({x}, {y})")
+                return {
+                    "selected": button,
+                    "tested": tested,
+                    "success": True,
+                    "reason": "selected_playable_candidate"
+                }
+
+            result["result"] = "not_playable"
+            tested.append(result)
+            print("      Candidate did not expose a playable state; trying next candidate.")
+
+        return {"selected": None, "tested": tested, "success": False, "reason": "no_playable_candidate"}
+
     def intro_skip_via_cdp(self):
         """ENHANCED: Multi-target Skip intro using CDP with smart detection + blind clicks"""
         try:
@@ -6310,6 +6530,7 @@ class SprunkiGamePlayer:
             scan_interval = 2.0
             smart_clicks_performed = 0
             rounds_completed = 0
+            candidate_trials_attempted = False
             
             try:
                 for scan_round in range(1, max_scan_rounds + 1):
@@ -6340,13 +6561,16 @@ class SprunkiGamePlayer:
                         priority = button.get('priority', 99)
                         name = button.get('targetName', '?')
                         costume = button.get('currentCostumeName', '?')
-                        
                         print(f"      [{i+1}] P{priority} '{keyword}' - {name}/{costume} @ ({x}, {y})")
-                        self._simulate_click_via_cdp(ws, x, y)
-                        time.sleep(0.8)
+
+                    candidate_trials_attempted = True
+                    trial_result = self._trial_action_buttons_via_ws(ws, buttons)
+                    if trial_result.get("success"):
                         smart_clicks_performed += 1
-                    
-                    print(f"   \u2705 Clicked {len(buttons)} button(s) in round {scan_round}")
+                        print(f"   \u2705 Selected one playable action candidate in round {scan_round}")
+                        break
+
+                    print(f"   \u26a0\ufe0f No playable action candidate in round {scan_round}: {trial_result.get('reason')}")
                     
                     if scan_round < max_scan_rounds:
                         print(f"   \u23f3 Waiting {scan_interval}s before next scan...")
@@ -6381,7 +6605,7 @@ class SprunkiGamePlayer:
             # Perform blind clicks via CDP only when smart detection found nothing.
             # Some mods put Gallery/menu controls at the screen center.
             blind_clicks_performed = 0
-            if smart_clicks_performed == 0:
+            if smart_clicks_performed == 0 and not candidate_trials_attempted:
                 for i in range(self.intro_skip_clicks):
                     self._simulate_click_via_cdp(ws, 960, 540)
                     blind_clicks_performed += 1

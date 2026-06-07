@@ -101,9 +101,14 @@ When multiple candidates are found, do not click all of them.
 Process:
 
 1. Click one candidate.
-2. Run playable verification.
-3. If pass, save it as `selectedPlayButton`.
-4. If fail, rollback using Esc/close/reload and try the next candidate.
+2. Inspect the post-click runtime state and record diagnostics:
+   - visible/action-like targets and current costumes,
+   - detected icon/slot counts,
+   - whether menu/panel-like targets appear active/open,
+   - whether drag/put/return verification passes.
+3. Treat drag/put success as necessary but not sufficient; it can still pass while a menu/gallery/settings/credits panel visually covers the game.
+4. If pass, save it as `selectedPlayButton`.
+5. If fail or if a panel/menu state is detected, rollback using Esc/close/reload and try the next candidate.
 
 This addresses mods where multiple candidates are named like `Play Button2/3/4/5` but only one is the real Play button.
 

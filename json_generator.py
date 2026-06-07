@@ -1572,6 +1572,7 @@ class SprunkiJSONGenerator:
                 
                 smart_clicks_performed = 0
                 all_buttons = []
+                candidate_trials_attempted = False
 
                 if skip_intro_response and skip_intro_response.get('found'):
                     all_buttons = skip_intro_response.get('buttons', [])
@@ -1582,22 +1583,18 @@ class SprunkiJSONGenerator:
                     print(f"✅ Found {button_count} Skip Intro buttons:")
                     print(f"   📊 Visible: {visible_count}, Hidden: {hidden_count}")
                     
-                    # Click ALL buttons found
-                    for i, button in enumerate(all_buttons):
-                        button_num = i + 1
-                        x, y = button['x'], button['y']
-                        visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
-                        costume_name = button.get('currentCostumeName', 'Unknown')
-                        
-                        print(f"👆 Clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status} - {costume_name}")
-                        
-                        # [ĐÃ SỬA] Sử dụng hàm click của engine
-                        self.game_player._execute_cdp_single_click(x, y)
-                        time.sleep(0.8)  # Wait between clicks
-                        
-                        smart_clicks_performed += 1
-                    
-                    print(f"✅ Smart clicks completed: {smart_clicks_performed} buttons clicked!")
+                    candidate_trials_attempted = True
+                    trial_result = self.game_player._trial_action_buttons_via_ws(ws, all_buttons)
+                    if trial_result.get("success"):
+                        smart_clicks_performed = 1
+                        selected = trial_result.get("selected") or {}
+                        print(
+                            "✅ Smart candidate trial selected: "
+                            f"{selected.get('targetName')}/{selected.get('currentCostumeName')} "
+                            f"@ ({selected.get('x')}, {selected.get('y')})"
+                        )
+                    else:
+                        print(f"⚠️ Smart candidate trial found no playable candidate: {trial_result.get('reason')}")
                     
                 else:
                     reason = skip_intro_response.get('reason', 'unknown') if skip_intro_response else 'no_result'
@@ -1624,14 +1621,14 @@ class SprunkiJSONGenerator:
                 # Perform blind clicks regardless of smart click success
                 # [ĐÃ SỬA] Lấy config `intro_skip_clicks` từ engine
                 blind_clicks_performed = 0
-                if smart_clicks_performed == 0:
+                if smart_clicks_performed == 0 and not candidate_trials_attempted:
                     for i in range(self.game_player.intro_skip_clicks):
                         # [ĐÃ SỬA] Sử dụng hàm click của engine
                         self.game_player._execute_cdp_single_click(960, 540)
                         blind_clicks_performed += 1
                         time.sleep(0.5)
                 else:
-                    print("   ⚠️ Skipping blind center clicks after smart clicks to avoid menu/gallery overlays.")
+                    print("   ⚠️ Skipping blind center clicks after smart/candidate trials to avoid menu/gallery overlays.")
 
                 # Summary
                 if smart_clicks_performed > 0:
