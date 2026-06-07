@@ -374,7 +374,7 @@ class SprunkiGamePlayer:
                 
                 const keywords = ['skip', 'play', 'start', 'intro'];
                 const priorityMap = { 'skip': 1, 'play': 2, 'start': 2, 'intro': 3 };
-                const excludeNames = ['icons', 'mute'];
+                const excludeNames = ['icons', 'mute', 'gallery', 'credits', 'more', 'reset', 'close'];
                 
                 const allTargets = vm.runtime.targets;
                 const actionButtons = [];
@@ -726,7 +726,7 @@ class SprunkiGamePlayer:
             
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
-                "params": {"expression": js_code, "returnByValue": True}
+                "params": {"expression": js_code, "awaitPromise": True, "returnByValue": True}
             })
             
             ws.close()
@@ -6378,10 +6378,16 @@ class SprunkiGamePlayer:
             else:
                 print("ðŸ–±ï¸ Phase 2: Performing STANDARD blind CDP clicks (no smart buttons found)...")
             
-            # Perform blind clicks via CDP
-            for i in range(self.intro_skip_clicks):
-                self._simulate_click_via_cdp(ws, 960, 540)
-                time.sleep(0.5)
+            # Perform blind clicks via CDP only when smart detection found nothing.
+            # Some mods put Gallery/menu controls at the screen center.
+            blind_clicks_performed = 0
+            if smart_clicks_performed == 0:
+                for i in range(self.intro_skip_clicks):
+                    self._simulate_click_via_cdp(ws, 960, 540)
+                    blind_clicks_performed += 1
+                    time.sleep(0.5)
+            else:
+                print("   ⚠️ Skipping blind center clicks after smart clicks to avoid menu/gallery overlays.")
             
             ws.close()
             
@@ -6389,12 +6395,12 @@ class SprunkiGamePlayer:
             if smart_clicks_performed > 0:
                 print("ðŸŽ‰ CDP SKIP/PLAY DETECTION COMPLETED:")
                 print(f"   âœ… Smart clicks: {smart_clicks_performed} action buttons via CDP")
-                print(f"   âœ… Blind clicks: {self.intro_skip_clicks} additional CDP clicks")
+                print(f"   âœ… Blind clicks: {blind_clicks_performed} additional CDP clicks")
                 print("   ðŸ›¡ï¸ Dual protection ensures maximum success rate")
             else:
                 print("ðŸŽ‰ STANDARD CDP FALLBACK COMPLETED:")
                 print("   âš ï¸ Smart clicks: N/A (No action buttons found)")
-                print(f"   âœ… Blind clicks: {self.intro_skip_clicks} CDP clicks")
+                print(f"   âœ… Blind clicks: {blind_clicks_performed} CDP clicks")
                 print("   ðŸ”„ Standard method used as fallback")
             
             print("âœ… CDP intro skipping completed")

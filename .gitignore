@@ -41,4 +41,15 @@ JSON/
 output/
 temp/
 
+# Generated inspection / smoke-test artifacts
+light_run_inspect_recording_area_tests/
+light_runtime_inspect_tests/
+project_centered_recording_area_tests/
+recording_area_scaled_comparison_tests/
+showcase_recording_area_center_line_crops/
+url_candidate_bounds_over_time_tests/
+url_production_recording_area_tests/
+url_recording_area_mockup_tests/
+url_slot_width_96_83_recording_area_tests/
+
 config.json
