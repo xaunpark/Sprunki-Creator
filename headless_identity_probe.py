@@ -371,7 +371,21 @@ def build_items(args):
     if args.input_list:
         items.extend(read_input_list(args.input_list))
     for folder in args.folder:
-        items.append({"outputFolder": folder})
+        folder_path = Path(folder)
+        if (folder_path / "manifest.json").exists():
+            items.append({"outputFolder": str(folder_path)})
+            continue
+
+        child_folders = sorted(
+            child
+            for child in folder_path.iterdir()
+            if child.is_dir() and (child / "manifest.json").exists()
+        ) if folder_path.exists() and folder_path.is_dir() else []
+        if child_folders:
+            for child in child_folders:
+                items.append({"outputFolder": str(child)})
+        else:
+            items.append({"outputFolder": str(folder_path)})
     for url in args.url:
         folder = args.output_folder or str(Path(args.out_dir) / slug_from_url(url))
         items.append({"outputFolder": folder, "sourceUrl": url})
@@ -418,7 +432,7 @@ def run_batch(items, args):
 def main():
     parser = argparse.ArgumentParser(description="Headless Cocrea/Scratch identity probe. Writes only character_identity_map.json.")
     parser.add_argument("url", nargs="*", help="Optional source URL(s).")
-    parser.add_argument("--folder", action="append", default=[], help="Existing output folder. URL is read from manifest.json unless --input-list supplies sourceUrl.")
+    parser.add_argument("--folder", action="append", default=[], help="Existing mod output folder, or a root folder containing child mod folders with manifest.json.")
     parser.add_argument("--input-list", help="JSONL or CSV with outputFolder and optional sourceUrl/pageTitle.")
     parser.add_argument("--output-folder", help="Output folder for a single URL probe.")
     parser.add_argument("--out-dir", default=r"G:\VS-Project\Sprunki\temp\character_identity_probe", help="Base folder for URL-only probes.")
