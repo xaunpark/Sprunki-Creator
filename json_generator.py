@@ -14,6 +14,7 @@ import websocket
 from image_detector import ImageDetector
 import numpy as np
 from page_load_verifier import PageLoadVerifier
+from manual_profile_manager import find_profile, validate_profile
 
 from sprunki_game_player import SprunkiGamePlayer
 
@@ -1446,6 +1447,127 @@ class SprunkiJSONGenerator:
 
             return self.game_player.navigate_and_prepare_game(url)
 
+    def _build_manual_layout_state(self, ws, manual_profile):
+        runtime_meta = {"pageTitle": "Unknown", "currentUrl": manual_profile.get("canonicalUrl") or manual_profile.get("sourceUrl")}
+        response = self._send_cdp_command(ws, {
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": "({ pageTitle: document.title, currentUrl: window.location.href })",
+                "returnByValue": True
+            }
+        })
+
+        if response and "result" in response:
+            result_value = response.get("result", {}).get("result", {}).get("value")
+            if isinstance(result_value, dict):
+                runtime_meta.update(result_value)
+
+        manual_layout = manual_profile.get("layout") or {}
+        return {
+            "pageTitle": runtime_meta.get("pageTitle", "Unknown"),
+            "currentUrl": runtime_meta.get("currentUrl") or manual_profile.get("canonicalUrl") or manual_profile.get("sourceUrl"),
+            "layout": {
+                "icons": manual_layout.get("icons") or [],
+                "slots": manual_layout.get("slots") or [],
+                "bonus": manual_layout.get("bonus") or [],
+            }
+        }
+
+    def _detect_game_control_type(self, ws, manual_profile=None):
+        game_control_type = "click_drag"
+        game_control_details = {
+            "method": "default_fallback",
+            "test_performed": False,
+            "confidence": 0.5,
+            "test_icon": 0,
+            "test_slot": 0
+        }
+
+        manual_settings = (manual_profile or {}).get("settings", {}) or {}
+        manual_control_type = (manual_settings.get("gameControlType") or "").strip()
+        if manual_control_type and manual_control_type.lower() != "unknown":
+            game_control_type = manual_control_type
+            game_control_details.update({
+                "method": "manual_profile",
+                "confidence": 1.0,
+                "source": "manual_profile"
+            })
+            return game_control_type, game_control_details
+
+        try:
+            if manual_profile:
+                layout = (manual_profile.get("layout") or {})
+                icons = layout.get("icons") or []
+                slots = layout.get("slots") or []
+                control_test_state = {"icons": icons, "slots": slots}
+                game_control_details["layoutSource"] = "manual_profile"
+            else:
+                print("📋 Getting layout for game control test...")
+                response = self._send_cdp_command(ws, {
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
+                })
+                control_test_state = None
+                if response and 'result' in response:
+                    control_test_state = response.get('result', {}).get('result', {}).get('value')
+                game_control_details["layoutSource"] = "runtime_detection"
+
+            if control_test_state and 'icons' in control_test_state and 'slots' in control_test_state:
+                icons = control_test_state['icons']
+                slots = control_test_state['slots']
+
+                test_icon = next((icon for icon in icons if icon.get('index') == 0), None)
+                test_slot = next((slot for slot in slots if slot.get('index') == 0), None)
+
+                if test_icon and test_slot and test_icon.get('x') and test_slot.get('x'):
+                    print(f"🎯 Test setup: Icon 0 at ({test_icon['x']}, {test_icon['y']}) -> Slot 0 at ({test_slot['x']}, {test_slot['y']})")
+
+                    original_icon_pos = {'x': test_icon['x'], 'y': test_icon['y']}
+                    print("🖱️ Testing Double-Click and Drag mechanism...")
+                    success, result_code = self.test_double_click_drag(ws, test_icon, test_slot)
+
+                    game_control_details['test_performed'] = True
+                    game_control_details['result_code'] = result_code
+
+                    if success:
+                        print("✅ Double-Click and Drag test SUCCESSFUL!")
+                        game_control_type = "double_click_drag"
+                        game_control_details['method'] = "double_click_test_success"
+                        game_control_details['confidence'] = 1.0
+
+                        print("🔄 Resetting game state...")
+                        reset_success = self.reset_icon_position(ws, test_slot, original_icon_pos)
+                        game_control_details['reset_performed'] = reset_success
+
+                        if reset_success:
+                            print("✅ Game state reset completed")
+                        else:
+                            print("⚠️ Reset may have failed - continuing anyway")
+
+                    else:
+                        print(f"❌ Double-Click and Drag test FAILED: {result_code}")
+                        print("🎯 Defaulting to Click-Drag mechanism")
+                        game_control_type = "click_drag"
+                        game_control_details['method'] = "double_click_test_failed"
+                        game_control_details['confidence'] = 0.9
+                        game_control_details['failure_reason'] = result_code
+
+                else:
+                    print("❌ Could not find icon 0 or slot 0 for testing")
+                    game_control_details['method'] = "test_setup_failed"
+                    game_control_details['failure_reason'] = "missing_test_elements"
+            else:
+                print("❌ Invalid state for game control testing")
+                game_control_details['method'] = "invalid_state"
+                game_control_details['failure_reason'] = "state_extraction_failed"
+
+        except Exception as e:
+            print(f"❌ Exception during game control detection: {e}")
+            game_control_details['method'] = "exception"
+            game_control_details['failure_reason'] = str(e)
+
+        return game_control_type, game_control_details
+
     def _get_websocket_url(self):
         if self.ws_url: return self.ws_url
         try:
@@ -1537,6 +1659,17 @@ class SprunkiJSONGenerator:
                 print("🔧 Ensuring window activation after game setup...")
                 self.ensure_window_activation("post-game-setup")
 
+                manual_profile = None
+                manual_profile_path = None
+                found_profile, found_profile_path = find_profile(url)
+                is_manual_profile_valid, manual_profile_error = validate_profile(found_profile, expected_url=url)
+                if found_profile and is_manual_profile_valid:
+                    manual_profile = found_profile
+                    manual_profile_path = found_profile_path
+                    print(f"🧭 Manual profile detected for this URL: {manual_profile_path}")
+                elif found_profile and manual_profile_error:
+                    print(f"⚠️ Manual profile found but invalid: {manual_profile_error}")
+
                 # OPTIMIZED: Single WebSocket approach like original working code
                 ws_url = self._get_websocket_url()
                 if not ws_url: 
@@ -1560,93 +1693,99 @@ class SprunkiJSONGenerator:
                     return False, None, None
                 print(f"✅ JavaScript environment ready. Current URL: {test_response}")
                 
-                print("⏩ Skipping intros via CDP...")
-                # ============================
-                # MULTI-TARGET SKIP INTRO (Sử dụng engine)
-                # ============================
-                print("\n🎯 MULTI-TARGET SKIP INTRO: Finding and clicking ALL Skip Intro buttons...")
-                
-                print("🔍 Phase 1: Searching for ALL Skip Intro buttons...")
-                # [ĐÃ SỬA] Thực thi JS skip intro thông qua engine
-                skip_intro_response = self.game_player._execute_verification_js(self.js_find_skip_intro)
-                
-                smart_clicks_performed = 0
-                all_buttons = []
-                candidate_trials_attempted = False
+                print("⏩ Preparing game entry...")
+                if manual_profile:
+                    print(f"🧭 Replaying manual profile prepare actions from: {manual_profile_path}")
+                    if not self.game_player.replay_manual_prepare_actions(manual_profile.get("prepareActions", [])):
+                        raise Exception(f"Manual profile replay failed: {manual_profile_path}")
+                    print("✅ Manual prepare replay finished - Game should be ready for interaction")
+                else:
+                    # ============================
+                    # MULTI-TARGET SKIP INTRO (Sử dụng engine)
+                    # ============================
+                    print("\n🎯 MULTI-TARGET SKIP INTRO: Finding and clicking ALL Skip Intro buttons...")
+                    
+                    print("🔍 Phase 1: Searching for ALL Skip Intro buttons...")
+                    # [ĐÃ SỬA] Thực thi JS skip intro thông qua engine
+                    skip_intro_response = self.game_player._execute_verification_js(self.js_find_skip_intro)
+                    
+                    smart_clicks_performed = 0
+                    all_buttons = []
+                    candidate_trials_attempted = False
 
-                if skip_intro_response and skip_intro_response.get('found'):
-                    all_buttons = skip_intro_response.get('buttons', [])
-                    button_count = skip_intro_response.get('count', 0)
-                    visible_count = skip_intro_response.get('visibleCount', 0)
-                    hidden_count = skip_intro_response.get('hiddenCount', 0)
-                    
-                    print(f"✅ Found {button_count} Skip Intro buttons:")
-                    print(f"   📊 Visible: {visible_count}, Hidden: {hidden_count}")
-                    
-                    candidate_trials_attempted = True
-                    trial_result = self.game_player._trial_action_buttons_via_ws(ws, all_buttons)
-                    if trial_result.get("success"):
-                        smart_clicks_performed = 1
-                        selected = trial_result.get("selected") or {}
-                        print(
-                            "✅ Smart candidate trial selected: "
-                            f"{selected.get('targetName')}/{selected.get('currentCostumeName')} "
-                            f"@ ({selected.get('x')}, {selected.get('y')})"
-                        )
+                    if skip_intro_response and skip_intro_response.get('found'):
+                        all_buttons = skip_intro_response.get('buttons', [])
+                        button_count = skip_intro_response.get('count', 0)
+                        visible_count = skip_intro_response.get('visibleCount', 0)
+                        hidden_count = skip_intro_response.get('hiddenCount', 0)
+                        
+                        print(f"✅ Found {button_count} Skip Intro buttons:")
+                        print(f"   📊 Visible: {visible_count}, Hidden: {hidden_count}")
+                        
+                        candidate_trials_attempted = True
+                        trial_result = self.game_player._trial_action_buttons_via_ws(ws, all_buttons)
+                        if trial_result.get("success"):
+                            smart_clicks_performed = 1
+                            selected = trial_result.get("selected") or {}
+                            print(
+                                "✅ Smart candidate trial selected: "
+                                f"{selected.get('targetName')}/{selected.get('currentCostumeName')} "
+                                f"@ ({selected.get('x')}, {selected.get('y')})"
+                            )
+                        else:
+                            print(f"⚠️ Smart candidate trial found no playable candidate: {trial_result.get('reason')}")
+                        
                     else:
-                        print(f"⚠️ Smart candidate trial found no playable candidate: {trial_result.get('reason')}")
-                    
-                else:
-                    reason = skip_intro_response.get('reason', 'unknown') if skip_intro_response else 'no_result'
-                    print(f"❌ No Skip Intro buttons found - Reason: {reason}")
-                    print("⚠️ Will use blind click method only...")
+                        reason = skip_intro_response.get('reason', 'unknown') if skip_intro_response else 'no_result'
+                        print(f"❌ No Skip Intro buttons found - Reason: {reason}")
+                        print("⚠️ Will use blind click method only...")
 
-                # === PHASE 1.5: PRESS ANY KEY (NEW) ===
-                print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
-                try:
-                    pyautogui.press('space')
-                    time.sleep(0.5)
-                    pyautogui.press('space')
-                    print("   ✅ 'space' key pressed twice successfully.")
-                except Exception as key_e:
-                    print(f"   ⚠️ Could not press 'space' key: {key_e}")
-
-                # Phase 2: ALWAYS perform blind clicks for additional assurance
-                if smart_clicks_performed > 0:
-                    print("🔄 Phase 2: Performing ADDITIONAL blind clicks for triple protection...")
-                    print("   📝 This ensures intro skipping even if smart clicks had edge cases")
-                else:
-                    print("🔄 Phase 2: Performing STANDARD blind clicks (no smart buttons found)...")
-
-                # Perform blind clicks regardless of smart click success
-                # [ĐÃ SỬA] Lấy config `intro_skip_clicks` từ engine
-                blind_clicks_performed = 0
-                if smart_clicks_performed == 0 and not candidate_trials_attempted:
-                    for i in range(self.game_player.intro_skip_clicks):
-                        # [ĐÃ SỬA] Sử dụng hàm click của engine
-                        self.game_player._execute_cdp_single_click(960, 540)
-                        blind_clicks_performed += 1
+                    # === PHASE 1.5: PRESS ANY KEY (NEW) ===
+                    print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
+                    try:
+                        pyautogui.press('space')
                         time.sleep(0.5)
-                else:
-                    print("   ⚠️ Skipping blind center clicks after smart/candidate trials to avoid menu/gallery overlays.")
+                        pyautogui.press('space')
+                        print("   ✅ 'space' key pressed twice successfully.")
+                    except Exception as key_e:
+                        print(f"   ⚠️ Could not press 'space' key: {key_e}")
 
-                # Summary
-                if smart_clicks_performed > 0:
-                    print("🎯 MULTI-TARGET SKIP INTRO COMPLETED:")
-                    print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons clicked successfully")
-                    print(f"   ✅ Button details: {len(all_buttons)} total found")
-                    for i, button in enumerate(all_buttons):
-                        visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
-                        print(f"      {i+1}. ({button['x']}, {button['y']}) - {visible_status}")
-                    print(f"   ✅ Blind clicks: {blind_clicks_performed} additional clicks performed")
-                    print("   🛡️ Triple protection ensures maximum skip success rate")
-                else:
-                    print("🎯 STANDARD SKIP INTRO COMPLETED:")
-                    print("   ❌ Smart clicks: N/A (No Skip Intro buttons found)")
-                    print(f"   ✅ Blind clicks: {blind_clicks_performed} clicks performed")
-                    print("   🔄 Standard method used as fallback")
+                    # Phase 2: ALWAYS perform blind clicks for additional assurance
+                    if smart_clicks_performed > 0:
+                        print("🔄 Phase 2: Performing ADDITIONAL blind clicks for triple protection...")
+                        print("   📝 This ensures intro skipping even if smart clicks had edge cases")
+                    else:
+                        print("🔄 Phase 2: Performing STANDARD blind clicks (no smart buttons found)...")
 
-                print("✅ Skip intro phase finished - Game should be ready for interaction")
+                    # Perform blind clicks regardless of smart click success
+                    # [ĐÃ SỬA] Lấy config `intro_skip_clicks` từ engine
+                    blind_clicks_performed = 0
+                    if smart_clicks_performed == 0 and not candidate_trials_attempted:
+                        for i in range(self.game_player.intro_skip_clicks):
+                            # [ĐÃ SỬA] Sử dụng hàm click của engine
+                            self.game_player._execute_cdp_single_click(960, 540)
+                            blind_clicks_performed += 1
+                            time.sleep(0.5)
+                    else:
+                        print("   ⚠️ Skipping blind center clicks after smart/candidate trials to avoid menu/gallery overlays.")
+
+                    # Summary
+                    if smart_clicks_performed > 0:
+                        print("🎯 MULTI-TARGET SKIP INTRO COMPLETED:")
+                        print(f"   ✅ Smart clicks: {smart_clicks_performed} buttons clicked successfully")
+                        print(f"   ✅ Button details: {len(all_buttons)} total found")
+                        for i, button in enumerate(all_buttons):
+                            visible_status = "VISIBLE" if button['visible'] else "HIDDEN"
+                            print(f"      {i+1}. ({button['x']}, {button['y']}) - {visible_status}")
+                        print(f"   ✅ Blind clicks: {blind_clicks_performed} additional clicks performed")
+                        print("   🛡️ Triple protection ensures maximum skip success rate")
+                    else:
+                        print("🎯 STANDARD SKIP INTRO COMPLETED:")
+                        print("   ❌ Smart clicks: N/A (No Skip Intro buttons found)")
+                        print(f"   ✅ Blind clicks: {blind_clicks_performed} clicks performed")
+                        print("   🔄 Standard method used as fallback")
+
+                    print("✅ Skip intro phase finished - Game should be ready for interaction")
 
                 ### ========Xong phần SKIP INTRO ======== ###
 
@@ -1703,87 +1842,10 @@ class SprunkiJSONGenerator:
                 print("="*70)
                 print("Testing: Double-Click and Drag vs Click-Drag mechanism")
 
-                game_control_type = "click_drag"  # Default fallback
-                game_control_details = {
-                    "method": "default_fallback",
-                    "test_performed": False,
-                    "confidence": 0.5,
-                    "test_icon": 0,
-                    "test_slot": 0
-                }
-
-                try:
-                    # Get initial layout for control testing
-                    print("📋 Getting layout for game control test...")
-                    response = self._send_cdp_command(ws, {
-                        "method": "Runtime.evaluate", 
-                        "params": {"expression": self.js_get_state_and_coordinates, "awaitPromise": True, "returnByValue": True}
-                    })
-                    
-                    if response and 'result' in response:
-                        control_test_state = response.get('result', {}).get('result', {}).get('value')
-                        
-                        if control_test_state and 'icons' in control_test_state and 'slots' in control_test_state:
-                            icons = control_test_state['icons']
-                            slots = control_test_state['slots']
-                            
-                            # Find icon 0 and slot 0 for testing
-                            test_icon = next((icon for icon in icons if icon.get('index') == 0), None)
-                            test_slot = next((slot for slot in slots if slot.get('index') == 0), None)
-                            
-                            if test_icon and test_slot and test_icon.get('x') and test_slot.get('x'):
-                                print(f"🎯 Test setup: Icon 0 at ({test_icon['x']}, {test_icon['y']}) -> Slot 0 at ({test_slot['x']}, {test_slot['y']})")
-                                
-                                # Store original position for reset
-                                original_icon_pos = {'x': test_icon['x'], 'y': test_icon['y']}
-                                
-                                # Perform double-click drag test
-                                print("🖱️ Testing Double-Click and Drag mechanism...")
-                                success, result_code = self.test_double_click_drag(ws, test_icon, test_slot)
-                                
-                                game_control_details['test_performed'] = True
-                                game_control_details['result_code'] = result_code
-                                
-                                if success:
-                                    print("✅ Double-Click and Drag test SUCCESSFUL!")
-                                    game_control_type = "double_click_drag"
-                                    game_control_details['method'] = "double_click_test_success"
-                                    game_control_details['confidence'] = 1.0
-                                    
-                                    # Reset icon to original position
-                                    print("🔄 Resetting game state...")
-                                    reset_success = self.reset_icon_position(ws, test_slot, original_icon_pos)
-                                    game_control_details['reset_performed'] = reset_success
-                                    
-                                    if reset_success:
-                                        print("✅ Game state reset completed")
-                                    else:
-                                        print("⚠️ Reset may have failed - continuing anyway")
-                                        
-                                else:
-                                    print(f"❌ Double-Click and Drag test FAILED: {result_code}")
-                                    print("🎯 Defaulting to Click-Drag mechanism")
-                                    game_control_type = "click_drag"  
-                                    game_control_details['method'] = "double_click_test_failed"
-                                    game_control_details['confidence'] = 0.9
-                                    game_control_details['failure_reason'] = result_code
-                                    
-                            else:
-                                print("❌ Could not find icon 0 or slot 0 for testing")
-                                game_control_details['method'] = "test_setup_failed"
-                                game_control_details['failure_reason'] = "missing_test_elements"
-                        else:
-                            print("❌ Invalid state for game control testing")  
-                            game_control_details['method'] = "invalid_state"
-                            game_control_details['failure_reason'] = "state_extraction_failed"
-                    else:
-                        print("❌ Failed to get state for game control testing")
-                        game_control_details['method'] = "state_fetch_failed"
-                        
-                except Exception as e:
-                    print(f"❌ Exception during game control detection: {e}")
-                    game_control_details['method'] = "exception"
-                    game_control_details['failure_reason'] = str(e)
+                game_control_type, game_control_details = self._detect_game_control_type(
+                    ws,
+                    manual_profile=manual_profile
+                )
 
                 print(f"\n🎮 GAME CONTROL DETECTION RESULT:")
                 print(f"   Control Type: {game_control_type}")
@@ -1802,16 +1864,19 @@ class SprunkiJSONGenerator:
                     # ============================
                     print("\n📄 Extracting final full layout...")
                     
-                    response = self._send_cdp_command(ws, {
-                        "method": "Runtime.evaluate", 
-                        "params": {"expression": self.js_full_layout, "awaitPromise": True, "returnByValue": True}
-                    })
-                    
                     layout_state = None
-                    if response and 'result' in response:
-                        result_data = response.get('result', {}).get('result', {})
-                        if 'value' in result_data:
-                            layout_state = result_data['value']
+                    if manual_profile:
+                        layout_state = self._build_manual_layout_state(ws, manual_profile)
+                    else:
+                        response = self._send_cdp_command(ws, {
+                            "method": "Runtime.evaluate", 
+                            "params": {"expression": self.js_full_layout, "awaitPromise": True, "returnByValue": True}
+                        })
+                        
+                        if response and 'result' in response:
+                            result_data = response.get('result', {}).get('result', {})
+                            if 'value' in result_data:
+                                layout_state = result_data['value']
                     
                     if not layout_state or "error" in layout_state:
                         raise Exception("Final layout extraction failed")
@@ -1847,7 +1912,9 @@ class SprunkiJSONGenerator:
                         }
                     },
                     "layout": layout_state.get('layout', {}),
-                    "settings": {}
+                    "settings": {
+                        "manualProfilePath": manual_profile_path if manual_profile else None
+                    }
                 }
 
                 json_file_path = self.save_json_file(final_json, output_path, custom_title=page_title)

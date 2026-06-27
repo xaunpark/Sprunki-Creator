@@ -29,6 +29,9 @@ if TYPE_CHECKING:
     from sprunki_obs_controller import SprunkiController
 from dataclasses import dataclass, field
 
+from character_identity import SCRATCH_VM_ICON_STATE_JS, write_character_identity_map
+from manual_profile_manager import find_profile, load_profile_from_path, validate_profile
+
 class WorkflowIncompatibleError(Exception):
     """Custom exception raised when the workflow detects a persistent,
     unrecoverable incompatibility with the current game mod."""
@@ -328,6 +331,7 @@ class SprunkiGamePlayer:
         self.session_start_time = None
         self.runtime_recording_areas = {}
         self.runtime_recording_area = None
+        self.character_identity_map_written = False
 
         # JavaScript for finding action buttons (skip/play/start/intro) - Multi-Target Detection
         self.js_find_skip_intro = '''
@@ -699,6 +703,72 @@ class SprunkiGamePlayer:
                 'recordings': os.path.join(self.current_project_folder, 'recordings') if self.current_project_folder else None
             }
         }
+
+    def write_character_identity_map_for_current_project(self):
+        """Capture visible Scratch VM icon state and write character_identity_map.json."""
+        ws = None
+        project_folder = self.get_project_folder()
+        source_url = getattr(self, "game_url", None)
+        if not source_url and isinstance(getattr(self, "config", None), dict):
+            source_url = self.config.get("currentUrl")
+
+        try:
+            if not project_folder:
+                print("⚠️ Character identity map skipped: project folder is not ready.")
+                return False
+
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                icon_state = {
+                    "ok": False,
+                    "error": "No CDP websocket URL",
+                    "href": source_url,
+                    "icons": [],
+                }
+            else:
+                ws = websocket.create_connection(ws_url, timeout=30)
+                response = self._send_cdp_command(ws, {
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": SCRATCH_VM_ICON_STATE_JS,
+                        "awaitPromise": True,
+                        "returnByValue": True,
+                    }
+                })
+                icon_state = response.get("result", {}).get("result", {}).get("value") if response else None
+                if not isinstance(icon_state, dict):
+                    icon_state = {
+                        "ok": False,
+                        "error": "Runtime.evaluate returned no icon state",
+                        "href": source_url,
+                        "icons": [],
+                    }
+
+            identity_map = write_character_identity_map(
+                project_folder,
+                icon_state,
+                source_url=source_url,
+                page_title=icon_state.get("title") if isinstance(icon_state, dict) else None,
+            )
+            validation = identity_map.get("validation", {})
+            print(
+                "✅ character_identity_map.json written: "
+                f"status={identity_map.get('status')}, "
+                f"standard={validation.get('standardCharacterCount')}, "
+                f"excluded={validation.get('excludedSegmentCount')}"
+            )
+            if validation.get("errors"):
+                print(f"   ⚠️ Identity validation errors: {validation.get('errors')}")
+            return identity_map.get("status") == "verified"
+        except Exception as exc:
+            print(f"⚠️ Character identity map capture failed: {exc}")
+            return False
+        finally:
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
 
     def _execute_edge_reinforcement(self, round_num, use_cdp):
         """
@@ -6512,6 +6582,65 @@ class SprunkiGamePlayer:
 
         return {"selected": None, "tested": tested, "success": False, "reason": "no_playable_candidate"}
 
+    def _resolve_manual_profile(self):
+        try:
+            settings = (self.config or {}).get("settings", {}) or {}
+            manual_profile_path = settings.get("manualProfilePath")
+            current_url = (self.config or {}).get("currentUrl", "")
+
+            if manual_profile_path:
+                profile_data, resolved_path = load_profile_from_path(manual_profile_path)
+                is_valid, error_message = validate_profile(profile_data, expected_url=current_url)
+                if profile_data and is_valid:
+                    return profile_data, resolved_path
+                if error_message:
+                    print(f"⚠️ Manual profile at {manual_profile_path} is invalid: {error_message}")
+
+            if current_url:
+                profile_data, resolved_path = find_profile(current_url)
+                is_valid, error_message = validate_profile(profile_data, expected_url=current_url)
+                if profile_data and is_valid:
+                    return profile_data, resolved_path
+                if profile_data and error_message:
+                    print(f"⚠️ Manual profile lookup found invalid data for {current_url}: {error_message}")
+        except Exception as e:
+            print(f"⚠️ Could not resolve manual profile: {e}")
+
+        return None, None
+
+    def replay_manual_prepare_actions(self, actions):
+        if not actions:
+            print("⚠️ Manual profile has no prepare actions to replay.")
+            return False
+
+        print(f"🎯 Replaying {len(actions)} manual prepare actions...")
+        for index, action in enumerate(actions, start=1):
+            try:
+                delay_ms = int(action.get("delayMs", 0) or 0)
+                if delay_ms > 0:
+                    time.sleep(delay_ms / 1000.0)
+
+                action_type = (action.get("type") or "").lower()
+                if action_type == "click":
+                    x = int(action.get("x"))
+                    y = int(action.get("y"))
+                    print(f"   {index}. Click @ ({x}, {y})")
+                    self._execute_cdp_single_click(x, y)
+                elif action_type == "key":
+                    key_name = action.get("key")
+                    if not key_name:
+                        continue
+                    print(f"   {index}. Key {key_name}")
+                    pyautogui.press(str(key_name).lower())
+                else:
+                    print(f"   {index}. Skipping unsupported manual action: {action}")
+            except Exception as action_error:
+                print(f"⚠️ Manual prepare action {index} failed: {action_error}")
+                return False
+
+        print("✅ Manual prepare actions replay completed")
+        return True
+
     def intro_skip_via_cdp(self):
         """ENHANCED: Multi-target Skip intro using CDP with smart detection + blind clicks"""
         try:
@@ -6956,12 +7085,25 @@ class SprunkiGamePlayer:
             else:
                 print("✅ CDP verification successful - automation ready!")
 
-            # Skip intros (existing logic, keep as-is)
-            if progress_callback:
-                progress_callback("⏭️ Skipping intros...")
-            
-            if not self.intro_skip_via_cdp():
-                print("CDP intro skipping failed, but continuing anyway...")
+            manual_profile, manual_profile_path = self._resolve_manual_profile()
+            if manual_profile:
+                if progress_callback:
+                    progress_callback("🧭 Replaying manual profile prepare actions...")
+                print(f"🧭 Using manual profile: {manual_profile_path}")
+                replay_success = self.replay_manual_prepare_actions(manual_profile.get("prepareActions", []))
+                if not replay_success:
+                    print("⚠️ Manual profile replay failed, falling back to automatic intro skip...")
+                    if progress_callback:
+                        progress_callback("⏭️ Falling back to automatic intro skip...")
+                    if not self.intro_skip_via_cdp():
+                        print("CDP intro skipping failed, but continuing anyway...")
+            else:
+                # Skip intros (existing logic, keep as-is)
+                if progress_callback:
+                    progress_callback("⏭️ Skipping intros...")
+
+                if not self.intro_skip_via_cdp():
+                    print("CDP intro skipping failed, but continuing anyway...")
 
             # 🔄 DUAL VERIFICATION SETUP (existing logic, keep as-is)
             if progress_callback:
@@ -8304,6 +8446,10 @@ class SprunkiGamePlayer:
             print(f"📄 Will showcase {total_count} icons")
             print("="*60)
             
+            if mode.lower() == "normal" and not self.character_identity_map_written:
+                self.write_character_identity_map_for_current_project()
+                self.character_identity_map_written = True
+
             success_count = 0
             consecutive_failures = 0
             FAILURE_THRESHOLD = 3  # Ngưỡng: 3 icon thất bại liên tiếp

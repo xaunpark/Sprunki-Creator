@@ -1,0 +1,320 @@
+import threading
+import time
+import tkinter as tk
+from tkinter import messagebox
+
+import keyboard
+import pyautogui
+import win32api
+import win32con
+
+from manual_profile_manager import save_profile
+from sprunki_game_player import SprunkiGamePlayer
+
+
+class ManualProfileRecorder:
+    RESERVED_KEYS = {
+        "shift",
+        "ctrl",
+        "left ctrl",
+        "right ctrl",
+        "left shift",
+        "right shift",
+        "alt",
+        "left alt",
+        "right alt",
+    }
+
+    def __init__(self, url: str):
+        self.url = url.strip()
+        self.game_player = SprunkiGamePlayer()
+        self.root = tk.Tk()
+        self.root.title("Manual Profile Recorder")
+        self.root.attributes("-topmost", True)
+        self.root.resizable(False, False)
+        self.root.geometry("360x215+20+20")
+
+        self.phase = "PREPARE"
+        self.prepare_actions = []
+        self.icons = []
+        self.slots = []
+        self.last_saved = "Ready"
+        self.running = True
+        self.recording_enabled = False
+        self.last_event_time = None
+        self.last_key_name = None
+        self.last_key_timestamp = 0.0
+        self.mouse_down = False
+        self.keyboard_hook = None
+        self.mouse_thread = None
+        self.save_result_path = None
+
+        self._build_ui()
+        self._install_hotkeys()
+
+    def _build_ui(self) -> None:
+        frame = tk.Frame(self.root, padx=12, pady=10)
+        frame.pack(fill="both", expand=True)
+
+        self.url_var = tk.StringVar(value=self.url)
+        self.phase_var = tk.StringVar(value=self.phase)
+        self.action_count_var = tk.StringVar(value="Prepare actions: 0")
+        self.icon_count_var = tk.StringVar(value="Icons: 0")
+        self.slot_count_var = tk.StringVar(value="Slots: 0")
+        self.last_saved_var = tk.StringVar(value=self.last_saved)
+
+        tk.Label(frame, text="URL", anchor="w").pack(fill="x")
+        tk.Label(frame, textvariable=self.url_var, anchor="w", justify="left", wraplength=330).pack(fill="x", pady=(0, 8))
+        tk.Label(frame, textvariable=self.phase_var, anchor="w", font=("Segoe UI", 10, "bold")).pack(fill="x")
+        tk.Label(frame, textvariable=self.action_count_var, anchor="w").pack(fill="x", pady=(8, 0))
+        tk.Label(frame, textvariable=self.icon_count_var, anchor="w").pack(fill="x")
+        tk.Label(frame, textvariable=self.slot_count_var, anchor="w").pack(fill="x")
+        tk.Label(frame, textvariable=self.last_saved_var, anchor="w", justify="left", wraplength=330).pack(fill="x", pady=(8, 10))
+
+        button_row = tk.Frame(frame)
+        button_row.pack(fill="x")
+        tk.Button(button_row, text="Undo Last", command=self.undo_last, width=10).pack(side="left")
+        tk.Button(button_row, text="Next Phase", command=self.advance_phase, width=10).pack(side="left", padx=6)
+        tk.Button(button_row, text="Finish Save", command=self.finish_save, width=10).pack(side="left")
+        tk.Button(button_row, text="Cancel", command=self.cancel, width=10).pack(side="right")
+
+        help_text = (
+            "Hotkeys:\n"
+            "Ctrl+Shift+Enter = next phase / finish\n"
+            "Ctrl+Shift+Backspace = undo\n"
+            "Ctrl+Shift+Esc = cancel\n"
+            "I or Space = save icon | S or Space = save slot"
+        )
+        tk.Label(frame, text=help_text, anchor="w", justify="left", wraplength=330).pack(fill="x", pady=(10, 0))
+
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self._refresh_ui()
+
+    def _install_hotkeys(self) -> None:
+        keyboard.add_hotkey("ctrl+shift+enter", self.advance_phase, suppress=False)
+        keyboard.add_hotkey("ctrl+shift+backspace", self.undo_last, suppress=False)
+        keyboard.add_hotkey("ctrl+shift+esc", self.cancel, suppress=False)
+        keyboard.add_hotkey("i", self._capture_icon_hotkey, suppress=False)
+        keyboard.add_hotkey("s", self._capture_slot_hotkey, suppress=False)
+        keyboard.add_hotkey("space", self._capture_space_hotkey, suppress=False)
+        self.keyboard_hook = keyboard.hook(self._on_keyboard_event)
+
+    def _cleanup_hotkeys(self) -> None:
+        try:
+            keyboard.unhook_all_hotkeys()
+        except Exception:
+            pass
+        if self.keyboard_hook:
+            try:
+                keyboard.unhook(self.keyboard_hook)
+            except Exception:
+                pass
+            self.keyboard_hook = None
+
+    def _refresh_ui(self) -> None:
+        self.phase_var.set(f"Phase: {self.phase}")
+        self.action_count_var.set(f"Prepare actions: {len(self.prepare_actions)}")
+        self.icon_count_var.set(f"Icons: {len(self.icons)}")
+        self.slot_count_var.set(f"Slots: {len(self.slots)}")
+        self.last_saved_var.set(f"Last: {self.last_saved}")
+        self.root.update_idletasks()
+
+    def _set_last_saved(self, message: str) -> None:
+        self.last_saved = message
+        self.root.after(0, self._refresh_ui)
+
+    def _mark_event_time(self) -> int:
+        now = time.monotonic()
+        if self.last_event_time is None:
+            self.last_event_time = now
+            return 0
+        delay_ms = int(round((now - self.last_event_time) * 1000))
+        self.last_event_time = now
+        return max(delay_ms, 0)
+
+    def _ui_bounds(self):
+        self.root.update_idletasks()
+        left = self.root.winfo_rootx()
+        top = self.root.winfo_rooty()
+        right = left + self.root.winfo_width()
+        bottom = top + self.root.winfo_height()
+        return left, top, right, bottom
+
+    def _point_inside_ui(self, x: int, y: int) -> bool:
+        left, top, right, bottom = self._ui_bounds()
+        return left <= x <= right and top <= y <= bottom
+
+    def _record_click(self, x: int, y: int) -> None:
+        if self.phase != "PREPARE" or not self.recording_enabled:
+            return
+        if self._point_inside_ui(x, y):
+            return
+        delay_ms = self._mark_event_time()
+        self.prepare_actions.append({
+            "type": "click",
+            "x": int(x),
+            "y": int(y),
+            "delayMs": delay_ms,
+        })
+        self._set_last_saved(f"Recorded click @ ({x}, {y})")
+
+    def _on_keyboard_event(self, event) -> None:
+        if event.event_type != "down" or self.phase != "PREPARE" or not self.recording_enabled:
+            return
+
+        key_name = (event.name or "").lower()
+        if not key_name or key_name in self.RESERVED_KEYS:
+            return
+        if key_name == "enter" and keyboard.is_pressed("ctrl") and keyboard.is_pressed("shift"):
+            return
+        if key_name == "backspace" and keyboard.is_pressed("ctrl") and keyboard.is_pressed("shift"):
+            return
+        if key_name == "esc" and keyboard.is_pressed("ctrl") and keyboard.is_pressed("shift"):
+            return
+
+        now = time.monotonic()
+        if key_name == self.last_key_name and (now - self.last_key_timestamp) < 0.12:
+            return
+
+        self.last_key_name = key_name
+        self.last_key_timestamp = now
+        delay_ms = self._mark_event_time()
+        self.prepare_actions.append({
+            "type": "key",
+            "key": event.name,
+            "delayMs": delay_ms,
+        })
+        self._set_last_saved(f"Recorded key: {event.name}")
+
+    def _capture_mouse_loop(self) -> None:
+        while self.running:
+            state = bool(win32api.GetAsyncKeyState(win32con.VK_LBUTTON) & 0x8000)
+            if state and not self.mouse_down:
+                x, y = pyautogui.position()
+                self._record_click(x, y)
+            self.mouse_down = state
+            time.sleep(0.03)
+
+    def _capture_icon_hotkey(self) -> None:
+        if self.phase != "ICONS":
+            return
+        x, y = pyautogui.position()
+        self.icons.append({
+            "index": len(self.icons),
+            "label": f"n-{len(self.icons) + 1}",
+            "x": int(x),
+            "y": int(y),
+        })
+        self._set_last_saved(f"Saved icon {self.icons[-1]['label']} @ ({x}, {y})")
+
+    def _capture_slot_hotkey(self) -> None:
+        if self.phase != "SLOTS":
+            return
+        x, y = pyautogui.position()
+        self.slots.append({
+            "index": len(self.slots),
+            "x": int(x),
+            "y": int(y),
+        })
+        self._set_last_saved(f"Saved slot {len(self.slots)} @ ({x}, {y})")
+
+    def _capture_space_hotkey(self) -> None:
+        if self.phase == "ICONS":
+            self._capture_icon_hotkey()
+        elif self.phase == "SLOTS":
+            self._capture_slot_hotkey()
+
+    def undo_last(self) -> None:
+        if self.phase == "PREPARE" and self.prepare_actions:
+            removed = self.prepare_actions.pop()
+            self._set_last_saved(f"Undo prepare action: {removed.get('type')}")
+        elif self.phase == "ICONS" and self.icons:
+            removed = self.icons.pop()
+            self._set_last_saved(f"Undo icon {removed.get('label')}")
+        elif self.phase == "SLOTS" and self.slots:
+            removed = self.slots.pop()
+            self._set_last_saved(f"Undo slot {removed.get('index')}")
+        self._refresh_ui()
+
+    def advance_phase(self) -> None:
+        if self.phase == "PREPARE":
+            self.phase = "ICONS"
+            self._set_last_saved("Prepare complete. Capture icons.")
+        elif self.phase == "ICONS":
+            self.phase = "SLOTS"
+            self._set_last_saved("Icon capture complete. Capture slots.")
+        else:
+            self.finish_save()
+            return
+        self._refresh_ui()
+
+    def cancel(self) -> None:
+        self.running = False
+        self.recording_enabled = False
+        self._cleanup_hotkeys()
+        try:
+            self.game_player.cleanup_chrome_complete()
+        except Exception:
+            pass
+        self.root.after(0, self.root.destroy)
+
+    def finish_save(self) -> None:
+        if not self.icons or not self.slots:
+            messagebox.showwarning("Missing layout", "Please capture at least one icon and one slot before saving.")
+            return
+
+        width, height = pyautogui.size()
+        profile_data = {
+            "version": 1,
+            "sourceUrl": self.url,
+            "canonicalUrl": self.url,
+            "urlKey": "",
+            "viewport": {"width": int(width), "height": int(height)},
+            "coordinateSpace": f"screen_{int(width)}x{int(height)}_with_menu",
+            "prepareActions": self.prepare_actions,
+            "layout": {
+                "icons": self.icons,
+                "slots": self.slots,
+            },
+            "settings": {
+                "gameControlType": "unknown",
+            },
+            "notes": "",
+        }
+
+        try:
+            profile_path = save_profile(profile_data)
+            self.save_result_path = profile_path
+            self._set_last_saved(f"Saved profile: {profile_path}")
+            messagebox.showinfo("Saved", f"Manual profile saved:\n{profile_path}")
+        except Exception as exc:
+            messagebox.showerror("Save failed", f"Could not save manual profile:\n{exc}")
+            return
+
+        self.cancel()
+
+    def start(self) -> None:
+        if not self.url:
+            raise ValueError("A game URL is required.")
+
+        if not self.game_player.navigate_and_prepare_game(self.url):
+            raise RuntimeError("Could not open the game and reach the post-Run/F11 state.")
+
+        self.recording_enabled = True
+        self.last_event_time = time.monotonic()
+        self.mouse_thread = threading.Thread(target=self._capture_mouse_loop, daemon=True)
+        self.mouse_thread.start()
+        self._set_last_saved("Run/F11 complete. Recording prepare actions.")
+        self.root.mainloop()
+
+
+def main() -> None:
+    import sys
+
+    url = sys.argv[1].strip() if len(sys.argv) > 1 else input("Enter mod URL: ").strip()
+    recorder = ManualProfileRecorder(url)
+    recorder.start()
+
+
+if __name__ == "__main__":
+    main()

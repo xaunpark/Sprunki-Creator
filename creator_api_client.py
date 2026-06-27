@@ -24,6 +24,7 @@ from sprunki_ultimate_master import ProcessingConfig
 from collections.abc import Callable
 from smart_retry_manager import SmartRetryManager
 from file_validator import FileQualityValidator
+from manual_profile_manager import suggested_profile_path_for_url, url_key_from_url
 
 # --- CONFIG: Thư mục chứa file JSON thủ công ---
 MANUAL_JSON_DIR = "manual_jsons"
@@ -648,6 +649,18 @@ class CreatorService:
             self.logger.error(f"❌ Error in override check: {e}")
             return None, None
 
+    def _build_manual_profile_failure_details(self, url: str, error_message: Optional[str] = None) -> Dict:
+        url = (url or "").strip()
+        details = {
+            "manualProfileRequired": True,
+            "sourceUrl": url,
+            "urlKey": url_key_from_url(url),
+            "suggestedManualProfilePath": suggested_profile_path_for_url(url),
+        }
+        if error_message:
+            details["reason"] = error_message
+        return details
+
     def _process_with_smart_retry(self, item, queue_id: int) -> bool:
         """Process with smart retry for individual steps - PHASE 2"""
         try:
@@ -715,11 +728,25 @@ class CreatorService:
                         
                         # Handle special cases
                         if retry_decision.get('requires_manual'):
-                            self.api_client.update_job_status(queue_id, 'failed',
-                                error_log=f"{operation_name} requires manual intervention: {error_msg}")
+                            details = None
+                            if operation_name == 'json_generation':
+                                details = self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg)
+                            self.api_client.update_job_status(
+                                queue_id,
+                                'failed',
+                                details=details,
+                                error_log=f"{operation_name} requires manual intervention: {error_msg}"
+                            )
                         elif retry_decision.get('should_skip'):
-                            self.api_client.update_job_status(queue_id, 'failed',
-                                error_log=f"{operation_name} should be skipped: {error_msg}")
+                            details = None
+                            if operation_name == 'json_generation':
+                                details = self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg)
+                            self.api_client.update_job_status(
+                                queue_id,
+                                'failed',
+                                details=details,
+                                error_log=f"{operation_name} should be skipped: {error_msg}"
+                            )
                         
                         return False
                     
@@ -760,6 +787,7 @@ class CreatorService:
                     # Final failure
                     self.api_client.update_job_progress(
                         queue_id, operation_name, 'exception', 0.0, 'failed',
+                        metadata=self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg) if operation_name == 'json_generation' else None,
                         error_details=error_msg
                     )
                     # 🆕 PHASE 4: Track performance
@@ -843,8 +871,12 @@ class CreatorService:
             success = self.processing_manager._generate_json_for_item(item)
             
             if not success:
-                self.api_client.update_job_status(queue_id, 'failed', 
-                    error_log="JSON generation failed")
+                self.api_client.update_job_status(
+                    queue_id,
+                    'failed',
+                    details=self._build_manual_profile_failure_details(item.source_url or "", "JSON generation failed"),
+                    error_log="JSON generation failed"
+                )
                 return False
             
             return self._process_video_for_item(item, queue_id)
