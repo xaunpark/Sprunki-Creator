@@ -19,6 +19,7 @@ from character_identity import (
     IDENTITY_MAP_FILENAME,
     SCRATCH_VM_ICON_STATE_JS,
     build_character_identity_map,
+    classify_needs_review_reason,
     is_verified_identity_map,
     load_character_identity_map,
     load_page_title_from_manifest,
@@ -199,13 +200,16 @@ def wait_for_identity(ws, output_folder, source_url, page_title, timeout, click_
                 if identity.get("status") == "verified":
                     return identity, state
         except Exception as exc:
-            last_error = str(exc)
+            last_error = str(exc) or repr(exc)
         time.sleep(1)
 
     if last_identity:
         return last_identity, last_state
     fallback_state = last_state if isinstance(last_state, dict) else {}
-    fallback_state.update({"ok": False, "error": fallback_state.get("error") or "timeout_no_verified_identity", "lastError": last_error, "icons": fallback_state.get("icons") or []})
+    error = fallback_state.get("error") or "timeout_no_verified_identity"
+    if last_error and ("Runtime.evaluate" in last_error or "timeout" in last_error.lower()):
+        error = "runtime_evaluate_timeout"
+    fallback_state.update({"ok": False, "error": error, "lastError": last_error, "icons": fallback_state.get("icons") or []})
     return build_character_identity_map(fallback_state, output_folder, source_url, page_title), fallback_state
 
 
@@ -236,9 +240,10 @@ def probe_one(item, args):
                 "elapsedSeconds": round(time.perf_counter() - started, 2),
                 "identityMap": str(identity_path),
                 "identityMapBytes": os.path.getsize(identity_path) if identity_path.exists() else 0,
-                "standardCharacterCount": validation.get("standardCharacterCount"),
-                "excludedSegmentCount": validation.get("excludedSegmentCount"),
-            }
+            "standardCharacterCount": validation.get("standardCharacterCount"),
+            "excludedSegmentCount": validation.get("excludedSegmentCount"),
+            "needsReviewReason": validation.get("needsReviewReason") or identity.get("needsReviewReason"),
+        }
         if args.skip_existing:
             identity_path = Path(output_folder) / IDENTITY_MAP_FILENAME
             return {
@@ -314,6 +319,7 @@ def probe_one(item, args):
             "standardCharacterCount": validation.get("standardCharacterCount"),
             "excludedSegmentCount": validation.get("excludedSegmentCount"),
             "errors": validation.get("errors") or [],
+            "needsReviewReason": validation.get("needsReviewReason") or identity.get("needsReviewReason"),
             "stateError": state.get("error") if isinstance(state, dict) else None,
             "cookieResult": cookie_result,
         }
@@ -325,7 +331,13 @@ def probe_one(item, args):
             source_url,
             page_title,
         )
+        if not identity.get("needsReviewReason"):
+            reason = classify_needs_review_reason({"ok": False, "error": str(exc), "href": source_url, "icons": []})
+            if reason:
+                identity["needsReviewReason"] = reason
+                identity.setdefault("validation", {})["needsReviewReason"] = reason
         identity_path = write_identity(output_folder, identity)
+        validation = identity.get("validation", {})
         return {
             "outputFolder": output_folder,
             "sourceUrl": source_url,
@@ -333,6 +345,7 @@ def probe_one(item, args):
             "elapsedSeconds": elapsed,
             "identityMap": str(identity_path),
             "error": str(exc),
+            "needsReviewReason": validation.get("needsReviewReason") or identity.get("needsReviewReason"),
         }
     finally:
         if ws:
@@ -358,7 +371,7 @@ def read_input_list(path):
         with open(input_path, "r", encoding="utf-8-sig", newline="") as handle:
             return [dict(row) for row in csv.DictReader(handle)]
     items = []
-    with open(input_path, "r", encoding="utf-8") as handle:
+    with open(input_path, "r", encoding="utf-8-sig") as handle:
         for line in handle:
             line = line.strip()
             if line:
@@ -437,7 +450,7 @@ def main():
     parser.add_argument("--output-folder", help="Output folder for a single URL probe.")
     parser.add_argument("--out-dir", default=r"G:\VS-Project\Sprunki\temp\character_identity_probe", help="Base folder for URL-only probes.")
     parser.add_argument("--cookie-file", default="cocrea_cookies.json")
-    parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument("--timeout", type=float, default=220)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--force", action="store_true", help="Re-probe even when character_identity_map.json already exists.")
     parser.add_argument("--skip-existing", action="store_true", help="Skip any existing character_identity_map.json, including needs_review/failed.")
@@ -463,6 +476,10 @@ def main():
         "skipped": len([row for row in results if row.get("status") == "skipped"]),
         "needsReview": len([row for row in results if row.get("status") == "needs_review"]),
         "failed": len([row for row in results if row.get("status") == "failed"]),
+        "needsReviewReasons": {
+            reason: len([row for row in results if row.get("needsReviewReason") == reason])
+            for reason in sorted({row.get("needsReviewReason") for row in results if row.get("needsReviewReason")})
+        },
         "results": results,
     }
     if args.summary:

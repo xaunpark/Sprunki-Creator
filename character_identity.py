@@ -57,14 +57,22 @@ new Promise((resolve) => {
       return null;
     }
     const vm = findVM();
-    if (!vm) return resolve({ok:false, error:'VM_NOT_FOUND', title: document.title, href: location.href});
+    if (!vm) return resolve({
+      ok:false,
+      error:'VM_NOT_FOUND',
+      title: document.title,
+      href: location.href,
+      readyState: document.readyState,
+      canvasCount: document.querySelectorAll('canvas').length,
+      bodyText: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 500)
+    });
     const allTargets = vm.runtime.targets || [];
-    const iconTargets = allTargets.filter(t => {
+    let iconTargets = allTargets.filter(t => {
       const costumes = t.sprite?.costumes || [];
       const costume = costumes[t.currentCostume] || {};
       return t.visible && (/^Icons/.test(t.sprite?.name || '') || /^\d{1,2}-a(?:\b|-|_)?/i.test(costume.name || ''));
     });
-    const icons = iconTargets.map((t, order) => {
+    let icons = iconTargets.map((t, order) => {
       const costumes = t.sprite.costumes || [];
       const costume = costumes[t.currentCostume] || {};
       return {
@@ -81,6 +89,48 @@ new Promise((resolve) => {
         visible: !!t.visible
       };
     });
+    if (icons.length < 20) {
+      const aggregateCandidates = allTargets.map((t) => {
+        const costumes = t.sprite?.costumes || [];
+        const standardCostumes = costumes
+          .map((costume, costumeIndex) => ({costume, costumeIndex}))
+          .filter(({costume}) => /^\d{1,2}-a(?:\b|-|_)?/i.test(costume.name || ''));
+        const standardNumbers = new Set(
+          standardCostumes
+            .map(({costume}) => Number((costume.name || '').match(/^(\d{1,2})-a/i)?.[1]))
+            .filter(number => number >= 1 && number <= 20)
+        );
+        return {target: t, standardCostumes, standardCount: standardNumbers.size};
+      })
+      .filter(row => /^Icons/.test(row.target.sprite?.name || '') && row.standardCount >= 20)
+      .sort((a, b) => b.standardCount - a.standardCount || b.standardCostumes.length - a.standardCostumes.length);
+
+      if (aggregateCandidates.length) {
+        const selected = aggregateCandidates[0];
+        const byNumber = new Map();
+        for (const row of selected.standardCostumes) {
+          const number = Number((row.costume.name || '').match(/^(\d{1,2})-a/i)?.[1]);
+          if (!byNumber.has(number)) byNumber.set(number, row);
+        }
+        icons = Array.from(byNumber.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([number, row], order) => ({
+            order,
+            segmentKey: `n-${order + 1}`,
+            iconNumberHint: number,
+            iconTargetName: selected.target.sprite?.name || null,
+            runtimeIndex: allTargets.indexOf(selected.target),
+            currentCostume: row.costumeIndex,
+            costumeName: row.costume.name || null,
+            costumeAssetId: row.costume.assetId || null,
+            x: selected.target.x,
+            y: selected.target.y,
+            size: selected.target.size,
+            visible: !!selected.target.visible,
+            source: 'aggregate_icon_costume_list'
+          }));
+      }
+    }
     resolve({
       ok:true,
       title: document.title,
@@ -149,6 +199,26 @@ def _select_best_icon_group(icons: List[Dict[str, Any]]) -> Tuple[Optional[str],
     return best_group_name, standard_icons, extras
 
 
+def classify_needs_review_reason(
+    icon_state: Dict[str, Any],
+    icons: Optional[List[Dict[str, Any]]] = None,
+    standard_icons: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    error = str(icon_state.get("error") or icon_state.get("lastError") or "")
+    body_text = str(icon_state.get("bodyText") or "")
+    if re.search(r"page not found|couldn.?t find the page|404", body_text, re.I):
+        return "page_not_found"
+    if re.search(r"runtime\.evaluate|timeout", error, re.I):
+        return "runtime_evaluate_timeout"
+    if error == "VM_NOT_FOUND":
+        return "vm_not_found"
+    if icon_state.get("ok") and icon_state.get("targetCount") is not None and not (icons or []):
+        return "vm_found_no_icon_candidates"
+    if standard_icons is not None and len(standard_icons) != 20:
+        return "icon_rule_mismatch"
+    return None
+
+
 def build_character_identity_map(
     icon_state: Dict[str, Any],
     output_folder: Optional[str] = None,
@@ -165,6 +235,7 @@ def build_character_identity_map(
     icon_numbers = [icon.get("iconNumber") for icon in standard_icons]
     if icon_numbers != list(range(1, 21)):
         errors.append(f"expected iconNumber 1..20, found {icon_numbers}")
+    needs_review_reason = classify_needs_review_reason(icon_state, icons, standard_icons) if errors else None
 
     standard_characters = []
     for (canonical_id, display_name), icon in zip(CANONICAL_CHARACTERS, standard_icons):
@@ -203,10 +274,11 @@ def build_character_identity_map(
         "targetCount": icon_state.get("targetCount"),
         "bestIconGroup": best_group_name,
     }
-    return {
+    payload = {
         "schemaVersion": 1,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "status": "verified" if not errors else "needs_review",
+        "needsReviewReason": needs_review_reason,
         "rule": {
             "id": IDENTITY_RULE_ID,
             "description": "Use the visible icon group containing costumeName 01-a through 20-a as the 20 canonical Sprunki characters; exclude icons outside that range.",
@@ -217,6 +289,7 @@ def build_character_identity_map(
             "visibleIconCount": len(icons),
             "standardCharacterCount": len(standard_characters),
             "excludedSegmentCount": len(excluded_segments),
+            "needsReviewReason": needs_review_reason,
         },
         "segmentByCanonicalId": {
             row["canonicalId"]: row["segmentKey"]
@@ -231,6 +304,10 @@ def build_character_identity_map(
         },
         "excludedSegments": excluded_segments,
     }
+    if not needs_review_reason:
+        payload.pop("needsReviewReason", None)
+        payload["validation"].pop("needsReviewReason", None)
+    return payload
 
 
 def write_character_identity_map(
