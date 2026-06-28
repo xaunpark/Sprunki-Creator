@@ -240,10 +240,10 @@ def probe_one(item, args):
                 "elapsedSeconds": round(time.perf_counter() - started, 2),
                 "identityMap": str(identity_path),
                 "identityMapBytes": os.path.getsize(identity_path) if identity_path.exists() else 0,
-            "standardCharacterCount": validation.get("standardCharacterCount"),
-            "excludedSegmentCount": validation.get("excludedSegmentCount"),
-            "needsReviewReason": validation.get("needsReviewReason") or identity.get("needsReviewReason"),
-        }
+                "standardCharacterCount": validation.get("standardCharacterCount"),
+                "excludedSegmentCount": validation.get("excludedSegmentCount"),
+                "needsReviewReason": validation.get("needsReviewReason") or existing_identity.get("needsReviewReason"),
+            }
         if args.skip_existing:
             identity_path = Path(output_folder) / IDENTITY_MAP_FILENAME
             return {
