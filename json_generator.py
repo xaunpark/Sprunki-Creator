@@ -6,6 +6,7 @@ import time
 import os
 import subprocess
 import requests
+import hashlib
 from datetime import datetime
 import pyautogui
 import pygetwindow as gw
@@ -464,7 +465,61 @@ class SprunkiJSONGenerator:
 
                             // Bước 2: CHUYỂN ĐỔI TỌA ĐỘ, LỌC VÀ GÁN INDEX TRỰC TIẾP (Không có sắp xếp)
                             console.log("🔶️ Bước 2: Chuyển đổi tọa độ, lọc và gán index theo thứ tự gốc...");
-                            const finalLayoutIcons = visibleIcons.map((icon, index) => {
+                            function clusterIconRows(iconRows, tolerance = 18) {
+                                const rows = [];
+                                [...iconRows].sort((a, b) => a.y - b.y || a.x - b.x).forEach(icon => {
+                                    let row = rows.find(candidate => Math.abs(candidate.y - icon.y) <= tolerance);
+                                    if (!row) {
+                                        row = { y: icon.y, icons: [] };
+                                        rows.push(row);
+                                    }
+                                    row.icons.push(icon);
+                                    row.y = row.icons.reduce((sum, item) => sum + item.y, 0) / row.icons.length;
+                                });
+                                return rows;
+                            }
+
+                            function validateIconGrid(iconRows) {
+                                if (iconRows.length <= 1) return iconRows;
+
+                                const rows = clusterIconRows(iconRows);
+                                const rowByIcon = new Map();
+                                rows.forEach(row => row.icons.forEach(icon => rowByIcon.set(icon, row)));
+
+                                const multiIconRows = rows.filter(row => row.icons.length >= 2);
+                                if (!multiIconRows.length) return iconRows;
+
+                                const groupCounts = {};
+                                multiIconRows.forEach(row => row.icons.forEach(icon => {
+                                    const group = icon.originalIcon?.sprite?.name || '';
+                                    groupCounts[group] = (groupCounts[group] || 0) + 1;
+                                }));
+                                const mainGroupName = Object.entries(groupCounts)
+                                    .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+                                const accepted = [];
+                                const rejected = [];
+                                iconRows.forEach(icon => {
+                                    const row = rowByIcon.get(icon);
+                                    const rowCount = row?.icons?.length || 0;
+                                    const group = icon.originalIcon?.sprite?.name || '';
+                                    const isSingletonOutlier = rowCount <= 1;
+                                    const isSmallOffMainGroup = mainGroupName && group !== mainGroupName && rowCount < 3;
+                                    if (isSingletonOutlier || isSmallOffMainGroup) {
+                                        rejected.push({ x: icon.x, y: icon.y, group, rowCount, reason: isSingletonOutlier ? 'singleton_row_outlier' : 'off_main_icon_group' });
+                                    } else {
+                                        accepted.push(icon);
+                                    }
+                                });
+
+                                if (rejected.length) {
+                                    console.log('[ICON GRID VALIDATION] Rejected outlier icon candidates:');
+                                    console.table(rejected);
+                                }
+                                return accepted.length ? accepted : iconRows;
+                            }
+
+                            const candidateLayoutIcons = visibleIcons.map((icon, index) => {
                                 const pixelCoords = toPixelWithMenu(icon.x, icon.y);
                                 return {
                                     originalIcon: icon,
@@ -473,7 +528,9 @@ class SprunkiJSONGenerator:
                                     originalIndexInVisibleList: index
                                 };
                             })
-                            .filter(icon => icon.y >= 540)
+                            .filter(icon => icon.y >= 540);
+
+                            const finalLayoutIcons = validateIconGrid(candidateLayoutIcons)
                             .map((iconData, finalIndex) => {
                                 return {
                                     x: iconData.x,
@@ -500,6 +557,82 @@ class SprunkiJSONGenerator:
                         
                         // Sử dụng hàm logic mới
                         const icons = getIconsWithSimplifiedLogic(allTargets);
+
+                        function parseIconNumber(costumeName) {
+                            const match = String(costumeName || '').match(/^(\d{1,2})-a(?:\b|-|_)?/i);
+                            return match ? Number(match[1]) : null;
+                        }
+
+                        function getIconIdentityEvidence(allTargets, layoutIcons) {
+                            const visibleCandidates = allTargets
+                                .filter(t => t.sprite && t.sprite.name && t.sprite.name.includes('Icons') && t.visible)
+                                .map((target, order) => {
+                                    const costumes = target.sprite.costumes || [];
+                                    const costume = costumes[target.currentCostume] || {};
+                                    const coords = toPixelWithMenu(target.x, target.y);
+                                    return {
+                                        order,
+                                        x: coords.x,
+                                        y: coords.y,
+                                        iconTargetName: target.sprite.name,
+                                        currentCostume: target.currentCostume,
+                                        costumeName: costume.name || null,
+                                        costumeAssetId: costume.assetId || null,
+                                        iconNumber: parseIconNumber(costume.name)
+                                    };
+                                })
+                                .filter(row => row.y >= 540);
+
+                            const directByIconIndex = layoutIcons.map(icon => {
+                                const match = visibleCandidates.find(candidate => candidate.x === icon.x && candidate.y === icon.y);
+                                return {
+                                    iconIndex: icon.index,
+                                    sourceX: icon.x,
+                                    sourceY: icon.y,
+                                    costumeName: match ? match.costumeName : null,
+                                    iconNumber: match ? match.iconNumber : null,
+                                    iconTargetName: match ? match.iconTargetName : null,
+                                    currentCostume: match ? match.currentCostume : null,
+                                    source: match ? 'visible_icon_coordinate_match' : 'unmatched_visible_icon'
+                                };
+                            });
+
+                            const aggregateCandidates = allTargets.map(target => {
+                                const costumes = target.sprite?.costumes || [];
+                                const iconCostumes = costumes
+                                    .map((costume, costumeIndex) => ({
+                                        costumeIndex,
+                                        costumeName: costume.name || null,
+                                        costumeAssetId: costume.assetId || null,
+                                        iconNumber: parseIconNumber(costume.name)
+                                    }))
+                                    .filter(row => row.iconNumber !== null);
+                                const standardCount = new Set(
+                                    iconCostumes
+                                        .map(row => row.iconNumber)
+                                        .filter(number => number >= 1 && number <= 20)
+                                ).size;
+                                return {
+                                    iconTargetName: target.sprite?.name || null,
+                                    runtimeIndex: allTargets.indexOf(target),
+                                    standardCount,
+                                    costumeCount: iconCostumes.length,
+                                    costumes: iconCostumes
+                                };
+                            })
+                            .filter(row => /^Icons/.test(row.iconTargetName || '') && row.standardCount >= 20)
+                            .sort((a, b) => b.standardCount - a.standardCount || b.costumeCount - a.costumeCount);
+
+                            return {
+                                capturedAt: new Date().toISOString(),
+                                source: 'json_generator_same_vm_session',
+                                visibleCandidates,
+                                directByIconIndex,
+                                aggregateCostumes: aggregateCandidates.length ? aggregateCandidates[0] : null
+                            };
+                        }
+
+                        const iconIdentityEvidence = getIconIdentityEvidence(allTargets, icons);
                         
                         // =====================================================
                         // FIXED: Sắp xếp slots theo tọa độ X (nhất quán với js_get_state_and_coordinates)
@@ -617,7 +750,8 @@ class SprunkiJSONGenerator:
                                 slots: slots, 
                                 bonus: [], 
                                 skipIntroButton: skipIntroButton
-                            }
+                            },
+                            iconIdentityEvidence: iconIdentityEvidence
                         };
 
                         console.log("Full layout capture completed!");
@@ -1921,6 +2055,7 @@ class SprunkiJSONGenerator:
                 if not json_file_path: 
                     self.game_player.cleanup_chrome_complete()
                     return False, None, None
+                self.save_icon_identity_sidecar(final_json, json_file_path, layout_state.get('iconIdentityEvidence', {}))
 
                 print(f"\n🎯 SIMPLIFIED COMPLETE LOGIC COMPLETED!")
                 print(f"✅ hasHorror Detection: {final_has_horror}")
@@ -1937,6 +2072,68 @@ class SprunkiJSONGenerator:
                 self.game_player.cleanup_chrome_complete()
                 return False, None, None
             
+    def save_icon_identity_sidecar(self, final_json, json_file_path, icon_identity_evidence=None):
+            """Write a sidecar mapping source JSON icon indexes to VM costume evidence."""
+            try:
+                evidence = icon_identity_evidence or final_json.get("iconIdentityEvidence") or {}
+                layout_icons = final_json.get("layout", {}).get("icons") or []
+                direct_rows = evidence.get("directByIconIndex") or []
+                rows_by_index = {
+                    int(row.get("iconIndex")): row
+                    for row in direct_rows
+                    if row.get("iconIndex") is not None
+                }
+
+                icon_identities = []
+                for fallback_index, icon in enumerate(layout_icons):
+                    icon_index = int(icon.get("index", fallback_index))
+                    row = rows_by_index.get(icon_index, {})
+                    icon_number = row.get("iconNumber")
+                    costume_name = row.get("costumeName")
+                    icon_identities.append({
+                        "iconIndex": icon_index,
+                        "sourceX": icon.get("x"),
+                        "sourceY": icon.get("y"),
+                        "costumeName": costume_name,
+                        "iconNumber": icon_number,
+                        "status": "matched" if icon_number and 1 <= int(icon_number) <= 20 else ("extra" if icon_number else "unknown"),
+                        "iconTargetName": row.get("iconTargetName"),
+                        "currentCostume": row.get("currentCostume"),
+                        "source": row.get("source") or "missing_direct_evidence",
+                    })
+
+                source_hash = None
+                try:
+                    with open(json_file_path, "rb") as handle:
+                        digest = hashlib.sha256()
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                        source_hash = digest.hexdigest()
+                except Exception:
+                    source_hash = None
+
+                sidecar = {
+                    "schemaVersion": 1,
+                    "generatedAt": datetime.now().isoformat(),
+                    "rule": {"id": "json_generator_same_session_icon_identity_sidecar"},
+                    "sourceJson": os.path.basename(json_file_path),
+                    "sourceJsonHash": source_hash,
+                    "currentUrl": final_json.get("currentUrl"),
+                    "pageTitle": final_json.get("pageTitle"),
+                    "iconIdentities": icon_identities,
+                    "evidence": evidence,
+                }
+                root, _ = os.path.splitext(json_file_path)
+                sidecar_path = f"{root}.icon_identity.json"
+                with open(sidecar_path, "w", encoding="utf-8") as handle:
+                    json.dump(self.convert_to_json_serializable(sidecar), handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                print(f"ðŸ§­ Icon identity sidecar saved: {sidecar_path}")
+                return sidecar_path
+            except Exception as exc:
+                print(f"âš ï¸ Icon identity sidecar skipped: {exc}")
+                return None
+
     def convert_to_json_serializable(self, obj):
         """Convert numpy types and other non-serializable objects to JSON-serializable types"""
         if isinstance(obj, dict):

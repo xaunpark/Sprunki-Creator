@@ -6159,6 +6159,20 @@ class SprunkiGamePlayer:
         def log_attempt(level, icon_idx, slot_idx):
             print(f"      -> [Lvl {level}] Trying combo: Icon[{icon_idx}] -> Slot[{slot_idx}]")
 
+        def with_coordinate_evidence(details, icon_idx, slot_idx):
+            evidence = dict(details or {})
+            pickup_x, pickup_y = icon_coords[icon_idx]
+            drop_x, drop_y = slot_coords[slot_idx]
+            evidence.update({
+                "pickupIconOffsetIdx": icon_idx,
+                "pickupX": pickup_x,
+                "pickupY": pickup_y,
+                "slotOffsetIdx": slot_idx,
+                "dropX": drop_x,
+                "dropY": drop_y,
+            })
+            return evidence
+
         # === CẤP ĐỘ 1: "ĐIỂM VÀNG" (1 LẦN THỬ) ===
         log_attempt(1, 0, 0)
         success, details = self._attempt_single_drag(
@@ -6166,7 +6180,7 @@ class SprunkiGamePlayer:
         )
         if success:
             print("   [SEARCH] ✅ SUCCESS on Golden Path (Lvl 1).")
-            return {'icon_idx': 0, 'slot_idx': 0, 'details': details}
+            return {'icon_idx': 0, 'slot_idx': 0, 'details': with_coordinate_evidence(details, 0, 0)}
         
         # === CẤP ĐỘ 2: "QUÉT DỌC THÔNG MINH" (TỐI ĐA 2 LẦN THỬ) ===
         print("   [SEARCH] Lvl 1 failed. Proceeding to Lvl 2: Vertical Scan.")
@@ -6180,7 +6194,7 @@ class SprunkiGamePlayer:
             )
             if success:
                 print(f"   [SEARCH] ✅ SUCCESS on Vertical Scan (Lvl 2) at Slot[{slot_idx}].")
-                return {'icon_idx': 0, 'slot_idx': slot_idx, 'details': details}
+                return {'icon_idx': 0, 'slot_idx': slot_idx, 'details': with_coordinate_evidence(details, 0, slot_idx)}
         
         # === CẤP ĐỘ 3: "QUÉT CHÉO PHẢN ỨNG" (TỐI ĐA 2 LẦN THỬ) ===
         print("   [SEARCH] Lvl 2 failed. Proceeding to Lvl 3: Pick-up Point Scan.")
@@ -6194,7 +6208,7 @@ class SprunkiGamePlayer:
             )
             if success:
                 print(f"   [SEARCH] ✅ SUCCESS on Pick-up Scan (Lvl 3) at Icon[{icon_idx}].")
-                return {'icon_idx': icon_idx, 'slot_idx': 0, 'details': details}
+                return {'icon_idx': icon_idx, 'slot_idx': 0, 'details': with_coordinate_evidence(details, icon_idx, 0)}
 
         # Nếu tất cả 5 lần thử đều thất bại
         print("   [SEARCH] ❌ FAILED: All 5 adaptive attempts failed. Concluding drag as impossible.")
@@ -6252,6 +6266,15 @@ class SprunkiGamePlayer:
             if success:
                 print(f"   [CACHE HIT] ✅ SUCCESS using learned offset.")
                 # (Bảo toàn tính năng #6, #10)
+                details = {
+                    **(details or {}),
+                    "pickupIconOffsetIdx": learned_offset['icon_idx'],
+                    "pickupX": start_coord[0],
+                    "pickupY": start_coord[1],
+                    "slotOffsetIdx": learned_offset['slot_idx'],
+                    "dropX": end_coord[0],
+                    "dropY": end_coord[1],
+                }
                 self._handle_successful_drag(icon, target_slot, details, 1, "cache_hit")
                 return True
             else:
@@ -6295,6 +6318,11 @@ class SprunkiGamePlayer:
         }
         # Bảo toàn tính năng #6: Ghi Timestamps
         if self.obs_controller and self.obs_controller.recording_start_time is not None:
+            drag_metadata = {
+                key: value
+                for key, value in self.last_successful_drag_details.items()
+                if key not in {"action_start_time", "drop_time", "verified_at"}
+            }
             action_start_time = details.get("action_start_time")
             drop_time = details.get("drop_time")
             verified_at = details.get("verified_at")
@@ -6303,12 +6331,12 @@ class SprunkiGamePlayer:
                 self.obs_controller.log_event_timestamp(
                     "successful_drag_started",
                     f"Drag started for icon {icon.get('index', -1)}",
-                    {"icon_index": icon.get('index', -1), "attempt_number": attempts, "method": method},
+                    drag_metadata,
                     event_timestamp=action_start_time
                 )
 
             if drop_time:
-                metadata = {"icon_index": icon.get('index', -1), "slot_index": target_slot.get('index', -1)}
+                metadata = dict(drag_metadata)
                 if verified_at:
                     metadata["verifiedAt"] = round(verified_at - self.obs_controller.recording_start_time, 3)
                     metadata["verificationDelay"] = round(verified_at - drop_time, 3)

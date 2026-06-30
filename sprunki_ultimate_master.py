@@ -570,7 +570,7 @@ class UnifiedProcessingManager:
                     "aspectRatio": recording_area.get("aspectRatio", "35:24"),
                 }
 
-            outputs = {"masterVideo": None, "individualVideos": [], "remixVideos": [], "logFiles": [], "sourceJson": None}
+            outputs = {"masterVideo": None, "individualVideos": [], "remixVideos": [], "logFiles": [], "sourceJson": None, "iconIdentitySidecar": None}
             if item.error_message:
                 manifest_data["errors"].append({"timestamp": datetime.now().isoformat(), "stage": "general", "message": item.error_message})
             
@@ -589,6 +589,9 @@ class UnifiedProcessingManager:
 
             if item.json_path:
                 outputs['sourceJson'] = os.path.basename(item.json_path)
+                sidecar_path = os.path.splitext(item.json_path)[0] + ".icon_identity.json"
+                if os.path.exists(sidecar_path):
+                    outputs['iconIdentitySidecar'] = os.path.basename(sidecar_path)
             
             log_slug = f"{item.project_slug}"
             if os.path.exists(os.path.join(project_folder, f"{log_slug}-master.log")):
