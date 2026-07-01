@@ -24,6 +24,7 @@ import psutil
 import gc
 import weakref
 import logging
+import ctypes
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from sprunki_obs_controller import SprunkiController
@@ -1629,6 +1630,96 @@ class SprunkiGamePlayer:
         """ðŸ›¡ï¸ Safe window maximization"""
         return self.safe_window_operation(window, "window maximization", lambda: window.maximize())
 
+    def _is_game_browser_title(self, title):
+        """Return True only for browser windows that can safely receive game hotkeys."""
+        title_lower = (title or "").lower()
+        if not title_lower:
+            return False
+
+        terminal_markers = (
+            "command prompt",
+            "powershell",
+            "windows terminal",
+            "cmd.exe",
+            "python ",
+            "validate_",
+            "start_creator_service",
+        )
+        if any(marker in title_lower for marker in terminal_markers):
+            return False
+
+        return (
+            "cocrea.world" in title_lower
+            or title_lower.endswith(" - google chrome")
+            or title_lower == "google chrome"
+        )
+
+    def _find_game_browser_window(self):
+        """Find the most likely Cocrea/Chrome game window without matching terminals."""
+        try:
+            candidates = []
+            for title_part in ("cocrea.world", " - Google Chrome", "Google Chrome"):
+                for window in gw.getWindowsWithTitle(title_part):
+                    if window and self._is_game_browser_title(getattr(window, "title", "")):
+                        candidates.append(window)
+
+            if not candidates:
+                for window in gw.getAllWindows():
+                    if window and self._is_game_browser_title(getattr(window, "title", "")):
+                        candidates.append(window)
+
+            candidates = [
+                window for window in candidates
+                if getattr(window, "width", 0) >= 800 and getattr(window, "height", 0) >= 500
+            ] or candidates
+            return candidates[0] if candidates else None
+        except Exception as e:
+            print(f"   ⚠️ Could not find game browser window safely: {e}")
+            return None
+
+    def _get_foreground_window_title(self):
+        """Read the current Windows foreground title for hotkey safety checks."""
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return ""
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buffer, length + 1)
+            return buffer.value
+        except Exception:
+            return ""
+
+    def press_f11_for_game_fullscreen(self):
+        """Press F11 only when the Cocrea/Chrome game window is definitely foreground."""
+        try:
+            print("   -> Preparing Chrome focus before F11 true fullscreen...")
+            game_window = self._find_game_browser_window()
+            if not game_window:
+                print("   ⚠️ F11 skipped: no safe Cocrea/Chrome game window found.")
+                return False
+
+            try:
+                game_window.restore()
+            except Exception:
+                pass
+            self.safe_activate_window(game_window)
+            self.safe_maximize_window(game_window)
+            time.sleep(0.7)
+
+            foreground_title = self._get_foreground_window_title()
+            if not self._is_game_browser_title(foreground_title):
+                print(f"   ⚠️ F11 skipped: foreground is not Chrome/Cocrea: {foreground_title[:80]!r}")
+                return False
+
+            print(f"   ✅ F11 target confirmed: {foreground_title[:80]}...")
+            pyautogui.press('f11')
+            time.sleep(3)
+            return True
+        except Exception as e:
+            print(f"   ⚠️ F11 fullscreen skipped due to focus safety error: {e}")
+            return False
+
     def wait_for_complete_game_readiness(self, url):
         """
         ðŸ”„ CONTINUOUS MONITORING: Wait for both page + game ready with configurable timeout
@@ -1902,9 +1993,7 @@ class SprunkiGamePlayer:
                 self.cleanup_chrome_complete()
                 return False
 
-            print("   -> Pressing F11 for true fullscreen mode...")
-            pyautogui.press('f11')
-            time.sleep(3)
+            self.press_f11_for_game_fullscreen()
 
             print("\n✅ GAME SETUP COMPLETED SUCCESSFULLY. Ready for automation.")
             print("======================================================================")
