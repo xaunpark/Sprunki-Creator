@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -8,6 +9,26 @@ from sprunki_game_player import SprunkiGamePlayer
 from sprunki_obs_controller import SprunkiController
 from validate_obs_recording import analyze_video
 from validate_obs_capture import connect_obs, get_screenshot, load_config, obs_request
+
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            try:
+                stream.write(data)
+                stream.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
 
 
 def read_json(path: Path) -> dict:
@@ -60,10 +81,17 @@ def main() -> int:
     parser.add_argument("url", help="Cocrea/Sprunki URL to open through SprunkiGamePlayer.setup_game_environment().")
     parser.add_argument("--seconds", type=float, default=8.0, help="Recording duration after game setup.")
     parser.add_argument("--output-dir", default="creator_workflow_obs_validation")
+    parser.add_argument("--cleanup", action="store_true", help="Run browser/OBS cleanup at the end. Disabled by default for debugging.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = output_dir / "run.log"
+    log_handle = log_path.open("w", encoding="utf-8")
+    sys.stdout = Tee(sys.__stdout__, log_handle)
+    sys.stderr = Tee(sys.__stderr__, log_handle)
+    print(f"Logging to: {log_path.resolve()}")
+
     config = write_temp_config(args.url, output_dir)
     (output_dir / "workflow_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -120,13 +148,26 @@ def main() -> int:
             return 2
         print("RESULT: PASS - creator workflow recording output has visible pixels.")
         return 0
+    except BaseException as exc:
+        import traceback
+        print("RESULT: FAIL - unhandled exception in creator workflow validation.")
+        print(f"Exception: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        return 99
     finally:
+        if args.cleanup:
+            try:
+                player.close_game_window()
+            except Exception as exc:
+                print(f"Cleanup warning: close_game_window failed: {exc}")
+            try:
+                obs.comprehensive_obs_cleanup()
+            except Exception as exc:
+                print(f"Cleanup warning: comprehensive_obs_cleanup failed: {exc}")
+        else:
+            print("Cleanup skipped. Use --cleanup to enable final browser/OBS cleanup.")
         try:
-            player.close_game_window()
-        except Exception:
-            pass
-        try:
-            obs.comprehensive_obs_cleanup()
+            log_handle.close()
         except Exception:
             pass
 
