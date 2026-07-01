@@ -1454,9 +1454,29 @@ class SprunkiGamePlayer:
             # Phase 4: Close windows by title (keep existing logic)
             try:
                 import pygetwindow as gw
-                for title_part in ['cocrea.world', 'Chrome']:
+                for title_part in ['cocrea.world', 'Google Chrome', ' - Google Chrome']:
                     windows = gw.getWindowsWithTitle(title_part)
                     for window in windows:
+                        title = window.title or ""
+                        normalized_title = title.lower()
+                        if any(token in normalized_title for token in [
+                            "command prompt",
+                            "powershell",
+                            "windows terminal",
+                            "cmd.exe",
+                            "python ",
+                            "validate_",
+                            "start_creator_service",
+                        ]):
+                            print(f"   ⚠️ Skipping non-Chrome window during cleanup: {title[:80]}...")
+                            continue
+                        if not (
+                            "cocrea.world" in normalized_title
+                            or normalized_title.endswith(" - google chrome")
+                            or normalized_title == "google chrome"
+                        ):
+                            print(f"   ⚠️ Skipping unmatched window during cleanup: {title[:80]}...")
+                            continue
                         try:
                             window.close()
                             print(f"   ✅ Closed window: {window.title[:50]}...")
