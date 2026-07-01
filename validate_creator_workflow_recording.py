@@ -1,14 +1,100 @@
 import argparse
 import json
 import os
+import socket
 import sys
 import time
+import types
 from pathlib import Path
 
 from sprunki_game_player import SprunkiGamePlayer
 from sprunki_obs_controller import SprunkiController
 from validate_obs_recording import analyze_video
 from validate_obs_capture import connect_obs, get_screenshot, load_config, obs_request
+
+
+def install_safe_chrome_cleanup(player: SprunkiGamePlayer) -> None:
+    def safe_cleanup_chrome_complete(self):
+        print("SAFE cleanup: closing Chrome debug process without title-based window close...")
+        try:
+            if getattr(self, "session_websocket", None):
+                try:
+                    self.session_websocket.close()
+                    print("   WebSocket connection closed")
+                except Exception:
+                    pass
+
+            try:
+                import psutil
+                chrome_pids_to_kill = []
+                for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                    try:
+                        name = proc.info.get("name") or ""
+                        cmdline = proc.info.get("cmdline") or []
+                        cmdline_str = " ".join(cmdline)
+                        if "chrome" in name.lower() and f"--remote-debugging-port={self.debugging_port}" in cmdline_str:
+                            chrome_pids_to_kill.append(proc.info["pid"])
+                            print(f"   Found Chrome debug process: PID {proc.info['pid']}")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+
+                for pid in chrome_pids_to_kill:
+                    try:
+                        psutil.Process(pid).terminate()
+                        print(f"   Terminated Chrome debug process: PID {pid}")
+                    except Exception:
+                        try:
+                            psutil.Process(pid).kill()
+                            print(f"   Killed Chrome debug process: PID {pid}")
+                        except Exception:
+                            pass
+
+                if chrome_pids_to_kill:
+                    psutil.wait_procs(
+                        [psutil.Process(pid) for pid in chrome_pids_to_kill if psutil.pid_exists(pid)],
+                        timeout=5,
+                    )
+            except Exception as exc:
+                print(f"   Process cleanup warning: {exc}")
+                chrome_process = getattr(self, "chrome_process", None)
+                if chrome_process:
+                    try:
+                        chrome_process.terminate()
+                        chrome_process.wait(timeout=3)
+                    except Exception:
+                        try:
+                            chrome_process.kill()
+                        except Exception:
+                            pass
+
+            print(f"   Verifying port {self.debugging_port} is released...")
+            for attempt in range(10):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1)
+                    result = sock.connect_ex(("localhost", self.debugging_port))
+                    sock.close()
+                    if result != 0:
+                        print(f"   Port {self.debugging_port} confirmed released")
+                        break
+                    print(f"   Port {self.debugging_port} still in use, waiting... ({attempt + 1}/10)")
+                    time.sleep(1)
+                except Exception as exc:
+                    print(f"   Port check warning: {exc}")
+                    time.sleep(1)
+
+            self.ws_url = None
+            self.chrome_process = None
+            self.session_websocket = None
+            self.session_websocket_url = None
+            self.batch_verification_active = False
+            print("SAFE cleanup completed.")
+            return True
+        except Exception as exc:
+            print(f"SAFE cleanup error: {exc}")
+            return False
+
+    player.cleanup_chrome_complete = types.MethodType(safe_cleanup_chrome_complete, player)
 
 
 class Tee:
@@ -97,6 +183,7 @@ def main() -> int:
 
     obs = SprunkiController()
     player = SprunkiGamePlayer()
+    install_safe_chrome_cleanup(player)
     player.config = config
     player.obs_controller = obs
 
