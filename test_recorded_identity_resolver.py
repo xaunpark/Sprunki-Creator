@@ -72,7 +72,7 @@ class RecordedIdentityResolverTests(unittest.TestCase):
             self.assertEqual(payload["status"], "unavailable")
             self.assertIn("missing_source_json", payload["validation"]["errors"])
 
-    def test_legacy_search_mode_without_runtime_coordinates_needs_review(self):
+    def test_legacy_search_mode_without_runtime_coordinates_keeps_standard_coordinate_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             project = Path(temp)
             source = project / "source.json"
@@ -98,11 +98,47 @@ class RecordedIdentityResolverTests(unittest.TestCase):
 
             payload = resolve(project, str(source), str(timestamps), str(sidecar))
 
-            self.assertEqual(payload["status"], "needs_review")
+            self.assertEqual(payload["status"], "verified")
             self.assertIn(
                 "search_mode_without_runtime_coordinates:n-1",
                 payload["validation"]["warnings"],
             )
+            self.assertEqual(payload["segmentByCanonicalId"]["oren"], "n-1")
+            self.assertEqual(payload["segmentIdentities"][0]["identityUsable"], True)
+            self.assertEqual(payload["segmentIdentities"][0]["runtimeCoordinateWarning"], "search_mode_without_runtime_coordinates")
+
+    def test_search_mode_without_runtime_coordinates_excludes_extra_segment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            source = project / "source.json"
+            timestamps = project / "showcase.timestamps.json"
+            sidecar = project / "source.icon_identity.json"
+            write_json(source, {"layout": {"icons": [{"index": i, "x": i, "y": 10} for i in range(21)]}})
+            events = []
+            for icon_index in range(21):
+                metadata = {"icon_index": icon_index, "method": "cache_hit"}
+                if icon_index == 0:
+                    metadata["method"] = "search_mode"
+                events.append({"event": "successful_drag_started", "timestamp": icon_index * 2, "metadata": metadata})
+                events.append({
+                    "event": "start_listen",
+                    "timestamp": icon_index * 2 + 0.1,
+                    "metadata": {"icon_index": icon_index, "segmentKey": f"n-{icon_index + 1}"},
+                })
+            write_json(timestamps, {"events": events})
+            write_json(sidecar, {"iconIdentities": [
+                {"iconIndex": 0, "costumeName": "24-a"},
+                *[
+                    {"iconIndex": i, "costumeName": f"{i:02d}-a"}
+                    for i in range(1, 21)
+                ],
+            ]})
+
+            payload = resolve(project, str(source), str(timestamps), str(sidecar))
+
+            self.assertEqual(payload["status"], "verified")
+            self.assertEqual(payload["segmentIdentities"][0]["identityUsable"], False)
+            self.assertEqual(payload["segmentByCanonicalId"]["oren"], "n-2")
 
     def test_search_mode_with_runtime_coordinates_can_verify(self):
         with tempfile.TemporaryDirectory() as temp:

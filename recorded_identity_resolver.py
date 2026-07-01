@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -89,6 +90,11 @@ def classify_costume(costume_name: Optional[str]) -> Dict[str, Any]:
 
 def project_slug_from_manifest(manifest: Dict[str, Any], project: Path) -> str:
     return manifest.get("projectInfo", {}).get("projectSlug") or project.name
+
+
+def source_url_from_manifest(manifest: Dict[str, Any]) -> Optional[str]:
+    source = manifest.get("source") or {}
+    return source.get("value") or manifest.get("projectInfo", {}).get("sourceUrl")
 
 
 def candidate_source_json_paths(project: Path, manifest: Dict[str, Any]) -> Iterable[Path]:
@@ -288,6 +294,113 @@ def smoke_artifact_icon_map(project: Path) -> Tuple[Dict[int, Dict[str, Any]], O
     return {}, None
 
 
+def nearest_runtime_icon(source_icon: Dict[str, Any], runtime_icons: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], float]:
+    source_x = source_icon.get("sourceX")
+    source_y = source_icon.get("sourceY")
+    if source_x is None or source_y is None:
+        return None, math.inf
+    best = None
+    best_distance = math.inf
+    for icon in runtime_icons:
+        icon_x = icon.get("x")
+        icon_y = icon.get("y")
+        if icon_x is None or icon_y is None:
+            continue
+        distance = math.hypot(float(icon_x) - float(source_x), float(icon_y) - float(source_y))
+        if distance < best_distance:
+            best = icon
+            best_distance = distance
+    return best, best_distance
+
+
+def headless_vm_icon_map(
+    project: Path,
+    manifest: Dict[str, Any],
+    source_icons: Dict[int, Dict[str, Any]],
+) -> Tuple[Dict[int, Dict[str, Any]], Optional[str], List[str]]:
+    warnings: List[str] = []
+    if not source_icons:
+        return {}, None, ["headless_skipped_no_source_icons"]
+    source_url = source_url_from_manifest(manifest)
+    if not source_url:
+        return {}, None, ["headless_skipped_missing_source_url"]
+    try:
+        from headless_coordinate_identity_smoke import open_headless_snapshot
+    except Exception as exc:
+        return {}, None, [f"headless_unavailable:{type(exc).__name__}:{str(exc)[:160]}"]
+
+    cookie_file = os.getenv("RECORDED_IDENTITY_COOKIE_FILE") or str(Path(__file__).resolve().parent / "cocrea_cookies.json")
+    timeout = int(os.getenv("RECORDED_IDENTITY_HEADLESS_TIMEOUT", "140"))
+    threshold = float(os.getenv("RECORDED_IDENTITY_COORDINATE_THRESHOLD", "8"))
+    min_runtime_icons = max(1, len(source_icons))
+    try:
+        print(f"[recorded_identity_resolver] Headless VM costume evidence: {source_url}")
+        snapshot = open_headless_snapshot(
+            source_url=source_url,
+            cookie_file=cookie_file,
+            timeout=timeout,
+            min_runtime_icons=min_runtime_icons,
+            click_center=True,
+        )
+    except Exception as exc:
+        return {}, None, [f"headless_probe_failed:{type(exc).__name__}:{str(exc)[:180]}"]
+
+    evidence_path = project / "recorded_identity_headless_evidence.json"
+    try:
+        write_json(evidence_path, {
+            "schemaVersion": 1,
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "source": "headless_vm_coordinate_costume_evidence",
+            "sourceUrl": source_url,
+            "snapshotPhase": snapshot.get("phase"),
+            "ok": snapshot.get("ok"),
+            "title": snapshot.get("title"),
+            "href": snapshot.get("href"),
+            "visibleIconCount": snapshot.get("visibleIconCount"),
+            "icons": snapshot.get("icons") or [],
+            "error": snapshot.get("error") or snapshot.get("lastError"),
+        })
+    except Exception as exc:
+        warnings.append(f"headless_evidence_write_failed:{type(exc).__name__}")
+
+    if not snapshot.get("ok"):
+        reason = snapshot.get("error") or snapshot.get("lastError") or "unknown"
+        return {}, str(evidence_path), [*warnings, f"headless_probe_unusable:{str(reason)[:160]}"]
+
+    runtime_icons = [
+        icon for icon in snapshot.get("icons", [])
+        if icon.get("filteredByJsonGenerator") and icon.get("costumeName")
+    ]
+    if not runtime_icons:
+        return {}, str(evidence_path), [*warnings, "headless_probe_no_runtime_icons"]
+    if len(runtime_icons) < min_runtime_icons:
+        return {}, str(evidence_path), [
+            *warnings,
+            f"headless_insufficient_runtime_icons:{len(runtime_icons)}/{min_runtime_icons}",
+        ]
+
+    out: Dict[int, Dict[str, Any]] = {}
+    unmatched = []
+    for icon_index, source_icon in sorted(source_icons.items()):
+        match, distance = nearest_runtime_icon(source_icon, runtime_icons)
+        if not match or distance > threshold:
+            unmatched.append(str(icon_index))
+            continue
+        out[icon_index] = {
+            "costumeName": match.get("costumeName"),
+            "identityEvidence": "headless_vm_coordinate_match",
+            "gridOrder": match.get("originalIndexInVisibleList"),
+            "coordinateDistance": round(distance, 3),
+            "iconTargetName": match.get("iconTargetName"),
+            "currentCostume": match.get("currentCostume"),
+        }
+    if unmatched:
+        warnings.append(f"headless_unmatched_icon_indexes:{','.join(unmatched[:12])}")
+    if out:
+        warnings.append("used_headless_vm_costume_evidence")
+    return out, str(evidence_path), warnings
+
+
 def legacy_identity_icon_map(project: Path, source_icons: Dict[int, Dict[str, Any]]) -> Tuple[Dict[int, Dict[str, Any]], Optional[str], List[str]]:
     path = project / "character_identity_map.json"
     if not path.exists():
@@ -330,6 +443,9 @@ def legacy_identity_icon_map(project: Path, source_icons: Dict[int, Dict[str, An
 
 
 def load_overrides(project: Path) -> Dict[str, Any]:
+    enabled = str(os.getenv("RECORDED_IDENTITY_ENABLE_OVERRIDES", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return {}
     path = project / OVERRIDES_FILENAME
     if not path.exists():
         return {}
@@ -372,6 +488,7 @@ def build_payload(
     segment_by_canonical = {}
     duplicate_segments_by_canonical: Dict[str, List[str]] = {}
     excluded_segments = {}
+    unusable_segments = {}
     canonical_preference = (overrides or {}).get("segmentByCanonicalPreference") or {}
     segment_metadata = segment_metadata or {}
 
@@ -379,8 +496,16 @@ def build_payload(
         source_icon = source_icons.get(icon_index, {"iconIndex": icon_index})
         identity = icon_identity_map.get(icon_index, {})
         runtime = segment_metadata.get(icon_index, {})
+        is_manual = identity.get("identityEvidence") in {"manual_override", "user_video_review"}
+        has_pickup_coordinates = runtime.get("pickupX") is not None and runtime.get("pickupY") is not None
         costume_name = identity.get("costumeName")
         classified = classify_costume(costume_name)
+        missing_runtime_pickup = (
+            runtime.get("method") == "search_mode"
+            and not has_pickup_coordinates
+            and not is_manual
+        )
+        is_runtime_ambiguous = missing_runtime_pickup and not classified["canonicalId"]
         row = {
             "segmentKey": segment_key,
             "iconIndex": icon_index,
@@ -400,9 +525,14 @@ def build_payload(
             "slotOffsetIdx": runtime.get("slotOffsetIdx"),
             "dropX": runtime.get("dropX"),
             "dropY": runtime.get("dropY"),
+            "identityUsable": not is_runtime_ambiguous,
+            "identityUnusableReason": "search_mode_without_runtime_coordinates" if is_runtime_ambiguous else None,
+            "runtimeCoordinateWarning": "search_mode_without_runtime_coordinates" if missing_runtime_pickup else None,
         }
         segment_identities.append(row)
-        if row["canonicalId"]:
+        if is_runtime_ambiguous:
+            unusable_segments[segment_key] = row
+        elif row["canonicalId"]:
             standard_by_segment[segment_key] = row
             duplicate_segments_by_canonical.setdefault(row["canonicalId"], []).append(segment_key)
             if row["canonicalId"] not in segment_by_canonical:
@@ -417,12 +547,11 @@ def build_payload(
     missing_identity = [idx for idx in icon_segments if idx not in icon_identity_map]
     if missing_identity:
         warnings.append(f"missing_identity_for_icon_indexes:{','.join(map(str, missing_identity[:12]))}")
-    search_without_runtime_coordinates = []
-    for row in segment_identities:
-        is_manual = row.get("identityEvidence") in {"manual_override", "user_video_review"}
-        has_pickup_coordinates = row.get("pickupX") is not None and row.get("pickupY") is not None
-        if row.get("dragMethod") == "search_mode" and not has_pickup_coordinates and not is_manual:
-            search_without_runtime_coordinates.append(row["segmentKey"])
+    search_without_runtime_coordinates = sorted(
+        row["segmentKey"]
+        for row in segment_identities
+        if row.get("runtimeCoordinateWarning") == "search_mode_without_runtime_coordinates"
+    )
     if search_without_runtime_coordinates:
         warnings.append(
             "search_mode_without_runtime_coordinates:"
@@ -451,16 +580,26 @@ def build_payload(
     standard_count = len(segment_by_canonical)
     if errors:
         status = "unavailable"
-    elif standard_count < 20 or unexpected_duplicate_canonicals or search_without_runtime_coordinates:
+    elif standard_count < 5 or unexpected_duplicate_canonicals:
         status = "needs_review"
-        if standard_count < 20:
+        if standard_count < 5:
             warnings.append("insufficient_standard_icons")
+    elif standard_count < 20:
+        warnings.append(f"partial_standard_icons:{standard_count}/20")
+
+    review_reason = None
+    if status != "verified":
+        blocking_warnings = [
+            warning for warning in warnings
+            if not str(warning).startswith("used_headless_vm_costume_evidence")
+        ]
+        review_reason = errors[0] if errors else (blocking_warnings[0] if blocking_warnings else (warnings[0] if warnings else None))
 
     return {
         "schemaVersion": 2,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "status": status,
-        "needsReviewReason": errors[0] if errors else (warnings[0] if status != "verified" and warnings else None),
+        "needsReviewReason": review_reason,
         "rule": {
             "id": RULE_ID,
             "description": "Join recorded timestamps to source JSON icon indexes, then map those icons to Scratch costume names and canonical Sprunki identities.",
@@ -481,6 +620,7 @@ def build_payload(
             "identityIconCount": len(icon_identity_map),
             "standardCharacterCount": standard_count,
             "excludedSegmentCount": len(excluded_segments),
+            "unusableSegmentCount": len(unusable_segments),
         },
         "segmentIdentities": segment_identities,
         "segmentByCanonicalId": segment_by_canonical,
@@ -491,12 +631,15 @@ def build_payload(
             if len(segments) > 1
         },
         "excludedSegments": excluded_segments,
+        "unusableSegments": unusable_segments,
     }
 
 
 def resolve(project: Path, source_json_arg: Optional[str], timestamps_arg: Optional[str], sidecar_arg: Optional[str]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
+    manifest_path = project / "manifest.json"
+    manifest = read_json(manifest_path) if manifest_path.exists() else {}
     source_json_path = find_source_json(project, source_json_arg)
     timestamps_path = find_timestamps(project, timestamps_arg)
 
@@ -531,6 +674,10 @@ def resolve(project: Path, source_json_arg: Optional[str], timestamps_arg: Optio
 
     if not icon_map:
         icon_map, evidence_source = smoke_artifact_icon_map(project)
+
+    if not icon_map and not errors:
+        icon_map, evidence_source, headless_warnings = headless_vm_icon_map(project, manifest, source_icons)
+        warnings.extend(headless_warnings)
 
     if not icon_map:
         icon_map, evidence_source, legacy_warnings = legacy_identity_icon_map(project, source_icons)
