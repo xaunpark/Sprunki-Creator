@@ -2129,6 +2129,22 @@ class SprunkiJSONGenerator:
                     json.dump(self.convert_to_json_serializable(sidecar), handle, ensure_ascii=False, indent=2)
                     handle.write("\n")
                 print(f"ðŸ§­ Icon identity sidecar saved: {sidecar_path}")
+                try:
+                    from pathlib import Path
+                    from identity_review_artifact import write_icon_order_identity_review
+
+                    project_folder = None
+                    if hasattr(self.game_player, "current_project_folder") and self.game_player.current_project_folder:
+                        project_folder = Path(self.game_player.current_project_folder)
+                    review_paths = write_icon_order_identity_review(
+                        final_json,
+                        sidecar,
+                        Path(json_file_path),
+                        project_folder=project_folder,
+                    )
+                    print(f"Icon identity review HTML saved: {review_paths.get('html')}")
+                except Exception as review_exc:
+                    print(f"Icon identity review HTML skipped: {review_exc}")
                 return sidecar_path
             except Exception as exc:
                 print(f"âš ï¸ Icon identity sidecar skipped: {exc}")

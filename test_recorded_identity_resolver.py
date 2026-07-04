@@ -176,6 +176,36 @@ class RecordedIdentityResolverTests(unittest.TestCase):
             self.assertEqual(payload["status"], "verified")
             self.assertEqual(payload["segmentIdentities"][0]["pickupX"], 100)
 
+    def test_segment_override_can_mark_duplicate_canonical_as_extra(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            source = project / "source.json"
+            timestamps = project / "showcase.timestamps.json"
+            sidecar = project / "source.icon_identity.json"
+            write_json(source, {"layout": {"icons": [{"index": i, "x": i, "y": 10} for i in range(21)]}})
+            write_json(timestamps, timestamp_events(21))
+            write_json(sidecar, {"iconIdentities": [
+                {"iconIndex": 0, "costumeName": "01-a"},
+                *[
+                    {"iconIndex": i, "costumeName": f"{i:02d}-a"}
+                    for i in range(1, 21)
+                ],
+            ]})
+            write_json(project / "recorded_identity_overrides.json", {
+                "schemaVersion": 1,
+                "rule": "manual_segment_identity_override",
+                "segmentOverrides": [
+                    {"segmentKey": "n-1", "status": "extra", "canonicalId": None, "reason": "manual_review"}
+                ],
+            })
+
+            payload = resolve(project, str(source), str(timestamps), str(sidecar))
+
+            self.assertEqual(payload["status"], "verified")
+            self.assertEqual(payload["segmentByCanonicalId"]["oren"], "n-2")
+            self.assertEqual(payload["segmentIdentities"][0]["status"], "extra")
+            self.assertTrue(payload["segmentIdentities"][0]["manualOverride"])
+
 
 if __name__ == "__main__":
     unittest.main()

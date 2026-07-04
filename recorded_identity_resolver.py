@@ -8,11 +8,53 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from identity_review_artifact import write_recorded_identity_review
+
 
 OUTPUT_FILENAME = "recorded_character_identity.json"
 OVERRIDES_FILENAME = "recorded_identity_overrides.json"
 RULE_ID = "source_json_timestamps_coordinate_alignment"
 SIDECAR_SUFFIX = ".icon_identity.json"
+
+RETRYABLE_REASONS = {
+    "resolver_timeout",
+    "headless_browser_launch_failed",
+    "chrome_debug_unavailable",
+    "page_load_timeout",
+    "game_load_timeout",
+    "game_vm_not_ready",
+    "missing_vm_runtime_temporarily",
+    "network_timeout",
+    "cocrea_load_timeout",
+    "headless_vm_costume_evidence_failed",
+}
+
+NON_RETRYABLE_REASONS = {
+    "missing_source_json",
+    "missing_timestamps",
+    "source_json_hash_mismatch",
+    "sidecar_source_hash_mismatch",
+    "insufficient_standard_icons",
+    "non_standard_costume_names",
+    "coordinate_grid_mismatch",
+    "no_timestamp_icon_join",
+    "missing_costume_evidence",
+}
+
+
+def reason_key(value: Any) -> str:
+    return str(value or "").split(":", 1)[0]
+
+
+def is_retryable_identity_result(status: str, reason: Optional[str], errors: List[str], warnings: List[str]) -> bool:
+    if status == "verified":
+        return False
+    all_reasons = [reason_key(reason)] + [reason_key(item) for item in errors] + [reason_key(item) for item in warnings]
+    if any(item in NON_RETRYABLE_REASONS for item in all_reasons):
+        return False
+    if any(item in RETRYABLE_REASONS for item in all_reasons):
+        return True
+    return False
 
 CANONICAL_CHARACTERS: List[Tuple[str, str]] = [
     ("oren", "Oren"),
@@ -443,9 +485,6 @@ def legacy_identity_icon_map(project: Path, source_icons: Dict[int, Dict[str, An
 
 
 def load_overrides(project: Path) -> Dict[str, Any]:
-    enabled = str(os.getenv("RECORDED_IDENTITY_ENABLE_OVERRIDES", "")).strip().lower() in {"1", "true", "yes", "on"}
-    if not enabled:
-        return {}
     path = project / OVERRIDES_FILENAME
     if not path.exists():
         return {}
@@ -469,6 +508,53 @@ def apply_icon_overrides(icon_identity_map: Dict[int, Dict[str, Any]], overrides
     return warnings
 
 
+def segment_overrides_by_key(overrides: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    if not overrides:
+        return {}
+    rows = overrides.get("segmentOverrides") or []
+    out = {}
+    for row in rows:
+        segment_key = row.get("segmentKey")
+        if segment_key:
+            out[str(segment_key)] = row
+    return out
+
+
+def apply_segment_override_to_row(row: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    status = str(override.get("status") or "").lower()
+    canonical_id = override.get("canonicalId")
+    out = {**row}
+    out["manualOverride"] = True
+    out["overrideReason"] = override.get("reason") or "manual_review"
+    out["identityEvidence"] = "manual_segment_override"
+    out["identityUsable"] = status not in {"unknown"}
+    out["identityUnusableReason"] = "manual_unknown" if status == "unknown" else None
+
+    if status == "extra":
+        out["canonicalId"] = None
+        out["displayName"] = None
+        out["status"] = "extra"
+        return out
+
+    if status == "unknown":
+        out["canonicalId"] = None
+        out["displayName"] = None
+        out["status"] = "unknown"
+        return out
+
+    if canonical_id:
+        display_name = next(
+            (display for cid, display in CANONICAL_CHARACTERS if cid == canonical_id),
+            str(canonical_id),
+        )
+        out["canonicalId"] = str(canonical_id)
+        out["displayName"] = display_name
+        out["status"] = "matched"
+        out["identityUsable"] = True
+        out["identityUnusableReason"] = None
+    return out
+
+
 def build_payload(
     project: Path,
     source_json_path: Optional[Path],
@@ -490,6 +576,7 @@ def build_payload(
     excluded_segments = {}
     unusable_segments = {}
     canonical_preference = (overrides or {}).get("segmentByCanonicalPreference") or {}
+    segment_overrides = segment_overrides_by_key(overrides)
     segment_metadata = segment_metadata or {}
 
     for icon_index, segment_key in sorted(icon_segments.items()):
@@ -529,6 +616,11 @@ def build_payload(
             "identityUnusableReason": "search_mode_without_runtime_coordinates" if is_runtime_ambiguous else None,
             "runtimeCoordinateWarning": "search_mode_without_runtime_coordinates" if missing_runtime_pickup else None,
         }
+        override = segment_overrides.get(segment_key)
+        if override:
+            row = apply_segment_override_to_row(row, override)
+            warnings.append(f"manual_override_segment:{segment_key}")
+            is_runtime_ambiguous = row.get("identityUsable") is False
         segment_identities.append(row)
         if is_runtime_ambiguous:
             unusable_segments[segment_key] = row
@@ -594,12 +686,14 @@ def build_payload(
             if not str(warning).startswith("used_headless_vm_costume_evidence")
         ]
         review_reason = errors[0] if errors else (blocking_warnings[0] if blocking_warnings else (warnings[0] if warnings else None))
+    retryable = is_retryable_identity_result(status, review_reason, errors, warnings)
 
     return {
         "schemaVersion": 2,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "status": status,
         "needsReviewReason": review_reason,
+        "retryable": retryable,
         "rule": {
             "id": RULE_ID,
             "description": "Join recorded timestamps to source JSON icon indexes, then map those icons to Scratch costume names and canonical Sprunki identities.",
@@ -719,16 +813,36 @@ def main() -> int:
     out_path = Path(args.out) if args.out else project / OUTPUT_FILENAME
     if out_path.exists() and not args.force:
         payload = read_json(out_path)
-        print(json.dumps({"status": "skipped", "reason": "existing_recorded_identity", "identityPath": str(out_path), "identityStatus": payload.get("status")}, ensure_ascii=False))
+        review_paths = {}
+        try:
+            review_paths = write_recorded_identity_review(project, payload)
+        except Exception as exc:
+            payload.setdefault("validation", {}).setdefault("warnings", []).append(f"review_artifact_failed:{exc}")
+        print(json.dumps({
+            "status": "skipped",
+            "reason": "existing_recorded_identity",
+            "identityPath": str(out_path),
+            "identityStatus": payload.get("status"),
+            "reviewHtml": str(review_paths.get("html")) if review_paths else None,
+            "reviewJson": str(review_paths.get("json")) if review_paths else None,
+        }, ensure_ascii=False))
         return 0
 
     payload = resolve(project, args.source_json, args.timestamps, args.sidecar)
     write_json(out_path, payload)
+    review_paths = {}
+    try:
+        review_paths = write_recorded_identity_review(project, payload)
+    except Exception as exc:
+        payload.setdefault("validation", {}).setdefault("warnings", []).append(f"review_artifact_failed:{exc}")
     print(json.dumps({
         "status": payload.get("status"),
         "identityPath": str(out_path),
+        "reviewHtml": str(review_paths.get("html")) if review_paths else None,
+        "reviewJson": str(review_paths.get("json")) if review_paths else None,
         "standardCharacterCount": payload.get("validation", {}).get("standardCharacterCount"),
         "needsReviewReason": payload.get("needsReviewReason"),
+        "retryable": payload.get("retryable", False),
         "errors": payload.get("validation", {}).get("errors") or [],
         "warnings": payload.get("validation", {}).get("warnings") or [],
     }, ensure_ascii=False))
