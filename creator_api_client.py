@@ -29,6 +29,7 @@ from manual_profile_manager import suggested_profile_path_for_url, url_key_from_
 
 # --- CONFIG: Thư mục chứa file JSON thủ công ---
 MANUAL_JSON_DIR = "manual_jsons"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class _TeeStream:
@@ -436,7 +437,7 @@ class CreatorService:
         enabled = self.config_manager.get('logging.enable_job_log_capture', True)
         log_directory = self.config_manager.get('logging.job_log_directory', 'logs/video_jobs')
         if not os.path.isabs(log_directory):
-            log_directory = os.path.abspath(log_directory)
+            log_directory = os.path.join(PROJECT_DIR, log_directory)
         return JobLogCapture(queue_id=queue_id, log_directory=log_directory, enabled=enabled)
 
     @property
