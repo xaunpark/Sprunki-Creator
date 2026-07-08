@@ -9,6 +9,7 @@ import time
 import requests
 from threading import Thread
 import os
+import sys
 from typing import Dict, Optional, Any, Tuple
 from datetime import datetime
 from config_manager import get_config
@@ -28,6 +29,134 @@ from manual_profile_manager import suggested_profile_path_for_url, url_key_from_
 
 # --- CONFIG: Thư mục chứa file JSON thủ công ---
 MANUAL_JSON_DIR = "manual_jsons"
+
+
+class _TeeStream:
+    """Write to the original stream and a job log file without owning either."""
+
+    def __init__(self, original_stream, log_file):
+        self.original_stream = original_stream
+        self.log_file = log_file
+        self.encoding = getattr(original_stream, "encoding", "utf-8")
+
+    def write(self, data):
+        if not data:
+            return 0
+
+        try:
+            self.original_stream.write(data)
+        except Exception:
+            pass
+
+        try:
+            self.log_file.write(data)
+        except Exception:
+            pass
+
+        return len(data)
+
+    def flush(self):
+        for stream in (self.original_stream, self.log_file):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return bool(getattr(self.original_stream, "isatty", lambda: False)())
+
+    def fileno(self):
+        return self.original_stream.fileno()
+
+
+class JobLogCapture:
+    """Best-effort per-job log capture for Tracker tailing."""
+
+    def __init__(self, queue_id: int, log_directory: str, enabled: bool = True):
+        self.queue_id = queue_id
+        self.log_directory = log_directory
+        self.enabled = enabled
+        self.log_path = os.path.join(log_directory, f"job-{queue_id}.log")
+        self.log_file = None
+        self.file_handler = None
+        self.original_stdout = None
+        self.original_stderr = None
+        self.started = False
+
+    def start(self) -> bool:
+        if not self.enabled:
+            return False
+
+        try:
+            os.makedirs(self.log_directory, exist_ok=True)
+            self.log_file = open(self.log_path, "a", encoding="utf-8", buffering=1)
+            self.log_file.write(
+                f"\n===== Job {self.queue_id} log started at {datetime.now().isoformat(timespec='seconds')} =====\n"
+            )
+
+            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            self.file_handler = logging.FileHandler(self.log_path, mode="a", encoding="utf-8")
+            self.file_handler.setLevel(logging.DEBUG)
+            self.file_handler.setFormatter(formatter)
+            logging.getLogger().addHandler(self.file_handler)
+
+            self.original_stdout = sys.stdout
+            self.original_stderr = sys.stderr
+            sys.stdout = _TeeStream(self.original_stdout, self.log_file)
+            sys.stderr = _TeeStream(self.original_stderr, self.log_file)
+            self.started = True
+            return True
+        except Exception as exc:
+            self._safe_restore_streams()
+            self._safe_close_handler()
+            self._safe_close_file()
+            try:
+                print(f"⚠️ Job log capture disabled for job {self.queue_id}: {exc}")
+            except Exception:
+                pass
+            return False
+
+    def stop(self):
+        if not self.started:
+            return
+
+        try:
+            if self.log_file:
+                self.log_file.write(
+                    f"\n===== Job {self.queue_id} log ended at {datetime.now().isoformat(timespec='seconds')} =====\n"
+                )
+        except Exception:
+            pass
+        finally:
+            self._safe_restore_streams()
+            self._safe_close_handler()
+            self._safe_close_file()
+            self.started = False
+
+    def _safe_restore_streams(self):
+        if self.original_stdout is not None:
+            sys.stdout = self.original_stdout
+        if self.original_stderr is not None:
+            sys.stderr = self.original_stderr
+
+    def _safe_close_handler(self):
+        if self.file_handler:
+            try:
+                logging.getLogger().removeHandler(self.file_handler)
+                self.file_handler.close()
+            except Exception:
+                pass
+            self.file_handler = None
+
+    def _safe_close_file(self):
+        if self.log_file:
+            try:
+                self.log_file.flush()
+                self.log_file.close()
+            except Exception:
+                pass
+            self.log_file = None
+
 
 class TrackerAPIClient:
     def __init__(self, tracker_url="http://localhost:5000"):
@@ -303,6 +432,13 @@ class CreatorService:
             print(f"❌ CRITICAL: Failed to initialize processing config: {e}")
             self.processing_manager.config = None
 
+    def _create_job_log_capture(self, queue_id: int) -> JobLogCapture:
+        enabled = self.config_manager.get('logging.enable_job_log_capture', True)
+        log_directory = self.config_manager.get('logging.job_log_directory', 'logs/video_jobs')
+        if not os.path.isabs(log_directory):
+            log_directory = os.path.abspath(log_directory)
+        return JobLogCapture(queue_id=queue_id, log_directory=log_directory, enabled=enabled)
+
     @property
     def root(self):
         """
@@ -530,6 +666,8 @@ class CreatorService:
         [REVISED & WATCHDOG ENABLED] Orchestrates job processing with a job-specific stop event.
         """
         queue_id = job['id']
+        job_log_capture = self._create_job_log_capture(queue_id)
+        job_log_capture.start()
         item = None
         job_successful = False
         start_time = time.monotonic()
@@ -615,6 +753,8 @@ class CreatorService:
                     self.game_player.close_game_window()
             except Exception as cleanup_error:
                 self.logger.error(f"Error during post-job cleanup for {queue_id}: {cleanup_error}")
+            finally:
+                job_log_capture.stop()
         return job_successful
 
     def _check_for_manual_json_override(self, slug: str, job_id: int) -> Tuple[Optional[Dict], Optional[str]]:
