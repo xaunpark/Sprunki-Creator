@@ -4074,8 +4074,9 @@ class SprunkiGamePlayer:
                     
                     if response and 'result' in response:
                         value = response.get('result', {}).get('result', {}).get('value')
-                        if isinstance(value, (int, float)):
-                            return int(value)
+                        normalized_value = self._normalize_count_value(value)
+                        if normalized_value is not None:
+                            return normalized_value
             
             # FALLBACK TO INDIVIDUAL (SLOW PATH)  
             print("âš ï¸ Batch unavailable, using individual verification")
@@ -4108,8 +4109,9 @@ class SprunkiGamePlayer:
             
             if response and 'result' in response:
                 value = response.get('result', {}).get('result', {}).get('value')
-                if isinstance(value, (int, float)):
-                    return int(value)
+                normalized_value = self._normalize_count_value(value)
+                if normalized_value is not None:
+                    return normalized_value
             
             return None
             
@@ -4142,8 +4144,8 @@ class SprunkiGamePlayer:
                     if response and 'result' in response:
                         result = response.get('result', {}).get('result', {}).get('value')
                         if result:
-                            characters_count = result.get('characters')
-                            putted_count = result.get('putted')
+                            characters_count = self._normalize_count_value(result.get('characters'))
+                            putted_count = self._normalize_count_value(result.get('putted'))
                             return characters_count, putted_count
             
             # Fallback to individual calls
@@ -4167,6 +4169,25 @@ class SprunkiGamePlayer:
         """
         # Try batch first for maximum performance
         return self.get_dual_counts_batch()
+
+    def _normalize_count_value(self, value):
+        """
+        Normalize Scratch runtime numeric values. Some mods expose variables as
+        strings, which otherwise breaks arithmetic verification.
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            try:
+                return int(float(value))
+            except ValueError:
+                return None
+        return None
 
     def detect_return_mode(self, operation_context="unknown", icons_count=1):
         """
