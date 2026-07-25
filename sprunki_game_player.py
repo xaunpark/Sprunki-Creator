@@ -813,6 +813,91 @@ class SprunkiGamePlayer:
             print(f"âš ï¸ Error executing verification JavaScript: {e}")
             return None
 
+    def preflight_url_playable(self, target_url):
+        """Fail fast for URLs that are definitely unavailable before launching Chrome."""
+        try:
+            print(f"[CHECK] URL preflight: {target_url}")
+            response = requests.get(
+                target_url,
+                allow_redirects=True,
+                timeout=8,
+                stream=True,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0 Safari/537.36"
+                    )
+                },
+            )
+            status_code = response.status_code
+            final_url = response.url
+            response.close()
+
+            print(f"   HTTP status: {status_code} ({final_url})")
+            if status_code in (404, 410):
+                print(f"[FAIL] URL preflight failed: page returned HTTP {status_code}")
+                return False
+
+            return True
+
+        except requests.RequestException as e:
+            print(f"[WARN] URL preflight inconclusive: {e}")
+            print("   Continuing with browser verification...")
+            return True
+
+    def detect_cocrea_error_page_fast(self):
+        """Detect Cocrea error pages from the already loaded DOM."""
+        error_page_js = """
+        (() => {
+            const bodyText = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+            const title = document.title || '';
+            const headingText = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+                .map(el => el.innerText || el.textContent || '')
+                .join(' ')
+                .replace(/\\s+/g, ' ')
+                .trim();
+            const currentUrl = window.location.href;
+            const combined = `${title} ${headingText} ${bodyText}`.toLowerCase();
+            const errorPatterns = [
+                '404',
+                'not found',
+                'page not found',
+                'project not found',
+                'không tìm thấy',
+                'khong tim thay'
+            ];
+            const matchedPattern = errorPatterns.find(pattern => combined.includes(pattern));
+            return {
+                isErrorPage: !!matchedPattern,
+                matchedPattern: matchedPattern || null,
+                title,
+                headingText: headingText.substring(0, 200),
+                bodyPreview: bodyText.substring(0, 300),
+                currentUrl
+            };
+        })();
+        """
+
+        try:
+            result = self._execute_verification_js(error_page_js)
+            if not result:
+                return False
+
+            if result.get("isErrorPage"):
+                print("[FAIL] Cocrea error page detected before game verification")
+                print(f"   Pattern: {result.get('matchedPattern')}")
+                print(f"   Title: {result.get('title')}")
+                print(f"   Heading: {result.get('headingText')}")
+                print(f"   URL: {result.get('currentUrl')}")
+                return True
+
+            return False
+
+        except Exception as e:
+            print(f"[WARN] Error-page preflight inconclusive: {e}")
+            return False
+
     def verify_page_fully_loaded(self, target_url):
         """
         ðŸ” Smart Page Load Verification System
@@ -1009,10 +1094,35 @@ class SprunkiGamePlayer:
                         details: []
                     }},
                     runButtonInDOM: false,
+                    errorPage: {{
+                        detected: false,
+                        pattern: null,
+                        title: document.title || '',
+                        headingText: '',
+                        bodyPreview: ''
+                    }},
                     overallReady: false,
                     timestamp: Date.now()
                 }};
-                
+
+                const bodyText = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+                const headingText = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+                    .map(el => el.innerText || el.textContent || '')
+                    .join(' ')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+                const combinedText = `${{results.errorPage.title}} ${{headingText}} ${{bodyText}}`.toLowerCase();
+                const errorPatterns = ['404', 'not found', 'page not found', 'project not found', 'không tìm thấy', 'khong tim thay'];
+                const matchedErrorPattern = errorPatterns.find(pattern => combinedText.includes(pattern));
+                if (matchedErrorPattern) {{
+                    results.errorPage.detected = true;
+                    results.errorPage.pattern = matchedErrorPattern;
+                    results.errorPage.headingText = headingText.substring(0, 200);
+                    results.errorPage.bodyPreview = bodyText.substring(0, 300);
+                    console.log(`[FAIL] Error page detected during game verification: ${{matchedErrorPattern}}`);
+                    return results;
+                }}
+                 
                 // Check game container elements with more detailed logging
                 selectors.forEach(selector => {{
                     try {{
@@ -1162,7 +1272,15 @@ class SprunkiGamePlayer:
                     game_containers = game_result.get('gameContainers', [])
                     react_components = game_result.get('reactComponents', {})
                     run_button_in_dom = game_result.get('runButtonInDOM', False)
+                    error_page = game_result.get('errorPage', {})
                     overall_ready = game_result.get('overallReady', False)
+
+                    if error_page.get('detected'):
+                        print("[FAIL] Game verification stopped early: Cocrea error page detected")
+                        print(f"   Pattern: {error_page.get('pattern')}")
+                        print(f"   Title: {error_page.get('title')}")
+                        print(f"   Heading: {error_page.get('headingText')}")
+                        return False
                     
                     print(f"   ðŸŽ¯ Game containers found: {len(game_containers)}")
                     for container in game_containers[:3]:  # Show first 3
@@ -1848,6 +1966,10 @@ class SprunkiGamePlayer:
             print("======================================================================")
             self.game_url = url
 
+            if not self.preflight_url_playable(url):
+                print("[FAIL] SETUP FAILED: URL is not playable (404/410).")
+                return False
+
             # --- PHASE 1: BROWSER LAUNCH (Không thay đổi) ---
             print("PHASE 1: Launching Browser and Loading Page...")
             self.cleanup_chrome_complete()
@@ -1964,6 +2086,11 @@ class SprunkiGamePlayer:
             # --- PHASE 2: PATIENTLY VERIFY GAME COMPONENTS (Logic quyết định duy nhất) ---
             # Đây là logic cốt lõi. Nếu trang là 404, nó sẽ không có component game và sẽ timeout.
             # Nếu là trang game, nó sẽ chờ cho đến khi component xuất hiện.
+            if self.detect_cocrea_error_page_fast():
+                print("[FAIL] SETUP FAILED: Cocrea rendered an error/404 page.")
+                self.cleanup_chrome_complete()
+                return False
+
             print(f"PHASE 2: Patiently Verifying Game Components (Timeout: {self.game_verification_timeout}s)...")
             
             # Chúng ta sẽ gọi hàm verify_game_components_ready với timeout mặc định (dài) từ config
