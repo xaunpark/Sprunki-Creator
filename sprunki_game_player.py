@@ -2957,6 +2957,143 @@ class SprunkiGamePlayer:
     def _click_run_button_cdp_only(self):
         """Pure CDP implementation for Run button detection and clicking"""
         try:
+            print("[RUN] CDP: finding Run button bounds, then clicking with mouse events...")
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                print("[RUN] WebSocket not available")
+                return False
+
+            ws = websocket.create_connection(ws_url, timeout=30)
+            run_button_bounds_js = r'''
+            (() => {
+                try {
+                    const selectors = [
+                        '.style_run-button__VjFSY',
+                        'button.MuiButton-contained.MuiButton-containedPrimary',
+                        'button[class*="style_run-button"]',
+                        'button[class*="run"]',
+                        'button[class*="play"]',
+                        'button[class*="start"]',
+                        '.MuiButton-contained',
+                        'button',
+                        'input[type="submit"]',
+                        'input[type="button"]',
+                        '[role="button"]',
+                        '[aria-label*="run" i]',
+                        '[aria-label*="play" i]',
+                        '[aria-label*="start" i]'
+                    ];
+
+                    function describe(el, selector) {
+                        const rect = el.getBoundingClientRect();
+                        const text = (el.textContent || el.value || el.alt || el.getAttribute('aria-label') || '').trim();
+                        const lowerText = text.toLowerCase();
+                        const className = typeof el.className === 'string' ? el.className : String(el.className || '');
+                        const lowerClass = className.toLowerCase();
+                        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                        const style = window.getComputedStyle(el);
+                        const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                        const looksLikeRun =
+                            lowerText === 'run' ||
+                            lowerText.includes('run') ||
+                            lowerText.includes('play') ||
+                            lowerText.includes('start') ||
+                            aria.includes('run') ||
+                            aria.includes('play') ||
+                            aria.includes('start') ||
+                            lowerClass.includes('run-button') ||
+                            lowerClass.includes('run');
+                        return {el, selector, text, className, visible, looksLikeRun};
+                    }
+
+                    const candidates = [];
+                    for (const selector of selectors) {
+                        let elements = [];
+                        try {
+                            elements = Array.from(document.querySelectorAll(selector));
+                        } catch (e) {
+                            continue;
+                        }
+                        for (const el of elements) {
+                            const info = describe(el, selector);
+                            if (info.visible && info.looksLikeRun) candidates.push(info);
+                        }
+                    }
+
+                    if (!candidates.length) {
+                        return {success: false, reason: 'button_not_found', candidateCount: 0};
+                    }
+
+                    const candidate = candidates[0];
+                    candidate.el.scrollIntoView({block: 'center', inline: 'center'});
+                    const rect = candidate.el.getBoundingClientRect();
+                    return {
+                        success: true,
+                        method: 'bounds_then_cdp_mouse',
+                        strategy: candidate.selector,
+                        text: candidate.text,
+                        className: candidate.className,
+                        candidateCount: candidates.length,
+                        x: rect.left + rect.width / 2,
+                        y: rect.top + rect.height / 2,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                } catch (error) {
+                    return {success: false, reason: 'js_error', error: String(error && error.stack || error)};
+                }
+            })();
+            '''
+
+            response = self._send_cdp_command(ws, {
+                "method": "Runtime.evaluate",
+                "params": {"expression": run_button_bounds_js, "returnByValue": True}
+            })
+
+            if response and 'error' in response:
+                print(f"[RUN] Runtime.evaluate error: {response.get('error')}")
+                ws.close()
+                return False
+
+            result = None
+            if response and 'result' in response:
+                result = response.get('result', {}).get('result', {}).get('value')
+
+            if not result or not result.get('success'):
+                reason = result.get('reason', 'no_result') if result else 'no_result'
+                error = result.get('error') if result else None
+                if error:
+                    print(f"[RUN] JavaScript error: {error}")
+                print(f"[RUN] Run button not clickable via DOM bounds: {reason}")
+                ws.close()
+                return False
+
+            x = result.get('x')
+            y = result.get('y')
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                print(f"[RUN] Invalid Run button coordinates: ({x}, {y})")
+                ws.close()
+                return False
+
+            print(f"[RUN] Found Run button via {result.get('strategy')} at ({x:.1f}, {y:.1f})")
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {"type": "mouseMoved", "x": x, "y": y}
+            })
+            time.sleep(0.1)
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}
+            })
+            time.sleep(0.1)
+            self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}
+            })
+            ws.close()
+            print(f"[RUN] Run button clicked via {result.get('method')} (strategy: {result.get('strategy')})")
+            return True
+
             print("ðŸ”§ CDP-ONLY: Finding and clicking Run button via DOM...")
             
             ws_url = self._get_websocket_url()
