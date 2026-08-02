@@ -1,0 +1,201 @@
+{
+  "version": 1,
+  "sourceUrl": "https://www.cocrea.world/@Lucad0510/MyProject2cd",
+  "canonicalUrl": "https://www.cocrea.world/@Lucad0510/MyProject2cd",
+  "urlKey": "Lucad0510/MyProject2cd",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "coordinateSpace": "screen_1920x1080_with_menu",
+  "prepareActions": [
+    {
+      "type": "click",
+      "x": 1047,
+      "y": 444,
+      "delayMs": 9109
+    },
+    {
+      "type": "key",
+      "key": "s",
+      "delayMs": 1453
+    }
+  ],
+  "layout": {
+    "icons": [
+      {
+        "index": 0,
+        "label": "n-1",
+        "x": 477,
+        "y": 827
+      },
+      {
+        "index": 1,
+        "label": "n-2",
+        "x": 592,
+        "y": 818
+      },
+      {
+        "index": 2,
+        "label": "n-3",
+        "x": 708,
+        "y": 825
+      },
+      {
+        "index": 3,
+        "label": "n-4",
+        "x": 825,
+        "y": 825
+      },
+      {
+        "index": 4,
+        "label": "n-5",
+        "x": 934,
+        "y": 831
+      },
+      {
+        "index": 5,
+        "label": "n-6",
+        "x": 1050,
+        "y": 827
+      },
+      {
+        "index": 6,
+        "label": "n-7",
+        "x": 1168,
+        "y": 818
+      },
+      {
+        "index": 7,
+        "label": "n-8",
+        "x": 1289,
+        "y": 825
+      },
+      {
+        "index": 8,
+        "label": "n-9",
+        "x": 1396,
+        "y": 831
+      },
+      {
+        "index": 9,
+        "label": "n-10",
+        "x": 1513,
+        "y": 825
+      },
+      {
+        "index": 10,
+        "label": "n-11",
+        "x": 478,
+        "y": 937
+      },
+      {
+        "index": 11,
+        "label": "n-12",
+        "x": 595,
+        "y": 944
+      },
+      {
+        "index": 12,
+        "label": "n-13",
+        "x": 711,
+        "y": 944
+      },
+      {
+        "index": 13,
+        "label": "n-14",
+        "x": 829,
+        "y": 940
+      },
+      {
+        "index": 14,
+        "label": "n-15",
+        "x": 934,
+        "y": 937
+      },
+      {
+        "index": 15,
+        "label": "n-16",
+        "x": 1045,
+        "y": 945
+      },
+      {
+        "index": 16,
+        "label": "n-17",
+        "x": 1170,
+        "y": 934
+      },
+      {
+        "index": 17,
+        "label": "n-18",
+        "x": 1280,
+        "y": 939
+      },
+      {
+        "index": 18,
+        "label": "n-19",
+        "x": 1396,
+        "y": 941
+      },
+      {
+        "index": 19,
+        "label": "n-20",
+        "x": 1514,
+        "y": 946
+      }
+    ],
+    "slots": [
+      {
+        "index": 0,
+        "x": 246,
+        "y": 507
+      },
+      {
+        "index": 1,
+        "x": 432,
+        "y": 523
+      },
+      {
+        "index": 2,
+        "x": 618,
+        "y": 512
+      },
+      {
+        "index": 3,
+        "x": 800,
+        "y": 523
+      },
+      {
+        "index": 4,
+        "x": 995,
+        "y": 522
+      },
+      {
+        "index": 5,
+        "x": 1179,
+        "y": 525
+      },
+      {
+        "index": 6,
+        "x": 1370,
+        "y": 520
+      },
+      {
+        "index": 7,
+        "x": 1561,
+        "y": 498
+      },
+      {
+        "index": 8,
+        "x": 1742,
+        "y": 522
+      }
+    ]
+  },
+  "settings": {
+    "gameControlType": "unknown"
+  },
+  "notes": "",
+  "createdAt": "2026-08-02T15:36:33.684337Z",
+  "updatedAt": "2026-08-02T15:36:33.684337Z"
+}

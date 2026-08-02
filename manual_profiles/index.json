@@ -1,12 +1,20 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-04T16:45:30.885060Z",
+  "updatedAt": "2026-08-02T15:36:33.724790Z",
   "canonicalUrls": {
+    "https://www.cocrea.world/@Lucad0510/MyProject2bb": "profiles/b0a88fb04dff.json",
+    "https://www.cocrea.world/@lucad0510/myproject2bb": "profiles/b0a88fb04dff.json",
     "https://www.cocrea.world/@TheReal_AlexRuby/UntitledProject44": "profiles/f9df772bd1a3.json",
-    "https://www.cocrea.world/@thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json"
+    "https://www.cocrea.world/@thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json",
+    "https://www.cocrea.world/@Lucad0510/MyProject2cd": "profiles/1e3ebdafde41.json",
+    "https://www.cocrea.world/@lucad0510/myproject2cd": "profiles/1e3ebdafde41.json"
   },
   "urlKeys": {
+    "Lucad0510/MyProject2bb": "profiles/b0a88fb04dff.json",
+    "lucad0510/myproject2bb": "profiles/b0a88fb04dff.json",
     "TheReal_AlexRuby/UntitledProject44": "profiles/f9df772bd1a3.json",
-    "thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json"
+    "thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json",
+    "Lucad0510/MyProject2cd": "profiles/1e3ebdafde41.json",
+    "lucad0510/myproject2cd": "profiles/1e3ebdafde41.json"
   }
 }
