@@ -7030,6 +7030,105 @@ class SprunkiGamePlayer:
 
         return None, None
 
+    def _execute_cdp_key_press(self, key_name):
+        """Send a browser-native key press to the active game target via CDP."""
+        normalized = str(key_name or "").strip().lower()
+        if not normalized:
+            return False
+
+        special_keys = {
+            "space": (" ", "Space", 32, " "),
+            "enter": ("Enter", "Enter", 13, ""),
+            "return": ("Enter", "Enter", 13, ""),
+            "esc": ("Escape", "Escape", 27, ""),
+            "escape": ("Escape", "Escape", 27, ""),
+            "tab": ("Tab", "Tab", 9, ""),
+            "backspace": ("Backspace", "Backspace", 8, ""),
+            "delete": ("Delete", "Delete", 46, ""),
+            "left": ("ArrowLeft", "ArrowLeft", 37, ""),
+            "right": ("ArrowRight", "ArrowRight", 39, ""),
+            "up": ("ArrowUp", "ArrowUp", 38, ""),
+            "down": ("ArrowDown", "ArrowDown", 40, ""),
+            "home": ("Home", "Home", 36, ""),
+            "end": ("End", "End", 35, ""),
+            "pageup": ("PageUp", "PageUp", 33, ""),
+            "pagedown": ("PageDown", "PageDown", 34, ""),
+            "f11": ("F11", "F11", 122, ""),
+        }
+
+        if normalized in special_keys:
+            key_value, code, virtual_key_code, text_value = special_keys[normalized]
+        elif len(normalized) == 1 and normalized.isalpha():
+            key_value = normalized
+            code = f"Key{normalized.upper()}"
+            virtual_key_code = ord(normalized.upper())
+            text_value = normalized
+        elif len(normalized) == 1 and normalized.isdigit():
+            key_value = normalized
+            code = f"Digit{normalized}"
+            virtual_key_code = ord(normalized)
+            text_value = normalized
+        else:
+            print(f"   ⚠️ Unsupported CDP key: {key_name}")
+            return False
+
+        ws = None
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return False
+
+            ws = websocket.create_connection(ws_url, timeout=30)
+            # Keep the same page target that receives the manual click in front.
+            self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+
+            key_down = {
+                "method": "Input.dispatchKeyEvent",
+                "params": {
+                    "type": "keyDown",
+                    "key": key_value,
+                    "code": code,
+                    "windowsVirtualKeyCode": virtual_key_code,
+                    "nativeVirtualKeyCode": virtual_key_code,
+                    "autoRepeat": False,
+                    "isKeypad": False,
+                },
+            }
+            if text_value:
+                key_down["params"]["text"] = text_value
+                key_down["params"]["unmodifiedText"] = text_value
+
+            down_response = self._send_cdp_command(ws, key_down)
+            time.sleep(0.05)
+            up_response = self._send_cdp_command(ws, {
+                "method": "Input.dispatchKeyEvent",
+                "params": {
+                    "type": "keyUp",
+                    "key": key_value,
+                    "code": code,
+                    "windowsVirtualKeyCode": virtual_key_code,
+                    "nativeVirtualKeyCode": virtual_key_code,
+                    "isKeypad": False,
+                },
+            })
+
+            if not down_response or not up_response:
+                return False
+            if "error" in down_response or "error" in up_response:
+                return False
+
+            print(f"   ✅ CDP keyDown/keyUp completed: {key_name}")
+            return True
+        except Exception as key_error:
+            print(f"   ⚠️ CDP key press failed for {key_name}: {key_error}")
+            return False
+        finally:
+            if ws:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
     def replay_manual_prepare_actions(self, actions):
         if not actions:
             print("⚠️ Manual profile has no prepare actions to replay.")
@@ -7047,13 +7146,16 @@ class SprunkiGamePlayer:
                     x = int(action.get("x"))
                     y = int(action.get("y"))
                     print(f"   {index}. Click @ ({x}, {y})")
-                    self._execute_cdp_single_click(x, y)
+                    if not self._execute_cdp_single_click(x, y):
+                        return False
                 elif action_type == "key":
                     key_name = action.get("key")
                     if not key_name:
                         continue
-                    print(f"   {index}. Key {key_name}")
-                    pyautogui.press(str(key_name).lower())
+                    print(f"   {index}. Key {key_name} (CDP native input)")
+                    if not self._execute_cdp_key_press(key_name):
+                        print(f"   ⚠️ CDP key input unavailable; falling back to PyAutoGUI: {key_name}")
+                        pyautogui.press(str(key_name).lower())
                 else:
                     print(f"   {index}. Skipping unsupported manual action: {action}")
             except Exception as action_error:
