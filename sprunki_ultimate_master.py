@@ -7,6 +7,8 @@ import time
 import threading
 import os
 import logging
+import subprocess
+import sys
 from tkinter import Tk, Button, Label, StringVar, messagebox, filedialog, Frame, Listbox, Scrollbar, Text, Entry, Toplevel, Canvas, Label, StringVar, messagebox, filedialog, Frame, Listbox, Scrollbar, Text, Entry, Toplevel, Canvas, Toplevel, Canvas
 from tkinter.ttk import Progressbar, Separator, Combobox
 from urllib.parse import urlparse
@@ -74,6 +76,11 @@ class ProcessingItem:
 
     workflow_report: Optional[Dict[str, Any]] = None
     recording_area: Optional[Dict[str, Any]] = None
+
+    recorded_identity_status: str = "not_started"
+    recorded_identity_reason: Optional[str] = None
+    recorded_identity_retryable: bool = False
+    recorded_identity_files: List[str] = field(default_factory=list)
 
     @property
     def display_name(self) -> str:
@@ -494,6 +501,136 @@ class UnifiedProcessingManager:
         except Exception as e:
             self.logger.error(f"Failed to cleanup logging handlers: {e}")
 
+    def _run_recorded_identity_resolver(self, item: ProcessingItem, project_folder: str) -> bool:
+        """Generate recorded identity and review artifacts for one completed project.
+
+        The resolver is intentionally run as a subprocess so the workflow uses the
+        same CLI entry point as the manual PC command. It consumes the source JSON,
+        icon identity sidecar, and recording timestamps that the workflow has already
+        produced; it does not reopen the local mod file.
+        """
+        project = Path(project_folder)
+        resolver_script = Path(__file__).resolve().with_name("recorded_identity_resolver.py")
+        expected_paths = [
+            project / "recorded_character_identity.json",
+            project / "recorded_identity_review.json",
+            project / "recorded_identity_review.html",
+        ]
+
+        item.recorded_identity_files = []
+        item.recorded_identity_status = "not_started"
+        item.recorded_identity_reason = None
+        item.recorded_identity_retryable = False
+
+        if not resolver_script.exists():
+            item.recorded_identity_status = "failed"
+            item.recorded_identity_reason = "recorded_identity_resolver.py not found"
+            self.logger.error("❌ Recorded identity resolver script not found: %s", resolver_script)
+            return False
+
+        command = [
+            sys.executable,
+            str(resolver_script),
+            "--project",
+            str(project),
+            "--force",
+        ]
+
+        source_json_path = Path(item.json_path) if item.json_path else None
+        if source_json_path and source_json_path.exists():
+            command.extend(["--source-json", str(source_json_path)])
+            sidecar_path = source_json_path.with_suffix(".icon_identity.json")
+            if sidecar_path.exists():
+                command.extend(["--sidecar", str(sidecar_path)])
+            else:
+                self.logger.warning(
+                    "⚠️ Icon identity sidecar not found; resolver may use fallback evidence: %s",
+                    sidecar_path,
+                )
+        else:
+            self.logger.warning(
+                "⚠️ Source JSON path is not available; resolver will try project/manifest discovery: %s",
+                source_json_path,
+            )
+
+        # Let the resolver select the matching showcase timestamps using its own
+        # documented discovery rules. This avoids duplicating timestamp selection.
+        self.logger.info("🧩 Generating recorded identity artifacts for %s", project.name)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(resolver_script.parent),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            item.recorded_identity_status = "failed"
+            item.recorded_identity_reason = "recorded_identity_resolver_timeout"
+            self.logger.error("❌ Recorded identity resolver timed out for %s", project.name)
+            return False
+        except OSError as exc:
+            item.recorded_identity_status = "failed"
+            item.recorded_identity_reason = f"recorded_identity_resolver_launch_failed:{exc}"
+            self.logger.error("❌ Could not launch recorded identity resolver for %s: %s", project.name, exc)
+            return False
+
+        identity_payload: Dict[str, Any] = {}
+        identity_path = expected_paths[0]
+        if identity_path.exists():
+            try:
+                with identity_path.open("r", encoding="utf-8-sig") as handle:
+                    identity_payload = json.load(handle)
+            except (OSError, json.JSONDecodeError) as exc:
+                self.logger.error("❌ Recorded identity JSON is invalid for %s: %s", project.name, exc)
+
+        item.recorded_identity_files = [str(path) for path in expected_paths if path.exists()]
+        missing_paths = [path.name for path in expected_paths if not path.exists()]
+        if missing_paths:
+            item.recorded_identity_status = "failed"
+            item.recorded_identity_reason = f"missing_artifacts:{','.join(missing_paths)}"
+            self.logger.error(
+                "❌ Recorded identity resolver did not produce all artifacts for %s: %s",
+                project.name,
+                ", ".join(missing_paths),
+            )
+            if completed.stdout:
+                self.logger.error("Resolver output: %s", completed.stdout.strip()[-2000:])
+            if completed.stderr:
+                self.logger.error("Resolver errors: %s", completed.stderr.strip()[-2000:])
+            return False
+
+        item.recorded_identity_status = str(identity_payload.get("status") or "generated")
+        item.recorded_identity_reason = identity_payload.get("needsReviewReason")
+        item.recorded_identity_retryable = bool(identity_payload.get("retryable", False))
+
+        if item.recorded_identity_status == "verified" and completed.returncode == 0:
+            self.logger.info("✅ Recorded identity verified for %s", project.name)
+        elif item.recorded_identity_status in {"needs_review", "unavailable"} or completed.returncode == 2:
+            self.logger.warning(
+                "⚠️ Recorded identity artifacts created for %s with status=%s reason=%s",
+                project.name,
+                item.recorded_identity_status,
+                item.recorded_identity_reason or "none",
+            )
+        else:
+            self.logger.error(
+                "❌ Recorded identity resolver failed for %s (exit=%s, status=%s)",
+                project.name,
+                completed.returncode,
+                item.recorded_identity_status,
+            )
+            if completed.stdout:
+                self.logger.error("Resolver output: %s", completed.stdout.strip()[-2000:])
+            if completed.stderr:
+                self.logger.error("Resolver errors: %s", completed.stderr.strip()[-2000:])
+            return False
+
+        return True
+
     def _generate_manifest_for_item(self, item: ProcessingItem):
         """
         Thu thập dữ liệu và tạo file manifest.json cho một item đã xử lý xong.
@@ -549,7 +686,8 @@ class UnifiedProcessingManager:
                     "statusDetails": {
                         "jsonGeneration": item.json_generation_status,
                         "masterMode": item.master_mode_status,
-                        "individualMode": item.individual_mode_status
+                        "individualMode": item.individual_mode_status,
+                        "recordedIdentity": item.recorded_identity_status
                     },
                     "startTime": item.start_time.isoformat() if item.start_time else None,
                     "endTime": item.end_time.isoformat() if item.end_time else None,
@@ -570,7 +708,16 @@ class UnifiedProcessingManager:
                     "aspectRatio": recording_area.get("aspectRatio", "35:24"),
                 }
 
-            outputs = {"masterVideo": None, "individualVideos": [], "remixVideos": [], "logFiles": [], "sourceJson": None, "iconIdentitySidecar": None}
+            outputs = {
+                "masterVideo": None,
+                "individualVideos": [],
+                "remixVideos": [],
+                "logFiles": [],
+                "sourceJson": None,
+                "iconIdentitySidecar": None,
+                "recordedIdentity": None,
+                "recordedIdentityReview": [],
+            }
             if item.error_message:
                 manifest_data["errors"].append({"timestamp": datetime.now().isoformat(), "stage": "general", "message": item.error_message})
             
@@ -592,6 +739,33 @@ class UnifiedProcessingManager:
                 sidecar_path = os.path.splitext(item.json_path)[0] + ".icon_identity.json"
                 if os.path.exists(sidecar_path):
                     outputs['iconIdentitySidecar'] = os.path.basename(sidecar_path)
+
+            identity_files = {
+                "identity": os.path.join(project_folder, "recorded_character_identity.json"),
+                "reviewJson": os.path.join(project_folder, "recorded_identity_review.json"),
+                "reviewHtml": os.path.join(project_folder, "recorded_identity_review.html"),
+            }
+
+            def manifest_file_info(file_path):
+                return {
+                    "status": "success",
+                    "filename": os.path.basename(file_path),
+                    "relativePath": f"./{os.path.basename(file_path)}",
+                    "fileSizeMb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
+                }
+
+            if os.path.exists(identity_files["identity"]):
+                identity_info = manifest_file_info(identity_files["identity"])
+                identity_info["identityStatus"] = item.recorded_identity_status
+                identity_info["needsReviewReason"] = item.recorded_identity_reason
+                identity_info["retryable"] = item.recorded_identity_retryable
+                outputs["recordedIdentity"] = identity_info
+
+            outputs["recordedIdentityReview"] = [
+                manifest_file_info(path)
+                for key, path in identity_files.items()
+                if key != "identity" and os.path.exists(path)
+            ]
             
             log_slug = f"{item.project_slug}"
             if os.path.exists(os.path.join(project_folder, f"{log_slug}-master.log")):
@@ -944,6 +1118,7 @@ class UnifiedProcessingManager:
     
     def _process_video_for_item(self, item: ProcessingItem) -> bool:
         """Enhanced video processing with proper mode isolation"""
+        project_folder = None
         try:
             item.status = "processing"
             if not item.start_time:
@@ -968,6 +1143,13 @@ class UnifiedProcessingManager:
             else:
                 self.logger.error("❌ OBS controller not found after initialization!")
                 raise Exception("OBS controller not available")
+
+            if hasattr(self.master_controller, 'game_player') and self.master_controller.game_player:
+                self.master_controller.game_player.current_project_folder = project_folder
+                self.logger.info(f"✅ [MASTER] Game player's project folder explicitly set to: {project_folder}")
+            else:
+                self.logger.error("❌ Game player not found after initialization!")
+                raise Exception("Game player not available")
             
             self.logger.info(f"📁 All videos will be saved to: {project_folder}")
             if item.mode == "master":
@@ -1037,6 +1219,12 @@ class UnifiedProcessingManager:
                     self.logger.warning("⚠️ OBS controller not available for cleanup")
             except Exception as cleanup_error:
                 self.logger.error(f"❌ Error during comprehensive OBS cleanup: {cleanup_error}")
+
+            # Generate identity artifacts only after OBS has finished writing the
+            # showcase and timestamps files. This is a derived post-processing
+            # step and must not change the video's success/failure status.
+            if item.mode != "skip" and item.json_data and project_folder:
+                self._run_recorded_identity_resolver(item, project_folder)
             
             # Cleanup file handlers after processing
             self._cleanup_logging_handlers()

@@ -1,0 +1,3 @@
+ĐỂ CHẠY TẠO HƯỚNG DẪN CHƠI GAME
+
+python manual_profile_recorder.py
