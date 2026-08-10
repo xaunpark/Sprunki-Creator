@@ -32,7 +32,7 @@ class ManualProfileRecorder:
         self.root.title("Manual Profile Recorder")
         self.root.attributes("-topmost", True)
         self.root.resizable(False, False)
-        self.root.geometry("360x215+20+20")
+        self.root.geometry("500x430+20+20")
 
         self.phase = "PREPARE"
         self.prepare_actions = []
@@ -58,14 +58,27 @@ class ManualProfileRecorder:
 
         self.url_var = tk.StringVar(value=self.url)
         self.phase_var = tk.StringVar(value=self.phase)
+        self.phase_instruction_var = tk.StringVar()
+        self.next_phase_var = tk.StringVar(value="Next Phase")
         self.action_count_var = tk.StringVar(value="Prepare actions: 0")
         self.icon_count_var = tk.StringVar(value="Icons: 0")
         self.slot_count_var = tk.StringVar(value="Slots: 0")
         self.last_saved_var = tk.StringVar(value=self.last_saved)
 
         tk.Label(frame, text="URL", anchor="w").pack(fill="x")
-        tk.Label(frame, textvariable=self.url_var, anchor="w", justify="left", wraplength=330).pack(fill="x", pady=(0, 8))
+        tk.Label(frame, textvariable=self.url_var, anchor="w", justify="left", wraplength=465).pack(fill="x", pady=(0, 8))
         tk.Label(frame, textvariable=self.phase_var, anchor="w", font=("Segoe UI", 10, "bold")).pack(fill="x")
+
+        instruction_frame = tk.LabelFrame(frame, text="Hướng dẫn thao tác", padx=8, pady=6)
+        instruction_frame.pack(fill="x", pady=(8, 8))
+        tk.Label(
+            instruction_frame,
+            textvariable=self.phase_instruction_var,
+            anchor="w",
+            justify="left",
+            wraplength=455,
+        ).pack(fill="x")
+
         tk.Label(frame, textvariable=self.action_count_var, anchor="w").pack(fill="x", pady=(8, 0))
         tk.Label(frame, textvariable=self.icon_count_var, anchor="w").pack(fill="x")
         tk.Label(frame, textvariable=self.slot_count_var, anchor="w").pack(fill="x")
@@ -74,18 +87,25 @@ class ManualProfileRecorder:
         button_row = tk.Frame(frame)
         button_row.pack(fill="x")
         tk.Button(button_row, text="Undo Last", command=self.undo_last, width=10).pack(side="left")
-        tk.Button(button_row, text="Next Phase", command=self.advance_phase, width=10).pack(side="left", padx=6)
-        tk.Button(button_row, text="Finish Save", command=self.finish_save, width=10).pack(side="left")
+        self.next_phase_button = tk.Button(
+            button_row,
+            textvariable=self.next_phase_var,
+            command=self.advance_phase,
+            width=18,
+        )
+        self.next_phase_button.pack(side="left", padx=6)
+        tk.Button(button_row, text="Finish Save", command=self.finish_save, width=12).pack(side="left")
         tk.Button(button_row, text="Cancel", command=self.cancel, width=10).pack(side="right")
 
         help_text = (
-            "Hotkeys:\n"
-            "Ctrl+Shift+Enter = next phase / finish\n"
-            "Ctrl+Shift+Backspace = undo\n"
-            "Ctrl+Shift+Esc = cancel\n"
-            "I or Space = save icon | S or Space = save slot"
+            "Phím tắt:\n"
+            "Ctrl+Shift+Enter = giống nút chuyển bước đang được đánh dấu\n"
+            "Ctrl+Shift+Backspace = hoàn tác\n"
+            "Ctrl+Shift+Esc = hủy\n"
+            "Trong ICONS: I hoặc Space = lưu icon\n"
+            "Trong SLOTS: S hoặc Space = lưu slot"
         )
-        tk.Label(frame, text=help_text, anchor="w", justify="left", wraplength=330).pack(fill="x", pady=(10, 0))
+        tk.Label(frame, text=help_text, anchor="w", justify="left", wraplength=465).pack(fill="x", pady=(10, 0))
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
         self._refresh_ui()
@@ -112,12 +132,40 @@ class ManualProfileRecorder:
             self.keyboard_hook = None
 
     def _refresh_ui(self) -> None:
-        self.phase_var.set(f"Phase: {self.phase}")
+        phase_title, instruction, next_label = self._phase_ui_content()
+        self.phase_var.set(f"Phase: {phase_title}")
+        self.phase_instruction_var.set(instruction)
+        self.next_phase_var.set(next_label)
         self.action_count_var.set(f"Prepare actions: {len(self.prepare_actions)}")
         self.icon_count_var.set(f"Icons: {len(self.icons)}")
         self.slot_count_var.set(f"Slots: {len(self.slots)}")
         self.last_saved_var.set(f"Last: {self.last_saved}")
         self.root.update_idletasks()
+
+    def _phase_ui_content(self):
+        if self.phase == "PREPARE":
+            return (
+                "PREPARE - mở menu game",
+                "1. Bấm vào cửa sổ game và thực hiện mọi thao tác để vượt menu mở đầu "
+                "(click chuột và phím bấm sẽ được tự động ghi lại).\n"
+                "2. Khi game đã sẵn sàng để ghi layout, đưa chuột ra khỏi bảng này.\n"
+                "3. Bấm 'Sang ICONS' bên dưới hoặc nhấn Ctrl+Shift+Enter.",
+                "Sang ICONS",
+            )
+        if self.phase == "ICONS":
+            return (
+                "ICONS - ghi các icon nhân vật",
+                "Đưa chuột vào tâm từng icon nhân vật rồi nhấn I hoặc Space một lần. "
+                "Con trỏ phải nằm trên game, không nằm trên bảng này. Khi ghi đủ icon, "
+                "bấm 'Sang SLOTS' bên dưới hoặc nhấn Ctrl+Shift+Enter.",
+                "Sang SLOTS",
+            )
+        return (
+            "SLOTS - ghi các ô thả",
+            "Đưa chuột vào tâm từng ô thả rồi nhấn S hoặc Space một lần. "
+            "Khi ghi đủ slot, bấm 'Finish Save' hoặc nhấn Ctrl+Shift+Enter để lưu.",
+            "Lưu profile",
+        )
 
     def _set_last_saved(self, message: str) -> None:
         self.last_saved = message
