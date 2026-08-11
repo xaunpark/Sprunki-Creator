@@ -1,5 +1,7 @@
 import html
 import json
+import ntpath
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -7,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 REVIEW_SCHEMA_VERSION = 1
 REVIEW_GENERATOR_VERSION = 1
+DEFAULT_VPS_OUTPUT_ROOT = r"D:\OUTPUT"
+DEFAULT_PC_OUTPUT_ROOT = r"G:\SprunkiOUTPUT"
 
 CHARACTER_OPTIONS: List[Tuple[str, str]] = [
     ("extra", "Extra"),
@@ -59,6 +63,30 @@ def _display_for_value(value: str) -> str:
     return lookup.get(value, value or "Unknown")
 
 
+def _review_pc_project_folder(project: Path) -> str:
+    r"""Return the path a synced review should use on the local PC.
+
+    The workflow generates the artifacts on the VPS under D:\OUTPUT and then
+    syncs them to G:\SprunkiOUTPUT. Keep the runtime path for evidence, but
+    make the path shown in the review usable from the PC where the HTML is
+    opened. Environment variables allow another deployment to override the
+    two roots without changing the artifact format.
+    """
+    vps_root = ntpath.normpath(os.getenv("SPRUNKI_REVIEW_VPS_OUTPUT_ROOT", DEFAULT_VPS_OUTPUT_ROOT))
+    pc_root = ntpath.normpath(os.getenv("SPRUNKI_REVIEW_PC_OUTPUT_ROOT", DEFAULT_PC_OUTPUT_ROOT))
+    source = ntpath.normpath(str(project))
+    source_key = ntpath.normcase(source)
+    vps_key = ntpath.normcase(vps_root)
+
+    if source_key == vps_key:
+        return pc_root
+    prefix = vps_key + "\\"
+    if source_key.startswith(prefix):
+        relative = ntpath.relpath(source, vps_root)
+        return ntpath.normpath(ntpath.join(pc_root, relative))
+    return source
+
+
 def build_recorded_review_payload(identity: Dict[str, Any], project: Path) -> Dict[str, Any]:
     rows = []
     for index, row in enumerate(sorted(identity.get("segmentIdentities") or [], key=_segment_sort_key), start=1):
@@ -84,7 +112,8 @@ def build_recorded_review_payload(identity: Dict[str, Any], project: Path) -> Di
         "schemaVersion": REVIEW_SCHEMA_VERSION,
         "reviewGeneratorVersion": REVIEW_GENERATOR_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "projectFolder": str(project),
+        "projectFolder": _review_pc_project_folder(project),
+        "runtimeProjectFolder": str(project),
         "identityStatus": identity.get("status"),
         "needsReviewReason": identity.get("needsReviewReason"),
         "identityGeneratedAt": identity.get("generatedAt"),
@@ -147,7 +176,8 @@ def build_icon_order_review_payload(
         "schemaVersion": REVIEW_SCHEMA_VERSION,
         "reviewGeneratorVersion": REVIEW_GENERATOR_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "projectFolder": str(project),
+        "projectFolder": _review_pc_project_folder(project),
+        "runtimeProjectFolder": str(project),
         "identityStatus": "source_json_preview",
         "needsReviewReason": None,
         "identityGeneratedAt": sidecar.get("generatedAt"),
