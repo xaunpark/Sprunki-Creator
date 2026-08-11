@@ -7486,17 +7486,35 @@ class SprunkiGamePlayer:
             print("   Waiting for game restart process (3s)...")
             time.sleep(3.0)
             
-            # Skip intro sequence (reuse existing logic)
-            print("   Step 2: Skipping intro sequence...")
-            if use_cdp:
-                intro_success = self.intro_skip_via_cdp()
+            # Re-enter the game using the same manual profile that was used
+            # during the initial setup. A restart does not call
+            # setup_game_environment(), so the profile must be replayed here.
+            print("   Step 2: Re-entering the game after restart...")
+            manual_profile, manual_profile_path = self._resolve_manual_profile()
+            manual_actions = (manual_profile or {}).get("prepareActions", [])
+            prepare_success = False
+
+            if manual_profile and manual_actions:
+                print(f"   Manual profile detected for restart: {manual_profile_path}")
+                print(f"   Replaying {len(manual_actions)} manual prepare actions...")
+                prepare_success = self.replay_manual_prepare_actions(manual_actions)
+                if prepare_success:
+                    print("   Manual profile prepare replay completed after restart")
+                else:
+                    print("   Manual profile replay failed; falling back to automatic intro skip")
+            elif manual_profile:
+                print("   Manual profile has no prepare actions; using automatic intro skip")
+
+            if not prepare_success:
+                if use_cdp:
+                    prepare_success = self.intro_skip_via_cdp()
+                else:
+                    prepare_success = self.intro_skip_via_pyautogui()
+
+            if prepare_success:
+                print("   Game entry preparation completed")
             else:
-                intro_success = self.intro_skip_via_pyautogui()
-            
-            if intro_success:
-                print("   Intro skip completed")
-            else:
-                print("   Intro skip warning, continuing anyway...")
+                print("   Game entry preparation warning, continuing anyway...")
             
             # Additional stabilization wait
             print("   Game restart stabilization (2s)...")
