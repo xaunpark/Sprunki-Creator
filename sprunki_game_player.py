@@ -238,6 +238,14 @@ class SprunkiGamePlayer:
         }
         self.last_operation_working_systems = {}  # Store per operation
 
+        # Some mods keep permanent entries in the monitored Scratch arrays even
+        # when every visible slot is empty.  Learn that per-mod empty state from
+        # a verified return instead of assuming that an empty board means zero.
+        self.empty_board_baseline = {
+            'characters': None,
+            'putted': None,
+        }
+
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
 
@@ -4582,7 +4590,7 @@ class SprunkiGamePlayer:
             
             # Get current count
             initial_count = self.get_characters_count() if self.characters_available else 0
-            if initial_count == 0:
+            if self._is_board_count_clean(characters_count=initial_count):
                 print("   âœ… Already clean")
                 return True
             
@@ -4850,7 +4858,7 @@ class SprunkiGamePlayer:
             initial_count = self.get_characters_count() if self.characters_available else None
             print(f"   ðŸ“Š Initial count: {initial_count}")
             
-            if initial_count == 0:
+            if self._is_board_count_clean(characters_count=initial_count):
                 print("   âœ… Already clean - no bombing needed")
                 return True, 0, []
             
@@ -4882,7 +4890,7 @@ class SprunkiGamePlayer:
                 
                 print(f"   ðŸ“Š Count after wave: {current_count}")
                 
-                if current_count == 0:
+                if self._is_board_count_clean(characters_count=current_count):
                     print(f"   ðŸŽ‰ SUCCESS! Clean after wave {wave_num}")
                     return True, waves_executed, []
                 elif current_count and initial_count and current_count < initial_count:
@@ -4893,7 +4901,7 @@ class SprunkiGamePlayer:
             
             # Final check
             final_count = self.get_characters_count() if self.characters_available else None
-            success = (final_count == 0)
+            success = self._is_board_count_clean(characters_count=final_count)
             
             print(f"\nðŸŽ¯ CARPET BOMBING COMPLETED")
             print(f"   ðŸŒŠ Waves executed: {waves_executed}")
@@ -5349,7 +5357,7 @@ class SprunkiGamePlayer:
                 
                 # Check current count before set
                 current_count = self.get_characters_count() if self.characters_available else None
-                if current_count == 0:
+                if self._is_board_count_clean(characters_count=current_count):
                     print(f"âœ… COMPLETE! All clear before set {set_num}")
                     return True
                 
@@ -5377,7 +5385,7 @@ class SprunkiGamePlayer:
                 
                 print(f"   ðŸ“Š Set {set_num} result: {current_count} â†’ {after_count} (cleared: {progress})")
                 
-                if after_count == 0:
+                if self._is_board_count_clean(characters_count=after_count):
                     print(f"ðŸŽ‰ SUCCESS! All icons cleared after set {set_num}")
                     return True
                 elif progress > 0:
@@ -5391,7 +5399,7 @@ class SprunkiGamePlayer:
             # Final check
             final_count = self.get_characters_count() if self.characters_available else None
             
-            if final_count == 0:
+            if self._is_board_count_clean(characters_count=final_count):
                 print(f"FINAL SUCCESS! All icons cleared")
                 return True
             else:
@@ -6521,9 +6529,23 @@ class SprunkiGamePlayer:
             else:
                 # Thất bại, thực hiện self-correction
                 print("      [ATTEMPT] Verification failed. Performing self-correction.")
-                # Sử dụng target_slot từ đâu? -> cần truyền vào hoặc tính toán lại.
-                # Tạm thời click vào end_coord
-                self.attempt_icon_return({'x': end_x, 'y': end_y}) 
+                # A failed drag commonly leaves the board unchanged. Clicking the
+                # slot in that case removes an older valid icon and creates a false
+                # success on the next retry. Only roll back when a counter proves
+                # that this attempt actually added an icon.
+                drag_may_have_landed = any((
+                    before_state.get('characters') is not None
+                    and after_state.get('characters') is not None
+                    and after_state['characters'] > before_state['characters'],
+                    before_state.get('putted') is not None
+                    and after_state.get('putted') is not None
+                    and after_state['putted'] > before_state['putted'],
+                ))
+                if drag_may_have_landed:
+                    print("      [SELF-CORRECTION] Counter increased; returning attempted icon.")
+                    self.attempt_icon_return({'x': end_x, 'y': end_y})
+                else:
+                    print("      [SELF-CORRECTION] Board unchanged; skipping destructive return click.")
                 self.move_mouse_to_safe_position()
                 return False, {"error": "Verification failed"}
         else:
@@ -6931,9 +6953,35 @@ class SprunkiGamePlayer:
             summary += f" [{'; '.join(indicator_names)}]"
         return summary
 
+    def _remember_empty_board_baseline(self, characters_count, putted_count):
+        """Remember counts observed after a verified return to an empty board."""
+        if characters_count is not None:
+            self.empty_board_baseline['characters'] = characters_count
+        if putted_count is not None:
+            self.empty_board_baseline['putted'] = putted_count
+        print(
+            "   Empty-board baseline updated: "
+            f"Characters={self.empty_board_baseline['characters']}, "
+            f"Putted={self.empty_board_baseline['putted']}"
+        )
+
+    def _is_board_count_clean(self, characters_count=None, putted_count=None):
+        """Return True when available counters are at their learned empty level."""
+        checks = []
+        for key, count in (('characters', characters_count), ('putted', putted_count)):
+            if count is None:
+                continue
+            baseline = self.empty_board_baseline.get(key)
+            # Preserve compatibility for mods whose counters genuinely reach 0
+            # until a non-zero baseline has been learned.
+            clean_level = baseline if baseline is not None else 0
+            checks.append(count <= clean_level)
+        return bool(checks) and all(checks)
+
     def _rollback_open_entry_panel_via_ws(self, ws, state):
         if not isinstance(state, dict):
             return False
+
         close_buttons = state.get('closeIndicators') or []
         if not close_buttons:
             return False
@@ -8254,6 +8302,7 @@ class SprunkiGamePlayer:
                 print(f"   ðŸŽ¯ Putted: {putted_after}")
                 
                 if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
+                    self._remember_empty_board_baseline(characters_after, putted_after)
                     print("ðŸŽ‰ PRECISION CLICK SUCCESS: DUAL verification passed!")
                     return True
                 else:
@@ -8293,7 +8342,7 @@ class SprunkiGamePlayer:
                 characters_count, putted_count = self.get_dual_counts()
                 initial_count = characters_count if characters_count is not None else putted_count
                 
-                if initial_count == 0:
+                if self._is_board_count_clean(characters_count=characters_count, putted_count=putted_count):
                     print("   âœ… Already clean - no carpet bombing needed")
                     return True
                 
@@ -8520,7 +8569,7 @@ class SprunkiGamePlayer:
                     initial_count = characters_count if characters_count is not None else putted_count
                     
                     # BÆ°á»›c 2: Ra quyáº¿t Ä‘á»‹nh
-                    if initial_count == 0:
+                    if self._is_board_count_clean(characters_count=characters_count, putted_count=putted_count):
                         print("   âœ… Board is already clean. Skipping cleanup.")
                         print("   âš¡ Fast exit executed in ~0.2s.")
                         return True # ÄÃ¢y lÃ  lá»‘i thoÃ¡t nhanh, giÃºp tÄƒng tá»‘c Ä‘á»™
@@ -8594,7 +8643,7 @@ class SprunkiGamePlayer:
                     current_chars, current_putted = self.get_dual_counts()
                     current_count = current_chars if current_chars is not None else current_putted
                     
-                    if current_count == 0:
+                    if self._is_board_count_clean(characters_count=current_chars, putted_count=current_putted):
                         print(f"   âœ… Clean after set {set_num} - early exit!")
                         return True
                 
@@ -10203,6 +10252,9 @@ class SprunkiGamePlayer:
 
                 with open(file_path, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
+                # Baselines are specific to the loaded mod and must never leak
+                # into the next configuration handled by the same player.
+                self.empty_board_baseline = {'characters': None, 'putted': None}
                 
                 if 'currentUrl' not in self.config or 'layout' not in self.config:
                     raise ValueError("Invalid JSON structure")
