@@ -5404,26 +5404,12 @@ class SprunkiGamePlayer:
                 return True
             else:
                 print(f"CARPET BOMBING INCOMPLETE after {max_sets} sets: {final_count} icons remaining")
-                print("ATTEMPTING GAME RESTART FALLBACK...")
-
-                # Game restart fallback when carpet bombing fails
-                restart_success = self.restart_game_to_initial_state(use_cdp)
-
-                # LUÔN TRẢ VỀ FALSE KHI ĐÃ RESTART
-                # Điều này báo cho hàm cha biết rằng đã xảy ra một sự kiện đặc biệt
+                print("RETURNING FAILURE TO CALLER FOR A SINGLE RESTART FALLBACK...")
                 return False
                 
         except Exception as e:
             print(f"Error in sequential carpet bombing: {e}")
-            
-            print("EMERGENCY GAME RESTART due to carpet bombing error...")
-            try:
-                self.restart_game_to_initial_state(use_cdp)
-            except Exception as restart_error:
-                print(f"Emergency restart also failed: {restart_error}")
-            
-            # Dù restart thành công hay thất bại,
-            # vẫn phải trả về False để báo hiệu cho hàm cha.
+            print("RETURNING FAILURE TO CALLER FOR A SINGLE RESTART FALLBACK...")
             return False
 
     def generate_simple_coordinate_set(self, sorted_slots, coords_per_slot, set_num):
@@ -7457,7 +7443,7 @@ class SprunkiGamePlayer:
         try:
             print(f"\nPHASE 3: GAME RESTART TO INITIAL STATE")
             print("="*60)
-            print("   Method: Click Re-Run button + Skip intro sequence")
+            print("   Method: Click Re-Run button + restore the configured game-entry flow")
             print("   Re-Run button coordinates: (40, 75)")
             print("   Expected result: All icons returned to initial positions")
             
@@ -7494,18 +7480,21 @@ class SprunkiGamePlayer:
             manual_actions = (manual_profile or {}).get("prepareActions", [])
             prepare_success = False
 
-            if manual_profile and manual_actions:
+            if manual_profile:
                 print(f"   Manual profile detected for restart: {manual_profile_path}")
+                if not manual_actions:
+                    print("   Manual profile has no prepare actions; automatic fallback is disabled")
+                    return False
+
                 print(f"   Replaying {len(manual_actions)} manual prepare actions...")
                 prepare_success = self.replay_manual_prepare_actions(manual_actions)
                 if prepare_success:
                     print("   Manual profile prepare replay completed after restart")
                 else:
-                    print("   Manual profile replay failed; falling back to automatic intro skip")
-            elif manual_profile:
-                print("   Manual profile has no prepare actions; using automatic intro skip")
-
-            if not prepare_success:
+                    print("   Manual profile replay failed; automatic fallback is disabled")
+                    return False
+            else:
+                print("   No manual profile detected; using automatic intro skip")
                 if use_cdp:
                     prepare_success = self.intro_skip_via_cdp()
                 else:
