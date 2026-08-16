@@ -222,6 +222,8 @@ def _render_html(payload: Dict[str, Any]) -> str:
     .badge {{ display: inline-block; padding: 2px 7px; border-radius: 999px; background: #e6ebf0; font-size: 12px; }}
     .changed {{ background: #fff8db; }}
     .needs {{ background: #ffe8e6; }}
+    .auto-filled {{ background: #eaf7ed; }}
+    .continue-button {{ font-size: 12px; padding: 4px 7px; margin-left: 4px; background: #eef6ff; }}
     code {{ background: #edf2f7; padding: 2px 4px; border-radius: 4px; }}
     .cmd {{ white-space: pre-wrap; background: #111827; color: #f9fafb; padding: 12px; border-radius: 6px; margin-top: 12px; }}
   </style>
@@ -243,6 +245,7 @@ def _render_html(payload: Dict[str, Any]) -> str:
     <button onclick="unlockAll()">Unlock all rows</button>
     <button onclick="resetAll()">Reset to auto</button>
     <span id="changedCount" class="badge">0 changed</span>
+    <span id="fillMessage" class="badge"></span>
   </div>
   <table>
     <thead>
@@ -266,6 +269,10 @@ def _render_html(payload: Dict[str, Any]) -> str:
 const REVIEW_DATA = {payload_json};
 const rows = REVIEW_DATA.rows || [];
 const characters = REVIEW_DATA.characters || [];
+const STANDARD_CHARACTER_VALUES = characters
+  .filter(character => character.value !== 'extra' && character.value !== 'unknown')
+  .slice(0, 20)
+  .map(character => character.value);
 
 function optionHtml(selected) {{
   return characters.map(c => `<option value="${{c.value}}" ${{c.value === selected ? 'selected' : ''}}>${{c.label}}</option>`).join('');
@@ -290,18 +297,36 @@ function render() {{
       <td><select id="sel-${{idx}}" disabled onchange="markChanged(${{idx}})">${{optionHtml(row.selectedValue)}}</select></td>
       <td><code>${{row.costumeName || ''}}</code></td>
       <td><span class="badge">${{row.status || ''}}</span></td>
-      <td><button onclick="unlockRow(${{idx}})">Override row</button></td>`;
+      <td>
+        <button onclick="unlockRow(${{idx}})">Override row</button>
+        <button id="continue-${{idx}}" class="continue-button" title="Điền tiếp theo thứ tự dropdown" onclick="fillFollowing(${{idx}})" hidden>Điền tiếp</button>
+      </td>`;
     tbody.appendChild(tr);
   }});
+  refreshContinueButtons();
   updateChangedCount();
 }}
 
 function unlockRow(idx) {{
   document.getElementById(`sel-${{idx}}`).disabled = false;
+  refreshContinueButtons();
 }}
 
 function unlockAll() {{
   rows.forEach((_, idx) => document.getElementById(`sel-${{idx}}`).disabled = false);
+  refreshContinueButtons();
+}}
+
+function refreshContinueButtons() {{
+  rows.forEach((_, idx) => {{
+    const select = document.getElementById(`sel-${{idx}}`);
+    const button = document.getElementById(`continue-${{idx}}`);
+    if (!select || !button) return;
+    const characterIndex = STANDARD_CHARACTER_VALUES.indexOf(select.value);
+    button.hidden = characterIndex < 0
+      || characterIndex >= STANDARD_CHARACTER_VALUES.length - 1
+      || idx >= rows.length - 1;
+  }});
 }}
 
 function resetAll() {{
@@ -309,17 +334,62 @@ function resetAll() {{
     const select = document.getElementById(`sel-${{idx}}`);
     select.value = row.autoValue || 'unknown';
     select.disabled = true;
-    document.querySelector(`tr[data-index="${{idx}}"]`).classList.remove('changed');
+    document.querySelector(`tr[data-index="${{idx}}"]`).classList.remove('changed', 'auto-filled');
   }});
+  document.getElementById('fillMessage').textContent = '';
+  refreshContinueButtons();
   updateChangedCount();
 }}
 
 function markChanged(idx) {{
   const row = rows[idx];
   const select = document.getElementById(`sel-${{idx}}`);
+  const tr = document.querySelector(`tr[data-index="${{idx}}"]`);
   const changed = select.value !== (row.autoValue || 'unknown');
-  document.querySelector(`tr[data-index="${{idx}}"]`).classList.toggle('changed', changed);
+  tr.classList.remove('auto-filled');
+  tr.classList.toggle('changed', changed);
+  refreshContinueButtons();
   updateChangedCount();
+}}
+
+function fillFollowing(startIdx) {{
+  const startSelect = document.getElementById(`sel-${{startIdx}}`);
+  const startCharacterIndex = STANDARD_CHARACTER_VALUES.indexOf(startSelect.value);
+  if (startCharacterIndex < 0) return;
+
+  let filled = 0;
+  const skipped = [];
+  for (let targetIdx = startIdx + 1; targetIdx < rows.length; targetIdx += 1) {{
+    const expectedCharacterIndex = startCharacterIndex + (targetIdx - startIdx);
+    if (expectedCharacterIndex >= STANDARD_CHARACTER_VALUES.length) break;
+
+    const row = rows[targetIdx];
+    const select = document.getElementById(`sel-${{targetIdx}}`);
+    const tr = document.querySelector(`tr[data-index="${{targetIdx}}"]`);
+    const currentValue = select.value || 'unknown';
+    const baselineValue = row.autoValue || 'unknown';
+    const hasManualChoice = currentValue !== baselineValue && !tr.classList.contains('auto-filled');
+    if (hasManualChoice) {{
+      skipped.push(row.segmentKey || `row ${{targetIdx + 1}}`);
+      continue;
+    }}
+
+    const expectedValue = STANDARD_CHARACTER_VALUES[expectedCharacterIndex];
+    if (currentValue === expectedValue) continue;
+
+    select.disabled = false;
+    select.value = expectedValue;
+    tr.classList.add('auto-filled');
+    tr.classList.toggle('changed', expectedValue !== baselineValue);
+    filled += 1;
+  }}
+
+  refreshContinueButtons();
+  updateChangedCount();
+  const message = [];
+  if (filled) message.push(`Đã tự điền ${{filled}} segment`);
+  if (skipped.length) message.push(`Bỏ qua lựa chọn thủ công: ${{skipped.join(', ')}}`);
+  document.getElementById('fillMessage').textContent = message.join(' | ') || 'Không có segment cần điền';
 }}
 
 function updateChangedCount() {{
