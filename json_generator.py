@@ -1830,7 +1830,10 @@ class SprunkiJSONGenerator:
                 print("⏩ Preparing game entry...")
                 if manual_profile:
                     print(f"🧭 Replaying manual profile prepare actions from: {manual_profile_path}")
-                    if not self.game_player.replay_manual_prepare_actions(manual_profile.get("prepareActions", [])):
+                    if not self.game_player.replay_manual_prepare_actions(
+                        manual_profile.get("prepareActions", []),
+                        manual_profile,
+                    ):
                         raise Exception(f"Manual profile replay failed: {manual_profile_path}")
                     print("✅ Manual prepare replay finished - Game should be ready for interaction")
                 else:

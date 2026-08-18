@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "sourceUrl": "https://www.cocrea.world/@arthur_blueyboy/JevinTreatPhase6",
+  "canonicalUrl": "https://www.cocrea.world/@arthur_blueyboy/JevinTreatPhase6",
+  "urlKey": "arthur_blueyboy/JevinTreatPhase6",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "coordinateSpace": "screen_1920x1080_with_menu",
+  "prepareActions": [
+    {
+      "type": "key",
+      "key": "s",
+      "delayMs": 4672
+    },
+    {
+      "type": "key",
+      "key": "k",
+      "delayMs": 7187
+    }
+  ],
+  "prepareTiming": {
+    "endDelayMs": 8078,
+    "durationMs": 19937
+  },
+  "layout": {
+    "icons": [
+      {
+        "index": 0,
+        "label": "n-1",
+        "x": 464,
+        "y": 778
+      },
+      {
+        "index": 1,
+        "label": "n-2",
+        "x": 574,
+        "y": 778
+      },
+      {
+        "index": 2,
+        "label": "n-3",
+        "x": 688,
+        "y": 774
+      },
+      {
+        "index": 3,
+        "label": "n-4",
+        "x": 797,
+        "y": 778
+      },
+      {
+        "index": 4,
+        "label": "n-5",
+        "x": 917,
+        "y": 768
+      },
+      {
+        "index": 5,
+        "label": "n-6",
+        "x": 1033,
+        "y": 778
+      },
+      {
+        "index": 6,
+        "label": "n-7",
+        "x": 1149,
+        "y": 774
+      },
+      {
+        "index": 7,
+        "label": "n-8",
+        "x": 1262,
+        "y": 768
+      },
+      {
+        "index": 8,
+        "label": "n-9",
+        "x": 1371,
+        "y": 776
+      },
+      {
+        "index": 9,
+        "label": "n-10",
+        "x": 1491,
+        "y": 771
+      },
+      {
+        "index": 10,
+        "label": "n-11",
+        "x": 513,
+        "y": 885
+      },
+      {
+        "index": 11,
+        "label": "n-12",
+        "x": 630,
+        "y": 889
+      },
+      {
+        "index": 12,
+        "label": "n-13",
+        "x": 738,
+        "y": 886
+      },
+      {
+        "index": 13,
+        "label": "n-14",
+        "x": 854,
+        "y": 889
+      },
+      {
+        "index": 14,
+        "label": "n-15",
+        "x": 966,
+        "y": 888
+      },
+      {
+        "index": 15,
+        "label": "n-16",
+        "x": 1087,
+        "y": 895
+      },
+      {
+        "index": 16,
+        "label": "n-17",
+        "x": 1200,
+        "y": 893
+      },
+      {
+        "index": 17,
+        "label": "n-18",
+        "x": 1307,
+        "y": 891
+      },
+      {
+        "index": 18,
+        "label": "n-19",
+        "x": 1432,
+        "y": 891
+      },
+      {
+        "index": 19,
+        "label": "n-20",
+        "x": 1548,
+        "y": 889
+      }
+    ],
+    "slots": [
+      {
+        "index": 0,
+        "x": 442,
+        "y": 536
+      },
+      {
+        "index": 1,
+        "x": 619,
+        "y": 539
+      },
+      {
+        "index": 2,
+        "x": 820,
+        "y": 551
+      },
+      {
+        "index": 3,
+        "x": 1001,
+        "y": 554
+      },
+      {
+        "index": 4,
+        "x": 1187,
+        "y": 552
+      },
+      {
+        "index": 5,
+        "x": 1369,
+        "y": 544
+      },
+      {
+        "index": 6,
+        "x": 1562,
+        "y": 548
+      }
+    ]
+  },
+  "settings": {
+    "gameControlType": "unknown"
+  },
+  "notes": "",
+  "createdAt": "2026-08-18T17:40:48.150882Z",
+  "updatedAt": "2026-08-18T17:40:48.150882Z"
+}

@@ -9,6 +9,7 @@ import win32api
 import win32con
 
 from manual_profile_manager import save_profile
+from manual_prepare_timeline import PrepareTimelineRecorder, format_duration_ms
 from sprunki_game_player import SprunkiGamePlayer
 
 
@@ -32,7 +33,7 @@ class ManualProfileRecorder:
         self.root.title("Manual Profile Recorder")
         self.root.attributes("-topmost", True)
         self.root.resizable(False, False)
-        self.root.geometry("500x430+20+20")
+        self.root.geometry("500x500+20+20")
 
         self.phase = "PREPARE"
         self.prepare_actions = []
@@ -41,7 +42,10 @@ class ManualProfileRecorder:
         self.last_saved = "Ready"
         self.running = True
         self.recording_enabled = False
-        self.last_event_time = None
+        self.prepare_timeline = PrepareTimelineRecorder()
+        self.prepare_timing = {}
+        self.last_prepare_action_text = "Mốc vừa ghi: chưa có action"
+        self.timing_refresh_job = None
         self.last_key_name = None
         self.last_key_timestamp = 0.0
         self.mouse_down = False
@@ -61,6 +65,12 @@ class ManualProfileRecorder:
         self.phase_instruction_var = tk.StringVar()
         self.next_phase_var = tk.StringVar(value="Next Phase")
         self.action_count_var = tk.StringVar(value="Prepare actions: 0")
+        self.prepare_timing_var = tk.StringVar(
+            value=(
+                "PREPARE tổng: 00:00.000 | Chờ hiện tại: 00:00.000\n"
+                "Mốc vừa ghi: chưa có action"
+            )
+        )
         self.icon_count_var = tk.StringVar(value="Icons: 0")
         self.slot_count_var = tk.StringVar(value="Slots: 0")
         self.last_saved_var = tk.StringVar(value=self.last_saved)
@@ -74,6 +84,16 @@ class ManualProfileRecorder:
         tk.Label(
             instruction_frame,
             textvariable=self.phase_instruction_var,
+            anchor="w",
+            justify="left",
+            wraplength=455,
+        ).pack(fill="x")
+
+        timing_frame = tk.LabelFrame(frame, text="Thời gian PREPARE (realtime)", padx=8, pady=4)
+        timing_frame.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            timing_frame,
+            textvariable=self.prepare_timing_var,
             anchor="w",
             justify="left",
             wraplength=455,
@@ -140,7 +160,50 @@ class ManualProfileRecorder:
         self.icon_count_var.set(f"Icons: {len(self.icons)}")
         self.slot_count_var.set(f"Slots: {len(self.slots)}")
         self.last_saved_var.set(f"Last: {self.last_saved}")
+        self._refresh_prepare_timing_display()
         self.root.update_idletasks()
+
+    def _describe_prepare_action(self, action) -> str:
+        action_type = (action.get("type") or "").lower()
+        delay_text = format_duration_ms(action.get("delayMs", 0))
+        if action_type == "click":
+            description = f"click @ ({action.get('x')}, {action.get('y')})"
+        elif action_type == "key":
+            description = f"phím {action.get('key')}"
+        else:
+            description = action_type or "action"
+        return f"Mốc vừa ghi: {description} — chờ trước đó {delay_text}"
+
+    def _sync_last_prepare_action_text(self) -> None:
+        if self.prepare_actions:
+            self.last_prepare_action_text = self._describe_prepare_action(self.prepare_actions[-1])
+        else:
+            self.last_prepare_action_text = "Mốc vừa ghi: chưa có action"
+
+    def _refresh_prepare_timing_display(self) -> None:
+        snapshot = self.prepare_timeline.snapshot()
+        if self.phase == "PREPARE" and self.recording_enabled:
+            timing_text = (
+                f"PREPARE tổng: {format_duration_ms(snapshot.get('elapsedMs', 0))} | "
+                f"Chờ hiện tại: {format_duration_ms(snapshot.get('currentWaitMs', 0))}"
+            )
+        elif self.prepare_timing:
+            timing_text = (
+                f"PREPARE tổng: {format_duration_ms(self.prepare_timing.get('durationMs', 0))} | "
+                f"Final wait: {format_duration_ms(self.prepare_timing.get('endDelayMs', 0))}"
+            )
+        else:
+            timing_text = "PREPARE: đang chờ bắt đầu ghi"
+        self.prepare_timing_var.set(f"{timing_text}\n{self.last_prepare_action_text}")
+
+    def _refresh_timing_clock(self) -> None:
+        self.timing_refresh_job = None
+        if not self.running:
+            return
+
+        self._refresh_prepare_timing_display()
+        if self.phase == "PREPARE" and self.recording_enabled:
+            self.timing_refresh_job = self.root.after(100, self._refresh_timing_clock)
 
     def _phase_ui_content(self):
         if self.phase == "PREPARE":
@@ -148,8 +211,10 @@ class ManualProfileRecorder:
                 "PREPARE - mở menu game",
                 "1. Bấm vào cửa sổ game và thực hiện mọi thao tác để vượt menu mở đầu "
                 "(click chuột và phím bấm sẽ được tự động ghi lại).\n"
-                "2. Khi game đã sẵn sàng để ghi layout, đưa chuột ra khỏi bảng này.\n"
-                "3. Bấm 'Sang ICONS' bên dưới hoặc nhấn Ctrl+Shift+Enter.",
+                "2. Đồng hồ hiển thị tổng thời gian và khoảng chờ hiện tại; mỗi action mới "
+                "sẽ chốt khoảng chờ trước đó.\n"
+                "3. Khi game đã sẵn sàng để ghi layout, đưa chuột ra khỏi bảng này.\n"
+                "4. Bấm 'Sang ICONS' bên dưới hoặc nhấn Ctrl+Shift+Enter.",
                 "Sang ICONS",
             )
         if self.phase == "ICONS":
@@ -172,13 +237,7 @@ class ManualProfileRecorder:
         self.root.after(0, self._refresh_ui)
 
     def _mark_event_time(self) -> int:
-        now = time.monotonic()
-        if self.last_event_time is None:
-            self.last_event_time = now
-            return 0
-        delay_ms = int(round((now - self.last_event_time) * 1000))
-        self.last_event_time = now
-        return max(delay_ms, 0)
+        return self.prepare_timeline.mark_event()
 
     def _ui_bounds(self):
         self.root.update_idletasks()
@@ -204,6 +263,7 @@ class ManualProfileRecorder:
             "y": int(y),
             "delayMs": delay_ms,
         })
+        self._sync_last_prepare_action_text()
         self._set_last_saved(f"Recorded click @ ({x}, {y})")
 
     def _on_keyboard_event(self, event) -> None:
@@ -232,6 +292,7 @@ class ManualProfileRecorder:
             "key": event.name,
             "delayMs": delay_ms,
         })
+        self._sync_last_prepare_action_text()
         self._set_last_saved(f"Recorded key: {event.name}")
 
     def _capture_mouse_loop(self) -> None:
@@ -275,6 +336,8 @@ class ManualProfileRecorder:
     def undo_last(self) -> None:
         if self.phase == "PREPARE" and self.prepare_actions:
             removed = self.prepare_actions.pop()
+            self.prepare_timeline.undo_last()
+            self._sync_last_prepare_action_text()
             self._set_last_saved(f"Undo prepare action: {removed.get('type')}")
         elif self.phase == "ICONS" and self.icons:
             removed = self.icons.pop()
@@ -286,8 +349,13 @@ class ManualProfileRecorder:
 
     def advance_phase(self) -> None:
         if self.phase == "PREPARE":
+            self.recording_enabled = False
+            self.prepare_timing = self.prepare_timeline.finish()
             self.phase = "ICONS"
-            self._set_last_saved("Prepare complete. Capture icons.")
+            self._set_last_saved(
+                "Prepare complete. "
+                f"Final wait: {self.prepare_timing.get('endDelayMs', 0)} ms. Capture icons."
+            )
         elif self.phase == "ICONS":
             self.phase = "SLOTS"
             self._set_last_saved("Icon capture complete. Capture slots.")
@@ -320,6 +388,7 @@ class ManualProfileRecorder:
             "viewport": {"width": int(width), "height": int(height)},
             "coordinateSpace": f"screen_{int(width)}x{int(height)}_with_menu",
             "prepareActions": self.prepare_actions,
+            "prepareTiming": self.prepare_timing,
             "layout": {
                 "icons": self.icons,
                 "slots": self.slots,
@@ -348,11 +417,13 @@ class ManualProfileRecorder:
         if not self.game_player.navigate_and_prepare_game(self.url):
             raise RuntimeError("Could not open the game and reach the post-Run/F11 state.")
 
+        self.prepare_timeline.start()
         self.recording_enabled = True
-        self.last_event_time = time.monotonic()
+        self._sync_last_prepare_action_text()
         self.mouse_thread = threading.Thread(target=self._capture_mouse_loop, daemon=True)
         self.mouse_thread.start()
         self._set_last_saved("Run/F11 complete. Recording prepare actions.")
+        self.timing_refresh_job = self.root.after(0, self._refresh_timing_clock)
         self.root.mainloop()
 
 

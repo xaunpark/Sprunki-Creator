@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 
 from character_identity import SCRATCH_VM_ICON_STATE_JS, write_character_identity_map
 from manual_profile_manager import find_profile, load_profile_from_path, validate_profile
+from manual_prepare_timeline import get_prepare_end_delay_ms, replay_prepare_timeline
 
 class WorkflowIncompatibleError(Exception):
     """Custom exception raised when the workflow detects a persistent,
@@ -7163,18 +7164,14 @@ class SprunkiGamePlayer:
                 except Exception:
                     pass
 
-    def replay_manual_prepare_actions(self, actions):
+    def replay_manual_prepare_actions(self, actions, profile_or_timing=None):
         if not actions:
             print("⚠️ Manual profile has no prepare actions to replay.")
             return False
 
         print(f"🎯 Replaying {len(actions)} manual prepare actions...")
-        for index, action in enumerate(actions, start=1):
+        def execute_action(index, action):
             try:
-                delay_ms = int(action.get("delayMs", 0) or 0)
-                if delay_ms > 0:
-                    time.sleep(delay_ms / 1000.0)
-
                 action_type = (action.get("type") or "").lower()
                 if action_type == "click":
                     x = int(action.get("x"))
@@ -7185,17 +7182,29 @@ class SprunkiGamePlayer:
                 elif action_type == "key":
                     key_name = action.get("key")
                     if not key_name:
-                        continue
+                        return True
                     print(f"   {index}. Key {key_name} (CDP native input)")
                     if not self._execute_cdp_key_press(key_name):
                         print(f"   ⚠️ CDP key input unavailable; falling back to PyAutoGUI: {key_name}")
                         pyautogui.press(str(key_name).lower())
                 else:
                     print(f"   {index}. Skipping unsupported manual action: {action}")
+                return True
             except Exception as action_error:
                 print(f"⚠️ Manual prepare action {index} failed: {action_error}")
                 return False
 
+        replay_success = replay_prepare_timeline(
+            actions,
+            profile_or_timing,
+            execute_action,
+        )
+        if not replay_success:
+            return False
+
+        end_delay_ms = get_prepare_end_delay_ms(profile_or_timing)
+        if end_delay_ms > 0:
+            print(f"   ⏳ Final PREPARE wait replayed: {end_delay_ms} ms")
         print("✅ Manual prepare actions replay completed")
         return True
 
@@ -7487,7 +7496,10 @@ class SprunkiGamePlayer:
                     return False
 
                 print(f"   Replaying {len(manual_actions)} manual prepare actions...")
-                prepare_success = self.replay_manual_prepare_actions(manual_actions)
+                prepare_success = self.replay_manual_prepare_actions(
+                    manual_actions,
+                    manual_profile,
+                )
                 if prepare_success:
                     print("   Manual profile prepare replay completed after restart")
                 else:
@@ -7669,7 +7681,10 @@ class SprunkiGamePlayer:
                 if progress_callback:
                     progress_callback("🧭 Replaying manual profile prepare actions...")
                 print(f"🧭 Using manual profile: {manual_profile_path}")
-                replay_success = self.replay_manual_prepare_actions(manual_profile.get("prepareActions", []))
+                replay_success = self.replay_manual_prepare_actions(
+                    manual_profile.get("prepareActions", []),
+                    manual_profile,
+                )
                 if not replay_success:
                     print("⚠️ Manual profile replay failed, falling back to automatic intro skip...")
                     if progress_callback:
