@@ -13,12 +13,20 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional
+import math
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
 PREPARE_TIMING_KEY = "prepareTiming"
 END_DELAY_KEY = "endDelayMs"
 DURATION_KEY = "durationMs"
+
+# A corrupted or hand-edited profile must never be able to keep an unattended
+# replay asleep for an effectively unbounded amount of time.  These are hard
+# safety ceilings; normal recorded profiles are far below them.
+MAX_PREPARE_ACTIONS = 256
+MAX_SINGLE_PREPARE_DELAY_MS = 10 * 60 * 1000
+MAX_TOTAL_PREPARE_DURATION_MS = 30 * 60 * 1000
 
 
 def coerce_delay_ms(value: Any) -> int:
@@ -75,9 +83,106 @@ def get_prepare_duration_ms(profile_or_timing: Optional[Mapping[str, Any]]) -> i
     return coerce_delay_ms(timing.get(DURATION_KEY, 0))
 
 
-def sleep_prepare_delay(delay_ms: Any, sleep_fn: Callable[[float], None] = time.sleep) -> int:
+def validate_prepare_timeline(
+    actions: Optional[Sequence[Mapping[str, Any]]],
+    profile_or_timing: Optional[Mapping[str, Any]],
+    *,
+    max_actions: int = MAX_PREPARE_ACTIONS,
+    max_single_delay_ms: int = MAX_SINGLE_PREPARE_DELAY_MS,
+    max_total_duration_ms: int = MAX_TOTAL_PREPARE_DURATION_MS,
+) -> Tuple[bool, str]:
+    """Validate replay cost before the first physical input or sleep."""
+    normalized_actions = list(actions or [])
+    if len(normalized_actions) > max_actions:
+        return False, f"too_many_actions:{len(normalized_actions)}>{max_actions}"
+
+    def parse_delay(raw_value, field_name, action_index=None):
+        if raw_value is None:
+            return True, 0, ""
+        if isinstance(raw_value, bool):
+            return False, 0, f"invalid_delay:{action_index or 'profile'}:{field_name}"
+        try:
+            numeric = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return False, 0, f"invalid_delay:{action_index or 'profile'}:{field_name}"
+        if not math.isfinite(numeric) or numeric < 0:
+            return False, 0, f"invalid_delay:{action_index or 'profile'}:{field_name}"
+        normalized = int(round(numeric))
+        return True, normalized, ""
+
+    def valid_coordinate(raw_value, field_name, action_index):
+        if raw_value is None or isinstance(raw_value, bool):
+            return False, f"invalid_coordinate:{action_index}:{field_name}"
+        try:
+            numeric = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            return False, f"invalid_coordinate:{action_index}:{field_name}"
+        if not math.isfinite(numeric):
+            return False, f"invalid_coordinate:{action_index}:{field_name}"
+        return True, ""
+
+    total_ms = 0
+    for index, action in enumerate(normalized_actions, start=1):
+        if not isinstance(action, Mapping):
+            return False, f"invalid_action:{index}"
+        action_type = str(action.get("type") or "").strip().lower()
+        if action_type not in {"click", "drag", "key"}:
+            return False, f"unsupported_action:{index}:{action_type or 'missing_type'}"
+        coordinate_fields = ("x", "y") if action_type == "click" else (
+            ("startX", "startY", "endX", "endY") if action_type == "drag" else ()
+        )
+        for field_name in coordinate_fields:
+            coordinate_valid, coordinate_reason = valid_coordinate(
+                action.get(field_name), field_name, index
+            )
+            if not coordinate_valid:
+                return False, coordinate_reason
+        if action_type == "key" and not str(action.get("key") or "").strip():
+            return False, f"invalid_key:{index}"
+
+        valid, delay_ms, reason = parse_delay(action.get("delayMs", 0), "delayMs", index)
+        if not valid:
+            return False, reason
+        valid, drag_duration_ms, reason = parse_delay(
+            action.get("dragDurationMs", 0), "dragDurationMs", index
+        )
+        if not valid:
+            return False, reason
+        for field_name, value in (("delayMs", delay_ms), ("dragDurationMs", drag_duration_ms)):
+            if value > max_single_delay_ms:
+                return False, f"delay_exceeds_limit:{index}:{field_name}:{value}"
+        total_ms += delay_ms + drag_duration_ms
+
+    timing = extract_prepare_timing(profile_or_timing)
+    valid, end_delay_ms, reason = parse_delay(timing.get(END_DELAY_KEY, timing.get("prepareEndDelayMs", 0)), END_DELAY_KEY)
+    if not valid:
+        return False, reason
+    if end_delay_ms > max_single_delay_ms:
+        return False, f"delay_exceeds_limit:endDelayMs:{end_delay_ms}"
+    total_ms += end_delay_ms
+
+    valid, declared_duration, reason = parse_delay(timing.get(DURATION_KEY, 0), DURATION_KEY)
+    if not valid:
+        return False, reason
+    if declared_duration > max_total_duration_ms:
+        return False, f"declared_duration_exceeds_limit:{declared_duration}"
+    if total_ms > max_total_duration_ms:
+        return False, f"replay_duration_exceeds_limit:{total_ms}"
+    return True, "ok"
+
+
+def sleep_prepare_delay(
+    delay_ms: Any,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    *,
+    max_delay_ms: int = MAX_SINGLE_PREPARE_DELAY_MS,
+) -> int:
     """Sleep for a recorded delay and return the normalized delay."""
     normalized_delay_ms = coerce_delay_ms(delay_ms)
+    if normalized_delay_ms > max_delay_ms:
+        raise ValueError(
+            f"prepare delay {normalized_delay_ms}ms exceeds safety limit {max_delay_ms}ms"
+        )
     if normalized_delay_ms > 0:
         sleep_fn(normalized_delay_ms / 1000.0)
     return normalized_delay_ms
@@ -96,7 +201,15 @@ def replay_prepare_timeline(
     created before ``prepareTiming`` was added naturally use a zero terminal
     delay, preserving their existing replay behavior.
     """
-    for index, action in enumerate(actions or [], start=1):
+    normalized_actions = list(actions or [])
+    is_valid, _reason = validate_prepare_timeline(
+        normalized_actions,
+        profile_or_timing,
+    )
+    if not is_valid:
+        return False
+
+    for index, action in enumerate(normalized_actions, start=1):
         if not isinstance(action, Mapping):
             return False
         sleep_prepare_delay(action.get("delayMs", 0), sleep_fn=sleep_fn)

@@ -286,8 +286,20 @@ class SafeOperationManager:
                 self.logger.info(f"🔄 Cleanup: Returning icon from slot index {slot_index}")
                 self.logger.info(f"🔄 Attempting return at coords ({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
                 try:
-                    return_success = self.game_player.corrected_return_icon(target_slot)
-                    if return_success:
+                    return_result = self.game_player.corrected_return_icon(target_slot)
+                    return_success = bool(return_result)
+                    return_status = getattr(getattr(return_result, "status", None), "value", None)
+                    target_verified = getattr(return_result, "target_verified", False)
+                    if return_status == "RECOVERED":
+                        # Recovery verified the whole board, so the old slot
+                        # queue is stale.  Do not continue replaying it.
+                        self.active_slots.clear()
+                        self.logger.warning("⚠️ Game recovered; cleared stale active_slots queue")
+                        return
+                    if return_success and (
+                        return_status == "ALREADY_EMPTY"
+                        or (return_status == "VERIFIED" and target_verified)
+                    ):
                         self.logger.info(f"✅ Icon returned successfully from slot index {slot_index}")
                         if target_slot in self.active_slots:
                             self.active_slots.remove(target_slot)
@@ -316,8 +328,24 @@ class SafeOperationManager:
                 self.logger.info(f"🔄 Cleanup: Returning {len(icons_placed)} icons from remix...")
                 for slot in icons_placed:
                     try:
-                        return_success = self.game_player.corrected_return_icon(slot)
-                        if return_success and slot in self.active_slots:
+                        return_result = self.game_player.corrected_return_icon(slot)
+                        return_success = bool(return_result)
+                        return_status = getattr(getattr(return_result, "status", None), "value", None)
+                        target_verified = getattr(return_result, "target_verified", False)
+                        if return_status == "RECOVERED":
+                            self.active_slots.clear()
+                            self.logger.warning("⚠️ Game recovered; stopped stale remix cleanup queue")
+                            break
+                        if return_status in {"UNKNOWN", "STOPPED", "FAILED"}:
+                            self.logger.warning(
+                                "🛑 Remix cleanup stopped after non-replayable slot result: %s",
+                                return_status,
+                            )
+                            break
+                        if return_success and (
+                            return_status == "ALREADY_EMPTY"
+                            or (return_status == "VERIFIED" and target_verified)
+                        ) and slot in self.active_slots:
                             self.active_slots.remove(slot)
                         time.sleep(0.1)
                     except Exception as e:
@@ -342,9 +370,30 @@ class SafeOperationManager:
             # Return all active slots
             for slot in self.active_slots.copy():
                 try:
-                    self.game_player.corrected_return_icon(slot)
-                    self.active_slots.remove(slot)
-                    time.sleep(0.1)
+                    result = self.game_player.corrected_return_icon(slot)
+                    result_status = getattr(getattr(result, "status", None), "value", None)
+                    target_verified = getattr(result, "target_verified", False)
+                    if result_status == "RECOVERED":
+                        self.active_slots.clear()
+                        self.logger.warning("⚠️ Game recovered; cleared stale emergency cleanup queue")
+                        break
+                    if result_status in {"UNKNOWN", "STOPPED", "FAILED"}:
+                        self.logger.warning(
+                            "🛑 Emergency cleanup stopped after non-replayable slot result: %s",
+                            result_status,
+                        )
+                        break
+                    if result and (
+                        result_status == "ALREADY_EMPTY"
+                        or (result_status == "VERIFIED" and target_verified)
+                    ):
+                        self.active_slots.remove(slot)
+                        time.sleep(0.1)
+                    else:
+                        self.logger.warning(
+                            "Emergency cleanup did not verify slot %s; keeping it tracked",
+                            slot.get('index', 'unknown'),
+                        )
                 except:
                     pass
             

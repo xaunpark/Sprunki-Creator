@@ -28,11 +28,28 @@ import ctypes
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from sprunki_obs_controller import SprunkiController
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from character_identity import SCRATCH_VM_ICON_STATE_JS, write_character_identity_map
 from manual_profile_manager import find_profile, load_profile_from_path, validate_profile
-from manual_prepare_timeline import coerce_delay_ms, get_prepare_end_delay_ms, replay_prepare_timeline
+from manual_prepare_timeline import (
+    MAX_PREPARE_ACTIONS,
+    MAX_TOTAL_PREPARE_DURATION_MS,
+    coerce_delay_ms,
+    get_prepare_end_delay_ms,
+    replay_prepare_timeline,
+    validate_prepare_timeline,
+)
+from placement_verifier import (
+    OperationContext,
+    OperationResult,
+    OperationStatus,
+    PlacementSnapshot,
+    classify_precondition,
+    evaluate_transition,
+    observe_until_verified,
+    wait_for_stable_snapshot,
+)
 
 class WorkflowIncompatibleError(Exception):
     """Custom exception raised when the workflow detects a persistent,
@@ -238,6 +255,17 @@ class SprunkiGamePlayer:
             'putted': None       # None/True/False  
         }
         self.last_operation_working_systems = {}  # Store per operation
+        self.last_operation_result = None
+        self._operation_counter = 0
+        self._active_operation_context = None
+        self._session_recovery_count = 0
+        self._max_session_recoveries = 2
+        self._cleanup_started = False
+        self._cleanup_completed = False
+        self._physical_input_context = None
+        self._batch_reconnect_attempts = 0
+        self._batch_snapshot_sequence = 0
+        self._snapshot_sequence = 0
 
         # Some mods keep permanent entries in the monitored Scratch arrays even
         # when every visible slot is empty.  Learn that per-mod empty state from
@@ -481,6 +509,267 @@ class SprunkiGamePlayer:
 
         # Initialize progress updater
         self.progress_updater = None  # Will be initialized when GUI is ready
+
+    # ================================================================
+    # == BOUNDED PLACEMENT OPERATIONS ================================
+    # ================================================================
+
+    def _begin_operation(
+        self,
+        direction,
+        target_slot=None,
+        *,
+        max_input_attempts=5,
+        deadline_seconds=12.0,
+    ):
+        """Create exactly one finite budget for one place/return operation."""
+        active = getattr(self, "_active_operation_context", None)
+        if active is not None and not active.closed:
+            return None
+
+        self._operation_counter += 1
+        context = OperationContext.begin(
+            direction,
+            target_slot,
+            max_input_attempts=max_input_attempts,
+            deadline_seconds=deadline_seconds,
+            max_recovery_attempts=1,
+            operation_id=f"{direction}-{self._operation_counter}",
+        )
+        self._active_operation_context = context
+        return context
+
+    def _finish_operation(self, context, result):
+        if context is not None:
+            context.close()
+        self.last_operation_result = result
+        if getattr(self, "_active_operation_context", None) is context:
+            self._active_operation_context = None
+        return result
+
+    def _operation_result(
+        self,
+        context,
+        status,
+        message="",
+        *,
+        evidence=(),
+        details=None,
+        attempts=None,
+        reads=None,
+    ):
+        return OperationResult(
+            status,
+            operation_id=context.operation_id if context else "",
+            direction=context.direction if context else "",
+            message=message,
+            evidence=tuple(evidence or ()),
+            details=dict(details or {}),
+            attempts=context.input_attempts if context and attempts is None else (attempts or 0),
+            reads=context.read_count if context and reads is None else (reads or 0),
+            recovery_attempts=context.recovery_attempts if context else 0,
+        )
+
+    def _register_scoped_physical_input(self) -> bool:
+        """Account for recovery-only inputs issued by legacy intro helpers."""
+        context = getattr(self, "_physical_input_context", None)
+        if context is None:
+            return True
+        if not context.can_send_input(
+            stop_requested=self.stop_event.is_set(),
+            allow_recovery_input=True,
+        ):
+            return False
+        return context.register_input()
+
+    def _require_target_specific_result(self, context, result, message="target_transition_unproven"):
+        """Demote aggregate-only evidence for a target-specific return."""
+        if result is None:
+            return self._operation_result(context, OperationStatus.UNKNOWN, message)
+        if result.status == OperationStatus.VERIFIED and not result.target_verified:
+            return self._operation_result(
+                context,
+                OperationStatus.UNKNOWN,
+                message,
+                evidence=result.evidence,
+                details={
+                    **(result.details or {}),
+                    "targetSpecific": False,
+                    "aggregateFallback": True,
+                    "originalStatus": result.status.value,
+                },
+                reads=result.reads,
+            )
+        return result
+
+    def _capture_placement_snapshot(self):
+        """Return one state mapping for the read-only verifier."""
+        state = self.get_comprehensive_slot_state()
+        snapshot = PlacementSnapshot.from_mapping(state)
+        if snapshot is None:
+            return None
+        if snapshot.sequence <= 0:
+            self._snapshot_sequence += 1
+            snapshot = replace(snapshot, sequence=self._snapshot_sequence)
+        else:
+            self._snapshot_sequence = max(self._snapshot_sequence, snapshot.sequence)
+        return snapshot
+
+    def _read_comprehensive_state(self, context=None):
+        """Read one state and account for it in the active operation budget."""
+        state = self.get_comprehensive_slot_state()
+        if context is None:
+            return state
+        snapshot = PlacementSnapshot.from_mapping(state)
+        context.register_read(snapshot)
+        if not context.can_read_again() and (
+            snapshot is None or not snapshot.has_known_signal or snapshot.read_error
+        ):
+            return None
+        return state
+
+    def _capture_stable_placement_snapshot(self, timeout_ms=1000, context=None):
+        def read_snapshot():
+            # A state reader gets at most three consecutive failures for the
+            # whole operation.  Do not start a fresh polling window after the
+            # operation-level reader budget has already become UNKNOWN.
+            if context is not None and not context.can_read_again():
+                return None
+            snapshot = self._capture_placement_snapshot()
+            if context is not None:
+                context.register_read(snapshot)
+            return snapshot
+
+        return wait_for_stable_snapshot(
+            read_snapshot,
+            timeout_ms=timeout_ms,
+            poll_ms=50,
+            stable_samples=2,
+            stop_requested=lambda: self.stop_event.is_set() or (
+                context is not None and context.expired()
+            ),
+        )
+
+    def _refresh_after_recovery(self):
+        """Rebind runtime readers and invalidate all operation-local evidence."""
+        self._physical_input_context = None
+        self.slot_offset_lookup.clear()
+        self.working_systems = {"characters": None, "putted": None}
+        self.last_operation_working_systems.clear()
+        self.empty_board_baseline = {"characters": None, "putted": None}
+        self.last_target_slot_index = None
+        self.last_successful_drag_details = {}
+        self.last_operation_result = None
+        self._batch_snapshot_sequence = 0
+        self._snapshot_sequence = 0
+
+        try:
+            if self.session_websocket or self.batch_verification_active:
+                self.stop_batch_verification_session()
+        except Exception as error:
+            print(f"⚠️ Recovery session reset warning: {error}")
+
+        self.batch_verification_active = False
+        self.verification_functions_ready = False
+        self._batch_reconnect_attempts = 0
+
+        setup_ok = self.setup_dual_verification_system()
+        batch_ok = self.start_batch_verification_session() if setup_ok else False
+        print(
+            "   Recovery reader refresh: "
+            f"dual={'✅' if setup_ok else '❌'}, batch={'✅' if batch_ok else '⚠️'}"
+        )
+        return setup_ok or batch_ok
+
+    def _record_recovery_result(self, context, result):
+        if context is not None:
+            context.end_recovery()
+        return self._finish_operation(context, result)
+
+    def _reset_cleanup_guard(self):
+        self._cleanup_started = False
+        self._cleanup_completed = False
+
+    def _run_cleanup_once(self, use_cdp=False, context=None, obs_controller=None):
+        """Run final cleanup at most once for the current workflow/session."""
+        if self._cleanup_completed:
+            return OperationResult(
+                OperationStatus.ALREADY_EMPTY,
+                direction="cleanup",
+                message="cleanup_already_completed",
+            )
+        if self._cleanup_started:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="cleanup",
+                message="cleanup_already_in_progress",
+            )
+
+        self._cleanup_started = True
+        try:
+            if not self.config:
+                return OperationResult(
+                    OperationStatus.FAILED,
+                    direction="cleanup",
+                    message="cleanup_config_unavailable",
+                )
+            success_count, total_attempted, errors = self.smart_batch_return_all_slots_with_mode(
+                use_cdp=use_cdp,
+                context=context,
+                obs_controller=obs_controller,
+            )
+            if total_attempted == 0 and errors:
+                result = OperationResult(
+                    OperationStatus.UNKNOWN,
+                    direction="cleanup",
+                    message="cleanup_operation_not_started",
+                    details={"errors": errors},
+                )
+            elif total_attempted == 0:
+                result = OperationResult(
+                    OperationStatus.ALREADY_EMPTY,
+                    direction="cleanup",
+                    message="no_slots_required_cleanup",
+                )
+            elif success_count == total_attempted and not errors:
+                result = OperationResult(
+                    OperationStatus.VERIFIED,
+                    direction="cleanup",
+                    message="cleanup_verified",
+                    details={"successCount": success_count, "total": total_attempted},
+                )
+            elif errors and any("unknown" in str(error).lower() for error in errors):
+                result = OperationResult(
+                    OperationStatus.UNKNOWN,
+                    direction="cleanup",
+                    message="cleanup_state_unknown",
+                    details={"errors": errors},
+                )
+            elif errors and any("recovered" in str(error).lower() for error in errors):
+                result = OperationResult(
+                    OperationStatus.RECOVERED,
+                    direction="cleanup",
+                    message="cleanup_recovered_not_verified",
+                    details={"errors": errors},
+                )
+            else:
+                result = OperationResult(
+                    OperationStatus.FAILED,
+                    direction="cleanup",
+                    message="cleanup_incomplete",
+                    details={"successCount": success_count, "total": total_attempted, "errors": errors},
+                )
+            return result
+        except Exception as error:
+            return OperationResult(
+                OperationStatus.FAILED,
+                direction="cleanup",
+                message=f"cleanup_exception:{error}",
+            )
+        finally:
+            # A failed cleanup must not be re-entered automatically from a
+            # second finally/exception path; the caller receives the failure.
+            self._cleanup_completed = True
 
     def setup_thread_safe_progress(self):
         """Setup thread-safe progress updater"""
@@ -1888,8 +2177,22 @@ class SprunkiGamePlayer:
             game_config = self.app_config.get('game_load_verification', {})
             
             # Get timeouts and intervals
-            max_timeout = continuous_config.get('max_wait_time_seconds', 120)
-            check_interval = continuous_config.get('check_interval_seconds', 10)
+            try:
+                max_timeout = float(continuous_config.get('max_wait_time_seconds', 120))
+                if not math.isfinite(max_timeout) or max_timeout <= 0:
+                    raise ValueError("invalid readiness timeout")
+                # A malformed config must not turn readiness polling into an
+                # unattended infinite wait.
+                max_timeout = min(max_timeout, 10 * 60)
+            except (TypeError, ValueError, OverflowError):
+                max_timeout = 120.0
+            try:
+                check_interval = float(continuous_config.get('check_interval_seconds', 10))
+                if not math.isfinite(check_interval) or check_interval <= 0:
+                    raise ValueError("invalid readiness interval")
+                check_interval = min(check_interval, 60.0)
+            except (TypeError, ValueError, OverflowError):
+                check_interval = 10.0
             early_exit = continuous_config.get('early_exit_on_success', True)
             
             print(f"\nðŸ”„ CONTINUOUS GAME READINESS MONITORING")
@@ -1903,7 +2206,7 @@ class SprunkiGamePlayer:
             start_time = time.time()
             check_count = 0
             
-            while True:
+            while time.time() - start_time < max_timeout:
                 check_count += 1
                 elapsed = time.time() - start_time
                 remaining = max_timeout - elapsed
@@ -3601,11 +3904,19 @@ class SprunkiGamePlayer:
 
     def _simulate_click_via_cdp(self, ws, x, y):
         """Simulate mouse click via CDP"""
+        if not self._register_scoped_physical_input():
+            return False
         down_command = {"method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}}
-        self._send_cdp_command(ws, down_command)
+        down_response = self._send_cdp_command(ws, down_command)
         time.sleep(random.uniform(0.05, 0.1))
         up_command = {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}}
-        self._send_cdp_command(ws, up_command)
+        up_response = self._send_cdp_command(ws, up_command)
+        return bool(
+            down_response
+            and up_response
+            and "error" not in down_response
+            and "error" not in up_response
+        )
 
     def _simulate_drag_via_cdp(self, ws, start_x, start_y, end_x, end_y):
         """Simulate mouse drag via CDP"""
@@ -3828,13 +4139,16 @@ class SprunkiGamePlayer:
             self.putted_chars_available = False
             return False
 
-    def start_batch_verification_session(self):
+    def start_batch_verification_session(self, reset_reconnect_budget=True):
         """
         ðŸš€ NEW: Start batch verification session with persistent WebSocket (FIXED LOGIC)
         """
         try:
             print("ðŸš€ STARTING BATCH VERIFICATION SESSION...")
             print("="*60)
+
+            if reset_reconnect_budget:
+                self._batch_reconnect_attempts = 0
             
             # Get WebSocket URL
             ws_url = self._get_websocket_url()
@@ -4010,7 +4324,8 @@ class SprunkiGamePlayer:
                 window.getBatchCharactersCount = () => {
                     try {
                         const entry = getListByName("Characters") || getVarByName("Characters");
-                        const raw = Array.isArray(entry?.value) ? entry.value.slice() : [];
+                        if (!entry || !Array.isArray(entry.value)) return null;
+                        const raw = entry.value.slice();
                         const normalized = raw.map(v => (v === 1 ? "1" : v === 0 ? "0" : String(v)));
                         return normalized.filter(v => v === "1").length;
                     } catch (e) {
@@ -4050,11 +4365,86 @@ class SprunkiGamePlayer:
                         return null;
                     }
                 };
+
+                // BATCH FUNCTION 4: Atomic placement snapshot.  Unlike the
+                // legacy helpers this scans every runtime target, so sprites
+                // that own Polos or button state are not silently ignored.
+                const placementAliases = {
+                    characters: ['characters'],
+                    putted: ['putted characters', 'putted character'],
+                    polos: ['polos'],
+                    buttons: ['set of buttons enable list', 'set of buttons enabled list']
+                };
+                const normalizeName = value => String(value || '').trim().toLowerCase().replace(/\\s+/g, ' ');
+                const runtimeEntries = () => {
+                    const entries = [];
+                    for (const target of (runtime.targets || [])) {
+                        for (const collectionName of ['variables', 'lists']) {
+                            const collection = target?.[collectionName] || {};
+                            for (const id of Object.keys(collection)) {
+                                const entry = collection[id];
+                                if (entry) entries.push({ target, entry });
+                            }
+                        }
+                    }
+                    return entries;
+                };
+                const findPlacementEntry = (aliases, scalarOnly = false) => {
+                    const normalizedAliases = aliases.map(normalizeName);
+                    const matches = runtimeEntries().filter(({ entry }) =>
+                        normalizedAliases.includes(normalizeName(entry.name))
+                    );
+                    if (scalarOnly) {
+                        return matches.find(({ entry }) => !Array.isArray(entry.value)) || matches[0] || null;
+                    }
+                    return matches.find(({ entry }) => Array.isArray(entry.value)) || matches[0] || null;
+                };
+                const copyValue = item => {
+                    if (!item) return null;
+                    const value = item.entry?.value;
+                    return Array.isArray(value) ? value.slice() : value;
+                };
+                const countOnes = value => {
+                    if (!Array.isArray(value)) return null;
+                    return value.map(v => String(v)).filter(v => v === '1').length;
+                };
+                window.getBatchPlacementSnapshot = () => {
+                    try {
+                        const charactersEntry = findPlacementEntry(placementAliases.characters);
+                        const puttedEntry = findPlacementEntry(placementAliases.putted, true);
+                        const polosEntry = findPlacementEntry(placementAliases.polos);
+                        const buttonsEntry = findPlacementEntry(placementAliases.buttons);
+                        const characters = copyValue(charactersEntry);
+                        const polos = copyValue(polosEntry);
+                        const buttonEnableList = copyValue(buttonsEntry);
+                        const puttedRaw = copyValue(puttedEntry);
+                        const putted = Array.isArray(puttedRaw) ? countOnes(puttedRaw) : puttedRaw;
+                        return {
+                            timestamp: Date.now(),
+                            sequence: (window.__batch_snapshot_sequence = (window.__batch_snapshot_sequence || 0) + 1),
+                            characters: Array.isArray(characters) ? characters : null,
+                            charactersCount: Array.isArray(characters) ? countOnes(characters) : null,
+                            puttedCharacters: putted,
+                            polos: Array.isArray(polos) ? polos : null,
+                            buttonEnableList: Array.isArray(buttonEnableList) ? buttonEnableList : null,
+                            available: {
+                                characters: !!charactersEntry,
+                                putted: !!puttedEntry,
+                                polos: !!polosEntry,
+                                buttons: !!buttonsEntry
+                            }
+                        };
+                    } catch (e) {
+                        console.error('Error in getBatchPlacementSnapshot:', e);
+                        return { timestamp: Date.now(), sequence: 0, read_error: String(e) };
+                    }
+                };
                 
                 // Test all functions
                 const testChars = window.getBatchCharactersCount();
                 const testPutted = window.getBatchPuttedChars ? window.getBatchPuttedChars() : null;
                 const testDual = window.getBatchDualState();
+                const testPlacement = window.getBatchPlacementSnapshot();
                 
                 console.log("âš¡ BATCH VERIFICATION FUNCTIONS READY:");
                 console.log("   Characters:", testChars);
@@ -4065,7 +4455,8 @@ class SprunkiGamePlayer:
                     success: true,
                     characters_ready: testChars !== null,
                     putted_ready: testPutted !== null,
-                    dual_ready: testDual !== null
+                    dual_ready: testDual !== null,
+                    placement_ready: testPlacement !== null
                 };
             })();
             '''
@@ -4084,11 +4475,13 @@ class SprunkiGamePlayer:
                     chars_ready = result.get('characters_ready', False)
                     putted_ready = result.get('putted_ready', False)
                     dual_ready = result.get('dual_ready', False)
+                    placement_ready = result.get('placement_ready', False)
                     
                     print(f"   âœ… Batch functions setup successful!")
                     print(f"   ðŸ“Š Characters function: {'âœ…' if chars_ready else 'âŒ'}")
                     print(f"   ðŸ“Š Putted function: {'âœ…' if putted_ready else 'âŒ'}")  
                     print(f"   ðŸ“Š Dual state function: {'âœ…' if dual_ready else 'âŒ'}")
+                    print(f"   ðŸ“Š Placement snapshot: {'âœ…' if placement_ready else 'âš ï¸'}")
                     
                     return True
                 else:
@@ -4103,7 +4496,7 @@ class SprunkiGamePlayer:
             print(f"âŒ Error setting up batch functions: {e}")
             return False
 
-    def _send_batch_cdp_command(self, command):
+    def _send_batch_cdp_command(self, command, timeout_seconds=5.0):
         """
         âš¡ NEW: Send CDP command using persistent batch WebSocket (DEBUG ENHANCED)
         """
@@ -4119,7 +4512,7 @@ class SprunkiGamePlayer:
             self.session_websocket.send(json.dumps(command))
             
             # Reduced timeout for batch operations (faster)
-            max_wait_time = 5  # Increased from 3s for debugging
+            max_wait_time = max(float(timeout_seconds), 0.1)
             start_time = time.time()
             
             while time.time() - start_time < max_wait_time:
@@ -4192,6 +4585,11 @@ class SprunkiGamePlayer:
         ðŸ”„ NEW: Attempt to reconnect batch session
         """
         try:
+            if self._batch_reconnect_attempts >= 1:
+                print("⚠️ Batch reconnect budget exhausted; disabling automatic reconnect")
+                return False
+
+            self._batch_reconnect_attempts += 1
             print("ðŸ”„ Attempting batch session reconnect...")
             
             # Stop current session
@@ -4199,7 +4597,7 @@ class SprunkiGamePlayer:
             time.sleep(1)
             
             # Try to restart
-            if self.start_batch_verification_session():
+            if self.start_batch_verification_session(reset_reconnect_budget=False):
                 print("âœ… Batch session reconnected successfully")
                 return True
             else:
@@ -4273,6 +4671,11 @@ class SprunkiGamePlayer:
         ðŸš¨ OPTIMIZED: Quick emergency return click without full verification cycle
         Used when normal return seems to have failed
         """
+        return OperationResult(
+            OperationStatus.STOPPED,
+            direction="return",
+            message="legacy_emergency_click_disabled",
+        )
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             
@@ -4296,6 +4699,9 @@ class SprunkiGamePlayer:
         Returns: list of strings ["0","1","0"...] or None if error
         """
         try:
+            snapshot = self.get_placement_snapshot_batch()
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("buttonEnableList"), list):
+                return snapshot.get("buttonEnableList")
             if not self.characters_available:
                 return None
                 
@@ -4473,6 +4879,29 @@ class SprunkiGamePlayer:
         # Try batch first for maximum performance
         return self.get_dual_counts_batch()
 
+    def get_placement_snapshot_batch(self):
+        """Read all placement signals in one Runtime.evaluate call."""
+        try:
+            if not (self.batch_verification_active and self.verification_functions_ready):
+                return None
+            if not self.check_batch_session_health():
+                return None
+            response = self._send_batch_cdp_command({
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "window.getBatchPlacementSnapshot()",
+                    "returnByValue": True,
+                },
+            }, timeout_seconds=0.5)
+            if response and "result" in response:
+                value = response.get("result", {}).get("result", {}).get("value")
+                if isinstance(value, dict):
+                    return value
+            return None
+        except Exception as error:
+            print(f"⚠️ Error getting atomic placement snapshot: {error}")
+            return None
+
     def _normalize_count_value(self, value):
         """
         Normalize Scratch runtime numeric values. Some mods expose variables as
@@ -4481,14 +4910,14 @@ class SprunkiGamePlayer:
         if value is None or isinstance(value, bool):
             return None
         if isinstance(value, (int, float)):
-            return int(value)
+            return int(value) if math.isfinite(float(value)) else None
         if isinstance(value, str):
             value = value.strip()
             if not value:
                 return None
             try:
                 return int(float(value))
-            except ValueError:
+            except (ValueError, OverflowError):
                 return None
         return None
 
@@ -4501,13 +4930,14 @@ class SprunkiGamePlayer:
             print(f"\nðŸŽ¯ MODE DETECTION: Context='{operation_context}', Icons={icons_count}")
             
             # Rule 1: Check operation context (explicit detection)
-            if "showcase" in operation_context.lower() or "individual" in operation_context.lower():
+            context_text = str(operation_context or "")
+            if "showcase" in context_text.lower() or "individual" in context_text.lower():
                 detected_mode = self.RETURN_MODE_INDIVIDUAL
-                reason = f"Context indicates individual operation: '{operation_context}'"
-                
-            elif "remix" in operation_context.lower() or "batch" in operation_context.lower():
+                reason = f"Context indicates individual operation: '{context_text}'"
+
+            elif "remix" in context_text.lower() or "batch" in context_text.lower():
                 detected_mode = self.RETURN_MODE_REMIX  
-                reason = f"Context indicates remix operation: '{operation_context}'"
+                reason = f"Context indicates remix operation: '{context_text}'"
                 
             # Rule 2: Check icons count (threshold-based detection)
             elif icons_count == 1:
@@ -4520,9 +4950,11 @@ class SprunkiGamePlayer:
                 
             # Rule 3: Check current slot state (state-based detection)
             else:
-                current_count = self.get_characters_count() if self.characters_available else 0
+                current_state = self.get_comprehensive_slot_state()
+                current_count = self._get_board_progress_count(current_state)
                 if current_count is None:
-                    current_count = 0
+                    print("   🛑 Return mode is UNKNOWN because board state cannot be read")
+                    return None
                     
                 if current_count <= 1:
                     detected_mode = self.RETURN_MODE_INDIVIDUAL
@@ -4543,8 +4975,9 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print(f"âŒ Error in mode detection: {e}")
-            # Safe fallback to individual mode
-            return self.RETURN_MODE_INDIVIDUAL
+            # A detection exception is UNKNOWN; a guessed individual route
+            # could send a physical click on an unverified board.
+            return None
 
     def set_return_mode_explicit(self, mode, reason="manual_override"):
         """
@@ -4591,12 +5024,20 @@ class SprunkiGamePlayer:
                 
             else:
                 print(f"âš ï¸ Unknown mode: {detected_mode}, falling back to individual")
-                return self.execute_individual_return_strategy(target_slot, use_cdp)
+                return OperationResult(
+                    OperationStatus.UNKNOWN,
+                    direction="return",
+                    message="return_mode_unknown",
+                )
                 
         except Exception as e:
             print(f"âŒ Error in smart return router: {e}")
-            # Fallback to current method
-            return self.corrected_return_icon(target_slot, use_cdp)
+            # Do not start a second return chain after mode detection failed.
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="return",
+                message=f"return_mode_detection_exception:{e}",
+            )
 
     def execute_individual_return_strategy(self, target_slot, use_cdp=False):
         """
@@ -4609,46 +5050,118 @@ class SprunkiGamePlayer:
         # Use current method for individual operations
         return self.corrected_return_icon(target_slot, use_cdp)
 
-    def execute_remix_return_strategy(self, target_slot, use_cdp=False):
+    def execute_remix_return_strategy(self, target_slot, use_cdp=False, operation_context=None):
         """
-        ðŸŽµ ULTRA SIMPLIFIED: Sequential carpet bombing slot by slot
+        ðŸŽµ Bounded sequential carpet bombing with a structured result.
         """
+        context = operation_context or getattr(self, "_active_operation_context", None)
+        owns_context = False
+        if context is None:
+            context = self._begin_operation(
+                "cleanup",
+                target_slot.get("index") if isinstance(target_slot, dict) else None,
+                # Reserve room for one bounded cleanup strategy plus a
+                # validated manual-profile replay if the single recovery is
+                # needed.  This remains a hard finite budget.
+                max_input_attempts=120 + MAX_PREPARE_ACTIONS + 2,
+                deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 60.0,
+            )
+            owns_context = True
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="cleanup",
+                message="another_operation_is_active",
+            )
+
+        def finish(status, message, details=None):
+            result = self._operation_result(context, status, message, details=details)
+            if owns_context:
+                return self._finish_operation(context, result)
+            return result
+
         try:
             print("ðŸŽµ ULTRA SIMPLIFIED CARPET BOMBING")
             print("="*50)
             print("   ðŸŽ¯ Strategy: Sequential slot-by-slot carpet bombing")
             print("   ðŸ“Š Progression: 2â†’3â†’4â†’5... coordinates per slot")
             
-            # Get current count
-            initial_count = self.get_characters_count() if self.characters_available else 0
-            if self._is_board_count_clean(characters_count=initial_count):
+            # Capture a stable baseline before any carpet input.  The two
+            # identical samples are part of this operation's evidence, not a
+            # best-effort single read.
+            initial_snapshot = self._capture_stable_placement_snapshot(
+                timeout_ms=1000,
+                context=context,
+            )
+            initial_count = (
+                initial_snapshot.characters_count
+                if initial_snapshot is not None and initial_snapshot.characters_count is not None
+                else initial_snapshot.putted_count
+                if initial_snapshot is not None
+                else None
+            )
+            if initial_snapshot is None or initial_count is None:
+                print("   🛑 Initial board state is UNKNOWN; refusing cleanup input")
+                return finish(OperationStatus.UNKNOWN, "cleanup_initial_state_unknown")
+            if self._is_board_count_clean(
+                characters_count=initial_snapshot.characters_count,
+                putted_count=initial_snapshot.putted_count,
+            ):
                 print("   âœ… Already clean")
-                return True
+                return finish(OperationStatus.ALREADY_EMPTY, "cleanup_already_empty")
+            context.set_baseline(initial_snapshot)
             
             print(f"   ðŸ“Š Icons to clear: {initial_count}")
             
             # Get ALL slots from config
             if not self.config:
                 print("âŒ No config available")
-                return False
+                return finish(OperationStatus.FAILED, "cleanup_config_unavailable")
                 
             all_slots = self.config.get('layout', {}).get('slots', [])
             if not all_slots:
                 print("âŒ No slots in config")
-                return False
+                return finish(OperationStatus.FAILED, "cleanup_slots_unavailable")
             
             # Sort slots by index for sequential processing
             sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
             print(f"   ðŸŽ¯ Will process {len(sorted_slots)} slots sequentially")
             
             # Execute progressive carpet bombing sets
-            success = self.execute_sequential_carpet_bombing_sets(sorted_slots, initial_count, use_cdp)
-            
-            return success
-            
+            success = self.execute_sequential_carpet_bombing_sets(
+                sorted_slots,
+                initial_count,
+                use_cdp,
+                operation_context=context,
+            )
+            final_snapshot = self._capture_stable_placement_snapshot(
+                timeout_ms=1000,
+                context=context,
+            )
+            if final_snapshot is None:
+                print("   🛑 Final cleanup state is UNKNOWN")
+                return finish(OperationStatus.UNKNOWN, "cleanup_final_state_unknown")
+            verified_clean = self._is_board_count_clean(
+                characters_count=final_snapshot.characters_count,
+                putted_count=final_snapshot.putted_count,
+            )
+            if verified_clean:
+                return finish(
+                    OperationStatus.VERIFIED,
+                    "cleanup_verified",
+                    details={"initialCount": initial_count},
+                )
+            if self.stop_event.is_set():
+                return finish(OperationStatus.STOPPED, "cleanup_stop_requested")
+            return finish(
+                OperationStatus.FAILED if not success else OperationStatus.UNKNOWN,
+                "cleanup_incomplete",
+                details={"initialCount": initial_count},
+            )
+
         except Exception as e:
             print(f"âŒ Error in simplified carpet bombing: {e}")
-            return False
+            return finish(OperationStatus.FAILED, f"cleanup_exception:{e}")
 
     def _determine_adaptive_density(self, icon_count, slot_count):
         """
@@ -4973,7 +5486,7 @@ class SprunkiGamePlayer:
                     time.sleep(inter_click_delay)
             
             print(f"   âœ… Wave completed: {clicks_executed}/{len(wave_points)} clicks")
-            return True, clicks_executed
+            return clicks_executed > 0, clicks_executed
             
         except Exception as e:
             print(f"   âŒ Wave execution error: {e}")
@@ -4984,6 +5497,16 @@ class SprunkiGamePlayer:
         ðŸ‘† NEW: Execute single carpet bombing click
         """
         try:
+            active_context = getattr(self, "_active_operation_context", None)
+            if active_context is None:
+                print("      🛑 Carpet click rejected without an active OperationContext")
+                return False
+            if not active_context.can_send_input(stop_requested=self.stop_event.is_set()):
+                return False
+            # Carpet bombing is a bounded batch strategy.  Repeated
+            # coordinates are allowed, but every physical click consumes
+            # the one shared operation budget.
+            active_context.register_input()
             if use_cdp:
                 return self._execute_cdp_carpet_click(x, y)
             else:
@@ -4998,24 +5521,24 @@ class SprunkiGamePlayer:
         try:
             if self.batch_verification_active and self.session_websocket:
                 # Use batch WebSocket if available
-                self._send_batch_cdp_command({
+                down_response = self._send_batch_cdp_command({
                     "method": "Input.dispatchMouseEvent",
                     "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}
                 })
                 time.sleep(0.05)
-                self._send_batch_cdp_command({
+                up_response = self._send_batch_cdp_command({
                     "method": "Input.dispatchMouseEvent", 
                     "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}
                 })
-                return True
+                return bool(down_response and up_response)
             else:
                 # Fallback to individual WebSocket
                 ws_url = self._get_websocket_url()
                 if ws_url:
                     ws = websocket.create_connection(ws_url, timeout=3)
-                    self._simulate_click_via_cdp(ws, x, y)
+                    success = self._simulate_click_via_cdp(ws, x, y)
                     ws.close()
-                    return True
+                    return bool(success)
                 return False
                 
         except Exception as e:
@@ -5030,10 +5553,138 @@ class SprunkiGamePlayer:
             return False
 
     def smart_batch_return_all_slots_with_mode(self, use_cdp=False, context=None, obs_controller=None):
+        """Run one finite cleanup operation and at most one session recovery."""
+        current_obs_controller = obs_controller or self.obs_controller
+        operation_context = (
+            context if isinstance(context, OperationContext)
+            else getattr(self, "_active_operation_context", None)
+        )
+        owns_context = False
+        if operation_context is None:
+            operation_context = self._begin_operation(
+                "cleanup",
+                None,
+                max_input_attempts=120 + MAX_PREPARE_ACTIONS + 2,
+                deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 60.0,
+            )
+            owns_context = True
+        if operation_context is None:
+            return 0, 0, ["cleanup_operation_context_unavailable"]
+
+        dummy_slot = {"x": 999, "y": 515, "index": 3}
+        recovery_started = False
+        try:
+            strategy_result = self.execute_remix_return_strategy(
+                dummy_slot,
+                use_cdp,
+                operation_context=operation_context,
+            )
+            if strategy_result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+                OperationStatus.ALREADY_PLACED,
+            }:
+                result = self._operation_result(
+                    operation_context,
+                    strategy_result.status,
+                    "cleanup_verified",
+                    details={"strategy": strategy_result.as_dict()},
+                )
+                if owns_context:
+                    self._finish_operation(operation_context, result)
+                return 1, 1, []
+
+            if strategy_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+                print(
+                    f"   🛑 Cleanup strategy stopped with "
+                    f"{strategy_result.status.value}; no blind recovery input is sent"
+                )
+                if owns_context:
+                    self._finish_operation(operation_context, strategy_result)
+                return 0, 1, [
+                    f"cleanup_{strategy_result.status.value.lower()}:{strategy_result.message}"
+                ]
+
+            if self._session_recovery_count >= self._max_session_recoveries:
+                result = self._operation_result(
+                    operation_context,
+                    OperationStatus.FAILED,
+                    "session_recovery_circuit_breaker",
+                )
+                if owns_context:
+                    self._finish_operation(operation_context, result)
+                return 0, 1, [result.message]
+
+            if not operation_context.begin_recovery():
+                result = self._operation_result(
+                    operation_context,
+                    OperationStatus.FAILED,
+                    "cleanup_recovery_budget_exhausted",
+                )
+                if owns_context:
+                    self._finish_operation(operation_context, result)
+                return 0, 1, [result.message]
+            recovery_started = True
+            if current_obs_controller:
+                metadata = {"reason": "bounded_cleanup_failed"}
+                if isinstance(context, dict):
+                    metadata.update(context)
+                current_obs_controller.log_event_timestamp(
+                    "start_game_restart",
+                    "Restart triggered during bounded cleanup",
+                    metadata,
+                )
+
+            restart_result = self.restart_game_to_initial_state(
+                use_cdp,
+                operation_context=operation_context,
+            )
+            operation_context.end_recovery()
+            recovery_started = False
+            if current_obs_controller:
+                current_obs_controller.log_event_timestamp(
+                    "end_game_restart",
+                    "Restart after bounded cleanup completed",
+                    {"status": restart_result.status.value},
+                )
+            if restart_result.status == OperationStatus.RECOVERED:
+                result = self._operation_result(
+                    operation_context,
+                    OperationStatus.RECOVERED,
+                    "cleanup_recovered_not_verified",
+                    details={"recovery": restart_result.as_dict()},
+                )
+                if owns_context:
+                    self._finish_operation(operation_context, result)
+                return 0, 1, ["cleanup_recovered_not_verified"]
+
+            result = self._operation_result(
+                operation_context,
+                restart_result.status,
+                "cleanup_recovery_failed",
+                details={"recovery": restart_result.as_dict()},
+            )
+            if owns_context:
+                self._finish_operation(operation_context, result)
+            return 0, 1, [f"cleanup_recovery_{restart_result.status.value.lower()}"]
+        except Exception as error:
+            if recovery_started:
+                operation_context.end_recovery()
+            result = self._operation_result(
+                operation_context,
+                OperationStatus.FAILED,
+                f"cleanup_exception:{error}",
+            )
+            if owns_context:
+                self._finish_operation(operation_context, result)
+            return 0, 1, [result.message]
+
+    def _legacy_smart_batch_return_all_slots_with_mode(self, use_cdp=False, context=None, obs_controller=None):
         """
-        [FIXED] ULTRA SIMPLIFIED: Sequential carpet bombing for batch returns
-        Nhận obs_controller như một tham số để đảm bảo ghi log.
+        Run one bounded batch cleanup and at most one explicit recovery.
+        The tuple shape remains compatible with existing workflow callers.
         """
+        return 0, 0, ["legacy_batch_cleanup_disabled"]
         try:
             print(f"\nðŸ”„ ULTRA SIMPLIFIED BATCH RETURN")
             print("="*50)
@@ -5041,59 +5692,39 @@ class SprunkiGamePlayer:
             # Luôn sử dụng obs_controller được truyền vào nếu có
             current_obs_controller = obs_controller or self.obs_controller
 
-            # Always use simplified carpet bombing
             dummy_slot = {'x': 999, 'y': 515, 'index': 3}
             success = self.execute_remix_return_strategy(dummy_slot, use_cdp)
-            
             if success:
                 print("SEQUENTIAL CARPET BOMBING SUCCESS for remix cleanup")
                 return 1, 1, []
-            else:
-                print("SEQUENTIAL CARPET BOMBING FAILED for remix cleanup")
-                print("ATTEMPTING GAME RESTART FALLBACK for remix cleanup...")
-                
-                # Ghi timestamp trước khi restart
-                if current_obs_controller:
-                    restart_metadata = {"reason": "Remix cleanup failed"}
-                    if context:
-                        restart_metadata.update(context)
-                    current_obs_controller.log_event_timestamp("start_game_restart", "Restart triggered during remix cleanup", restart_metadata)
 
-                restart_success = self.restart_game_to_initial_state(use_cdp)
-                
-                if current_obs_controller:
-                    current_obs_controller.log_event_timestamp("end_game_restart", "Restart after remix cleanup completed")
+            print("SEQUENTIAL CARPET BOMBING FAILED for remix cleanup")
+            print("ATTEMPTING ONE GAME RESTART RECOVERY for remix cleanup...")
+            if current_obs_controller:
+                restart_metadata = {"reason": "Remix cleanup failed"}
+                if isinstance(context, dict):
+                    restart_metadata.update(context)
+                current_obs_controller.log_event_timestamp(
+                    "start_game_restart",
+                    "Restart triggered during remix cleanup",
+                    restart_metadata,
+                )
 
-                if restart_success:
-                    print("GAME RESTART FALLBACK SUCCESS for remix cleanup")
-                    return 1, 1, []
-                else:
-                    print("GAME RESTART WARNING for remix cleanup: Assuming success")
-                    return 1, 1, []
-            
+            restart_result = self.restart_game_to_initial_state(use_cdp)
+            if current_obs_controller:
+                current_obs_controller.log_event_timestamp(
+                    "end_game_restart",
+                    "Restart after remix cleanup completed",
+                    {"status": restart_result.status.value},
+                )
+            if restart_result.status == OperationStatus.RECOVERED:
+                print("GAME RESTART RECOVERY COMPLETED; target cleanup is not verified")
+                return 0, 1, ["cleanup_recovered_not_target_verified"]
+            return 0, 1, [f"cleanup_recovery_{restart_result.status.value.lower()}"]
+
         except Exception as e:
             print(f"Ultra simplified batch return error: {e}")
-            
-            # Luôn sử dụng obs_controller được truyền vào nếu có
-            current_obs_controller = obs_controller or self.obs_controller
-            if current_obs_controller:
-                current_obs_controller.log_event_timestamp("start_game_restart", f"Emergency restart due to exception: {e}", context)
-
-            try:
-                restart_success = self.restart_game_to_initial_state(use_cdp)
-                
-                if current_obs_controller:
-                    current_obs_controller.log_event_timestamp("end_game_restart", "Emergency restart completed")
-                
-                if restart_success:
-                    print("EMERGENCY RESTART SUCCESS for remix cleanup")
-                    return 1, 1, []
-                else:
-                    print("EMERGENCY RESTART WARNING: Assuming success")
-                    return 1, 1, []
-            except Exception as restart_error:
-                print(f"Emergency restart failed for remix: {restart_error}")
-                return 0, 1, [f"All methods failed including restart: {str(restart_error)}"]
+            return 0, 1, [f"batch_cleanup_exception:{str(e)}"]
 
     def _execute_carpet_bombing_strategy(self, icon_count, use_cdp=False):
         """
@@ -5198,50 +5829,20 @@ class SprunkiGamePlayer:
 
     def execute_smart_return_with_auto_recovery(self, target_slot, operation_context="unknown", max_retries=2, use_cdp=False):
         """
-        ðŸ›¡ï¸ PHASE 4: Smart return with automatic error recovery
+        Compatibility wrapper.  Recovery is now owned by corrected_return_icon;
+        this method must not wrap it in another retry loop.
         """
         try:
             print(f"\nðŸ›¡ï¸ SMART RETURN WITH AUTO-RECOVERY")
             print("="*60)
             print(f"   ðŸŽ¯ Context: {operation_context}")
-            print(f"   ðŸ”„ Max retries: {max_retries}")
-            
-            for attempt in range(1, max_retries + 1):
-                if self.stop_event.is_set():
-                    break
-                    
-                print(f"\nðŸ”„ ATTEMPT {attempt}/{max_retries}")
-                
-                # Try primary method
-                success = self.execute_smart_return_with_mode_detection(
-                    target_slot, operation_context, use_cdp)
-                
-                if success:
-                    print(f"âœ… SUCCESS on attempt {attempt}")
-                    return True
-                
-                # If failed and retries available, try recovery
-                if attempt < max_retries:
-                    print(f"âš ï¸ Attempt {attempt} failed, trying recovery...")
-                    
-                    # Recovery strategy based on mode
-                    recovery_success = self._attempt_smart_recovery(
-                        target_slot, operation_context, attempt, use_cdp
-                    )
-                    
-                    if recovery_success:
-                        print(f"âœ… RECOVERY SUCCESS on attempt {attempt}")
-                        return True
-                    else:
-                        print(f"âŒ Recovery failed, will retry...")
-                        time.sleep(1.0)  # Brief pause before retry
-            
-            print(f"âŒ ALL ATTEMPTS FAILED after {max_retries} tries")
-            return False
+            result = self.corrected_return_icon(target_slot, use_cdp)
+            print(f"   Return result: {result.status.value} ({result.message})")
+            return result
             
         except Exception as e:
             print(f"âŒ Error in smart return with recovery: {e}")
-            return False
+            return OperationResult(OperationStatus.FAILED, direction="return", message=str(e))
 
     def _attempt_smart_recovery(self, target_slot, context, attempt_num, use_cdp):
         """
@@ -5367,7 +5968,13 @@ class SprunkiGamePlayer:
             print(f"âŒ Error in enhanced round execution: {e}")
             return False
 
-    def execute_sequential_carpet_bombing_sets(self, sorted_slots, initial_count, use_cdp=False):
+    def execute_sequential_carpet_bombing_sets(
+        self,
+        sorted_slots,
+        initial_count,
+        use_cdp=False,
+        operation_context=None,
+    ):
         """
         [FIXED v2] Execute progressive carpet bombing sets.
         Returns False if a game restart was necessary.
@@ -5376,8 +5983,29 @@ class SprunkiGamePlayer:
             print(f"\nðŸŽ¯ SEQUENTIAL CARPET BOMBING SETS")
             print("="*60)
             
-            max_sets = 6  # Maximum bombing sets
+            context = operation_context or getattr(self, "_active_operation_context", None)
+            if context is None:
+                print("   🛑 Carpet bombing requires a coordinator-owned OperationContext")
+                return False
+            if getattr(self, "_active_operation_context", None) is not context:
+                print("   🛑 Carpet bombing context is not the active coordinator context")
+                return False
+            max_sets = min(
+                int(self.carpet_bombing_config.get("max_sets", 3)),
+                6,
+            )
             base_coords_per_slot = 2  # Start with 2 coordinates per slot
+            no_progress_sets = 0
+
+            if context is not None and context.baseline is None:
+                baseline = self._capture_stable_placement_snapshot(
+                    timeout_ms=1000,
+                    context=context,
+                )
+                if baseline is None:
+                    print("   🛑 Cannot establish a stable carpet baseline")
+                    return False
+                context.set_baseline(baseline)
             
             for set_num in range(1, max_sets + 1):
                 if self.stop_event.is_set():
@@ -5387,8 +6015,15 @@ class SprunkiGamePlayer:
                 print("-" * 40)
                 
                 # Check current count before set
-                current_count = self.get_characters_count() if self.characters_available else None
-                if self._is_board_count_clean(characters_count=current_count):
+                current_state = self._read_comprehensive_state(context)
+                current_count = self._get_board_progress_count(current_state)
+                if current_count is None:
+                    print("   ⚠️ Cannot read board progress; stopping carpet bombing")
+                    return False
+                if self._is_board_count_clean(
+                    characters_count=current_state.get("characters_count"),
+                    putted_count=current_state.get("putted_characters"),
+                ):
                     print(f"âœ… COMPLETE! All clear before set {set_num}")
                     return True
                 
@@ -5408,11 +6043,20 @@ class SprunkiGamePlayer:
                 print(f"   ðŸ“Š Generated {len(coordinate_set)} total coordinates")
                 
                 # Execute sequential clicking for this set
-                set_success = self.execute_sequential_clicking_set(coordinate_set, set_num, use_cdp)
+                set_success = self.execute_sequential_clicking_set(
+                    coordinate_set,
+                    set_num,
+                    use_cdp,
+                    operation_context=context,
+                )
                 
                 # Check progress after set
-                after_count = self.get_characters_count() if self.characters_available else None
-                progress = (current_count or 0) - (after_count or 0)
+                after_state = self._read_comprehensive_state(context)
+                after_count = self._get_board_progress_count(after_state)
+                if after_count is None:
+                    print("   ⚠️ Post-set board state is UNKNOWN; stopping without another set")
+                    return False
+                progress = current_count - after_count
                 
                 print(f"   ðŸ“Š Set {set_num} result: {current_count} â†’ {after_count} (cleared: {progress})")
                 
@@ -5420,17 +6064,26 @@ class SprunkiGamePlayer:
                     print(f"ðŸŽ‰ SUCCESS! All icons cleared after set {set_num}")
                     return True
                 elif progress > 0:
+                    no_progress_sets = 0
                     print(f"   ðŸ“ˆ Progress made, continuing to next set...")
                 else:
+                    no_progress_sets += 1
                     print(f"   âš ï¸ No progress in set {set_num}, but continuing...")
+                    if no_progress_sets >= 2:
+                        print("   🛑 Two consecutive no-progress sets; stopping carpet bombing")
+                        return False
                 
                 # Brief pause between sets
                 time.sleep(0.3)
             
             # Final check
-            final_count = self.get_characters_count() if self.characters_available else None
+            final_state = self._read_comprehensive_state(context)
+            final_count = self._get_board_progress_count(final_state)
             
-            if self._is_board_count_clean(characters_count=final_count):
+            if final_state and self._is_board_count_clean(
+                characters_count=final_state.get("characters_count"),
+                putted_count=final_state.get("putted_characters"),
+            ):
                 print(f"FINAL SUCCESS! All icons cleared")
                 return True
             else:
@@ -5533,12 +6186,22 @@ class SprunkiGamePlayer:
             print(f"âŒ Error generating slot coordinates: {e}")
             return [(center_x, center_y)]  # Fallback to center only
 
-    def execute_sequential_clicking_set(self, coordinate_set, set_num, use_cdp=False):
+    def execute_sequential_clicking_set(
+        self,
+        coordinate_set,
+        set_num,
+        use_cdp=False,
+        operation_context=None,
+    ):
         """
         ðŸ‘† NEW: Execute clicking in sequential order (slot 0 â†’ slot 1 â†’ slot 2...)
         """
         try:
             print(f"   ðŸ‘† Executing sequential clicking for set {set_num}")
+            context = operation_context or getattr(self, "_active_operation_context", None)
+            if context is None or getattr(self, "_active_operation_context", None) is not context:
+                print("      🛑 Sequential clicks require the active OperationContext")
+                return False
             
             # Group coordinates by slot for sequential processing
             slots_coords = {}
@@ -5564,6 +6227,11 @@ class SprunkiGamePlayer:
                 
                 # Execute all coordinates for this slot
                 for i, coord in enumerate(slot_coords):
+                    if not context.can_send_input(
+                        stop_requested=self.stop_event.is_set()
+                    ):
+                        print("      🛑 Carpet input budget exhausted")
+                        return False
                     click_success = self._execute_carpet_click(coord['x'], coord['y'], use_cdp)
                     
                     total_clicks += 1
@@ -5587,82 +6255,81 @@ class SprunkiGamePlayer:
 
     def get_comprehensive_slot_state(self):
         """
-        ðŸ“Š NEW: Get comprehensive slot state for verification - UPDATED for Characters Array
-        FIXED: None safety checks
+        ðŸ“Š Get one atomic placement snapshot for verification.
+
+        The batch path reads Characters, Putted characters, Polos and the
+        button-enable list in one Runtime.evaluate call.  The individual
+        fallback exposes the counters only; it never invents missing arrays.
         """
         try:
-            characters_count = self.get_characters_count()
-            
-            if characters_count is None:
-                print("âš ï¸ Could not get Characters count")
+            batch_state = self.get_placement_snapshot_batch()
+            if isinstance(batch_state, dict) and not batch_state.get("read_error"):
+                snapshot = PlacementSnapshot.from_mapping(batch_state)
+                if snapshot and snapshot.has_known_signal:
+                    state = {
+                        "characters_count": snapshot.characters_count,
+                        "putted_characters": snapshot.putted_count,
+                        "polos_array": list(snapshot.polos) if snapshot.polos is not None else None,
+                        "characters_array": list(snapshot.characters) if snapshot.characters is not None else None,
+                        "button_enable_list": (
+                            list(snapshot.button_enable_list)
+                            if snapshot.button_enable_list is not None else None
+                        ),
+                        "timestamp": snapshot.timestamp,
+                        "sequence": snapshot.sequence,
+                    }
+                    print(
+                        "ðŸ“Š Atomic placement state captured: "
+                        f"Characters={state['characters_count']}, "
+                        f"Putted={state['putted_characters']}, "
+                        f"Polos={'yes' if state['polos_array'] is not None else 'no'}, "
+                        f"Buttons={'yes' if state['button_enable_list'] is not None else 'no'}"
+                    )
+                    return state
+
+            characters_count, putted_count = self.get_dual_counts_individual()
+            if characters_count is None and putted_count is None:
+                print("âš ï¸ No placement signal available")
                 return None
-            
-            # Build comprehensive state using Characters Array
-            state = {
-                'characters_count': characters_count,
-                'timestamp': time.time()
+            return {
+                "characters_count": characters_count,
+                "putted_characters": putted_count,
+                "polos_array": None,
+                "characters_array": None,
+                "button_enable_list": None,
+                "timestamp": time.time(),
+                "sequence": 0,
             }
-            
-            print(f"ðŸ“Š Comprehensive state captured:")
-            print(f"   Characters count: {characters_count}")
-            
-            return state
-            
+
         except Exception as e:
             print(f"âŒ Error getting comprehensive state: {e}")
             return None
 
     def verify_slot_specific_return_enhanced(self, target_slot_index, state_before, state_after):
         """
-        ðŸ” ENHANCED: Slot-specific verification vá»›i Characters Array
-        FIXED: Chá»‰ sá»­ dá»¥ng Characters count thay vÃ¬ Polos vÃ  Enabled List
+        ðŸ” ENHANCED: Slot-specific verification using the shared verifier
         Returns: (success, reason, details)
         """
         try:
             if not state_before or not state_after:
                 return False, "missing_state_data", {}
-            
-            count_before = state_before.get('characters_count')
-            count_after = state_after.get('characters_count')
-            
-            print(f"\nðŸ” ENHANCED SLOT VERIFICATION for Slot {target_slot_index}")
-            print("-" * 50)
-            
-            # Characters count check
-            expected_count = count_before - 1 if count_before is not None else None
-            count_success = (count_after == expected_count)
-            
-            print(f"   ðŸ“Š Characters count: {count_before} â†’ {count_after} (expected: {expected_count}) = {'âœ…' if count_success else 'âŒ'}")
-            
-            # Decision logic: Chá»‰ dá»±a vÃ o Characters count
-            overall_success = count_success
-            
-            # Determine reason and build details
-            if overall_success:
-                reason = "verified_success"
-                details = {
-                    'characters_change': f"{count_before} â†’ {count_after}",
-                    'verification_method': 'characters_array_only',
-                    'target_slot': target_slot_index
-                }
-            else:
-                if not count_success:
-                    reason = "characters_count_mismatch"
-                else:
-                    reason = "unknown_failure"
-                
-                details = {
-                    'characters_change': f"{count_before} â†’ {count_after}",
-                    'expected_count': expected_count,
-                    'verification_method': 'characters_array_only',
-                    'target_slot': target_slot_index
-                }
-            
-            print(f"   ðŸŽ¯ FINAL RESULT: {'âœ… SUCCESS' if overall_success else 'âŒ FAILED'} ({reason})")
-            print(f"   ðŸ’¡ METHOD: Characters Array count verification only")
-            print("-" * 50)
-            
-            return overall_success, reason, details
+            evaluation = evaluate_transition(
+                state_before,
+                state_after,
+                "return",
+                target_slot_index,
+            )
+            details = dict(evaluation.details)
+            details.update({
+                "target_slot": target_slot_index,
+                "verification_method": ",".join(evaluation.evidence) or "none",
+                "aggregate_fallback": evaluation.aggregate_fallback,
+            })
+            return (
+                evaluation.status == OperationStatus.VERIFIED and evaluation.target_specific,
+                evaluation.message,
+                details,
+            )
             
         except Exception as e:
             print(f"âŒ Enhanced slot verification error: {e}")
@@ -5677,21 +6344,30 @@ class SprunkiGamePlayer:
             print(f"\nðŸ” PRE-FLIGHT CHECK: Slot {target_slot_index}")
             
             state = self.get_comprehensive_slot_state()
-            if not state:  # âœ… CHECK None state
-                return True, None, "cannot_verify_state"
-            
-            characters_count = state.get('characters_count', 0)  # âœ… SAFE get with default
-            
-            if characters_count == 0:
-                print(f"   âœ… No characters on slots (count: {characters_count}) - SKIPPING")
-                return False, state, "no_characters_placed"
-            else:
-                print(f"   ðŸŽ¯ Characters on slots (count: {characters_count}) - NEEDS RETURN")
-                return True, state, "characters_need_return"
+            if not state:
+                return False, None, "unknown"
+
+            polos = state.get("polos_array")
+            if isinstance(polos, list) and 0 <= target_slot_index < len(polos):
+                value = str(polos[target_slot_index])
+                if value == "0":
+                    return False, state, "already_empty"
+                if value == "1":
+                    return True, state, "target_occupied"
+                return False, state, "unknown_target_state"
+
+            characters_count = state.get("characters_count")
+            putted_count = state.get("putted_characters")
+            available_counts = [value for value in (characters_count, putted_count) if value is not None]
+            if not available_counts:
+                return False, state, "unknown"
+            if self._is_board_count_clean(characters_count, putted_count):
+                return False, state, "already_empty"
+            return True, state, "aggregate_fallback"
                 
         except Exception as e:
             print(f"âŒ Pre-flight check error: {e}")
-            return True, None, f"error: {e}"
+            return False, None, f"error: {e}"
 
     def get_active_slots_queue(self):
         """
@@ -5708,21 +6384,39 @@ class SprunkiGamePlayer:
                 print("âš ï¸ Cannot get slot state, using fallback")
                 return []
             
-            characters_count = state.get('characters_count', 0)
+            characters_count = state.get('characters_count')
+            putted_count = state.get('putted_characters')
+
+            polos = state.get("polos_array")
+            if isinstance(polos, list):
+                active_slots = [
+                    index for index, value in enumerate(polos)
+                    if str(value) == "1"
+                ]
+                if active_slots:
+                    print(f"   ðŸ“‹ Target-specific active slots: {active_slots}")
+                    return active_slots
+                if polos:
+                    return []
             
             print(f"   ðŸ“Š Characters count: {characters_count}")
             
-            if characters_count == 0:
+            if characters_count is None and putted_count is None:
+                print("âš ï¸ Active slot queue is UNKNOWN; no physical cleanup guesses allowed")
+                return []
+
+            if self._is_board_count_clean(characters_count, putted_count):
                 print(f"   âœ… No characters to return")
                 return []
             
             # For Characters Array system, we don't know specific slot indices
             # Just return a simple range based on typical slot usage
-            if characters_count > 0:
+            aggregate_count = characters_count if characters_count is not None else putted_count
+            if aggregate_count is not None and aggregate_count > 0:
                 # Return slots in reverse order (high â†’ low) for safety
-                active_slots_estimated = list(range(min(characters_count, 7) - 1, -1, -1))
+                active_slots_estimated = list(range(min(aggregate_count, 7) - 1, -1, -1))
                 print(f"   ðŸ“‹ Estimated active slots: {active_slots_estimated}")
-                print(f"   ðŸ’¡ Reason: Characters Array doesn't track specific slot indices")
+                print(f"   ðŸ’¡ Reason: aggregate fallback; target-specific state unavailable")
                 return active_slots_estimated
             
             return []
@@ -5788,68 +6482,47 @@ class SprunkiGamePlayer:
                 if not needs_return:
                     if reason == "already_empty":
                         print(f"âœ… Slot {slot_index} already empty - skipping")
-                        success_count += 1  # Count as success since goal achieved
+                        success_count += 1
                     else:
                         error_msg = f"Slot {slot_index}: Cannot verify if return needed ({reason})"
                         print(f"âš ï¸ {error_msg}")
                         error_log.append(error_msg)
-                    continue
-                
-                # Attempt return with error recovery
-                return_success = False
-                max_retries = 2
-                
-                for retry in range(max_retries):
-                    if self.stop_event.is_set():
+                        # An unknown target must not trigger a guessed click on
+                        # the next slot; stop this batch and let the caller
+                        # decide whether to recover the entire game.
                         break
-                    
-                    if retry > 0:
-                        print(f"ðŸ”„ RETRY {retry}/{max_retries-1} for Slot {slot_index}")
-                        recovery_attempts += 1
-                        time.sleep(1.0)  # Brief pause before retry
-                    
-                    try:
-                        return_success = self.corrected_return_icon(target_slot, use_cdp)
-                        
-                        if return_success:
-                            print(f"âœ… Slot {slot_index} returned successfully")
-                            success_count += 1
-                            break
-                        else:
-                            error_msg = f"Slot {slot_index}: Return failed on attempt {retry + 1}"
-                            print(f"âŒ {error_msg}")
-                            if retry == max_retries - 1:  # Last retry
-                                error_log.append(error_msg)
-                            
-                    except Exception as e:
-                        error_msg = f"Slot {slot_index}: Exception on attempt {retry + 1}: {str(e)}"
-                        print(f"ðŸ’¥ {error_msg}")
-                        if retry == max_retries - 1:  # Last retry
-                            error_log.append(error_msg)
-                
-                # Post-return validation and recovery
-                if return_success:
-                    # Verify the return actually worked
-                    time.sleep(0.5)
-                    post_return_state = self.get_comprehensive_slot_state()
-                    
-                    if post_return_state and post_return_state.get('polos_array'):
-                        post_polos = post_return_state['polos_array']
-                        if slot_index < len(post_polos) and post_polos[slot_index] == "1":
-                            # Return failed verification!
-                            print(f"ðŸš¨ POST-RETURN VERIFICATION FAILED: Slot {slot_index} still shows '1'")
-                            error_msg = f"Slot {slot_index}: Post-return verification failed"
-                            error_log.append(error_msg)
-                            success_count -= 1  # Adjust success count
-                            
-                            # Attempt emergency recovery
-                            print(f"ðŸš¨ EMERGENCY RECOVERY for Slot {slot_index}")
-                            emergency_success = self._emergency_slot_recovery(slot_index, target_slot, use_cdp)
-                            if emergency_success:
-                                print(f"âœ… Emergency recovery successful for Slot {slot_index}")
-                                success_count += 1
-                            else:
-                                print(f"ðŸ’¥ Emergency recovery failed for Slot {slot_index}")
+                    continue
+
+                try:
+                    result = self.corrected_return_icon(target_slot, use_cdp)
+                except Exception as error:
+                    result = OperationResult(
+                        OperationStatus.FAILED,
+                        direction="return",
+                        message=f"return_exception:{error}",
+                    )
+
+                if (
+                    result.status in {OperationStatus.ALREADY_EMPTY, OperationStatus.ALREADY_PLACED}
+                    or (result.status == OperationStatus.VERIFIED and result.target_verified)
+                ):
+                    print(f"âœ… Slot {slot_index} return status: {result.status.value}")
+                    success_count += 1
+                elif result.status == OperationStatus.RECOVERED:
+                    recovery_attempts += result.recovery_attempts or 1
+                    error_log.append(
+                        f"Slot {slot_index}: game recovered but target return was not verified"
+                    )
+                    # Recovery invalidates the old queue and baselines.
+                    break
+                else:
+                    error_log.append(
+                        f"Slot {slot_index}: {result.status.value} ({result.message})"
+                    )
+                    # One failed/unknown target is a circuit-breaker for this
+                    # batch; retrying the same target would repeat the full
+                    # precision/carpet/recovery chain.
+                    break
                 
                 # Brief pause between slots to allow game state stabilization
                 if slot_index != active_slot_indices[-1]:  # Not the last slot
@@ -5894,6 +6567,11 @@ class SprunkiGamePlayer:
             return 0, 0, [f"Critical error: {str(e)}"]
 
     def _emergency_slot_recovery(self, slot_index, target_slot, use_cdp):
+        return OperationResult(
+            OperationStatus.STOPPED,
+            direction="return",
+            message="legacy_emergency_recovery_disabled",
+        )
         """
         ðŸš¨ NEW: Emergency recovery for stuck slots
         Last resort methods when normal return fails
@@ -5987,13 +6665,21 @@ class SprunkiGamePlayer:
             if not state:
                 return False, ["Cannot get final state"], ["Manual verification needed"]
             
-            characters_count = state.get('characters_count', 0)
+            characters_count = state.get('characters_count')
+            putted_count = state.get('putted_characters')
+            if characters_count is None:
+                characters_count = putted_count
+            if characters_count is None:
+                return False, ["Final placement state is UNKNOWN"], ["Manual verification needed"]
             
             issues = []
             recommendations = []
             
             # Check: Characters count should be 0
-            if characters_count != 0:
+            if not self._is_board_count_clean(
+                characters_count=state.get("characters_count"),
+                putted_count=state.get("putted_characters"),
+            ):
                 issues.append(f"Characters count = {characters_count} (expected: 0)")
                 recommendations.append("Run additional return operations")
             else:
@@ -6179,14 +6865,23 @@ class SprunkiGamePlayer:
         Returns True if any click was executed successfully
         """
         successful_clicks = 0
+        active_context = getattr(self, "_active_operation_context", None)
+        if active_context is None:
+            print("🛑 Multi-method clicks require a coordinator-owned OperationContext")
+            return False
         
         print(f"ðŸŽ¯ Executing {method} method on {len(coordinates)} coordinates...")
         
         for i, (click_x, click_y) in enumerate(coordinates):
             if self.stop_event.is_set():
                 break
-                
+
             try:
+                if not active_context.can_send_input(stop_requested=self.stop_event.is_set()):
+                    print("   🛑 Operation input budget exhausted")
+                    break
+                active_context.register_input()
+
                 # Add small jitter for precision
                 jitter_x = click_x + random.randint(-2, 2)
                 jitter_y = click_y + random.randint(-2, 2)
@@ -6406,16 +7101,21 @@ class SprunkiGamePlayer:
         UPDATED: Always use CDP first for game operations with fallback
         """
         try:
-            # 🌐 ALWAYS TRY CDP FIRST for game operations  
-            print(f"🌐 Using CDP for game click at ({click_x}, {click_y})")
-            cdp_success = self._execute_cdp_single_click(click_x, click_y)
-            
-            if cdp_success:
-                print("✅ CDP click successful")
-                return True
-            else:
-                print("⚠️ CDP click failed, using PyAutoGUI fallback...")
-                return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
+            if getattr(self, "_active_operation_context", None) is None:
+                print("❌ Return click rejected without an active OperationContext")
+                return False
+            # 🌐 Choose the transport before sending input.  If a browser
+            # target exists but CDP becomes inconclusive, a second PyAutoGUI
+            # click could duplicate a partially delivered return gesture.
+            ws_url = self._get_websocket_url() if use_cdp else None
+            if ws_url:
+                print(f"🌐 Using CDP for game click at ({click_x}, {click_y})")
+                cdp_success = self._execute_cdp_single_click(click_x, click_y)
+                print("✅ CDP click successful" if cdp_success else "🛑 CDP click inconclusive; no duplicate fallback")
+                return bool(cdp_success)
+
+            print(f"🖱️ Using PyAutoGUI for game click at ({click_x}, {click_y})")
+            return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
                 
         except Exception as e:
             print(f"❌ Single return click execution error: {e}")
@@ -6423,6 +7123,7 @@ class SprunkiGamePlayer:
 
     def _execute_cdp_single_click(self, click_x, click_y):
         """ADDED: Execute single click using CDP"""
+        ws = None
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
@@ -6433,17 +7134,24 @@ class SprunkiGamePlayer:
             print(f"ðŸ–±ï¸ Executing CDP single click at ({click_x}, {click_y})")
             
             # Move and click
-            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": click_x, "y": click_y}})
+            move_response = self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": click_x, "y": click_y}})
+            if not move_response or "error" in move_response:
+                return False
             time.sleep(0.1)
-            self._simulate_click_via_cdp(ws, click_x, click_y)
-            
-            ws.close()
-            print("âœ… CDP single click completed")
-            return True
+            click_success = self._simulate_click_via_cdp(ws, click_x, click_y)
+
+            print("âœ… CDP single click completed" if click_success else "🛑 CDP single click inconclusive")
+            return bool(click_success)
             
         except Exception as e:
             print(f"âŒ CDP single click failed: {e}")
             return False
+        finally:
+            if ws:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
 
     def _execute_cdp_single_drag(
         self,
@@ -6464,14 +7172,9 @@ class SprunkiGamePlayer:
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
-                pyautogui.moveTo(int(start_x), int(start_y), duration=0.05)
-                pyautogui.dragTo(
-                    int(end_x),
-                    int(end_y),
-                    duration=duration_seconds,
-                    button="left",
-                )
-                return True
+                # Manual replay has no safe blind-input fallback: a previous
+                # action may already have changed the game state.
+                return False
 
             ws = websocket.create_connection(ws_url, timeout=30)
             self._send_cdp_command(ws, {"method": "Page.bringToFront"})
@@ -6560,6 +7263,11 @@ class SprunkiGamePlayer:
                     pass
 
     def attempt_icon_return(self, target_slot):
+        return OperationResult(
+            OperationStatus.STOPPED,
+            direction="return",
+            message="legacy_unverified_return_disabled",
+        )
         try:
             print("ðŸ”„ Attempting to return icon before retry...")
             
@@ -6593,42 +7301,70 @@ class SprunkiGamePlayer:
     # == ENHANCED DRAG & DROP WITH VERIFICATION ==
     # ================================================================
 
-    def _attempt_single_drag(self, start_coord, end_coord, before_state, is_first_icon, use_cdp, control_type_override):
-        """
-        [IMPLEMENTED - STABILITY V3 HELPER] Executes a single drag-and-drop-and-verify cycle.
-        This reuses the core execution logic from the old corrected_drag_and_drop.
-        """
+    def _attempt_single_drag(
+        self,
+        start_coord,
+        end_coord,
+        before_state,
+        is_first_icon,
+        use_cdp,
+        control_type_override,
+        operation_context=None,
+    ):
+        """Execute one drag and observe it without issuing a hidden retry."""
         start_x, start_y = start_coord
         end_x, end_y = end_coord
-        
-        # Lấy lại các biến cần thiết từ class instance
-        obs_controller = self.obs_controller
-        dual_verification_enabled = self.characters_available or self.putted_chars_available
-        
-        # --- 1. Thực thi kéo thả (Lấy từ logic cũ) ---
+        context = operation_context or getattr(self, "_active_operation_context", None)
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="place",
+                message="missing_coordinator_operation_context",
+            )
+
+        before_snapshot = PlacementSnapshot.from_mapping(before_state)
+        context.set_baseline(before_snapshot)
+        coordinates = (start_x, start_y, end_x, end_y)
+        if before_snapshot is None:
+            result = self._operation_result(context, OperationStatus.UNKNOWN, "missing_stable_baseline")
+            return result
+        if not context.can_send_input(coordinates, stop_requested=self.stop_event.is_set()):
+            status = OperationStatus.STOPPED if self.stop_event.is_set() else OperationStatus.FAILED
+            result = self._operation_result(context, status, "input_budget_or_deadline_exhausted")
+            return result
+
+        context.register_input(coordinates)
         drag_executed = False
+        cdp_attempted = False
         action_start_time = None
         drop_time = None
-        
+
         if use_cdp:
             ws_url = self._get_websocket_url()
             if ws_url:
+                cdp_attempted = True
                 try:
                     ws = websocket.create_connection(ws_url, timeout=30)
                     drag_executed, action_start_time, drop_time = self._execute_dynamic_drag_cdp(
                         ws, start_x, start_y, end_x, end_y,
                         control_type_override or self.game_control_type,
-                        is_first_icon
+                        is_first_icon,
                     )
                     ws.close()
-                except Exception:
+                except Exception as error:
+                    print(f"⚠️ CDP drag execution failed: {error}")
                     drag_executed = False
-            else: # Fallback nếu không có ws_url
-                 drag_executed = False
-        
-        if not use_cdp or not drag_executed:
+
+        # A CDP gesture may have reached the page before its response failed.
+        # Do not send a second physical gesture through PyAutoGUI in that
+        # ambiguous state; the verifier will classify the resulting state.
+        if cdp_attempted and not drag_executed:
+            result = self._operation_result(context, OperationStatus.UNKNOWN, "cdp_drag_inconclusive")
+            return result
+
+        if not use_cdp or not cdp_attempted:
             domain_adj = self.get_domain_adjustments()
-            timing_key = 'first_icon' if is_first_icon else 'normal_icon'
+            timing_key = "first_icon" if is_first_icon else "normal_icon"
             delays = self.DRAG_DELAYS[timing_key].copy()
             action_start_time = time.monotonic()
             drag_executed = self._execute_pyautogui_drag(
@@ -6638,73 +7374,61 @@ class SprunkiGamePlayer:
                 drop_time = time.monotonic()
 
         if not drag_executed:
-            return False, {"error": "Drag execution failed"}
+            result = self._operation_result(context, OperationStatus.FAILED, "drag_execution_failed")
+            return result
 
-        # --- 2. Xác thực (Lấy từ logic cũ) ---
-        if dual_verification_enabled:
-            verification_success = False
-            for verify_attempt in range(1, 4):
-                wait_time = 0.5 + (verify_attempt * 0.4)
-                time.sleep(wait_time)
-                
-                chars_after, putted_after = self.get_dual_counts()
-                after_state = {'characters': chars_after, 'putted': putted_after}
+        observed_result = observe_until_verified(
+            before_snapshot,
+            self._capture_placement_snapshot,
+            "place",
+            context.target_slot,
+            operation_id=context.operation_id,
+            timeout_ms=3000,
+            poll_ms=50,
+            stable_samples=2,
+            stop_requested=lambda: self.stop_event.is_set(),
+            context=context,
+        )
+        result = self._operation_result(
+            context,
+            observed_result.status,
+            observed_result.message,
+            evidence=observed_result.evidence,
+            details={
+                **(observed_result.details or {}),
+                "action_start_time": action_start_time,
+                "drop_time": drop_time,
+                "verified_at": time.monotonic() if observed_result.status == OperationStatus.VERIFIED else None,
+                "inputAttempt": context.input_attempts,
+            },
+            reads=context.read_count,
+        )
+        self.last_operation_result = result
+        self.move_mouse_to_safe_position()
+        return result
 
-                if self.verify_drag_success_dual(before_state['characters'], after_state['characters'], before_state['putted'], after_state['putted']):
-                    verification_success = True
-                    break
-            
-            if verification_success:
-                # Trả về các thông tin cần thiết để ghi timestamp
-                return True, {"action_start_time": action_start_time, "drop_time": drop_time, "verified_at": time.monotonic()}
-            else:
-                # Thất bại, thực hiện self-correction
-                print("      [ATTEMPT] Verification failed. Performing self-correction.")
-                # A failed drag commonly leaves the board unchanged. Clicking the
-                # slot in that case removes an older valid icon and creates a false
-                # success on the next retry. Only roll back when a counter proves
-                # that this attempt actually added an icon.
-                drag_may_have_landed = any((
-                    before_state.get('characters') is not None
-                    and after_state.get('characters') is not None
-                    and after_state['characters'] > before_state['characters'],
-                    before_state.get('putted') is not None
-                    and after_state.get('putted') is not None
-                    and after_state['putted'] > before_state['putted'],
-                ))
-                if drag_may_have_landed:
-                    print("      [SELF-CORRECTION] Counter increased; returning attempted icon.")
-                    self.attempt_icon_return({'x': end_x, 'y': end_y})
-                else:
-                    print("      [SELF-CORRECTION] Board unchanged; skipping destructive return click.")
-                self.move_mouse_to_safe_position()
-                return False, {"error": "Verification failed"}
-        else:
-            # Không có xác thực, giả định thành công
-            return True, {"action_start_time": action_start_time, "drop_time": drop_time, "verified_at": time.monotonic()}
-
-    def _find_optimal_drop_point(self, icon, target_slot, is_first_icon, use_cdp, control_type_override):
-        """
-        [ADAPTIVE SEARCH - MAX 5 ATTEMPTS] Finds the optimal drop point using a
-        weighted, adaptive 3-level search strategy to fail-fast on problematic icons.
-        """
+    def _find_optimal_drop_point(
+        self,
+        icon,
+        target_slot,
+        is_first_icon,
+        use_cdp,
+        control_type_override,
+        operation_context=None,
+    ):
+        """Search at most five unique coordinates with a fresh baseline each time."""
+        context = operation_context or getattr(self, "_active_operation_context", None)
         print(f"🔍 [ADAPTIVE SEARCH] Activated for slot {target_slot.get('index', 'N/A')}")
-        
-        # 1. Generate all possible coordinates (chỉ dùng khi cần)
-        icon_coords = self.generate_icon_coordinates(icon['x'], icon['y'])
-        slot_coords = self._generate_slot_scan_coords(target_slot)
 
-        # 2. Get the initial 'before' state ONCE to save performance
-        before_state = None
-        dual_verification_enabled = self.characters_available or self.putted_chars_available
-        if dual_verification_enabled:
-            chars_before, putted_before = self.get_dual_counts()
-            before_state = {'characters': chars_before, 'putted': putted_before}
-            print(f"   [SEARCH] Initial state: Chars={chars_before}, Putted={putted_before}")
-        
-        # Helper function to log attempts
-        def log_attempt(level, icon_idx, slot_idx):
-            print(f"      -> [Lvl {level}] Trying combo: Icon[{icon_idx}] -> Slot[{slot_idx}]")
+        icon_coords = self.generate_icon_coordinates(icon["x"], icon["y"])
+        slot_coords = self._generate_slot_scan_coords(target_slot)
+        candidates = [
+            (1, 0, 0),
+            (2, 0, 1),
+            (2, 0, 2),
+            (3, 1, 0),
+            (3, 3, 0),
+        ]
 
         def with_coordinate_evidence(details, icon_idx, slot_idx):
             evidence = dict(details or {})
@@ -6720,144 +7444,340 @@ class SprunkiGamePlayer:
             })
             return evidence
 
-        # === CẤP ĐỘ 1: "ĐIỂM VÀNG" (1 LẦN THỬ) ===
-        log_attempt(1, 0, 0)
-        success, details = self._attempt_single_drag(
-            icon_coords[0], slot_coords[0], before_state, is_first_icon, use_cdp, control_type_override
-        )
-        if success:
-            print("   [SEARCH] ✅ SUCCESS on Golden Path (Lvl 1).")
-            return {'icon_idx': 0, 'slot_idx': 0, 'details': with_coordinate_evidence(details, 0, 0)}
-        
-        # === CẤP ĐỘ 2: "QUÉT DỌC THÔNG MINH" (TỐI ĐA 2 LẦN THỬ) ===
-        print("   [SEARCH] Lvl 1 failed. Proceeding to Lvl 2: Vertical Scan.")
-        vertical_scan_indices = [1, 2] # Chỉ thử điểm Trên và Dưới
-        for slot_idx in vertical_scan_indices:
-            if self.stop_event.is_set(): return None
-            
-            log_attempt(2, 0, slot_idx)
-            success, details = self._attempt_single_drag(
-                icon_coords[0], slot_coords[slot_idx], before_state, is_first_icon, use_cdp, control_type_override
-            )
-            if success:
-                print(f"   [SEARCH] ✅ SUCCESS on Vertical Scan (Lvl 2) at Slot[{slot_idx}].")
-                return {'icon_idx': 0, 'slot_idx': slot_idx, 'details': with_coordinate_evidence(details, 0, slot_idx)}
-        
-        # === CẤP ĐỘ 3: "QUÉT CHÉO PHẢN ỨNG" (TỐI ĐA 2 LẦN THỬ) ===
-        print("   [SEARCH] Lvl 2 failed. Proceeding to Lvl 3: Pick-up Point Scan.")
-        cross_scan_indices = [1, 3] # Chỉ thử điểm lấy Trái và Trên
-        for icon_idx in cross_scan_indices:
-            if self.stop_event.is_set(): return None
+        for attempt_number, (level, icon_idx, slot_idx) in enumerate(candidates, start=1):
+            if self.stop_event.is_set():
+                return {"result": self._operation_result(context, OperationStatus.STOPPED, "stop_requested")}
+            if context is None or not context.can_send_input(stop_requested=self.stop_event.is_set()):
+                return {"result": self._operation_result(context, OperationStatus.FAILED, "drag_budget_exhausted")}
 
-            log_attempt(3, icon_idx, 0)
-            success, details = self._attempt_single_drag(
-                icon_coords[icon_idx], slot_coords[0], before_state, is_first_icon, use_cdp, control_type_override
+            candidate_coordinates = (
+                *icon_coords[icon_idx],
+                *slot_coords[slot_idx],
             )
-            if success:
-                print(f"   [SEARCH] ✅ SUCCESS on Pick-up Scan (Lvl 3) at Icon[{icon_idx}].")
-                return {'icon_idx': icon_idx, 'slot_idx': 0, 'details': with_coordinate_evidence(details, icon_idx, 0)}
+            if candidate_coordinates in context.attempted_coordinates:
+                print("      -> Candidate already consumed by this operation; skipping without input")
+                continue
 
-        # Nếu tất cả 5 lần thử đều thất bại
-        print("   [SEARCH] ❌ FAILED: All 5 adaptive attempts failed. Concluding drag as impossible.")
-        return None
+            before_state = self._capture_stable_placement_snapshot(
+                timeout_ms=1000,
+                context=context,
+            )
+            if before_state is None:
+                return {"result": self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable")}
+            context.set_baseline(before_state)
+
+            print(
+                f"      -> [Attempt {attempt_number}/5, Lvl {level}] "
+                f"Icon[{icon_idx}] -> Slot[{slot_idx}]"
+            )
+            result = self._attempt_single_drag(
+                icon_coords[icon_idx],
+                slot_coords[slot_idx],
+                before_state,
+                is_first_icon,
+                use_cdp,
+                control_type_override,
+                operation_context=context,
+            )
+            result.details = with_coordinate_evidence(result.details, icon_idx, slot_idx)
+
+            if result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_PLACED}:
+                return {
+                    "result": result,
+                    "icon_idx": icon_idx,
+                    "slot_idx": slot_idx,
+                    "details": result.details,
+                }
+
+            # UNKNOWN means that the previous gesture may have landed.  Never
+            # send another physical gesture until a new operation reconciles it.
+            if result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+                return {"result": result}
+
+            current_state = self._capture_stable_placement_snapshot(
+                timeout_ms=500,
+                context=context,
+            )
+            if current_state is None:
+                return {"result": self._operation_result(context, OperationStatus.UNKNOWN, "post_attempt_state_unavailable")}
+            precondition = classify_precondition(current_state, "place", context.target_slot)
+            if precondition == OperationStatus.ALREADY_PLACED:
+                result = self._operation_result(
+                    context,
+                    OperationStatus.ALREADY_PLACED,
+                    "target_is_already_occupied",
+                    details={"aggregateFallback": True},
+                )
+                return {"result": result}
+
+            # A failed gesture may still have changed another slot or an
+            # aggregate signal.  In that case the target's original
+            # precondition is no longer proven, so a new coordinate would be
+            # a blind second gesture.  Continue searching only when this
+            # candidate demonstrably left the complete semantic state alone.
+            if current_state.semantic_key() != before_state.semantic_key():
+                return {
+                    "result": self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN,
+                        "state_changed_after_failed_drag_no_retry",
+                    )
+                }
+
+            context.note_failure(
+                f"place:{context.target_slot}:no_transition",
+                progressed=False,
+            )
+            if (
+                context.no_progress_cycles >= 2
+                or context.failure_counts.get(f"place:{context.target_slot}:no_transition", 0) >= 2
+            ):
+                return {
+                    "result": self._operation_result(
+                        context,
+                        OperationStatus.FAILED,
+                        "no_progress_after_two_attempts",
+                    )
+                }
+
+        return {
+            "result": self._operation_result(
+                context,
+                OperationStatus.FAILED,
+                "all_five_drag_attempts_exhausted",
+            )
+        }
 
     def corrected_drag_and_drop(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
+        """Public coordinator entry point with a terminal exception guard."""
+        context_before = getattr(self, "_active_operation_context", None)
+        try:
+            return self._corrected_drag_and_drop_bounded(
+                icon,
+                target_slot,
+                is_first_icon,
+                use_cdp,
+                control_type_override,
+            )
+        except Exception as error:
+            context_after = getattr(self, "_active_operation_context", None)
+            if context_after is not None and context_after is not context_before and not context_after.closed:
+                return self._finish_operation(
+                    context_after,
+                    self._operation_result(
+                        context_after,
+                        OperationStatus.FAILED,
+                        f"drag_coordinator_exception:{error}",
+                    ),
+                )
+            return OperationResult(
+                OperationStatus.FAILED,
+                direction="place",
+                message=f"drag_coordinator_exception:{error}",
+            )
+
+    def _corrected_drag_and_drop_bounded(self, icon, target_slot, is_first_icon=False, use_cdp=True, control_type_override=None):
         """
-        [RESTRUCTURED - STABILITY V3] Smart drag-and-drop with a dynamic learning
-        and caching strategy for optimal drop points.
+        Smart drag-and-drop with one finite budget and read-only verification.
         """
-        # --- PHASE 1: SETUP & PRESERVATION OF EXISTING LOGIC ---
-        # (Bảo toàn các tính năng #1, #2, #3 từ phân tích)
         print(f"\n🎯 [SMART DRAG] START for icon {icon.get('index', 'N/A')} -> slot {target_slot.get('index', 'N/A')}")
-        
-        # Xác định control type
+
+        target_slot_index = target_slot.get("index", -1)
+        context = self._begin_operation(
+            "place",
+            target_slot_index,
+            max_input_attempts=5,
+            deadline_seconds=30.0,
+        )
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="place",
+                message="another_operation_is_active",
+            )
+
         if control_type_override:
             active_control_type = control_type_override
         elif self.config and isinstance(self.config, dict):
             active_control_type = self.config.get('gameSettings', {}).get('gameControlType', 'click_drag')
         else:
-            active_control_type = 'click_drag' # Fallback an toàn
-            
+            active_control_type = 'click_drag'
+
         print(f"   - Control Type: '{active_control_type}'")
 
         if is_first_icon:
             print("   - First Icon: YES -> Ensuring focus and applying extended waits.")
             self.ensure_game_focus()
 
-        target_slot_index = target_slot.get('index', -1)
-        if target_slot_index == -1: return False # Failsafe
+        if target_slot_index == -1:
+            return self._finish_operation(
+                context,
+                self._operation_result(context, OperationStatus.FAILED, "invalid_target_slot"),
+            )
 
-        # --- PHASE 2: CACHE LOOKUP LOGIC (Tính năng mới) ---
+        baseline = self._capture_stable_placement_snapshot(
+            timeout_ms=1000,
+            context=context,
+        )
+        if baseline is None:
+            return self._finish_operation(
+                context,
+                self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable"),
+            )
+        context.set_baseline(baseline)
+
+        precondition = classify_precondition(baseline, "place", target_slot_index)
+        if precondition == OperationStatus.ALREADY_PLACED:
+            return self._finish_operation(
+                context,
+                self._operation_result(context, OperationStatus.ALREADY_PLACED, "target_already_occupied"),
+            )
+
         learned_offset = self.slot_offset_lookup.get(target_slot_index)
-        
+
         if learned_offset:
             print(f"   [CACHE HIT] Found learned offset for slot {target_slot_index}: icon_idx={learned_offset['icon_idx']}, slot_idx={learned_offset['slot_idx']}")
-            
-            # Tính toán tọa độ từ offset đã học
             icon_coords = self.generate_icon_coordinates(icon['x'], icon['y'])
             slot_coords = self._generate_slot_scan_coords(target_slot)
-            
-            start_coord = icon_coords[learned_offset['icon_idx']]
-            end_coord = slot_coords[learned_offset['slot_idx']]
-            
-            # Lấy trạng thái trước khi thử
-            before_state = None
-            if self.characters_available or self.putted_chars_available:
-                chars_before, putted_before = self.get_dual_counts()
-                before_state = {'characters': chars_before, 'putted': putted_before}
 
-            success, details = self._attempt_single_drag(
-                start_coord, end_coord, before_state, is_first_icon, use_cdp, active_control_type
-            )
-            
-            if success:
-                print(f"   [CACHE HIT] ✅ SUCCESS using learned offset.")
-                # (Bảo toàn tính năng #6, #10)
-                details = {
-                    **(details or {}),
-                    "pickupIconOffsetIdx": learned_offset['icon_idx'],
-                    "pickupX": start_coord[0],
-                    "pickupY": start_coord[1],
-                    "slotOffsetIdx": learned_offset['slot_idx'],
-                    "dropX": end_coord[0],
-                    "dropY": end_coord[1],
-                }
-                self._handle_successful_drag(icon, target_slot, details, 1, "cache_hit")
-                return True
+            try:
+                start_coord = icon_coords[learned_offset['icon_idx']]
+                end_coord = slot_coords[learned_offset['slot_idx']]
+            except (IndexError, KeyError, TypeError):
+                start_coord = end_coord = None
+
+            if start_coord is not None and end_coord is not None:
+                cache_result = self._attempt_single_drag(
+                    start_coord,
+                    end_coord,
+                    baseline,
+                    is_first_icon,
+                    use_cdp,
+                    active_control_type,
+                    operation_context=context,
+                )
             else:
-                print(f"   [CACHE INVALIDATION] ⚠️ Learned offset for slot {target_slot_index} failed. Re-searching...")
-                del self.slot_offset_lookup[target_slot_index]
-                # Chuyển xuống logic Search Mode
+                cache_result = self._operation_result(context, OperationStatus.FAILED, "invalid_cached_offset")
 
-        # --- PHASE 3: SEARCH MODE (Cache Miss or Invalidation) ---
+            if cache_result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_PLACED}:
+                print(f"   [CACHE HIT] ✅ SUCCESS using learned offset.")
+                details = {
+                    **(cache_result.details or {}),
+                    "pickupIconOffsetIdx": learned_offset['icon_idx'],
+                    "pickupX": start_coord[0] if start_coord else None,
+                    "pickupY": start_coord[1] if start_coord else None,
+                    "slotOffsetIdx": learned_offset['slot_idx'],
+                    "dropX": end_coord[0] if end_coord else None,
+                    "dropY": end_coord[1] if end_coord else None,
+                }
+                cache_result.details = details
+                if cache_result.status == OperationStatus.VERIFIED and cache_result.target_verified:
+                    self._handle_successful_drag(icon, target_slot, details, context.input_attempts, "cache_hit")
+                elif cache_result.status == OperationStatus.VERIFIED:
+                    self._record_aggregate_drag_progress(icon, target_slot, details, context.input_attempts, "cache_hit_aggregate")
+                return self._finish_operation(context, cache_result)
+
+            if cache_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+                print(f"   [CACHE STOP] {cache_result.message}; no blind coordinate retry")
+                return self._finish_operation(context, cache_result)
+
+            # The cached gesture is part of this same operation.  Before
+            # spending the remaining drag budget on another coordinate, take
+            # a fresh stable read and prove that the failed gesture left the
+            # semantic board state unchanged.
+            cache_state_after = self._capture_stable_placement_snapshot(
+                timeout_ms=500,
+                context=context,
+            )
+            if cache_state_after is None:
+                return self._finish_operation(
+                    context,
+                    self._operation_result(context, OperationStatus.UNKNOWN, "cached_drag_post_state_unknown"),
+                )
+            if classify_precondition(cache_state_after, "place", target_slot_index) == OperationStatus.ALREADY_PLACED:
+                cache_result = self._operation_result(
+                    context,
+                    OperationStatus.ALREADY_PLACED,
+                    "target_occupied_after_cached_drag",
+                )
+                return self._finish_operation(context, cache_result)
+            if cache_state_after.semantic_key() != baseline.semantic_key():
+                return self._finish_operation(
+                    context,
+                    self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN,
+                        "cached_drag_changed_state_no_retry",
+                    ),
+                )
+
+            print(f"   [CACHE INVALIDATION] ⚠️ Learned offset failed with known no-change state; searching remaining budget")
+            self.slot_offset_lookup.pop(target_slot_index, None)
+
         print(f"   [CACHE MISS] No learned offset for slot {target_slot_index}. Activating Search Mode...")
-        
         search_result = self._find_optimal_drop_point(
-            icon, target_slot, is_first_icon, use_cdp, active_control_type
+            icon,
+            target_slot,
+            is_first_icon,
+            use_cdp,
+            active_control_type,
+            operation_context=context,
         )
-        
-        if search_result:
-            # Lưu offset đã học được
-            self.slot_offset_lookup[target_slot_index] = {
-                'icon_idx': search_result['icon_idx'],
-                'slot_idx': search_result['slot_idx']
-            }
-            print(f"   [LEARNED] Saved new optimal offset for slot {target_slot_index}.")
-            
-            # (Bảo toàn tính năng #6, #10)
-            self._handle_successful_drag(icon, target_slot, search_result.get('details', {}), 99, "search_mode") # 99 attempts as placeholder
-            return True
-        else:
-            print(f"   [DRAG FAILED] ❌ All attempts failed for icon {icon.get('index', 'N/A')}.")
-            self.drag_stats.record_attempt(False, retry_count=25, verification_used=True) # Max attempts
-            return False
+
+        result = (search_result or {}).get("result") if isinstance(search_result, dict) else None
+        if result is None:
+            result = self._operation_result(context, OperationStatus.UNKNOWN, "search_did_not_return_result")
+
+        if result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_PLACED}:
+            details = (search_result or {}).get("details") or result.details or {}
+            result.details = details
+            if result.status == OperationStatus.VERIFIED and result.target_verified and not details.get("aggregateFallback"):
+                self.slot_offset_lookup[target_slot_index] = {
+                    'icon_idx': search_result['icon_idx'],
+                    'slot_idx': search_result['slot_idx'],
+                }
+                print(f"   [LEARNED] Saved target-specific offset for slot {target_slot_index}.")
+                self._handle_successful_drag(
+                    icon,
+                    target_slot,
+                    details,
+                    context.input_attempts,
+                    "search_mode",
+                )
+            elif result.status == OperationStatus.VERIFIED:
+                print("   [LEARNED] Aggregate fallback verified; coordinate cache unchanged.")
+                self._record_aggregate_drag_progress(
+                    icon,
+                    target_slot,
+                    details,
+                    context.input_attempts,
+                    "search_mode_aggregate_fallback",
+                )
+            elif result.status == OperationStatus.ALREADY_PLACED:
+                self._handle_successful_drag(
+                    icon,
+                    target_slot,
+                    details,
+                    context.input_attempts,
+                    "already_placed",
+                )
+            return self._finish_operation(context, result)
+
+        print(f"   [DRAG STOP] {result.status.value}: {result.message}")
+        self.drag_stats.record_attempt(
+            False,
+            retry_count=context.input_attempts,
+            verification_used=True,
+        )
+        return self._finish_operation(context, result)
 
     def _handle_successful_drag(self, icon, target_slot, details, attempts, method):
         """
         [NEW - HELPER] Centralizes actions after a successful drag to avoid code duplication.
         """
+        details = dict(details or {})
         self.last_successful_drag_details = {
-            **(details or {}),
+            **details,
             "icon_index": icon.get('index', -1),
             "slot_index": target_slot.get('index', -1),
             "method": method,
@@ -6897,6 +7817,23 @@ class SprunkiGamePlayer:
         # Bảo toàn tính năng #10: Ghi lại Thống kê
         self.drag_stats.record_attempt(True, retry_count=attempts, verification_used=True)
         print(f"   [SUCCESS INFO] Method: {method}, Attempts: {attempts}")
+
+    def _record_aggregate_drag_progress(self, icon, target_slot, details, attempts, method):
+        """Record aggregate progress without claiming the requested target moved."""
+        details = dict(details or {})
+        self.last_successful_drag_details = {
+            **details,
+            "icon_index": icon.get("index", -1),
+            "slot_index": target_slot.get("index", -1),
+            "method": method,
+            "attempt_number": attempts,
+            "target_verified": False,
+        }
+        self.drag_stats.record_attempt(True, retry_count=attempts, verification_used=True)
+        print(
+            "   [AGGREGATE PROGRESS] Board state changed, but the requested "
+            "slot was not proven; coordinate cache unchanged."
+        )
 
     def _execute_single_drag_attempt(self, start_x, start_y, target_slot, is_first_icon, use_cdp, domain_adj):
         """
@@ -7096,6 +8033,18 @@ class SprunkiGamePlayer:
             f"Putted={self.empty_board_baseline['putted']}"
         )
 
+    def _get_board_progress_count(self, state):
+        """Return a known aggregate count, or None when state is unknown."""
+        if not isinstance(state, dict):
+            return None
+        characters_count = state.get("characters_count")
+        putted_count = state.get("putted_characters")
+        if characters_count is not None:
+            return characters_count
+        if putted_count is not None:
+            return putted_count
+        return None
+
     def _is_board_count_clean(self, characters_count=None, putted_count=None):
         """Return True when available counters are at their learned empty level."""
         checks = []
@@ -7126,7 +8075,8 @@ class SprunkiGamePlayer:
             f"{close_button.get('targetName')}/{close_button.get('currentCostumeName')} "
             f"@ ({close_button.get('x')}, {close_button.get('y')})"
         )
-        self._simulate_click_via_cdp(ws, int(close_button['x']), int(close_button['y']))
+        if not self._simulate_click_via_cdp(ws, int(close_button['x']), int(close_button['y'])):
+            return False
         time.sleep(0.8)
         return True
 
@@ -7142,7 +8092,13 @@ class SprunkiGamePlayer:
             print(f"   Trial {i}/{len(buttons)}: {name}/{costume} @ ({x}, {y})")
 
             before_state = self._evaluate_entry_state_via_ws(ws)
-            self._simulate_click_via_cdp(ws, x, y)
+            if not self._simulate_click_via_cdp(ws, x, y):
+                return {
+                    "selected": None,
+                    "tested": tested,
+                    "success": False,
+                    "reason": "intro_input_inconclusive_or_budget_exhausted",
+                }
             time.sleep(1.0)
             after_state = self._evaluate_entry_state_via_ws(ws)
             print(f"      After click: {self._summarize_entry_state(after_state)}")
@@ -7184,6 +8140,7 @@ class SprunkiGamePlayer:
         return {"selected": None, "tested": tested, "success": False, "reason": "no_playable_candidate"}
 
     def _resolve_manual_profile(self):
+        self._manual_profile_resolution_error = None
         try:
             settings = (self.config or {}).get("settings", {}) or {}
             manual_profile_path = settings.get("manualProfilePath")
@@ -7196,6 +8153,8 @@ class SprunkiGamePlayer:
                     return profile_data, resolved_path
                 if error_message:
                     print(f"⚠️ Manual profile at {manual_profile_path} is invalid: {error_message}")
+                    self._manual_profile_resolution_error = str(error_message)
+                    return None, None
 
             if current_url:
                 profile_data, resolved_path = find_profile(current_url)
@@ -7204,8 +8163,10 @@ class SprunkiGamePlayer:
                     return profile_data, resolved_path
                 if profile_data and error_message:
                     print(f"⚠️ Manual profile lookup found invalid data for {current_url}: {error_message}")
+                    self._manual_profile_resolution_error = str(error_message)
         except Exception as e:
             print(f"⚠️ Could not resolve manual profile: {e}")
+            self._manual_profile_resolution_error = str(e)
 
         return None, None
 
@@ -7308,22 +8269,75 @@ class SprunkiGamePlayer:
                 except Exception:
                     pass
 
-    def replay_manual_prepare_actions(self, actions, profile_or_timing=None):
+    def replay_manual_prepare_actions(
+        self,
+        actions,
+        profile_or_timing=None,
+        operation_context=None,
+    ):
+        """Replay one validated manual timeline without a blind fallback.
+
+        A replay is a compound recovery/prepare operation: if any action is
+        inconclusive, it stops at that action and the caller must decide
+        whether to start a fresh recovery.  It never continues on a partially
+        changed game state.
+        """
+        actions = list(actions or [])
         if not actions:
             print("⚠️ Manual profile has no prepare actions to replay.")
             return False
 
+        is_valid, validation_reason = validate_prepare_timeline(actions, profile_or_timing)
+        if not is_valid:
+            print(f"🛑 Manual profile replay rejected before input: {validation_reason}")
+            return False
+
+        context = operation_context or getattr(self, "_active_operation_context", None)
+        owns_context = False
+        if context is None:
+            context = self._begin_operation(
+                "prepare",
+                None,
+                max_input_attempts=len(actions),
+                deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 5.0,
+            )
+            owns_context = True
+        if context is None:
+            print("🛑 Manual profile replay rejected: another operation is active")
+            return False
+
+        def finish(success, message):
+            result = self._operation_result(
+                context,
+                OperationStatus.VERIFIED if success else OperationStatus.FAILED,
+                message,
+            )
+            if owns_context:
+                self._finish_operation(context, result)
+            return bool(result)
+
         print(f"🎯 Replaying {len(actions)} manual prepare actions...")
+
         def execute_action(index, action):
             try:
+                # Recovery replay is allowed to send its own bounded inputs,
+                # but no caller can silently send an extra input after this
+                # callback returns False.
+                if not context.can_send_input(
+                    stop_requested=self.stop_event.is_set(),
+                    allow_recovery_input=True,
+                ):
+                    return False
+                if not context.register_input():
+                    return False
+
                 action_type = (action.get("type") or "").lower()
                 if action_type == "click":
                     x = int(action.get("x"))
                     y = int(action.get("y"))
                     print(f"   {index}. Click @ ({x}, {y})")
-                    if not self._execute_cdp_single_click(x, y):
-                        return False
-                elif action_type == "drag":
+                    return bool(self._execute_cdp_single_click(x, y))
+                if action_type == "drag":
                     start_x = int(action.get("startX"))
                     start_y = int(action.get("startY"))
                     end_x = int(action.get("endX"))
@@ -7333,50 +8347,66 @@ class SprunkiGamePlayer:
                         f"   {index}. Drag @ ({start_x}, {start_y}) -> "
                         f"({end_x}, {end_y}) ({drag_duration_ms} ms)"
                     )
-                    if not self._execute_cdp_single_drag(
+                    return bool(self._execute_cdp_single_drag(
                         start_x,
                         start_y,
                         end_x,
                         end_y,
                         drag_duration_ms,
-                    ):
-                        return False
-                elif action_type == "key":
+                    ))
+                if action_type == "key":
                     key_name = action.get("key")
-                    if not key_name:
-                        return True
                     print(f"   {index}. Key {key_name} (CDP native input)")
                     if not self._execute_cdp_key_press(key_name):
-                        print(f"   ⚠️ CDP key input unavailable; falling back to PyAutoGUI: {key_name}")
-                        pyautogui.press(str(key_name).lower())
-                else:
-                    print(f"   {index}. Skipping unsupported manual action: {action}")
-                return True
+                        print(
+                            f"   🛑 CDP key input was inconclusive; refusing a duplicate "
+                            f"PyAutoGUI key: {key_name}"
+                        )
+                        return False
+                    return True
+                return False
             except Exception as action_error:
                 print(f"⚠️ Manual prepare action {index} failed: {action_error}")
                 return False
 
-        replay_success = replay_prepare_timeline(
-            actions,
-            profile_or_timing,
-            execute_action,
-        )
-        if not replay_success:
-            return False
+        def bounded_sleep(seconds):
+            """Sleep in short slices so stop/deadline can terminate replay."""
+            remaining = max(float(seconds or 0.0), 0.0)
+            while remaining > 0:
+                if self.stop_event.is_set() or context.expired():
+                    raise TimeoutError("manual_prepare_replay_deadline_or_stop")
+                slice_seconds = min(1.0, remaining, max(context.deadline_at - time.monotonic(), 0.0))
+                if slice_seconds <= 0:
+                    raise TimeoutError("manual_prepare_replay_deadline")
+                time.sleep(slice_seconds)
+                remaining -= slice_seconds
 
-        end_delay_ms = get_prepare_end_delay_ms(profile_or_timing)
-        if end_delay_ms > 0:
-            print(f"   ⏳ Final PREPARE wait replayed: {end_delay_ms} ms")
-        print("✅ Manual prepare actions replay completed")
-        return True
+        try:
+            replay_success = replay_prepare_timeline(
+                actions,
+                profile_or_timing,
+                execute_action,
+                sleep_fn=bounded_sleep,
+            )
+            if not replay_success:
+                return finish(False, "manual_prepare_replay_failed")
 
-    def intro_skip_via_cdp(self):
+            end_delay_ms = get_prepare_end_delay_ms(profile_or_timing)
+            if end_delay_ms > 0:
+                print(f"   ⏳ Final PREPARE wait replayed: {end_delay_ms} ms")
+            print("✅ Manual prepare actions replay completed")
+            return finish(True, "manual_prepare_replay_verified")
+        except Exception as replay_error:
+            print(f"🛑 Manual profile replay stopped: {replay_error}")
+            return finish(False, f"manual_prepare_replay_exception:{replay_error}")
+
+    def intro_skip_via_cdp(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using CDP with smart detection + blind clicks"""
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
                 print("âš ï¸ Could not get WebSocket URL for enhanced intro skipping, using pyautogui fallback")
-                return self.intro_skip_via_pyautogui()
+                return self.intro_skip_via_pyautogui(operation_context=operation_context)
             
             ws = websocket.create_connection(ws_url, timeout=30)
             
@@ -7404,7 +8434,10 @@ class SprunkiGamePlayer:
                     if response and 'result' in response:
                         result = response.get('result', {}).get('result', {}).get('value')
                         if result and result.get('found'):
-                            buttons = result.get('buttons', [])
+                            # Intro discovery is a bounded recovery helper;
+                            # do not let a malformed runtime expose an
+                            # unbounded candidate list.
+                            buttons = list(result.get('buttons', []) or [])[:10]
                     
                     if not buttons:
                         print(f"   \u2139\ufe0f No action buttons found in round {scan_round}")
@@ -7446,8 +8479,12 @@ class SprunkiGamePlayer:
             # === PHASE 1.5: PRESS ANY KEY (NEW) ===
             print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
             try:
+                if not self._register_scoped_physical_input():
+                    return False
                 pyautogui.press('space')
                 time.sleep(0.5)
+                if not self._register_scoped_physical_input():
+                    return False
                 pyautogui.press('space')
                 print("   ✅ 'space' key pressed twice successfully.")
             except Exception as key_e:
@@ -7464,7 +8501,11 @@ class SprunkiGamePlayer:
             # Some mods put Gallery/menu controls at the screen center.
             blind_clicks_performed = 0
             if smart_clicks_performed == 0 and not candidate_trials_attempted:
-                for i in range(self.intro_skip_clicks):
+                try:
+                    intro_click_limit = min(max(int(self.intro_skip_clicks), 0), 10)
+                except (TypeError, ValueError, OverflowError):
+                    intro_click_limit = 0
+                for i in range(intro_click_limit):
                     self._simulate_click_via_cdp(ws, 960, 540)
                     blind_clicks_performed += 1
                     time.sleep(0.5)
@@ -7490,12 +8531,16 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print(f"âŒ CDP intro skipping failed: {e}, falling back to pyautogui")
-            return self.intro_skip_via_pyautogui()
+            return self.intro_skip_via_pyautogui(operation_context=operation_context)
 
-    def intro_skip_via_pyautogui(self):
+    def intro_skip_via_pyautogui(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using PyAutoGUI with smart detection + blind drags"""
         try:
-            print(f"ðŸ” ENHANCED PYAUTOGUI SKIP INTRO: Multi-target detection + {self.intro_skip_clicks} wake-up drags...")
+            try:
+                intro_drag_limit = min(max(int(self.intro_skip_clicks), 0), 10)
+            except (TypeError, ValueError, OverflowError):
+                intro_drag_limit = 0
+            print(f"ðŸ” ENHANCED PYAUTOGUI SKIP INTRO: Multi-target detection + {intro_drag_limit} wake-up drags...")
             
             # Phase 1: Try smart detection via WebSocket if available
             print("ðŸ“ Phase 1: Attempting smart detection via WebSocket...")
@@ -7517,7 +8562,7 @@ class SprunkiGamePlayer:
                         skip_result = response.get('result', {}).get('result', {}).get('value')
                         
                         if skip_result and skip_result.get('found'):
-                            all_buttons = skip_result.get('buttons', [])
+                            all_buttons = list(skip_result.get('buttons', []) or [])[:10]
                             button_count = skip_result.get('count', 0)
                             
                             print(f"âœ… Found {button_count} Skip Intro buttons via WebSocket")
@@ -7531,6 +8576,8 @@ class SprunkiGamePlayer:
                                 print(f"ðŸŽ¯ PyAutoGUI clicking button {button_num}/{button_count}: ({x}, {y}) - {visible_status}")
                                 
                                 # Click this specific button via PyAutoGUI
+                                if not self._register_scoped_physical_input():
+                                    return False
                                 pyautogui.moveTo(x, y, duration=0.2)
                                 pyautogui.click(button='left')
                                 time.sleep(0.8)  # Wait between clicks
@@ -7551,8 +8598,12 @@ class SprunkiGamePlayer:
             # === PHASE 1.5: PRESS ANY KEY (NEW) ===
             print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
             try:
+                if not self._register_scoped_physical_input():
+                    return False
                 pyautogui.press('space')
                 time.sleep(0.5)
+                if not self._register_scoped_physical_input():
+                    return False
                 pyautogui.press('space')
                 print("   ✅ 'space' key pressed twice successfully.")
             except Exception as key_e:
@@ -7570,8 +8621,8 @@ class SprunkiGamePlayer:
             screen_width, screen_height = pyautogui.size()
             center_x, center_y = screen_width // 2, screen_height // 2
             total_duration = 5.0
-            num_drags = self.intro_skip_clicks
-            sleep_between_drags = total_duration / num_drags
+            num_drags = intro_drag_limit
+            sleep_between_drags = total_duration / num_drags if num_drags else 0
             
             for i in range(num_drags):
                 if self.stop_event.is_set(): 
@@ -7583,20 +8634,22 @@ class SprunkiGamePlayer:
                 end_x = start_x + drag_x_offset
                 end_y = start_y + drag_y_offset
                 print(f"   ... Wake-up drag {i + 1}/{num_drags}")
+                if not self._register_scoped_physical_input():
+                    return False
                 pyautogui.moveTo(start_x, start_y, duration=0.05)
                 pyautogui.dragTo(end_x, end_y, duration=0.15, button='left')
-                time.sleep(sleep_between_drags - 0.20)
+                time.sleep(max(sleep_between_drags - 0.20, 0.0))
             
             # Summary
             if smart_clicks_performed > 0:
                 print("ðŸŽ‰ ENHANCED PYAUTOGUI SKIP INTRO COMPLETED:")
                 print(f"   âœ… Smart clicks: {smart_clicks_performed} buttons via PyAutoGUI")
-                print(f"   âœ… Wake-up drags: {self.intro_skip_clicks} aggressive drags")
+                print(f"   âœ… Wake-up drags: {intro_drag_limit} aggressive drags")
                 print("   ðŸ›¡ï¸ Dual protection ensures maximum success rate")
             else:
                 print("ðŸŽ‰ AGGRESSIVE PYAUTOGUI SKIP INTRO COMPLETED:")
                 print("   âš ï¸ Smart clicks: N/A (No buttons found)")
-                print(f"   âœ… Wake-up drags: {self.intro_skip_clicks} aggressive drags")
+                print(f"   âœ… Wake-up drags: {intro_drag_limit} aggressive drags")
                 print("   âš¡ Aggressive method used as fallback")
             
             print("âœ… Aggressive intro skipping sequence completed.")
@@ -7606,12 +8659,63 @@ class SprunkiGamePlayer:
             print(f"âŒ PyAutoGUI intro skipping failed: {e}")
             return False
 
-    def restart_game_to_initial_state(self, use_cdp=True):
-        """
-        PHASE 3 FALLBACK: Restart game to initial state by clicking Re-Run button
-        Used when both precision click and carpet bombing fail
-        """
+    def restart_game_to_initial_state(self, use_cdp=True, operation_context=None):
+        """Perform one bounded Re-run recovery and verify the fresh state."""
+        context = operation_context or getattr(self, "_active_operation_context", None)
+        owns_context = False
+        if context is None:
+            if self._session_recovery_count >= self._max_session_recoveries:
+                return OperationResult(
+                    OperationStatus.FAILED,
+                    direction="recovery",
+                    message="session_recovery_circuit_breaker",
+                )
+            context = self._begin_operation(
+                "recovery",
+                None,
+                # One Re-run click plus the worst accepted manual profile
+                # (and one small margin for entry controls).
+                max_input_attempts=MAX_PREPARE_ACTIONS + 2,
+                # A validated manual profile may legally contain a timeline
+                # close to the 30-minute ceiling; the operation still has a
+                # hard deadline rather than inheriting an unbounded wait.
+                deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 5.0,
+            )
+            owns_context = True
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="recovery",
+                message="another_operation_is_active",
+            )
+        if operation_context is not None and not context.recovery_in_progress:
+            return self._operation_result(
+                context,
+                OperationStatus.STOPPED,
+                "recovery_must_be_started_by_coordinator",
+            )
+
+        if self._session_recovery_count >= self._max_session_recoveries:
+            result = self._operation_result(
+                context,
+                OperationStatus.FAILED,
+                "session_recovery_circuit_breaker",
+            )
+            if operation_context is None and not owns_context:
+                context.end_recovery()
+            return self._finish_operation(context, result) if owns_context else result
+
         try:
+            if operation_context is None:
+                if not context.begin_recovery():
+                    result = self._operation_result(context, OperationStatus.FAILED, "recovery_budget_exhausted")
+                    return self._finish_operation(context, result) if owns_context else result
+
+            # The recovery coordinator owns the session-wide counter.  This
+            # keeps direct and nested callers from incrementing it twice or
+            # bypassing the two-Re-run circuit breaker.
+            self._session_recovery_count += 1
+
             print(f"\nPHASE 3: GAME RESTART TO INITIAL STATE")
             print("="*60)
             print("   Method: Click Re-Run button + restore the configured game-entry flow")
@@ -7623,21 +8727,34 @@ class SprunkiGamePlayer:
             
             # Click Re-Run button at fixed coordinates
             print("   Step 1: Clicking Re-Run button...")
+            if not context.can_send_input(
+                stop_requested=self.stop_event.is_set(),
+                allow_recovery_input=True,
+            ) or not context.register_input():
+                result = self._operation_result(context, OperationStatus.STOPPED, "recovery_input_budget_exhausted")
+                return self._finish_operation(context, result) if owns_context else result
+            rerun_clicked = False
             if use_cdp:
                 # Try CDP first
                 ws_url = self._get_websocket_url()
                 if ws_url:
                     ws = websocket.create_connection(ws_url, timeout=10)
-                    self._simulate_click_via_cdp(ws, 40, 75)
+                    rerun_clicked = bool(self._simulate_click_via_cdp(ws, 40, 75))
                     ws.close()
                     print("   Re-Run clicked via CDP")
                 else:
                     # Fallback to PyAutoGUI
                     pyautogui.click(40, 75)
+                    rerun_clicked = True
                     print("   Re-Run clicked via PyAutoGUI")
             else:
                 pyautogui.click(40, 75)
+                rerun_clicked = True
                 print("   Re-Run clicked via PyAutoGUI")
+
+            if not rerun_clicked:
+                result = self._operation_result(context, OperationStatus.FAILED, "rerun_click_failed")
+                return self._finish_operation(context, result) if owns_context else result
             
             # Wait for game restart process
             print("   Waiting for game restart process (3s)...")
@@ -7648,6 +8765,14 @@ class SprunkiGamePlayer:
             # setup_game_environment(), so the profile must be replayed here.
             print("   Step 2: Re-entering the game after restart...")
             manual_profile, manual_profile_path = self._resolve_manual_profile()
+            profile_resolution_error = getattr(self, "_manual_profile_resolution_error", None)
+            if profile_resolution_error:
+                result = self._operation_result(
+                    context,
+                    OperationStatus.FAILED,
+                    f"manual_profile_invalid:{profile_resolution_error}",
+                )
+                return self._finish_operation(context, result) if owns_context else result
             manual_actions = (manual_profile or {}).get("prepareActions", [])
             prepare_success = False
 
@@ -7655,59 +8780,81 @@ class SprunkiGamePlayer:
                 print(f"   Manual profile detected for restart: {manual_profile_path}")
                 if not manual_actions:
                     print("   Manual profile has no prepare actions; automatic fallback is disabled")
-                    return False
+                    result = self._operation_result(context, OperationStatus.FAILED, "manual_profile_has_no_actions")
+                    return self._finish_operation(context, result) if owns_context else result
 
                 print(f"   Replaying {len(manual_actions)} manual prepare actions...")
                 prepare_success = self.replay_manual_prepare_actions(
                     manual_actions,
                     manual_profile,
+                    operation_context=context,
                 )
                 if prepare_success:
                     print("   Manual profile prepare replay completed after restart")
                 else:
                     print("   Manual profile replay failed; automatic fallback is disabled")
-                    return False
+                    result = self._operation_result(context, OperationStatus.FAILED, "manual_prepare_replay_failed")
+                    return self._finish_operation(context, result) if owns_context else result
             else:
                 print("   No manual profile detected; using automatic intro skip")
-                if use_cdp:
-                    prepare_success = self.intro_skip_via_cdp()
-                else:
-                    prepare_success = self.intro_skip_via_pyautogui()
+                # Legacy intro helpers issue several physical inputs internally.
+                # Scope the same recovery context around them so those inputs
+                # cannot bypass the recovery budget.  Do not scope manual
+                # profile replay: it already registers each action itself.
+                self._physical_input_context = context
+                try:
+                    if use_cdp:
+                        prepare_success = self.intro_skip_via_cdp(operation_context=context)
+                    else:
+                        prepare_success = self.intro_skip_via_pyautogui(operation_context=context)
+                finally:
+                    self._physical_input_context = None
 
-            if prepare_success:
-                print("   Game entry preparation completed")
-            else:
-                print("   Game entry preparation warning, continuing anyway...")
+            if not prepare_success:
+                result = self._operation_result(context, OperationStatus.FAILED, "game_entry_prepare_failed")
+                return self._finish_operation(context, result) if owns_context else result
+            print("   Game entry preparation completed")
             
             # Additional stabilization wait
             print("   Game restart stabilization (2s)...")
             time.sleep(2.0)
             
-            # Verify restart success if verification available
-            if self.characters_available or self.putted_chars_available:
-                characters_count, putted_count = self.get_dual_counts()
-                print(f"   Post-restart verification:")
-                print(f"      Characters: {characters_count}")
-                print(f"      Putted: {putted_count}")
-                
-                # Expect 0 after successful restart
-                if (characters_count == 0 or characters_count is None) and (putted_count == 0 or putted_count is None):
-                    print("   RESTART VERIFIED: Game returned to initial state!")
-                    print("   All icons should now be in original positions")
-                else:
-                    print("   RESTART UNCLEAR: State verification inconclusive")
-                    print("   Assuming restart successful - continuing workflow")
+            # Rebind the VM/session before reading the post-restart state.
+            self._refresh_after_recovery()
+            post_state = self._capture_stable_placement_snapshot(
+                timeout_ms=1500,
+                context=context,
+            )
+            if post_state is None:
+                result = self._operation_result(context, OperationStatus.UNKNOWN, "post_restart_state_unknown")
+                if operation_context is None:
+                    context.end_recovery()
+                return self._finish_operation(context, result) if owns_context else result
+
+            polos = post_state.polos
+            counters = [value for value in (post_state.characters_count, post_state.putted_count) if value is not None]
+            polos_clean = polos is not None and all(str(value) == "0" for value in polos)
+            counters_clean = bool(counters) and all(value == 0 for value in counters)
+            if not (polos_clean or counters_clean):
+                print("   RESTART UNCLEAR: state is known but not initial/empty")
+                result = self._operation_result(context, OperationStatus.UNKNOWN, "post_restart_not_empty")
             else:
-                print("   Verification disabled - assuming restart successful")
-            
+                print("   RESTART VERIFIED: Game returned to initial state!")
+                result = self._operation_result(context, OperationStatus.RECOVERED, "game_recovered")
+
             print("GAME RESTART COMPLETED!")
             print("="*60)
-            return True
+            if operation_context is None:
+                context.end_recovery()
+            return self._finish_operation(context, result) if owns_context else result
             
         except Exception as e:
             print(f"Game restart error: {e}")
-            print("Restart may have failed - continuing with workflow anyway")
-            return False
+            print("Restart failed; workflow must not continue blindly")
+            result = self._operation_result(context, OperationStatus.FAILED, f"restart_exception:{e}")
+            if operation_context is None:
+                context.end_recovery()
+            return self._finish_operation(context, result) if owns_context else result
 
     def close_game_window(self):
         """Close game window safely"""
@@ -7734,6 +8881,14 @@ class SprunkiGamePlayer:
                 print("🚫 CRITICAL ERROR: No config loaded - Cannot continue setup")
                 print("   💡 Please load a JSON configuration file first")
                 return False
+
+            # A newly loaded game gets a fresh recovery/cleanup budget.  A
+            # Re-run inside an active operation is handled by the operation
+            # context and must not reset these counters.
+            self._session_recovery_count = 0
+            self._batch_reconnect_attempts = 0
+            self._active_operation_context = None
+            self._reset_cleanup_guard()
 
             # 🆕 ENHANCED INDIVIDUAL MODE CLEANUP
             if not first_setup:
@@ -7839,6 +8994,13 @@ class SprunkiGamePlayer:
                 print("✅ CDP verification successful - automation ready!")
 
             manual_profile, manual_profile_path = self._resolve_manual_profile()
+            profile_resolution_error = getattr(self, "_manual_profile_resolution_error", None)
+            if profile_resolution_error:
+                print(
+                    "🛑 Manual profile is invalid; refusing automatic intro fallback: "
+                    f"{profile_resolution_error}"
+                )
+                return False
             if manual_profile:
                 if progress_callback:
                     progress_callback("🧭 Replaying manual profile prepare actions...")
@@ -7848,18 +9010,16 @@ class SprunkiGamePlayer:
                     manual_profile,
                 )
                 if not replay_success:
-                    print("⚠️ Manual profile replay failed, falling back to automatic intro skip...")
-                    if progress_callback:
-                        progress_callback("⏭️ Falling back to automatic intro skip...")
-                    if not self.intro_skip_via_cdp():
-                        print("CDP intro skipping failed, but continuing anyway...")
+                    print("🛑 Manual profile replay failed; refusing blind automatic input on a partially prepared game")
+                    return False
             else:
                 # Skip intros (existing logic, keep as-is)
                 if progress_callback:
                     progress_callback("⏭️ Skipping intros...")
 
                 if not self.intro_skip_via_cdp():
-                    print("CDP intro skipping failed, but continuing anyway...")
+                    print("🛑 CDP intro skipping failed; refusing to continue on an unprepared game")
+                    return False
 
             # 🔄 DUAL VERIFICATION SETUP (existing logic, keep as-is)
             if progress_callback:
@@ -8392,115 +9552,269 @@ class SprunkiGamePlayer:
 
     def corrected_return_icon(self, target_slot, use_cdp=True):
         """
-        [REFACTORED] Centralized logic for returning an icon and logging the definitive timestamp.
-        Always returns True to allow main workflow to continue.
+        Return one icon with a single bounded precision/batch/recovery chain.
         """
         return_process_start_time = time.monotonic()
         obs_controller = self.obs_controller
-        target_slot_index = target_slot.get('index', -1)
-        
+        target_slot_index = target_slot.get("index", -1)
+        context = self._begin_operation(
+            "return",
+            target_slot_index,
+            # Precision/carpet inputs and one possible manual-profile
+            # recovery share one finite budget.
+            max_input_attempts=120 + MAX_PREPARE_ACTIONS + 2,
+            deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 60.0,
+        )
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="return",
+                message="another_operation_is_active",
+            )
+
         try:
-            dual_verification_enabled = self.characters_available or self.putted_chars_available
-            
-            # PHASE 1: PRECISION CLICK
+            if target_slot_index < 0:
+                return self._finish_operation(
+                    context,
+                    self._operation_result(context, OperationStatus.FAILED, "invalid_target_slot"),
+                )
+
+            baseline = self._capture_stable_placement_snapshot(
+                timeout_ms=1000,
+                context=context,
+            )
+            if baseline is None:
+                return self._finish_operation(
+                    context,
+                    self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable"),
+                )
+            context.set_baseline(baseline)
+
+            precondition = classify_precondition(baseline, "return", target_slot_index)
+            if precondition == OperationStatus.ALREADY_EMPTY:
+                return self._finish_operation(
+                    context,
+                    self._operation_result(context, OperationStatus.ALREADY_EMPTY, "target_already_empty"),
+                )
+
+            # PHASE 1: one precision click
             print(f"\nðŸŽ¯ PHASE 1: PRECISION CLICK")
-            if self._execute_precision_return_click(target_slot, use_cdp, dual_verification_enabled):
+            precision_result = self._execute_precision_return_click(
+                target_slot,
+                use_cdp,
+                operation_context=context,
+                before_snapshot=baseline,
+            )
+            if precision_result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_EMPTY}:
                 print("ðŸŽ‰ PHASE 1 SUCCESS!")
                 if obs_controller:
                     obs_controller.log_event_timestamp(
                         "return_completed_successfully",
                         f"Return successful (Phase 1) for slot {target_slot_index}",
-                        {"slot_index": target_slot_index, "return_phase": 1, "status": "success"}
+                        {
+                            "slot_index": target_slot_index,
+                            "return_phase": 1,
+                            "status": precision_result.status.value,
+                            "operationId": context.operation_id,
+                        },
                     )
-                return True
+                return self._finish_operation(context, precision_result)
 
-            # PHASE 2: CARPET BOMBING
+            if precision_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+                print(f"   🛑 Precision result is {precision_result.status.value}; no blind carpet retry")
+                return self._finish_operation(context, precision_result)
+
+            # PHASE 2: bounded carpet bombing.  It is only allowed after the
+            # precision click produced a known no-change result.
             print(f"\nðŸ’¥ PHASE 2: CARPET BOMBING")
-            if self._execute_carpet_bombing_return(use_cdp):
+            current_state = self._capture_stable_placement_snapshot(
+                timeout_ms=500,
+                context=context,
+            )
+            if current_state is None:
+                result = self._operation_result(context, OperationStatus.UNKNOWN, "post_precision_state_unknown")
+                return self._finish_operation(context, result)
+            if classify_precondition(current_state, "return", target_slot_index) == OperationStatus.ALREADY_EMPTY:
+                result = self._operation_result(context, OperationStatus.ALREADY_EMPTY, "target_cleared_after_precision")
+                return self._finish_operation(context, result)
+            post_precision_evaluation = evaluate_transition(
+                baseline,
+                current_state,
+                "return",
+                target_slot_index,
+            )
+            if post_precision_evaluation.status == OperationStatus.VERIFIED:
+                result = self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "precision_changed_state_without_target_proof",
+                    evidence=post_precision_evaluation.evidence,
+                    details={
+                        **post_precision_evaluation.details,
+                        "targetSpecific": post_precision_evaluation.target_specific,
+                        "aggregateFallback": post_precision_evaluation.aggregate_fallback,
+                    },
+                )
+                return self._finish_operation(context, result)
+            if post_precision_evaluation.status == OperationStatus.UNKNOWN:
+                result = self._operation_result(context, OperationStatus.UNKNOWN, "post_precision_transition_unknown")
+                return self._finish_operation(context, result)
+
+            carpet_result = self._execute_carpet_bombing_return(
+                use_cdp,
+                operation_context=context,
+                before_snapshot=baseline,
+            )
+            if carpet_result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_EMPTY}:
                 print("ðŸŽ‰ PHASE 2 SUCCESS!")
                 if obs_controller:
-                     obs_controller.log_event_timestamp(
+                    obs_controller.log_event_timestamp(
                         "return_completed_successfully",
                         f"Return successful (Phase 2) for slot {target_slot_index}",
-                        {"slot_index": target_slot_index, "return_phase": 2, "status": "success"}
+                        {
+                            "slot_index": target_slot_index,
+                            "return_phase": 2,
+                            "status": carpet_result.status.value,
+                            "aggregateFallback": bool(carpet_result.details.get("aggregateFallback")),
+                            "operationId": context.operation_id,
+                        },
                     )
-                return True
+                return self._finish_operation(context, carpet_result)
 
-            # PHASE 3: RESTART FALLBACK
+            if carpet_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+                return self._finish_operation(context, carpet_result)
+
+            # PHASE 3: one recovery, then terminate this operation.  The old
+            # implementation returned True here and made outer callers retry
+            # the entire precision/carpet/restart chain.
             print(f"\nðŸš¨ PHASE 3: RESTART FALLBACK")
-            if obs_controller:
-                obs_controller.log_event_timestamp("start_game_restart", "Restart triggered: Phase 1 & 2 return failed")
-            
-            self.restart_game_to_initial_state(use_cdp)
+            if not context.begin_recovery():
+                result = self._operation_result(context, OperationStatus.FAILED, "operation_recovery_budget_exhausted")
+                return self._finish_operation(context, result)
+            if self._session_recovery_count >= self._max_session_recoveries:
+                context.end_recovery()
+                result = self._operation_result(context, OperationStatus.FAILED, "session_recovery_circuit_breaker")
+                return self._finish_operation(context, result)
 
             if obs_controller:
-                obs_controller.log_event_timestamp("end_game_restart", "Restart completed")
-            
-            # Ghi lại sự kiện "thất bại" với timestamp lùi về quá khứ
-            if obs_controller and obs_controller.recording_start_time is not None:
-                elapsed_time = return_process_start_time - obs_controller.recording_start_time
-                event_data = {
-                    "event": "return_completed_successfully",
-                    "timestamp": round(elapsed_time, 3),
-                    "label": f"Return failed for slot {target_slot_index}, restart required",
-                    "metadata": { "slot_index": target_slot_index, "return_phase": 3, "status": "failed_restart_required"}
-                }
-                obs_controller.event_timestamps.append(event_data)
-                print(f"🕒 Video Event Logged: 'return_completed_successfully' (FAILED) at {elapsed_time:.3f}s")
-            
-            return True # Luôn trả về True vì restart là giải pháp cuối cùng
+                obs_controller.log_event_timestamp(
+                    "start_game_restart",
+                    "Restart triggered after bounded return methods failed",
+                    {"operationId": context.operation_id, "slot_index": target_slot_index},
+                )
+            recovery_result = self.restart_game_to_initial_state(
+                use_cdp,
+                operation_context=context,
+            )
+            context.end_recovery()
+            if obs_controller:
+                obs_controller.log_event_timestamp(
+                    "end_game_restart",
+                    "Restart recovery completed",
+                    {
+                        "operationId": context.operation_id,
+                        "status": recovery_result.status.value,
+                    },
+                )
+
+            if recovery_result.status == OperationStatus.RECOVERED:
+                result = self._operation_result(
+                    context,
+                    OperationStatus.RECOVERED,
+                    "game_recovered_target_return_not_verified",
+                    details={"recovery": recovery_result.as_dict()},
+                )
+            else:
+                result = self._operation_result(
+                    context,
+                    recovery_result.status,
+                    "return_not_verified_after_recovery",
+                    details={"recovery": recovery_result.as_dict()},
+                )
+            return self._finish_operation(context, result)
 
         except Exception as e:
             print(f"â Œ Critical error in corrected_return_icon: {e}")
-            return True # Vẫn trả về True để không làm sập workflow chính
+            result = self._operation_result(context, OperationStatus.FAILED, f"return_exception:{e}")
+            return self._finish_operation(context, result)
 
-    def _execute_precision_return_click(self, target_slot, use_cdp, dual_verification_enabled):
-        """PHASE 1: Attempts a precision click and returns ONLY True/False."""
+    def _execute_precision_return_click(
+        self,
+        target_slot,
+        use_cdp,
+        operation_context=None,
+        before_snapshot=None,
+    ):
+        """Execute exactly one precision click and observe its transition."""
         try:
             center_x, center_y = target_slot['x'], target_slot['y']
             domain_adj = self.get_domain_adjustments()
-            
             print(f"   ðŸŽ¯ Method: Single precision click at exact coordinates")
             print(f"   ðŸ“ Target: ({center_x}, {center_y})")
-            
-            # Get DUAL counts BEFORE return
-            characters_before, putted_before = None, None
-            if dual_verification_enabled:
-                characters_before, putted_before = self.get_dual_counts()
-                print(f"ðŸ“Š DUAL counts BEFORE return:")
-                print(f"   ðŸ”¢ Characters: {characters_before}")
-                print(f"   ðŸŽ¯ Putted: {putted_before}")
-            
-            # Execute single precision click
-            center_coords = [(center_x, center_y)]
-            self.execute_multi_method_clicks(center_coords, use_cdp, domain_adj, method="single")
-            
-            # Wait and verify
-            verification_wait = 0.3 if dual_verification_enabled else 0.2
-            time.sleep(verification_wait)
-            
-            if dual_verification_enabled:
-                characters_after, putted_after = self.get_dual_counts()
-                print(f"ðŸ“Š DUAL counts AFTER return:")
-                print(f"   ðŸ”¢ Characters: {characters_after}")
-                print(f"   ðŸŽ¯ Putted: {putted_after}")
-                
-                if self.verify_return_success_dual(characters_before, characters_after, putted_before, putted_after):
-                    self._remember_empty_board_baseline(characters_after, putted_after)
-                    print("ðŸŽ‰ PRECISION CLICK SUCCESS: DUAL verification passed!")
-                    return True
-                else:
-                    print(f"âŒ Precision click failed: DUAL verification failed")
-                    return False
-            else:
-                print("âœ… Precision click assumed success (no verification)")
-                return True
+            context = operation_context or getattr(self, "_active_operation_context", None)
+            if context is None:
+                return OperationResult(OperationStatus.UNKNOWN, direction="return", message="missing_operation_context")
+            if before_snapshot is None:
+                before_snapshot = self._capture_stable_placement_snapshot(timeout_ms=1000, context=context)
+            if before_snapshot is None:
+                return self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable")
+            context.set_baseline(before_snapshot)
+            if not context.can_send_input(stop_requested=self.stop_event.is_set()):
+                return self._operation_result(context, OperationStatus.FAILED, "input_budget_exhausted")
+
+            context.register_input()
+            executed = self._execute_single_return_click(
+                center_x,
+                center_y,
+                use_cdp,
+                domain_adj,
+            )
+            if not executed:
+                return self._operation_result(context, OperationStatus.FAILED, "precision_click_execution_failed")
+
+            observed_result = observe_until_verified(
+                before_snapshot,
+                self._capture_placement_snapshot,
+                "return",
+                context.target_slot,
+                operation_id=context.operation_id,
+                timeout_ms=3000,
+                poll_ms=50,
+                stable_samples=2,
+                stop_requested=lambda: self.stop_event.is_set(),
+                context=context,
+            )
+            result = self._operation_result(
+                context,
+                observed_result.status,
+                observed_result.message,
+                evidence=observed_result.evidence,
+                details=observed_result.details,
+                reads=context.read_count,
+            )
+            if result.status == OperationStatus.VERIFIED:
+                self._remember_empty_board_baseline(
+                    result.details.get("after", (None, None))[0]
+                    if result.details.get("after") else None,
+                    result.details.get("after", (None, None))[1]
+                    if result.details.get("after") else None,
+                )
+            return result
         except Exception as e:
             print(f"âŒ Error in precision return click: {e}")
-            return False
+            return self._operation_result(
+                operation_context,
+                OperationStatus.FAILED,
+                f"precision_click_exception:{e}",
+            )
 
-    def _execute_carpet_bombing_return(self, use_cdp=False):
-        """PHASE 2: Attempts carpet bombing and returns ONLY True/False (True=cleaned, False=needs_restart)."""
+    def _execute_carpet_bombing_return(
+        self,
+        use_cdp=False,
+        operation_context=None,
+        before_snapshot=None,
+    ):
+        """Run one bounded carpet strategy and classify the final state."""
         try:
             print(f"\nðŸ’¥ SEQUENTIAL CARPET BOMBING FOR RETURN")
             print("="*60)
@@ -8509,38 +9823,99 @@ class SprunkiGamePlayer:
             
             if not self.config:
                 print("â Œ No config available for carpet bombing")
-                return False
+                return self._operation_result(
+                    operation_context,
+                    OperationStatus.FAILED,
+                    "carpet_config_unavailable",
+                )
                     
             all_slots = self.config.get('layout', {}).get('slots', [])
             if not all_slots:
                 print("â Œ No slots configuration found")
-                return False
+                return self._operation_result(
+                    operation_context,
+                    OperationStatus.FAILED,
+                    "carpet_slots_unavailable",
+                )
             
             sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
             print(f"   ðŸŽ¯ Will process {len(sorted_slots)} slots sequentially")
             
-            dual_verification_enabled = self.characters_available or self.putted_chars_available
-            initial_count = None
-            
-            if dual_verification_enabled:
-                characters_count, putted_count = self.get_dual_counts()
-                initial_count = characters_count if characters_count is not None else putted_count
-                
-                if self._is_board_count_clean(characters_count=characters_count, putted_count=putted_count):
-                    print("   âœ… Already clean - no carpet bombing needed")
-                    return True
-                
-                print(f"   ðŸ“Š Icons to clear: {initial_count}")
+            context = operation_context or getattr(self, "_active_operation_context", None)
+            if context is None:
+                return OperationResult(OperationStatus.UNKNOWN, direction="return", message="missing_operation_context")
+            if before_snapshot is None:
+                before_snapshot = self._capture_stable_placement_snapshot(
+                    timeout_ms=1000,
+                    context=context,
+                )
             else:
-                print("   âš ï¸  Verification disabled - assuming carpet bombing needed")
-            
-            success = self.execute_sequential_carpet_bombing_sets(
-                sorted_slots, initial_count, use_cdp
+                before_snapshot = PlacementSnapshot.from_mapping(before_snapshot)
+            if before_snapshot is None:
+                return self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable")
+            context.set_baseline(before_snapshot)
+
+            initial_count = (
+                before_snapshot.characters_count
+                if before_snapshot.characters_count is not None
+                else before_snapshot.putted_count
             )
-            return success
+            if initial_count is None:
+                return self._operation_result(context, OperationStatus.UNKNOWN, "board_count_unavailable")
+            print(f"   ðŸ“Š Icons to clear: {initial_count}")
+
+            success = self.execute_sequential_carpet_bombing_sets(
+                sorted_slots,
+                initial_count,
+                use_cdp,
+                operation_context=context,
+            )
+            after_snapshot = self._capture_stable_placement_snapshot(
+                timeout_ms=1000,
+                context=context,
+            )
+            if after_snapshot is None:
+                return self._operation_result(context, OperationStatus.UNKNOWN, "post_carpet_state_unknown")
+
+            evaluation = evaluate_transition(
+                before_snapshot,
+                after_snapshot,
+                "return",
+                context.target_slot,
+            )
+            if evaluation.status == OperationStatus.VERIFIED:
+                result = self._operation_result(
+                    context,
+                    OperationStatus.VERIFIED,
+                    evaluation.message,
+                    evidence=evaluation.evidence,
+                    details={
+                        **evaluation.details,
+                        "targetSpecific": evaluation.target_specific,
+                        "aggregateFallback": evaluation.aggregate_fallback,
+                    },
+                )
+                return result
+
+            precondition = classify_precondition(after_snapshot, "return", context.target_slot)
+            if precondition == OperationStatus.ALREADY_EMPTY:
+                return self._operation_result(
+                    context,
+                    OperationStatus.ALREADY_EMPTY,
+                    "target_empty_after_bounded_carpet",
+                    evidence=("polos_target",),
+                    details={"targetSpecific": True},
+                )
+            if not success:
+                return self._operation_result(context, OperationStatus.FAILED, "carpet_no_progress")
+            return self._operation_result(context, OperationStatus.UNKNOWN, "carpet_result_not_target_specific")
         except Exception as e:
             print(f"â Œ Error in carpet bombing return: {e}")
-            return False
+            return self._operation_result(
+                operation_context,
+                OperationStatus.FAILED,
+                f"carpet_exception:{e}",
+            )
                     
 
     def _execute_cdp_return(self, center_x, center_y, domain_adj):
@@ -8638,9 +10013,16 @@ class SprunkiGamePlayer:
                 obs_controller.log_event_timestamp("start_drag", f"Dragging icon {icon_index}", {"success": None})
             
             drag_success = self.corrected_drag_and_drop(current_icon, target_slot, False, True)
-            
+
             if obs_controller:
-                obs_controller.log_event_timestamp("end_drag", f"Drag for icon {icon_index} {'succeeded' if drag_success else 'failed'}", {"success": drag_success})
+                obs_controller.log_event_timestamp(
+                    "end_drag",
+                    f"Drag for icon {icon_index} {'succeeded' if drag_success else 'failed'}",
+                    {
+                        "success": bool(drag_success),
+                        "status": getattr(getattr(drag_success, "status", None), "value", None),
+                    },
+                )
 
             if not drag_success:
                 if obs_controller:
@@ -8696,6 +10078,12 @@ class SprunkiGamePlayer:
                 obs_controller.log_event_timestamp("start_return", f"Returning icon {icon_index}")
 
             return_success = self.corrected_return_icon(target_slot, use_cdp=True)
+            if not return_success:
+                print(
+                    f"🛑 Showcase stopped: return status "
+                    f"{getattr(getattr(return_success, 'status', None), 'value', return_success)}"
+                )
+                return False
 
             if obs_controller:
                 if return_success:
@@ -8730,7 +10118,8 @@ class SprunkiGamePlayer:
             
             return False
 
-    def execute_fast_showcase_cleanup(self):
+    def _legacy_execute_fast_showcase_cleanup_disabled(self):
+            return self._execute_fast_showcase_cleanup_bounded()
             """
             ðŸš€ FAST: Optimized carpet bombing cho showcase mode
             - Early exit náº¿u Ä‘Ã£ clean
@@ -8760,7 +10149,12 @@ class SprunkiGamePlayer:
                     
                     print(f"   âš ï¸ Board is not clean! Found {initial_count} icon(s). Activating safety net...")
                 else:
-                    print("   âš ï¸ Verification disabled - proceeding with precautionary carpet bombing.")
+                    print("   🛑 Verification unavailable - refusing precautionary carpet bombing")
+                    return OperationResult(
+                        OperationStatus.UNKNOWN,
+                        direction="cleanup",
+                        message="cleanup_state_unknown",
+                    )
                 
                 ### Káº¾T THÃšC Lá»›p 3 ###
 
@@ -8769,13 +10163,13 @@ class SprunkiGamePlayer:
 
                 # Get configuration
                 if not self.config:
-                    print("   âŒ No config - skipping")
-                    return True
+                    print("   ❌ No config - cleanup cannot be verified")
+                    return OperationResult(OperationStatus.FAILED, direction="cleanup", message="no_config")
                         
                 all_slots = self.config.get('layout', {}).get('slots', [])
                 if not all_slots:
-                    print("   âŒ No slots - skipping")
-                    return True
+                    print("   ❌ No slots - cleanup cannot be verified")
+                    return OperationResult(OperationStatus.FAILED, direction="cleanup", message="no_slots")
                 
                 # Sort slots for sequential processing
                 sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
@@ -8800,18 +10194,109 @@ class SprunkiGamePlayer:
                 if success:
                     print("   âœ… Fast cleanup completed!")
                 else:
-                    print("   âš ï¸ Fast cleanup incomplete - continuing anyway")
+                    print("   🛑 Fast cleanup incomplete")
                 
-                return True  # LuÃ´n tráº£ vá» True Ä‘á»ƒ khÃ´ng block showcase
+                return OperationResult(
+                    OperationStatus.VERIFIED if success else OperationStatus.FAILED,
+                    direction="cleanup",
+                    message="fast_cleanup_completed" if success else "fast_cleanup_incomplete",
+                )
                 
             except Exception as e:
                 print(f"   âŒ Fast cleanup error: {e}")
-                return True  # LuÃ´n tráº£ vá» True Ä‘á»ƒ khÃ´ng block showcase
+                return OperationResult(
+                    OperationStatus.FAILED,
+                    direction="cleanup",
+                    message=f"fast_cleanup_exception:{e}",
+                )
+
+    def execute_fast_showcase_cleanup(self):
+        """Run the bounded fast-cleanup coordinator."""
+        return self._execute_fast_showcase_cleanup_bounded()
+
+    def _execute_fast_showcase_cleanup_bounded(self):
+        """Bounded compatibility implementation for the fast cleanup entry point."""
+        context = self._begin_operation(
+            "cleanup",
+            None,
+            max_input_attempts=120,
+            deadline_seconds=45.0,
+        )
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="cleanup",
+                message="another_operation_is_active",
+            )
+        try:
+            baseline = self._capture_stable_placement_snapshot(
+                timeout_ms=1000,
+                context=context,
+            )
+            if baseline is None:
+                result = self._operation_result(context, OperationStatus.UNKNOWN, "cleanup_state_unknown")
+                return self._finish_operation(context, result)
+            if self._is_board_count_clean(
+                characters_count=baseline.characters_count,
+                putted_count=baseline.putted_count,
+            ):
+                result = self._operation_result(context, OperationStatus.ALREADY_EMPTY, "cleanup_already_empty")
+                return self._finish_operation(context, result)
+            context.set_baseline(baseline)
+
+            slots = sorted(
+                (self.config or {}).get("layout", {}).get("slots", []),
+                key=lambda slot: slot.get("index", 0),
+            )
+            if not slots:
+                result = self._operation_result(context, OperationStatus.FAILED, "cleanup_slots_unavailable")
+                return self._finish_operation(context, result)
+
+            success = self.execute_sequential_carpet_bombing_sets(
+                slots,
+                baseline.characters_count
+                if baseline.characters_count is not None
+                else baseline.putted_count,
+                use_cdp=False,
+                operation_context=context,
+            )
+            final_state = self._capture_stable_placement_snapshot(
+                timeout_ms=1000,
+                context=context,
+            )
+            if final_state is None:
+                status = OperationStatus.UNKNOWN
+                message = "cleanup_final_state_unknown"
+            elif self._is_board_count_clean(
+                characters_count=final_state.characters_count,
+                putted_count=final_state.putted_count,
+            ):
+                status = OperationStatus.VERIFIED
+                message = "fast_cleanup_verified"
+            else:
+                status = OperationStatus.FAILED if not success else OperationStatus.UNKNOWN
+                message = "fast_cleanup_incomplete"
+            return self._finish_operation(context, self._operation_result(context, status, message))
+        except Exception as error:
+            return self._finish_operation(
+                context,
+                self._operation_result(context, OperationStatus.FAILED, f"fast_cleanup_exception:{error}"),
+            )
 
     def execute_fast_carpet_bombing_sets(self, sorted_slots, initial_count, config, use_cdp=False):
         """
         âš¡ Execute fast carpet bombing with reduced timing for showcase
         """
+        # The legacy implementation below had no shared operation budget and
+        # could report success without a final verified state.  The active
+        # entry point is _execute_fast_showcase_cleanup_bounded(); keep this
+        # compatibility method inert so it cannot reintroduce an unbounded
+        # physical-input path.
+        return OperationResult(
+            OperationStatus.STOPPED,
+            direction="cleanup",
+            message="legacy_fast_carpet_bombing_disabled",
+        )
         try:
             max_sets = config['max_sets']
             base_coords = config['base_coords_per_slot']
@@ -9222,6 +10707,12 @@ class SprunkiGamePlayer:
                 else:
                     icon_index = icon_object.get('index', 'unknown')
                     print(f"⚠️ Failed to showcase icon {icon_index}, but continuing with the next one.")
+                    last_result = getattr(self, "last_operation_result", None)
+                    last_status = getattr(getattr(last_result, "status", None), "value", None)
+                    if last_status in {"UNKNOWN", "RECOVERED", "STOPPED"}:
+                        raise WorkflowIncompatibleError(
+                            f"Showcase stopped after non-replayable {last_status} result for icon {icon_index}"
+                        )
                     consecutive_failures += 1
 
                 # [REFINED] Kích hoạt ngắt mạch nếu vượt ngưỡng bằng cách ném Exception
@@ -9278,8 +10769,18 @@ class SprunkiGamePlayer:
                 current_icon = icons[icon_index]
                 target_slot = slots[slot_position]
 
-                if not self.corrected_drag_and_drop(current_icon, target_slot, False, use_cdp=True):
-                    continue
+                drag_result = self.corrected_drag_and_drop(
+                    current_icon,
+                    target_slot,
+                    False,
+                    use_cdp=True,
+                )
+                if not drag_result:
+                    print(
+                        "🛑 Remix stopped after bounded drag result "
+                        f"{getattr(getattr(drag_result, 'status', None), 'value', drag_result)}"
+                    )
+                    return False
                 time.sleep(0.3)
 
                 if self.stop_event.is_set(): return False
@@ -9336,6 +10837,8 @@ class SprunkiGamePlayer:
                 print(f"  âš ï¸  Smart batch return: {success_count}/{total_attempted} icons returned")
                 if error_log:
                     print(f"  ðŸ“‹ Errors: {len(error_log)} issues encountered")
+                print("  🛑 Remix is not considered complete after unverified cleanup")
+                return False
 
             time.sleep(0.5)
             
@@ -9352,6 +10855,7 @@ class SprunkiGamePlayer:
         ENHANCED: Execute full workflow with verification, resilience, and detailed reporting.
         """
         report = WorkflowReport()
+        self._reset_cleanup_guard()
         try:
             if not self.config:
                 report.message = "Configuration not loaded."
@@ -9520,15 +11024,6 @@ class SprunkiGamePlayer:
                 if has_horror and not horror_phase_success:
                     report.issues.append("Horror phase failed thresholds.")
 
-            # Final Cleanup and Validation
-            print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
-            print("="*70)
-            self.smart_batch_return_all_slots(use_cdp=False)
-            self.validate_workflow_completion()
-            print("\n📊 ENHANCED WORKFLOW SUMMARY:")
-            print(self.get_enhanced_workflow_summary())
-            print("="*70)
-            
         except WorkflowIncompatibleError as e:
             print(f"🛑 Workflow halted by Circuit Breaker: {e}")
             report.was_successful = False
@@ -9543,10 +11038,28 @@ class SprunkiGamePlayer:
             report.issues.append(f"Critical error: {e}")
 
         finally:
-            # Cleanup luôn được chạy dù thành công, thất bại hay có lỗi
+            # Cleanup is intentionally centralized here.  The previous
+            # implementation also cleaned up in the try body, causing the
+            # complete precision/carpet/recovery chain to run twice.
             print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
             print("="*70)
-            self.smart_batch_return_all_slots(use_cdp=False)
+            cleanup_result = self._run_cleanup_once(
+                use_cdp=False,
+                context={"workflow": "full_showcase"},
+                obs_controller=self.obs_controller,
+            )
+            if cleanup_result.status not in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }:
+                report.was_successful = False
+            if cleanup_result.status not in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }:
+                report.issues.append(
+                    f"Final cleanup: {cleanup_result.status.value} ({cleanup_result.message})"
+                )
             self.validate_workflow_completion()
             print("\n📊 ENHANCED WORKFLOW SUMMARY:")
             print(self.get_enhanced_workflow_summary())
@@ -9658,7 +11171,8 @@ class SprunkiGamePlayer:
                 use_cdp = True
                 if not self.corrected_drag_and_drop(bonus_char, target_slot, False, use_cdp):
                     print(f"❌ Failed to drag bonus {bonus_index} with verification")
-                    continue
+                    print("🛑 Bonus sequence stopped; no blind retry on a possibly partial board state")
+                    return False
                 
                 if self.stop_event.is_set(): break
                 
@@ -9673,7 +11187,16 @@ class SprunkiGamePlayer:
                 if self.stop_event.is_set(): break
                 
                 print(f"🔄 Returning bonus {bonus_index + 1}...")
-                self.corrected_return_icon(target_slot, use_cdp)
+                return_result = self.corrected_return_icon(target_slot, use_cdp)
+                if return_result.status not in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_EMPTY,
+                }:
+                    print(
+                        f"🛑 Bonus return stopped at {return_result.status.value}: "
+                        f"{return_result.message}"
+                    )
+                    break
                 time.sleep(0.2)
                 success_count += 1
             
@@ -9840,76 +11363,39 @@ class SprunkiGamePlayer:
             if progress_callback:
                 progress_callback("ðŸ”„ Returning horror trigger icon for showcase...")
             
-            # Check current state before return
-            dual_verification_enabled = self.characters_available or self.putted_chars_available
-            if dual_verification_enabled:
-                before_chars, before_putted = self.get_dual_counts()
-                print(f"   ðŸ“Š BEFORE return: Characters={before_chars}, Putted={before_putted}")
-                
-                if before_chars == 0 and before_putted == 0:
-                    print("   âœ… Slot already empty - no return needed")
-                    print("   ðŸŽ¯ Horror mode ready for showcase immediately")
-                else:
-                    print(f"   ðŸŽ¯ Slot occupied - returning icon 19...")
-                    
-                    # Use enhanced return with all fallback methods
-                    return_success = self.corrected_return_icon(target_slot, use_cdp)
-                    
-                    if return_success:
-                        # Verify return worked
-                        time.sleep(1.0)  # Wait for state update
-                        after_chars, after_putted = self.get_dual_counts()
-                        print(f"   ðŸ“Š AFTER return: Characters={after_chars}, Putted={after_putted}")
-                        
-                        if after_chars == 0 and after_putted == 0:
-                            print("   âœ… RETURN SUCCESSFUL: Slot 3 is now empty")
-                            print("   ðŸŽ¯ Horror mode ready for showcase")
-                        else:
-                            print("   âš ï¸ RETURN UNCLEAR: State may not be fully cleared")
-                            print("   ðŸŽ¯ Proceeding with showcase anyway")
-                    else:
-                        print("   âŒ RETURN FAILED: Using emergency methods...")
-                        
-                        # Emergency cleanup attempts
-                        for emergency_attempt in range(3):
-                            print(f"   ðŸš¨ Emergency return attempt {emergency_attempt + 1}/3")
-                            
-                            # Multiple clicks on slot 3
-                            emergency_coords = [
-                                (target_slot['x'], target_slot['y']),
-                                (target_slot['x'] - 10, target_slot['y']),
-                                (target_slot['x'] + 10, target_slot['y']),
-                                (target_slot['x'], target_slot['y'] - 10),
-                                (target_slot['x'], target_slot['y'] + 10)
-                            ]
-                            
-                            domain_adj = self.get_domain_adjustments()
-                            self.execute_multi_method_clicks(emergency_coords, use_cdp, domain_adj, method="single")
-                            time.sleep(0.5)
-                            
-                            # Check if emergency worked
-                            emergency_chars, emergency_putted = self.get_dual_counts()
-                            if emergency_chars == 0 and emergency_putted == 0:
-                                print(f"   âœ… EMERGENCY SUCCESS: Slot cleared on attempt {emergency_attempt + 1}")
-                                break
-                        else:
-                            print("   ðŸ’¥ ALL EMERGENCY ATTEMPTS FAILED")
-                            print("   âš ï¸ Proceeding with showcase - may have slot conflicts")
+            # Check current state before return.  No emergency click loop is
+            # allowed after corrected_return_icon has already exhausted its
+            # own bounded chain.
+            before_snapshot = self._capture_stable_placement_snapshot(timeout_ms=1000)
+            if before_snapshot is None:
+                print("   🛑 Horror return precondition is UNKNOWN")
+                return False
+            precondition = classify_precondition(before_snapshot, "return", center_slot_index)
+            if precondition == OperationStatus.ALREADY_EMPTY:
+                return_success = OperationResult(
+                    OperationStatus.ALREADY_EMPTY,
+                    direction="return",
+                    message="horror_target_already_empty",
+                )
             else:
-                print("   âš ï¸ Verification disabled - assuming icon return needed")
-                print("   ðŸ”„ Performing blind return attempt...")
-                
-                # Blind return attempt
-                self.corrected_return_icon(target_slot, use_cdp)
-                time.sleep(1.0)
-                print("   âœ… Blind return completed")
+                print(f"   ðŸŽ¯ Slot occupied or aggregate fallback; returning icon 19...")
+                return_success = self.corrected_return_icon(target_slot, use_cdp)
+                if return_success.status not in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_EMPTY,
+                }:
+                    print(
+                        f"   🛑 Horror return stopped at {return_success.status.value}: "
+                        f"{return_success.message}"
+                    )
+                    return False
 
             # Đánh dấu KẾT THÚC chuỗi sự kiện trigger SAU KHI đã trả icon về
             if self.obs_controller:
                 self.obs_controller.log_event_timestamp(
                     "trigger_horror_mode_ended",
                     "Horror mode sequence completed and slot is cleared",
-                    {"return_successful": return_success}
+                    {"return_successful": return_success.status.value}
                 )
 
             # ================================================================
@@ -9922,26 +11408,29 @@ class SprunkiGamePlayer:
                 # Validate horror mode activation state
                 horror_state = self.get_comprehensive_slot_state()
                 
-                if horror_state and dual_verification_enabled:
-                    characters_count = horror_state.get('characters_count', 0)
+                if horror_state:
+                    characters_count = horror_state.get('characters_count')
                     
                     print(f"ðŸ“Š Final horror mode state:")
                     print(f"   Characters count: {characters_count}")
                     
                     # Expect 0 after return (slot should be empty for showcase)
-                    if characters_count == 0:
+                    if self._is_board_count_clean(
+                        horror_state.get("characters_count"),
+                        horror_state.get("putted_characters"),
+                    ):
                         print("âœ… Horror mode properly prepared - slot empty for showcase")
                         print("ðŸŽ¯ Ready to showcase all horror icons (0-19)")
                     else:
-                        print(f"âš ï¸ Horror mode state: {characters_count} icons still on slots")
-                        print("ðŸŽ¯ Proceeding anyway - showcase will handle conflicts")
+                        print(f"🛑 Horror mode state is not clean: {characters_count}")
+                        return False
                 else:
-                    print("âš ï¸ Cannot validate horror mode state (verification disabled)")
-                    print("ðŸŽ¯ Assuming horror mode ready")
+                    print("🛑 Cannot validate horror mode state")
+                    return False
                 
             except Exception as e:
                 print(f"âš ï¸ Error validating horror mode state: {e}")
-                print("ðŸŽ¯ Assuming horror mode ready")
+                return False
             
             print("="*50)
             
@@ -9964,7 +11453,9 @@ class SprunkiGamePlayer:
     
     def execute_remix_only_workflow_corrected(self, progress_callback=None):
         """ENHANCED: Remix-only workflow with verification system"""
+        success = False
         try:
+            self._reset_cleanup_guard()
             if progress_callback:
                 progress_callback("ðŸŽµ Starting enhanced remix-only workflow...")
             
@@ -9991,7 +11482,19 @@ class SprunkiGamePlayer:
                 try:
                     # Smart cleanup for remix-only mode
                     print("ðŸ”„ Smart batch cleanup for remix-only mode...")
-                    cleanup_success_count, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
+                    cleanup_result = self._run_cleanup_once(
+                        use_cdp=False,
+                        context={"workflow": "remix_only"},
+                        obs_controller=self.obs_controller,
+                    )
+                    cleanup_success = cleanup_result.status in {
+                        OperationStatus.VERIFIED,
+                        OperationStatus.ALREADY_EMPTY,
+                    }
+                    cleanup_total = 1
+                    cleanup_success_count = 1 if cleanup_success else 0
+                    if not cleanup_success:
+                        success = False
                     
                     if cleanup_total == 0:
                         print("âœ… No remix cleanup needed - all slots clean")
@@ -10027,6 +11530,21 @@ class SprunkiGamePlayer:
         except Exception as e:
             print("âŒ Error in enhanced remix-only workflow: " + str(e))
             return False
+        finally:
+            # A partial remix can still have occupied slots.  The guard makes
+            # this safe even when the success branch already performed its
+            # cleanup/report path.
+            if not self._cleanup_completed:
+                cleanup_result = self._run_cleanup_once(
+                    use_cdp=False,
+                    context={"workflow": "remix_only_finally"},
+                    obs_controller=self.obs_controller,
+                )
+                if cleanup_result.status not in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_EMPTY,
+                }:
+                    success = False
 
     # ================================================================
     # == LEGACY METHOD REDIRECTS ==
@@ -10878,15 +12396,21 @@ class SprunkiGamePlayer:
             print(f"\nðŸ§¹ ENHANCED CLEANUP & REPORTING: {session_type}")
             print("="*60)
             
-            # Final smart cleanup
-            if self.characters_available:
-                print("ðŸ”„ Final smart batch cleanup...")
-                cleanup_success, cleanup_total, cleanup_errors = self.smart_batch_return_all_slots(use_cdp=False)
-                
-                if cleanup_total > 0:
-                    print(f"   âœ… Cleaned {cleanup_success}/{cleanup_total} slots")
-                    if cleanup_errors:
-                        print(f"   âš ï¸ {len(cleanup_errors)} cleanup issues")
+            # Final smart cleanup is guarded so a workflow finally block and
+            # the completion-report path cannot execute it twice.
+            cleanup_result = self._run_cleanup_once(
+                use_cdp=False,
+                context={"workflow": session_type},
+                obs_controller=self.obs_controller,
+            )
+            if cleanup_result.status not in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }:
+                print(
+                    f"   🛑 Cleanup status: {cleanup_result.status.value} "
+                    f"({cleanup_result.message})"
+                )
             
             # Generate comprehensive report
             print("\nðŸ“‹ Generating comprehensive session report...")

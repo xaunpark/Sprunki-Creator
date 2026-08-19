@@ -9,7 +9,11 @@ import win32api
 import win32con
 
 from manual_profile_manager import save_profile
-from manual_prepare_timeline import PrepareTimelineRecorder, format_duration_ms
+from manual_prepare_timeline import (
+    PrepareTimelineRecorder,
+    format_duration_ms,
+    validate_prepare_timeline,
+)
 from sprunki_game_player import SprunkiGamePlayer
 
 
@@ -45,6 +49,7 @@ class ManualProfileRecorder:
         self.last_saved = "Ready"
         self.running = True
         self.recording_enabled = False
+        self.game_ready = False
         self.prepare_timeline = PrepareTimelineRecorder()
         self.prepare_timing = {}
         self.last_prepare_action_text = "Mốc vừa ghi: chưa có action"
@@ -110,6 +115,13 @@ class ManualProfileRecorder:
 
         button_row = tk.Frame(frame)
         button_row.pack(fill="x")
+        self.start_button = tk.Button(
+            button_row,
+            text="Start recording",
+            command=self.start_recording,
+            width=15,
+        )
+        self.start_button.pack(side="left")
         tk.Button(button_row, text="Undo Last", command=self.undo_last, width=10).pack(side="left")
         self.next_phase_button = tk.Button(
             button_row,
@@ -164,6 +176,10 @@ class ManualProfileRecorder:
         self.icon_count_var.set(f"Icons: {len(self.icons)}")
         self.slot_count_var.set(f"Slots: {len(self.slots)}")
         self.last_saved_var.set(f"Last: {self.last_saved}")
+        if hasattr(self, "start_button"):
+            self.start_button.configure(
+                state=("normal" if self.game_ready and not self.recording_enabled and self.phase == "PREPARE" else "disabled")
+            )
         self._refresh_prepare_timing_display()
         self.root.update_idletasks()
 
@@ -229,12 +245,10 @@ class ManualProfileRecorder:
         if self.phase == "PREPARE":
             return (
                 "PREPARE - mở menu game",
-                "1. Bấm vào cửa sổ game và thực hiện mọi thao tác để vượt menu mở đầu "
-                "(click, kéo thả và phím bấm sẽ được tự động ghi lại).\n"
-                "2. Đồng hồ hiển thị tổng thời gian và khoảng chờ hiện tại; mỗi action mới "
-                "sẽ chốt khoảng chờ trước đó.\n"
-                "3. Khi game đã sẵn sàng để ghi layout, đưa chuột ra khỏi bảng này.\n"
-                "4. Bấm 'Sang ICONS' bên dưới hoặc nhấn Ctrl+Shift+Enter.",
+                "1. Chờ game load xong, đưa chuột ra khỏi bảng này rồi bấm 'Start recording'.\n"
+                "2. Sau Start, mọi click, kéo thả và phím bấm trong PREPARE sẽ được ghi lại.\n"
+                "3. Đồng hồ lấy đúng thời điểm bấm Start làm mốc 0; mỗi action mới chốt khoảng chờ trước đó.\n"
+                "4. Khi game sẵn sàng ghi layout, bấm 'Sang ICONS' hoặc Ctrl+Shift+Enter.",
                 "Sang ICONS",
             )
         if self.phase == "ICONS":
@@ -447,6 +461,9 @@ class ManualProfileRecorder:
 
     def advance_phase(self) -> None:
         if self.phase == "PREPARE":
+            if not self.recording_enabled:
+                self._set_last_saved("Chưa bắt đầu ghi: hãy bấm Start recording sau khi game load xong.")
+                return
             self.recording_enabled = False
             self.prepare_timing = self.prepare_timeline.finish()
             self.phase = "ICONS"
@@ -472,9 +489,38 @@ class ManualProfileRecorder:
             pass
         self.root.after(0, self.root.destroy)
 
+    def start_recording(self) -> None:
+        """Start the PREPARE timeline exactly when the user presses Start."""
+        if not self.game_ready or self.phase != "PREPARE" or self.recording_enabled:
+            return
+        self.prepare_actions = []
+        self.prepare_timing = {}
+        self.prepare_timeline.start()
+        self.recording_enabled = True
+        self.last_key_name = None
+        self.last_key_timestamp = 0.0
+        self._sync_last_prepare_action_text()
+        if self.mouse_thread is None or not self.mouse_thread.is_alive():
+            self.mouse_thread = threading.Thread(target=self._capture_mouse_loop, daemon=True)
+            self.mouse_thread.start()
+        self._set_last_saved("Start recording pressed: PREPARE timeline started at 0.")
+        if self.timing_refresh_job is None:
+            self.timing_refresh_job = self.root.after(0, self._refresh_timing_clock)
+
     def finish_save(self) -> None:
         if not self.icons or not self.slots:
             messagebox.showwarning("Missing layout", "Please capture at least one icon and one slot before saving.")
+            return
+
+        timeline_valid, timeline_reason = validate_prepare_timeline(
+            self.prepare_actions,
+            self.prepare_timing,
+        )
+        if not timeline_valid:
+            messagebox.showwarning(
+                "Invalid PREPARE timeline",
+                f"Cannot save this manual profile: {timeline_reason}",
+            )
             return
 
         width, height = pyautogui.size()
@@ -515,13 +561,8 @@ class ManualProfileRecorder:
         if not self.game_player.navigate_and_prepare_game(self.url):
             raise RuntimeError("Could not open the game and reach the post-Run/F11 state.")
 
-        self.prepare_timeline.start()
-        self.recording_enabled = True
-        self._sync_last_prepare_action_text()
-        self.mouse_thread = threading.Thread(target=self._capture_mouse_loop, daemon=True)
-        self.mouse_thread.start()
-        self._set_last_saved("Run/F11 complete. Recording prepare actions.")
-        self.timing_refresh_job = self.root.after(0, self._refresh_timing_clock)
+        self.game_ready = True
+        self._set_last_saved("Game load complete. Press Start recording when ready.")
         self.root.mainloop()
 
 
