@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 from character_identity import SCRATCH_VM_ICON_STATE_JS, write_character_identity_map
 from manual_profile_manager import find_profile, load_profile_from_path, validate_profile
-from manual_prepare_timeline import get_prepare_end_delay_ms, replay_prepare_timeline
+from manual_prepare_timeline import coerce_delay_ms, get_prepare_end_delay_ms, replay_prepare_timeline
 
 class WorkflowIncompatibleError(Exception):
     """Custom exception raised when the workflow detects a persistent,
@@ -867,19 +867,31 @@ class SprunkiGamePlayer:
                 .replace(/\\s+/g, ' ')
                 .trim();
             const currentUrl = window.location.href;
-            const combined = `${title} ${headingText} ${bodyText}`.toLowerCase();
-            const errorPatterns = [
-                '404',
-                'not found',
-                'page not found',
-                'project not found',
-                'không tìm thấy',
-                'khong tim thay'
+            const headingCandidates = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+                .map(el => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim())
+                .filter(Boolean);
+            const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const normalizedTitle = normalize(title);
+            const normalizedHeadings = headingCandidates.map(normalize);
+
+            // Do not search the whole body for "404". Usernames, dates, comments,
+            // and project text can contain that sequence by coincidence.
+            const errorMatchers = [
+                { pattern: '404', regex: /^(?:404|error 404|404 error)(?:[ .:!?]|$)/i },
+                { pattern: 'page not found', regex: /^page not found(?:[ .:!?]|$)/i },
+                { pattern: 'project not found', regex: /^project not found(?:[ .:!?]|$)/i },
+                { pattern: 'không tìm thấy', regex: /^không tìm thấy(?:[ .:!?]|$)/i },
+                { pattern: 'khong tim thay', regex: /^khong tim thay(?:[ .:!?]|$)/i }
             ];
-            const matchedPattern = errorPatterns.find(pattern => combined.includes(pattern));
+            const titleMatch = errorMatchers.find(({ regex }) => regex.test(normalizedTitle));
+            const headingMatch = errorMatchers.find(({ regex }) =>
+                normalizedHeadings.some(heading => regex.test(heading))
+            );
+            const matched = titleMatch || headingMatch;
+            const matchedPattern = matched ? matched.pattern : null;
             return {
-                isErrorPage: !!matchedPattern,
-                matchedPattern: matchedPattern || null,
+                isErrorPage: !!matched,
+                matchedPattern,
                 title,
                 headingText: headingText.substring(0, 200),
                 bodyPreview: bodyText.substring(0, 300),
@@ -1120,9 +1132,27 @@ class SprunkiGamePlayer:
                     .join(' ')
                     .replace(/\\s+/g, ' ')
                     .trim();
-                const combinedText = `${{results.errorPage.title}} ${{headingText}} ${{bodyText}}`.toLowerCase();
-                const errorPatterns = ['404', 'not found', 'page not found', 'project not found', 'không tìm thấy', 'khong tim thay'];
-                const matchedErrorPattern = errorPatterns.find(pattern => combinedText.includes(pattern));
+                const headingCandidates = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+                    .map(el => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim())
+                    .filter(Boolean);
+                const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const normalizedTitle = normalize(results.errorPage.title);
+                const normalizedHeadings = headingCandidates.map(normalize);
+
+                // Match only exact error titles/headings. Do not scan body text;
+                // comments can contain accidental sequences such as "404".
+                const errorMatchers = [
+                    {{ pattern: '404', regex: /^(?:404|error 404|404 error)(?:[ .:!?]|$)/i }},
+                    {{ pattern: 'page not found', regex: /^page not found(?:[ .:!?]|$)/i }},
+                    {{ pattern: 'project not found', regex: /^project not found(?:[ .:!?]|$)/i }},
+                    {{ pattern: 'không tìm thấy', regex: /^không tìm thấy(?:[ .:!?]|$)/i }},
+                    {{ pattern: 'khong tim thay', regex: /^khong tim thay(?:[ .:!?]|$)/i }}
+                ];
+                const matchedError = errorMatchers.find(item =>
+                    item.regex.test(normalizedTitle) ||
+                    normalizedHeadings.some(heading => item.regex.test(heading))
+                );
+                const matchedErrorPattern = matchedError ? matchedError.pattern : null;
                 if (matchedErrorPattern) {{
                     results.errorPage.detected = true;
                     results.errorPage.pattern = matchedErrorPattern;
@@ -6415,6 +6445,120 @@ class SprunkiGamePlayer:
             print(f"âŒ CDP single click failed: {e}")
             return False
 
+    def _execute_cdp_single_drag(
+        self,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        drag_duration_ms=0,
+    ):
+        """Replay one manually recorded drag with browser-native mouse events."""
+        ws = None
+        mouse_pressed = False
+        mouse_released = False
+        duration_seconds = coerce_delay_ms(drag_duration_ms) / 1000.0
+        if duration_seconds <= 0:
+            duration_seconds = 0.8
+
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                pyautogui.moveTo(int(start_x), int(start_y), duration=0.05)
+                pyautogui.dragTo(
+                    int(end_x),
+                    int(end_y),
+                    duration=duration_seconds,
+                    button="left",
+                )
+                return True
+
+            ws = websocket.create_connection(ws_url, timeout=30)
+            self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+
+            start_x = float(start_x)
+            start_y = float(start_y)
+            end_x = float(end_x)
+            end_y = float(end_y)
+
+            move_response = self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {"type": "mouseMoved", "x": start_x, "y": start_y},
+            })
+            if not move_response or "error" in move_response:
+                return False
+
+            time.sleep(0.05)
+            press_response = self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {
+                    "type": "mousePressed",
+                    "x": start_x,
+                    "y": start_y,
+                    "button": "left",
+                    "buttons": 1,
+                    "clickCount": 1,
+                },
+            })
+            if not press_response or "error" in press_response:
+                return False
+            mouse_pressed = True
+
+            steps = max(5, min(40, int(round(duration_seconds * 30))))
+            step_delay = duration_seconds / steps
+            for step in range(1, steps + 1):
+                progress = step / steps
+                current_x = start_x + ((end_x - start_x) * progress)
+                current_y = start_y + ((end_y - start_y) * progress)
+                move_response = self._send_cdp_command(ws, {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {
+                        "type": "mouseMoved",
+                        "x": current_x,
+                        "y": current_y,
+                        "button": "left",
+                        "buttons": 1,
+                    },
+                })
+                if not move_response or "error" in move_response:
+                    return False
+                time.sleep(step_delay)
+
+            release_response = self._send_cdp_command(ws, {
+                "method": "Input.dispatchMouseEvent",
+                "params": {
+                    "type": "mouseReleased",
+                    "x": end_x,
+                    "y": end_y,
+                    "button": "left",
+                    "buttons": 0,
+                    "clickCount": 1,
+                },
+            })
+            mouse_released = bool(release_response and "error" not in release_response)
+            return mouse_released
+        except Exception as drag_error:
+            print(f"âŒ CDP manual drag failed: {drag_error}")
+            return False
+        finally:
+            if ws:
+                try:
+                    if mouse_pressed and not mouse_released:
+                        self._send_cdp_command(ws, {
+                            "method": "Input.dispatchMouseEvent",
+                            "params": {
+                                "type": "mouseReleased",
+                                "x": end_x,
+                                "y": end_y,
+                                "button": "left",
+                                "buttons": 0,
+                                "clickCount": 1,
+                            },
+                        })
+                    ws.close()
+                except Exception:
+                    pass
+
     def attempt_icon_return(self, target_slot):
         try:
             print("ðŸ”„ Attempting to return icon before retry...")
@@ -7178,6 +7322,24 @@ class SprunkiGamePlayer:
                     y = int(action.get("y"))
                     print(f"   {index}. Click @ ({x}, {y})")
                     if not self._execute_cdp_single_click(x, y):
+                        return False
+                elif action_type == "drag":
+                    start_x = int(action.get("startX"))
+                    start_y = int(action.get("startY"))
+                    end_x = int(action.get("endX"))
+                    end_y = int(action.get("endY"))
+                    drag_duration_ms = coerce_delay_ms(action.get("dragDurationMs", 0))
+                    print(
+                        f"   {index}. Drag @ ({start_x}, {start_y}) -> "
+                        f"({end_x}, {end_y}) ({drag_duration_ms} ms)"
+                    )
+                    if not self._execute_cdp_single_drag(
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y,
+                        drag_duration_ms,
+                    ):
                         return False
                 elif action_type == "key":
                     key_name = action.get("key")

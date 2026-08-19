@@ -1,6 +1,8 @@
 """Shared timing helpers for manually recorded PREPARE flows.
 
 The recorder stores the delay before each action in ``prepareActions[*].delayMs``.
+Drag actions additionally contain ``startX``, ``startY``, ``endX``, ``endY`` and
+``dragDurationMs`` so a drag can be replayed as a real mouse gesture.
 The delay after the last action, up to the user's PREPARE -> ICONS transition,
 is stored in ``prepareTiming.endDelayMs``.  Keeping the timing model here lets
 all replay entry points apply the same timing rules while remaining compatible
@@ -140,8 +142,13 @@ class PrepareTimelineRecorder:
                 DURATION_KEY: 0,
             }
 
-    def mark_event(self, now: Optional[float] = None) -> int:
-        """Record an action boundary and return its preceding delay."""
+    def mark_event(self, now: Optional[float] = None, duration_ms: Any = 0) -> int:
+        """Record an action boundary and return its delay before execution.
+
+        ``duration_ms`` is used for gestures such as drag: the timeline
+        boundary is recorded at mouse-up, while the returned delay represents
+        the time from the previous action to mouse-down.
+        """
         timestamp = self._clock() if now is None else float(now)
         with self._lock:
             if self._started_at is None:
@@ -156,6 +163,7 @@ class PrepareTimelineRecorder:
                 else timestamp
             )
             delay_ms = coerce_delay_ms((timestamp - previous) * 1000.0)
+            delay_ms = max(delay_ms - coerce_delay_ms(duration_ms), 0)
             self._last_event_at = timestamp
             self._event_times.append(timestamp)
             self._finished = False

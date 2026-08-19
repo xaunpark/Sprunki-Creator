@@ -14,6 +14,9 @@ from sprunki_game_player import SprunkiGamePlayer
 
 
 class ManualProfileRecorder:
+    DRAG_THRESHOLD_PX = 8
+    MOUSE_POLL_INTERVAL_SECONDS = 0.01
+
     RESERVED_KEYS = {
         "shift",
         "ctrl",
@@ -49,6 +52,7 @@ class ManualProfileRecorder:
         self.last_key_name = None
         self.last_key_timestamp = 0.0
         self.mouse_down = False
+        self.active_mouse_gesture = None
         self.keyboard_hook = None
         self.mouse_thread = None
         self.save_result_path = None
@@ -168,6 +172,12 @@ class ManualProfileRecorder:
         delay_text = format_duration_ms(action.get("delayMs", 0))
         if action_type == "click":
             description = f"click @ ({action.get('x')}, {action.get('y')})"
+        elif action_type == "drag":
+            description = (
+                f"kéo ({action.get('startX')}, {action.get('startY')}) → "
+                f"({action.get('endX')}, {action.get('endY')}) "
+                f"trong {format_duration_ms(action.get('dragDurationMs', 0))}"
+            )
         elif action_type == "key":
             description = f"phím {action.get('key')}"
         else:
@@ -183,10 +193,20 @@ class ManualProfileRecorder:
     def _refresh_prepare_timing_display(self) -> None:
         snapshot = self.prepare_timeline.snapshot()
         if self.phase == "PREPARE" and self.recording_enabled:
-            timing_text = (
-                f"PREPARE tổng: {format_duration_ms(snapshot.get('elapsedMs', 0))} | "
-                f"Chờ hiện tại: {format_duration_ms(snapshot.get('currentWaitMs', 0))}"
-            )
+            if self.active_mouse_gesture is not None:
+                drag_elapsed_ms = max(
+                    int(round((time.monotonic() - self.active_mouse_gesture["startTime"]) * 1000)),
+                    0,
+                )
+                timing_text = (
+                    f"PREPARE tổng: {format_duration_ms(snapshot.get('elapsedMs', 0))} | "
+                    f"Đang kéo: {format_duration_ms(drag_elapsed_ms)}"
+                )
+            else:
+                timing_text = (
+                    f"PREPARE tổng: {format_duration_ms(snapshot.get('elapsedMs', 0))} | "
+                    f"Chờ hiện tại: {format_duration_ms(snapshot.get('currentWaitMs', 0))}"
+                )
         elif self.prepare_timing:
             timing_text = (
                 f"PREPARE tổng: {format_duration_ms(self.prepare_timing.get('durationMs', 0))} | "
@@ -210,7 +230,7 @@ class ManualProfileRecorder:
             return (
                 "PREPARE - mở menu game",
                 "1. Bấm vào cửa sổ game và thực hiện mọi thao tác để vượt menu mở đầu "
-                "(click chuột và phím bấm sẽ được tự động ghi lại).\n"
+                "(click, kéo thả và phím bấm sẽ được tự động ghi lại).\n"
                 "2. Đồng hồ hiển thị tổng thời gian và khoảng chờ hiện tại; mỗi action mới "
                 "sẽ chốt khoảng chờ trước đó.\n"
                 "3. Khi game đã sẵn sàng để ghi layout, đưa chuột ra khỏi bảng này.\n"
@@ -236,8 +256,8 @@ class ManualProfileRecorder:
         self.last_saved = message
         self.root.after(0, self._refresh_ui)
 
-    def _mark_event_time(self) -> int:
-        return self.prepare_timeline.mark_event()
+    def _mark_event_time(self, event_time=None, duration_ms=0) -> int:
+        return self.prepare_timeline.mark_event(now=event_time, duration_ms=duration_ms)
 
     def _ui_bounds(self):
         self.root.update_idletasks()
@@ -251,12 +271,12 @@ class ManualProfileRecorder:
         left, top, right, bottom = self._ui_bounds()
         return left <= x <= right and top <= y <= bottom
 
-    def _record_click(self, x: int, y: int) -> None:
+    def _record_click(self, x: int, y: int, event_time=None) -> None:
         if self.phase != "PREPARE" or not self.recording_enabled:
             return
         if self._point_inside_ui(x, y):
             return
-        delay_ms = self._mark_event_time()
+        delay_ms = self._mark_event_time(event_time=event_time)
         self.prepare_actions.append({
             "type": "click",
             "x": int(x),
@@ -266,8 +286,34 @@ class ManualProfileRecorder:
         self._sync_last_prepare_action_text()
         self._set_last_saved(f"Recorded click @ ({x}, {y})")
 
+    def _record_drag(self, gesture, end_x: int, end_y: int, end_time: float) -> None:
+        if self.phase != "PREPARE" or not self.recording_enabled:
+            return
+
+        start_time = float(gesture["startTime"])
+        drag_duration_ms = max(int(round((end_time - start_time) * 1000)), 0)
+        delay_ms = self._mark_event_time(
+            event_time=end_time,
+            duration_ms=drag_duration_ms,
+        )
+        self.prepare_actions.append({
+            "type": "drag",
+            "startX": int(gesture["startX"]),
+            "startY": int(gesture["startY"]),
+            "endX": int(end_x),
+            "endY": int(end_y),
+            "dragDurationMs": drag_duration_ms,
+            "delayMs": delay_ms,
+        })
+        self._sync_last_prepare_action_text()
+        self._set_last_saved(
+            f"Recorded drag: ({gesture['startX']}, {gesture['startY']}) → ({end_x}, {end_y})"
+        )
+
     def _on_keyboard_event(self, event) -> None:
         if event.event_type != "down" or self.phase != "PREPARE" or not self.recording_enabled:
+            return
+        if self.active_mouse_gesture is not None:
             return
 
         key_name = (event.name or "").lower()
@@ -295,14 +341,66 @@ class ManualProfileRecorder:
         self._sync_last_prepare_action_text()
         self._set_last_saved(f"Recorded key: {event.name}")
 
+    def _start_mouse_gesture(self, x: int, y: int) -> None:
+        if self.phase != "PREPARE" or not self.recording_enabled or self._point_inside_ui(x, y):
+            self.active_mouse_gesture = None
+            return
+
+        now = time.monotonic()
+        self.active_mouse_gesture = {
+            "startX": int(x),
+            "startY": int(y),
+            "startTime": now,
+            "maxDistanceSquared": 0,
+        }
+        self.last_prepare_action_text = (
+            f"Đang giữ chuột tại ({int(x)}, {int(y)}) — chờ phân loại click/kéo..."
+        )
+        self._set_last_saved(f"Mouse down @ ({x}, {y})")
+
+    def _update_mouse_gesture(self, x: int, y: int) -> None:
+        gesture = self.active_mouse_gesture
+        if gesture is None:
+            return
+        dx = int(x) - gesture["startX"]
+        dy = int(y) - gesture["startY"]
+        distance_squared = dx * dx + dy * dy
+        gesture["maxDistanceSquared"] = max(
+            gesture["maxDistanceSquared"],
+            distance_squared,
+        )
+
+    def _finish_mouse_gesture(self, x: int, y: int) -> None:
+        gesture = self.active_mouse_gesture
+        self.active_mouse_gesture = None
+        if gesture is None:
+            return
+
+        end_time = time.monotonic()
+        threshold_squared = self.DRAG_THRESHOLD_PX * self.DRAG_THRESHOLD_PX
+        if gesture["maxDistanceSquared"] >= threshold_squared:
+            self._record_drag(gesture, int(x), int(y), end_time)
+        else:
+            self._record_click(
+                gesture["startX"],
+                gesture["startY"],
+                event_time=gesture["startTime"],
+            )
+
     def _capture_mouse_loop(self) -> None:
         while self.running:
             state = bool(win32api.GetAsyncKeyState(win32con.VK_LBUTTON) & 0x8000)
             if state and not self.mouse_down:
                 x, y = pyautogui.position()
-                self._record_click(x, y)
+                self._start_mouse_gesture(x, y)
+            elif state and self.mouse_down and self.active_mouse_gesture is not None:
+                x, y = pyautogui.position()
+                self._update_mouse_gesture(x, y)
+            elif not state and self.mouse_down:
+                x, y = pyautogui.position()
+                self._finish_mouse_gesture(x, y)
             self.mouse_down = state
-            time.sleep(0.03)
+            time.sleep(self.MOUSE_POLL_INTERVAL_SECONDS)
 
     def _capture_icon_hotkey(self) -> None:
         if self.phase != "ICONS":
