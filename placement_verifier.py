@@ -472,6 +472,10 @@ def evaluate_transition(
     details: Dict[str, Any] = {
         "before": before_snapshot.semantic_key(),
         "after": after_snapshot.semantic_key(),
+        "beforeCharactersCount": before_snapshot.characters_count,
+        "afterCharactersCount": after_snapshot.characters_count,
+        "beforePuttedCount": before_snapshot.putted_count,
+        "afterPuttedCount": after_snapshot.putted_count,
         "expectedDelta": delta,
         "targetSlot": target_slot,
     }

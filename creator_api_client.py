@@ -6,6 +6,7 @@ Replaces tkinter GUI with API-based job polling
 import json
 import threading
 import time
+import uuid
 import requests
 from threading import Thread
 import os
@@ -26,6 +27,15 @@ from collections.abc import Callable
 from smart_retry_manager import SmartRetryManager
 from file_validator import FileQualityValidator
 from manual_profile_manager import suggested_profile_path_for_url, url_key_from_url
+from workflow_quality import (
+    NON_RETRYABLE_FAILURE_CODES,
+    validate_playable_layout,
+)
+from tracker_reporting import (
+    SCHEMA_VERSION as TRACKER_REPORT_SCHEMA_VERSION,
+    build_log_snapshot,
+    build_tracker_diagnostic_report,
+)
 
 # --- CONFIG: Thư mục chứa file JSON thủ công ---
 MANUAL_JSON_DIR = "manual_jsons"
@@ -134,6 +144,15 @@ class JobLogCapture:
             self._safe_close_file()
             self.started = False
 
+    def snapshot(self) -> dict:
+        """Return a bounded excerpt and a reference to the complete job log."""
+        try:
+            if self.log_file:
+                self.log_file.flush()
+        except Exception:
+            pass
+        return build_log_snapshot(self.log_path)
+
     def _safe_restore_streams(self):
         if self.original_stdout is not None:
             sys.stdout = self.original_stdout
@@ -166,6 +185,8 @@ class TrackerAPIClient:
         self.service_name = f"creator-{self.config.get('application', {}).get('instance_id', '1')}"
         self.session = requests.Session()
         self.timeout = 30
+        self._active_report_ids = {}
+        self._progress_sequences = {}
         
         self.capabilities = {
             'master': True,
@@ -185,6 +206,27 @@ class TrackerAPIClient:
         print(f"🔗 Tracker API Client initialized")
         print(f"   Service: {self.service_name}")
         print(f"   Tracker: {self.tracker_url}")
+
+    def bind_job_report(self, queue_id: int, report_id: str) -> None:
+        """Associate progress events with the job's final diagnostic report."""
+        if not hasattr(self, "_active_report_ids"):
+            self._active_report_ids = {}
+        if not hasattr(self, "_progress_sequences"):
+            self._progress_sequences = {}
+        self._active_report_ids[queue_id] = report_id
+        self._progress_sequences[queue_id] = 0
+
+    def unbind_job_report(self, queue_id: int) -> None:
+        if hasattr(self, "_active_report_ids"):
+            self._active_report_ids.pop(queue_id, None)
+        if hasattr(self, "_progress_sequences"):
+            self._progress_sequences.pop(queue_id, None)
+
+    def _next_progress_sequence(self, queue_id: int) -> int:
+        if not hasattr(self, "_progress_sequences"):
+            self._progress_sequences = {}
+        self._progress_sequences[queue_id] = self._progress_sequences.get(queue_id, 0) + 1
+        return self._progress_sequences[queue_id]
     
     def register_service(self) -> bool:
         """Register this Creator instance with Tracker"""
@@ -259,9 +301,21 @@ class TrackerAPIClient:
     
     def update_job_status(self, queue_id: int, status: str, details: Optional[Dict] = None,
                          video_files: Optional[Dict] = None, error_log: Optional[str] = None,
-                         workflow_report: Optional[Dict] = None) -> bool:
-        """Update job status in Tracker"""
+                         workflow_report: Optional[Dict] = None,
+                         diagnostic_report: Optional[Dict] = None,
+                         manifest_ref: Optional[Dict] = None,
+                         log_ref: Optional[Dict] = None,
+                         report_id: Optional[str] = None,
+                         final: bool = False,
+                         sequence: Optional[int] = None) -> bool:
+        """Update job status in Tracker with backward-compatible diagnostics.
+
+        ``final`` is intentionally explicit.  Intermediate status calls may
+        still be accepted by older Trackers, but only the final call carries
+        the authoritative quality/evidence report.
+        """
         try:
+            active_report_id = getattr(self, "_active_report_ids", {}).get(queue_id)
             payload = {
                 'status': status,
                 'details': details,
@@ -269,6 +323,15 @@ class TrackerAPIClient:
                 'error_log': error_log,
                 'workflow_report': workflow_report
             }
+            payload.update({
+                'schema_version': TRACKER_REPORT_SCHEMA_VERSION,
+                'diagnostic_report': diagnostic_report,
+                'manifest_ref': manifest_ref,
+                'log_ref': log_ref,
+                'report_id': report_id or active_report_id,
+                'final': bool(final),
+                'sequence': sequence,
+            })
             
             response = self.session.put(
                 f"{self.tracker_url}/api/queue/status/{queue_id}", 
@@ -289,16 +352,27 @@ class TrackerAPIClient:
 
     def update_job_progress(self, queue_id: int, stage: str, substep: Optional[str] = None,
                         progress_percent: float = 0.0, status: str = 'active',
-                        metadata: Optional[Dict] = None, error_details: Optional[str] = None) -> bool:
+                        metadata: Optional[Dict] = None, error_details: Optional[str] = None,
+                        report_id: Optional[str] = None, sequence: Optional[int] = None,
+                        final: bool = False) -> bool:
         """Report detailed job progress to Tracker - PHASE 1"""
         try:
+            active_report_id = getattr(self, "_active_report_ids", {}).get(queue_id)
+            effective_report_id = report_id or active_report_id
+            effective_sequence = sequence
+            if effective_sequence is None and effective_report_id:
+                effective_sequence = self._next_progress_sequence(queue_id)
             payload = {
                 'stage': stage,
                 'substep': substep,
                 'progress_percent': progress_percent,
                 'status': status,
                 'metadata': metadata,
-                'error_details': error_details
+                'error_details': error_details,
+                'schema_version': TRACKER_REPORT_SCHEMA_VERSION,
+                'report_id': effective_report_id,
+                'sequence': effective_sequence,
+                'final': bool(final),
             }
             
             response = self.session.post(
@@ -348,7 +422,10 @@ class TrackerAPIClient:
                 'mode': summary.get('mode'),
                 'output_path': manifest_data.get("projectInfo", {}).get("outputDirectory"),
                 'produced_at': summary.get('endTime'),
-                'production_details': summary.get('statusDetails')
+                'production_details': summary.get('statusDetails'),
+                'quality_gates': manifest_data.get('qualityGates'),
+                'coverage': summary.get('coverage'),
+                'manifest_snapshot': manifest_data,
             }
             
             response = self.session.put(
@@ -378,6 +455,8 @@ class CreatorService:
         self.heartbeat_thread = None
         self.service_stop_event = threading.Event()        
         self.current_job = None
+        self._watchdog_failures = {}
+        self._watchdog_failures_lock = threading.Lock()
         
         self.game_player = None
         self.obs_controller = None
@@ -440,6 +519,16 @@ class CreatorService:
             log_directory = os.path.join(PROJECT_DIR, log_directory)
         return JobLogCapture(queue_id=queue_id, log_directory=log_directory, enabled=enabled)
 
+    def _snapshot_job_log(self, job_log_capture: Any) -> Dict[str, Any]:
+        """Capture log evidence while remaining compatible with test/dummy captures."""
+        snapshotter = getattr(job_log_capture, "snapshot", None)
+        if callable(snapshotter):
+            try:
+                return snapshotter()
+            except Exception as exc:
+                self.logger.warning("Could not snapshot job log: %s", exc)
+        return build_log_snapshot(getattr(job_log_capture, "log_path", None))
+
     @property
     def root(self):
         """
@@ -460,6 +549,11 @@ class CreatorService:
         """
         try:
             print("⚙️ Initializing components for new job...")
+
+            layout_quality = validate_playable_layout(config_data)
+            if not layout_quality.passed:
+                print(f"🛑 Component initialization rejected: {layout_quality.failure_code}")
+                return False
             
             if hasattr(self, 'obs_controller') and self.obs_controller:
                 print("🧹 Cleaning up previous OBS controller...")
@@ -649,18 +743,47 @@ class CreatorService:
             
             # Kích hoạt cờ dừng của JOB này
             job_stop_event.set()
-            
-            # Cập nhật trạng thái job là thất bại
-            # Chúng ta không cần dọn dẹp ở đây nữa, khối finally của _process_job sẽ xử lý
-            self.api_client.update_job_status(
+
+            # Do not send a terminal status from the watchdog thread.  The
+            # finalizer owns the only terminal report and will attach the
+            # workflow/manifest/log evidence collected by the job.
+            failure = {
+                "failure_code": "runtime_verification_unknown",
+                "message": f"WATCHDOG: {error_msg}",
+                "evidence": {
+                    "watchdog": True,
+                    "timeout_minutes": job_timeout_minutes,
+                },
+                "status": "UNKNOWN",
+                "retryable": True,
+            }
+            with self._watchdog_failures_lock:
+                self._watchdog_failures[queue_id] = failure
+            self.api_client.update_job_progress(
                 queue_id,
-                status='failed',
-                error_log=f"WATCHDOG: {error_msg}"
+                "watchdog",
+                "timeout",
+                0.0,
+                "failed",
+                metadata={**failure, "final": False},
+                error_details=failure["message"],
+                final=False,
             )
         elif job_finished_before_timeout:
              self.logger.info(f"🐶 Watchdog for job {queue_id}: Job finished normally. Exiting.")
         elif self.service_stop_event.is_set():
              self.logger.info(f"🐶 Watchdog for job {queue_id}: Service is stopping. Exiting.")
+
+    def _take_watchdog_failure(self, queue_id: int) -> Optional[Dict[str, Any]]:
+        """Consume a watchdog failure so it is included in the final report."""
+        failures = getattr(self, "_watchdog_failures", None)
+        if not isinstance(failures, dict):
+            return None
+        lock = getattr(self, "_watchdog_failures_lock", None)
+        if lock is not None:
+            with lock:
+                return failures.pop(queue_id, None)
+        return failures.pop(queue_id, None)
 
     def _process_job(self, job: Dict) -> bool:
         """
@@ -671,7 +794,13 @@ class CreatorService:
         job_log_capture.start()
         item = None
         job_successful = False
+        final_success = False
         start_time = time.monotonic()
+        terminal_error = None
+        report_id = f"{getattr(self.api_client, 'service_name', 'creator')}:{queue_id}:{uuid.uuid4().hex}"
+        bind_report = getattr(self.api_client, "bind_job_report", None)
+        if callable(bind_report):
+            bind_report(queue_id, report_id)
         
         # 1. TẠO CỜ DỪNG RIÊNG CHO JOB NÀY
         job_stop_event = threading.Event()
@@ -690,6 +819,8 @@ class CreatorService:
             self.processing_manager.stop_event = job_stop_event
             
             item = self._convert_job_to_processing_item(job)
+            if getattr(item, "start_time", None) is None:
+                item.start_time = datetime.now()
             
             # --- HIỂN THỊ SLUG ĐỂ USER DỄ COPY ---
             print(f"🔑 Project Slug: {item.project_slug}")
@@ -704,10 +835,17 @@ class CreatorService:
 
         except Exception as e:
             error_msg = f"Critical job processing error: {str(e)}"
+            terminal_error = error_msg
             self.logger.error(f"❌ Unhandled exception in job {queue_id}: {error_msg}", exc_info=True)
             if item:
-                item.status = "failed"
-                item.error_message = error_msg
+                self.processing_manager._record_quality_failure(
+                    item,
+                    getattr(item, "failure_code", None) or "runtime_verification_unknown",
+                    error_msg,
+                    evidence={"error": error_msg, "queueId": queue_id},
+                    status="UNKNOWN",
+                    retryable=True,
+                )
             job_successful = False
             self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
         
@@ -715,38 +853,88 @@ class CreatorService:
             # 5. BÁO HIỆU CHO WATCHDOG DỪNG LẠI vì job đã xong (dù thành công hay thất bại)
             job_stop_event.set()
 
-            if item:
-                from dataclasses import asdict
-                final_status = "completed" if job_successful else "failed"
-                
-                self.logger.info(f"Finalizing job {queue_id} with status: {final_status.upper()}")
+            watchdog_failure = self._take_watchdog_failure(queue_id)
+            if watchdog_failure:
+                terminal_error = watchdog_failure.get("message") or terminal_error
+                if item:
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        watchdog_failure.get("failure_code", "runtime_verification_unknown"),
+                        watchdog_failure.get("message", "Watchdog stopped the workflow."),
+                        evidence=watchdog_failure.get("evidence", {}),
+                        status=watchdog_failure.get("status", "UNKNOWN"),
+                        retryable=watchdog_failure.get("retryable", True),
+                    )
 
-                workflow_report_obj = getattr(item, 'workflow_report', None)
-                workflow_report_dict = asdict(workflow_report_obj) if workflow_report_obj else None
+            manifest_data = None
+            video_files_payload = {}
+            workflow_report_obj = getattr(item, "workflow_report", None) if item else None
+
+            if item:
+                if workflow_report_obj is None:
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        "runtime_verification_unknown",
+                        "Workflow ended without a quality report.",
+                        evidence={"queueId": queue_id},
+                        status="UNKNOWN",
+                        retryable=True,
+                    )
+                    workflow_report_obj = getattr(item, "workflow_report", None)
+
+                # Align the manifest status with the same final authority as
+                # the Tracker status.  A false workflow return must not leave
+                # an item looking successful merely because an older phase
+                # had a passing gate.
+                if not job_successful and item.status != "failed":
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        getattr(item, "failure_code", None) or "workflow_stopped",
+                        getattr(item, "error_message", None) or "Workflow returned failure before finalization.",
+                        evidence={"jobSuccessful": False},
+                        retryable=False,
+                    )
+                    workflow_report_obj = getattr(item, "workflow_report", None)
 
                 item.end_time = datetime.now()
-                manifest_data = self.processing_manager._generate_manifest_for_item(item)
-                
-                video_files_payload = self._organize_output_files(item.output_files)
+                try:
+                    manifest_data = self.processing_manager._generate_manifest_for_item(item)
+                except Exception as manifest_error:
+                    terminal_error = terminal_error or f"Manifest generation failed: {manifest_error}"
+                    self.logger.error("❌ Manifest generation failed for %s: %s", queue_id, manifest_error, exc_info=True)
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        "artifact_missing",
+                        terminal_error,
+                        evidence={"manifest_generation_error": str(manifest_error)},
+                        retryable=False,
+                    )
+                    workflow_report_obj = getattr(item, "workflow_report", None)
+                if manifest_data is None:
+                    terminal_error = terminal_error or "Manifest generation returned no data."
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        "artifact_missing",
+                        terminal_error,
+                        evidence={"manifest_generation": "no_data"},
+                        retryable=False,
+                    )
+                    workflow_report_obj = getattr(item, "workflow_report", None)
 
-                self.api_client.update_job_status(
-                    queue_id,
-                    status=final_status,
-                    video_files=video_files_payload,
-                    error_log=item.error_message,
-                    workflow_report=workflow_report_dict
-                )
+                try:
+                    video_files_payload = self._organize_output_files(item.output_files)
+                except Exception as output_error:
+                    terminal_error = terminal_error or f"Output organization failed: {output_error}"
+                    self.logger.error("❌ Output organization failed for %s: %s", queue_id, output_error, exc_info=True)
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        "artifact_missing",
+                        terminal_error,
+                        evidence={"output_organization_error": str(output_error)},
+                        retryable=False,
+                    )
 
-                if manifest_data:
-                    mod_id = job.get('mod_id')
-                    if mod_id:
-                        self.logger.info(f"Syncing production status for mod {mod_id}...")
-                        self.api_client.update_mod_production_status(mod_id, manifest_data)
-
-            duration = time.monotonic() - start_time
-            self.performance_analyzer.record_job_completion(queue_id, job_successful, {})
-            
-            # Dọn dẹp các component của job hiện tại
+            # Dọn dẹp các component của job hiện tại trước khi chụp log cuối.
             try:
                 if hasattr(self, 'obs_controller') and self.obs_controller:
                     self.obs_controller.comprehensive_obs_cleanup()
@@ -756,13 +944,113 @@ class CreatorService:
                 self.logger.error(f"Error during post-job cleanup for {queue_id}: {cleanup_error}")
             finally:
                 job_log_capture.stop()
-        return job_successful
+
+            # The final status is calculated only after all evidence-producing
+            # steps above have had a chance to record their own failures.
+            next_sequence = getattr(self.api_client, "_next_progress_sequence", None)
+            final_sequence = next_sequence(queue_id) if callable(next_sequence) else 1
+            if item:
+                workflow_report_obj = getattr(item, "workflow_report", None)
+                quality_passed = (
+                    workflow_report_obj is not None
+                    and getattr(getattr(workflow_report_obj, "quality_gate", None), "passed", False) is True
+                )
+                final_status = "completed" if job_successful and quality_passed and item.status != "failed" else "failed"
+                final_success = final_status == "completed"
+                self.logger.info(f"Finalizing job {queue_id} with status: {final_status.upper()}")
+
+                diagnostic_report = build_tracker_diagnostic_report(
+                    job,
+                    item,
+                    workflow_report_obj,
+                    manifest_data=manifest_data,
+                    log_snapshot=self._snapshot_job_log(job_log_capture),
+                    output_files_payload=video_files_payload,
+                    report_id=report_id,
+                    max_attempts=getattr(getattr(self.processing_manager, "config", None), "max_retries", None),
+                    terminal_status=final_status,
+                    terminal_error=terminal_error,
+                )
+                self.api_client.update_job_status(
+                    queue_id,
+                    status=final_status,
+                    details={
+                        "stage": diagnostic_report["summary"].get("blocking_stage"),
+                        "failure_code": diagnostic_report["summary"].get("failure_code"),
+                        "retryable": diagnostic_report["summary"].get("retryable"),
+                        "report_id": report_id,
+                    },
+                    video_files=video_files_payload,
+                    error_log=(
+                        item.error_message
+                        or diagnostic_report["summary"].get("root_cause")
+                        or None
+                    ),
+                    workflow_report=diagnostic_report.get("workflow_report"),
+                    diagnostic_report=diagnostic_report,
+                    manifest_ref=diagnostic_report["outputs"].get("manifest_ref"),
+                    log_ref=diagnostic_report["logs"],
+                    report_id=report_id,
+                    final=True,
+                    sequence=final_sequence,
+                )
+
+                if manifest_data:
+                    mod_id = job.get('mod_id')
+                    if mod_id:
+                        self.logger.info(f"Syncing production status for mod {mod_id}...")
+                        self.api_client.update_mod_production_status(mod_id, manifest_data)
+            else:
+                final_status = "failed"
+                final_success = False
+                diagnostic_report = build_tracker_diagnostic_report(
+                    job,
+                    None,
+                    None,
+                    log_snapshot=self._snapshot_job_log(job_log_capture),
+                    report_id=report_id,
+                    terminal_status=final_status,
+                    terminal_error=terminal_error or "Job ended before a ProcessingItem was created.",
+                )
+                self.api_client.update_job_status(
+                    queue_id,
+                    status=final_status,
+                    details={
+                        "stage": diagnostic_report["summary"].get("blocking_stage"),
+                        "failure_code": diagnostic_report["summary"].get("failure_code"),
+                        "retryable": diagnostic_report["summary"].get("retryable"),
+                        "report_id": report_id,
+                    },
+                    error_log=diagnostic_report["summary"].get("root_cause"),
+                    workflow_report=diagnostic_report.get("workflow_report"),
+                    diagnostic_report=diagnostic_report,
+                    manifest_ref=diagnostic_report["outputs"].get("manifest_ref"),
+                    log_ref=diagnostic_report["logs"],
+                    report_id=report_id,
+                    final=True,
+                    sequence=final_sequence,
+                )
+
+            unbind_report = getattr(self.api_client, "unbind_job_report", None)
+            if callable(unbind_report):
+                unbind_report(queue_id)
+
+            duration = time.monotonic() - start_time
+            self.performance_analyzer.record_job_completion(queue_id, final_success, {
+                "report_id": report_id,
+                "duration_seconds": duration,
+            })
+        # The orchestration result must agree with the status sent to the
+        # tracker.  A workflow return value alone is not sufficient: the
+        # shared quality gate is the final authority.
+        return final_success
 
     def _check_for_manual_json_override(self, slug: str, job_id: int) -> Tuple[Optional[Dict], Optional[str]]:
         """
         Check if a manual JSON file exists for this job in the manual_jsons directory.
         Checks by Job ID first, then by Slug.
         """
+        self._manual_json_failure = None
         try:
             files_to_check = []
             if job_id:
@@ -777,17 +1065,37 @@ class CreatorService:
                     try:
                         with open(filepath, 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                        # Basic validation
-                        if 'layout' in data:
+                        layout_quality = validate_playable_layout(data)
+                        if layout_quality.passed:
+                            self._manual_json_failure = None
                             return data, filepath
                         else:
-                            self.logger.warning(f"⚠️ Manual JSON {filename} found but invalid (missing 'layout')")
+                            self._manual_json_failure = {
+                                "path": filepath,
+                                "failure_code": layout_quality.failure_code or "manual_json_invalid",
+                                "message": layout_quality.message,
+                                "evidence": layout_quality.evidence,
+                            }
+                            self.logger.warning(
+                                f"⚠️ Manual JSON {filename} rejected: {layout_quality.failure_code}"
+                            )
                     except Exception as e:
                         self.logger.error(f"❌ Error reading manual JSON {filename}: {e}")
+                        self._manual_json_failure = {
+                            "path": filepath,
+                            "failure_code": "manual_json_invalid",
+                            "message": f"Manual JSON could not be read: {e}",
+                            "evidence": {"error": str(e)},
+                        }
+                        return None, None
             
             return None, None
         except Exception as e:
             self.logger.error(f"❌ Error in override check: {e}")
+            self._manual_json_failure = {
+                "failure_code": "manual_json_invalid",
+                "message": str(e),
+            }
             return None, None
 
     def _build_manual_profile_failure_details(self, url: str, error_message: Optional[str] = None) -> Dict:
@@ -807,11 +1115,35 @@ class CreatorService:
         try:
             # --- STEP 0: CHECK MANUAL OVERRIDE ---
             manual_data, manual_path = self._check_for_manual_json_override(item.project_slug, queue_id)
+
+            if getattr(self, "_manual_json_failure", None):
+                failure = self._manual_json_failure
+                item.json_generation_status = "failure"
+                self.processing_manager._record_quality_failure(
+                    item,
+                    failure.get("failure_code", "manual_json_invalid"),
+                    failure.get("message", "Manual JSON failed static playability validation."),
+                    evidence={
+                        "manualJson": failure,
+                        "path": failure.get("path"),
+                    },
+                )
+                self.api_client.update_job_progress(
+                    queue_id,
+                    "json_generation",
+                    "manual_override",
+                    0.0,
+                    "failed",
+                    metadata=failure,
+                    error_details=item.error_message,
+                )
+                return False
             
             if manual_data:
                 print(f"🟢 MANUAL OVERRIDE DETECTED! Using local JSON file: {manual_path}")
                 item.json_data = manual_data
                 item.json_path = manual_path
+                item.json_generation_status = "success"
                 # Đánh dấu là JSON đã có sẵn để bỏ qua bước sinh tự động
                 self.api_client.update_job_progress(queue_id, 'json_generation', 'manual_override', 100.0, 'completed',
                     metadata={'override_file': manual_path})
@@ -821,7 +1153,7 @@ class CreatorService:
                 success = self._execute_with_retry(
                     queue_id, 'json_generation',
                     lambda: self.processing_manager._generate_json_for_item(item),
-                    context={'url': item.source_url}
+                    context={'url': item.source_url, 'item': item}
                 )
                 
                 if not success:
@@ -831,20 +1163,63 @@ class CreatorService:
             success = self._execute_with_retry(
                 queue_id, 'video_processing',
                 lambda: self.processing_manager._process_video_for_item(item),
-                context={'mode': item.mode, 'project_slug': item.project_slug}
+                context={'mode': item.mode, 'project_slug': item.project_slug, 'item': item}
             )
             
             return success
             
         except Exception as e:
             print(f"❌ Smart retry processing error: {e}")
+            self.processing_manager._record_quality_failure(
+                item,
+                getattr(item, "failure_code", None) or "runtime_verification_unknown",
+                f"Smart retry processing error: {e}",
+                evidence={"error": str(e)},
+                status="UNKNOWN",
+                retryable=True,
+            )
             return False
 
     def _execute_with_retry(self, queue_id: int, operation_name: str, operation_function: Callable, 
                         context: Optional[dict] = None, max_step_retries: int = 3) -> bool:
         """Execute operation with smart retry logic - PHASE 2 (API-based)"""
+
+        def record_retry_evidence(
+            attempt: int,
+            *,
+            error: str,
+            exception: bool = False,
+            status: Optional[str] = None,
+            retryable: Optional[bool] = None,
+            started_at: Optional[datetime] = None,
+        ) -> None:
+            failed_item = (context or {}).get('item')
+            report = getattr(failed_item, 'workflow_report', None)
+            if report is None:
+                return
+            ended_at = datetime.now()
+            duration_ms = (
+                max(0, int((ended_at - started_at).total_seconds() * 1000))
+                if isinstance(started_at, datetime)
+                else None
+            )
+            attempts = report.evidence.setdefault('retryAttempts', [])
+            attempts.append({
+                'operation': operation_name,
+                'attempt': attempt,
+                'error': error,
+                'exception': exception,
+                'failureCode': getattr(failed_item, 'failure_code', None),
+                'failure_code': getattr(failed_item, 'failure_code', None),
+                'status': status or ('FAIL' if exception else 'UNKNOWN'),
+                'retryable': retryable,
+                'started_at': started_at.isoformat() if isinstance(started_at, datetime) else None,
+                'ended_at': ended_at.isoformat(),
+                'duration_ms': duration_ms,
+            })
         
         for step_attempt in range(1, max_step_retries + 1):
+            attempt_started_at = datetime.now()
             try:
                 print(f"🔧 {operation_name} - Step attempt {step_attempt}/{max_step_retries}")
                 
@@ -852,11 +1227,50 @@ class CreatorService:
                 result = operation_function()
                 
                 if result:
+                    record_retry_evidence(
+                        step_attempt,
+                        error=f"{operation_name} succeeded",
+                        status="PASS",
+                        retryable=False,
+                        started_at=attempt_started_at,
+                    )
                     print(f"✅ {operation_name} succeeded on attempt {step_attempt}")
                     return True
                 else:
-                    error_msg = f"{operation_name} returned False"
+                    failed_item = (context or {}).get('item')
+                    failure_code = getattr(failed_item, 'failure_code', None)
+                    failed_gate = getattr(getattr(failed_item, 'workflow_report', None), 'quality_gate', None)
+                    error_msg = (
+                        f"{operation_name} failed with {failure_code}"
+                        if failure_code
+                        else f"{operation_name} returned False"
+                    )
                     print(f"❌ {operation_name} failed on attempt {step_attempt}: {error_msg}")
+                    record_retry_evidence(
+                        step_attempt,
+                        error=error_msg,
+                        status="FAIL",
+                        retryable=(failure_code not in NON_RETRYABLE_FAILURE_CODES),
+                        started_at=attempt_started_at,
+                    )
+
+                    if failure_code in NON_RETRYABLE_FAILURE_CODES or (
+                        failed_gate is not None and not getattr(failed_gate, "retryable", True)
+                    ):
+                        self.logger.error(
+                            "🚫 Deterministic quality failure is not retryable: %s",
+                            failure_code,
+                        )
+                        self.api_client.update_job_progress(
+                            queue_id,
+                            operation_name,
+                            'quality_gate_failed',
+                            0.0,
+                            'failed',
+                            error_details=error_msg,
+                            metadata={'failure_code': failure_code},
+                        )
+                        return False
                     
                     # Prepare context with attempt number
                     retry_context = {**(context or {}), 'operation': operation_name, 'attempt': step_attempt}
@@ -866,27 +1280,62 @@ class CreatorService:
                     
                     if not retry_decision['should_retry']:
                         print(f"🚫 Not retrying {operation_name}: {retry_decision['reason']}")
+
+                        failed_item = (context or {}).get('item')
                         
                         # Handle special cases
                         if retry_decision.get('requires_manual'):
+                            if failed_item is not None:
+                                self.processing_manager._record_quality_failure(
+                                    failed_item,
+                                    "manual_json_invalid"
+                                    if operation_name == "json_generation"
+                                    else (getattr(failed_item, "failure_code", None) or "workflow_stopped"),
+                                    f"{operation_name} requires manual intervention: {error_msg}",
+                                    evidence={"retryDecision": retry_decision},
+                                    retryable=False,
+                                )
                             details = None
                             if operation_name == 'json_generation':
                                 details = self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg)
-                            self.api_client.update_job_status(
+                            self.api_client.update_job_progress(
                                 queue_id,
-                                'failed',
-                                details=details,
-                                error_log=f"{operation_name} requires manual intervention: {error_msg}"
+                                operation_name,
+                                "manual_intervention",
+                                0.0,
+                                "failed",
+                                metadata={
+                                    "final": False,
+                                    "details": details,
+                                    "failure_code": getattr(failed_item, "failure_code", None)
+                                    if failed_item is not None else "manual_json_invalid",
+                                },
+                                error_details=f"{operation_name} requires manual intervention: {error_msg}",
                             )
                         elif retry_decision.get('should_skip'):
+                            if failed_item is not None:
+                                self.processing_manager._record_quality_failure(
+                                    failed_item,
+                                    "skipped_by_policy",
+                                    f"{operation_name} was skipped by retry policy: {error_msg}",
+                                    evidence={"retryDecision": retry_decision},
+                                    retryable=False,
+                                )
                             details = None
                             if operation_name == 'json_generation':
                                 details = self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg)
-                            self.api_client.update_job_status(
+                            self.api_client.update_job_progress(
                                 queue_id,
-                                'failed',
-                                details=details,
-                                error_log=f"{operation_name} should be skipped: {error_msg}"
+                                operation_name,
+                                "skipped_by_policy",
+                                0.0,
+                                "failed",
+                                metadata={
+                                    "final": False,
+                                    "details": details,
+                                    "failure_code": "skipped_by_policy",
+                                },
+                                error_details=f"{operation_name} should be skipped: {error_msg}",
                             )
                         
                         return False
@@ -898,9 +1347,21 @@ class CreatorService:
                         )
                         
                         if retry_success:
+                            record_retry_evidence(
+                                retry_decision.get("retry_attempt", step_attempt + 1),
+                                error=f"{operation_name} retry succeeded",
+                                status="PASS",
+                                retryable=False,
+                            )
                             print(f"✅ {operation_name} retry succeeded")
                             return True
                         else:
+                            record_retry_evidence(
+                                retry_decision.get("retry_attempt", step_attempt + 1),
+                                error=f"{operation_name} retry failed",
+                                status="FAIL",
+                                retryable=True,
+                            )
                             print(f"❌ {operation_name} retry failed, will try again")
                             continue
                     else:
@@ -908,8 +1369,28 @@ class CreatorService:
                         return False
                         
             except Exception as e:
+                failed_item = (context or {}).get('item')
+                failure_code = getattr(failed_item, 'failure_code', None)
+                failed_gate = getattr(getattr(failed_item, 'workflow_report', None), 'quality_gate', None)
                 error_msg = f"{operation_name} exception: {str(e)}"
                 print(f"❌ {operation_name} exception on attempt {step_attempt}: {e}")
+                record_retry_evidence(
+                    step_attempt,
+                    error=error_msg,
+                    exception=True,
+                    status="FAIL",
+                    retryable=(failure_code not in NON_RETRYABLE_FAILURE_CODES),
+                    started_at=attempt_started_at,
+                )
+
+                if failure_code in NON_RETRYABLE_FAILURE_CODES or (
+                    failed_gate is not None and not getattr(failed_gate, "retryable", True)
+                ):
+                    self.logger.error(
+                        "🚫 Deterministic quality exception is not retryable: %s",
+                        failure_code,
+                    )
+                    return False
                 
                 # Prepare context with attempt number and exception flag
                 retry_context = {
@@ -943,7 +1424,21 @@ class CreatorService:
                     )
                     
                     if retry_success:
+                        record_retry_evidence(
+                            retry_decision.get("retry_attempt", step_attempt + 1),
+                            error=f"{operation_name} retry succeeded after exception",
+                            exception=True,
+                            status="PASS",
+                            retryable=False,
+                        )
                         return True
+                    record_retry_evidence(
+                        retry_decision.get("retry_attempt", step_attempt + 1),
+                        error=f"{operation_name} retry failed after exception",
+                        exception=True,
+                        status="FAIL",
+                        retryable=True,
+                    )
         
         return False
     
@@ -1012,11 +1507,19 @@ class CreatorService:
             success = self.processing_manager._generate_json_for_item(item)
             
             if not success:
-                self.api_client.update_job_status(
+                self.api_client.update_job_progress(
                     queue_id,
-                    'failed',
-                    details=self._build_manual_profile_failure_details(item.source_url or "", "JSON generation failed"),
-                    error_log="JSON generation failed"
+                    "json_generation",
+                    "failed",
+                    0.0,
+                    "failed",
+                    metadata={
+                        "final": False,
+                        "details": self._build_manual_profile_failure_details(
+                            item.source_url or "", "JSON generation failed"
+                        ),
+                    },
+                    error_details="JSON generation failed",
                 )
                 return False
             
@@ -1032,13 +1535,52 @@ class CreatorService:
             stop_event propagation.
             """
             try:
+                if item.mode == "skip":
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        "skipped_by_policy",
+                        "Item was skipped by policy and did not run gameplay verification.",
+                    )
+                    self.api_client.update_job_progress(
+                        queue_id,
+                        "video_processing",
+                        "skipped_by_policy",
+                        0.0,
+                        "failed",
+                        error_details=item.error_message,
+                    )
+                    return False
+
                 # === START: PRE-FLIGHT CHECK ===
                 if not item.json_data:
                     error_msg = "Cannot process video: item.json_data is missing."
                     self.logger.error(error_msg)
-                    self.api_client.update_job_status(queue_id, 'failed', error_log=error_msg)
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        "manual_json_invalid",
+                        error_msg,
+                    )
+                    self.api_client.update_job_progress(
+                        queue_id,
+                        "preflight",
+                        "missing_json",
+                        0.0,
+                        "failed",
+                        metadata={"final": False, "failure_code": "manual_json_invalid"},
+                        error_details=error_msg,
+                    )
                     return False
                 # === END: PRE-FLIGHT CHECK ===
+
+                layout_quality = validate_playable_layout(item.json_data)
+                if not layout_quality.passed:
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        layout_quality.failure_code or "manual_json_invalid",
+                        layout_quality.message,
+                        evidence=layout_quality.evidence,
+                    )
+                    return False
 
                 # --- Initialize progress tracking ---
                 self.api_client.update_job_progress(
@@ -1066,7 +1608,13 @@ class CreatorService:
                         queue_id, 'initialization', 'components', 0.0, 'failed',
                         error_details=error_details
                     )
-                    item.error_message = error_details
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        getattr(item, "failure_code", None) or "runtime_verification_unknown",
+                        error_details,
+                        status="UNKNOWN",
+                        retryable=True,
+                    )
                     return False
                 
                 # --- OBS connection test ---
@@ -1088,7 +1636,13 @@ class CreatorService:
                             queue_id, 'initialization', 'obs_test', 0.0, 'failed',
                             error_details=error_details
                         )
-                        item.error_message = error_details
+                        self.processing_manager._record_quality_failure(
+                            item,
+                            "runtime_verification_unknown",
+                            error_details,
+                            status="UNKNOWN",
+                            retryable=True,
+                        )
                         return False
                 
                 # --- Start main processing ---
@@ -1101,6 +1655,36 @@ class CreatorService:
                 # --- Early exit on core workflow failure ---
                 if not success:
                     self.logger.error(f"❌ Video processing workflow failed for item {item.project_slug} (mode: {item.mode}). Skipping file validation.")
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        getattr(item, "failure_code", None) or "placement_not_verified",
+                        getattr(item, "error_message", None) or "Core workflow failed.",
+                    )
+                    return False
+
+                project_folder = getattr(self.obs_controller, 'current_project_folder', None)
+                if item.mode != "skip" and project_folder:
+                    identity_ok = self.processing_manager._run_recorded_identity_resolver(item, project_folder)
+                    if not identity_ok:
+                        identity_code = (
+                            "recorded_identity_needs_review"
+                            if item.recorded_identity_status in {"needs_review", "unavailable"}
+                            else "recorded_identity_missing"
+                        )
+                        self.processing_manager._record_quality_failure(
+                            item,
+                            identity_code,
+                            item.recorded_identity_reason or "Recorded identity was not verified.",
+                            evidence={"identityStatus": item.recorded_identity_status},
+                        )
+                        return False
+
+                if not self.processing_manager._finalize_item_quality(item):
+                    self.logger.error(
+                        "❌ Shared quality gate failed for %s: %s",
+                        item.project_slug,
+                        item.failure_code,
+                    )
                     return False
                 
                 # --- File validation ---
@@ -1118,6 +1702,8 @@ class CreatorService:
                 validation_success = self._check_validation_requirements(validation_summary, item)
                 
                 if validation_success:
+                    item.status = "completed"
+                    item.end_time = datetime.now()
                     self.logger.info(f"✅ File validation passed: {validation_summary.get('success_rate', 0)}% success rate")
                     self.api_client.update_job_progress(
                         queue_id, 'completion', 'finalizing', 100.0, 'completed',
@@ -1135,7 +1721,12 @@ class CreatorService:
                         queue_id, 'validation', 'failed', 95.0, 'failed',
                         error_details=failure_reason
                     )
-                    item.error_message = failure_reason
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        "artifact_missing",
+                        failure_reason,
+                        evidence={"validationSummary": validation_summary},
+                    )
                     return False
                         
             except Exception as e:
@@ -1146,7 +1737,14 @@ class CreatorService:
                     queue_id, 'error', 'exception', 0.0, 'failed',
                     error_details=error_msg
                 )
-                item.error_message = error_msg
+                self.processing_manager._record_quality_failure(
+                    item,
+                    getattr(item, "failure_code", None) or "runtime_verification_unknown",
+                    error_msg,
+                    evidence={"error": error_msg},
+                    status="UNKNOWN",
+                    retryable=True,
+                )
                 return False
 
     def _process_with_progress_callbacks(self, item, queue_id: int) -> bool:
@@ -1353,16 +1951,18 @@ class CreatorService:
                 self.logger.error("Validation check failed: Input JSON data is missing.")
                 return False
 
-            # --- Tính toán số lượng file KỲ VỌNG từ JSON ---
-            icons_in_json = json_data.get('layout', {}).get('icons', [])
-            has_horror_in_json = json_data.get('gameSettings', {}).get('hasHorror', False)
-            
-            # Số icon bình thường (không tính icon 19 nếu có horror)
-            normal_icons_expected = len([i for i in icons_in_json if i.get('index') != 19]) if has_horror_in_json else len(icons_in_json)
-            # Số icon horror (tất cả icon)
-            horror_icons_expected = len(icons_in_json) if has_horror_in_json else 0
-            
-            remixes_expected = 3 # Luôn kỳ vọng 3 bản remix
+            workflow_report = getattr(item, "workflow_report", None)
+            quality_gate = getattr(workflow_report, "quality_gate", None)
+            if (
+                workflow_report is None
+                or quality_gate is None
+                or getattr(quality_gate, "passed", False) is not True
+            ):
+                self.logger.error(
+                    "Validation rejected because shared quality gate did not pass: %s",
+                    getattr(item, "failure_code", None),
+                )
+                return False
 
             # --- Lấy số lượng file THỰC TẾ từ validation_summary ---
             master_files_actual = validation_summary.get('master_files', 0)
@@ -1376,36 +1976,23 @@ class CreatorService:
                 return master_files_actual >= 1
 
             elif mode == "individual":
-                # Individual mode: Phải tạo đủ 80% video icon và ít nhất 2/3 video remix.
-                total_icons_expected = normal_icons_expected + horror_icons_expected
-                icon_success_threshold = 0.80
-                remix_success_threshold = 2/3
-
-                icon_requirement_met = (individual_files_actual >= total_icons_expected * icon_success_threshold)
-                remix_requirement_met = (validation_summary.get('individual_files', 0) - individual_files_actual + validation_summary.get('master_files', 0) >= remixes_expected * remix_success_threshold) # Logic này cần cải thiện nếu tên file remix không rõ ràng
-
-                self.logger.info(f"Individual Mode Validation:")
-                self.logger.info(f"  - Icons: {individual_files_actual} found / {total_icons_expected} expected. Met threshold? {icon_requirement_met}")
-                # Logic đếm remix cần được cải thiện nếu file_organizer không phân loại được.
-                # Tạm thời, chúng ta sẽ dựa vào tổng số file.
-                return icon_requirement_met
+                # Gameplay thresholds are already evaluated by the shared
+                # WorkflowReport. File validation remains an auxiliary
+                # artifact check and must not recalculate coverage from raw
+                # JSON that may contain policy-skipped horror content.
+                self.logger.info("Individual Mode Validation: shared quality gate passed")
+                return individual_files_actual >= 1
 
             elif mode == "both":
-                # Both mode: Phải có 1 video master VÀ đáp ứng yêu cầu của individual mode.
+                # Both mode: both phase gates passed before this check; require
+                # at least one valid artifact from each output family.
                 master_requirement_met = (master_files_actual >= 1)
-                
-                total_icons_expected = normal_icons_expected + horror_icons_expected
-                icon_success_threshold = 0.80
-                
-                # Trong 'both' mode, file individual được tạo ra bởi _process_both_mode_enhanced
-                # Chúng ta cần đảm bảo logic tạo file nhất quán.
-                icon_requirement_met = (individual_files_actual >= total_icons_expected * icon_success_threshold)
 
                 self.logger.info(f"Both Mode Validation:")
                 self.logger.info(f"  - Master: {master_files_actual} found. Met threshold? {master_requirement_met}")
-                self.logger.info(f"  - Icons: {individual_files_actual} found / {total_icons_expected} expected. Met threshold? {icon_requirement_met}")
+                self.logger.info(f"  - Individual artifacts: {individual_files_actual} found")
                 
-                return master_requirement_met and icon_requirement_met
+                return master_requirement_met and individual_files_actual >= 1
             
             else:
                 return False # Chế độ không xác định

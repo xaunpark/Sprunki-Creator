@@ -24,6 +24,13 @@ try:
     from sprunki_game_player import SprunkiGamePlayer
     from sprunki_obs_controller import SprunkiController
     from json_generator import SprunkiJSONGenerator
+    from workflow_quality import (
+        QualityGateResult,
+        WorkflowReport,
+        evaluate_workflow_report,
+        validate_artifacts,
+        validate_playable_layout,
+    )
 except ImportError as e:
     print(f"❌ Import error: {e}")
     print("Make sure all required files are in the same directory!")
@@ -69,12 +76,13 @@ class ProcessingItem:
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     project_slug: Optional[str] = None
+    failure_code: Optional[str] = None
     
     json_generation_status: str = "not_started" # "success", "failure", "skipped"
     master_mode_status: str = "not_started"     # "success", "failure", "skipped"
     individual_mode_status: str = "not_started" # "success", "failure", "skipped"
 
-    workflow_report: Optional[Dict[str, Any]] = None
+    workflow_report: Optional[Any] = None
     recording_area: Optional[Dict[str, Any]] = None
 
     recorded_identity_status: str = "not_started"
@@ -133,6 +141,34 @@ class SafeOperationManager:
         self.obs_controller = obs_controller
         self.logger = logger
         self.active_slots = []  # Track slots có icons
+
+    def _record_placement(self, icon_index, target_slot, result):
+        status = getattr(getattr(result, "status", None), "value", None)
+        if status != "VERIFIED" or not getattr(result, "target_verified", False):
+            return None
+        transition_details = dict(getattr(result, "details", {}) or {})
+        transition_details["verificationEvidence"] = list(
+            getattr(result, "evidence", ()) or ()
+        )
+        transaction = {
+            "iconIndex": icon_index,
+            "slotIndex": target_slot.get("index"),
+            "before": self.game_player._transition_count_from_details(transition_details, "before"),
+            "after": self.game_player._transition_count_from_details(transition_details, "after"),
+            "status": "VERIFIED",
+            "targetVerified": True,
+            "cleanupVerified": False,
+            "operationId": getattr(result, "operation_id", None),
+            "transitionEvidence": transition_details,
+        }
+        self.game_player._workflow_placement_transactions.append(transaction)
+        return transaction
+
+    def _mark_cleanup(self, slot_index, verified):
+        for transaction in reversed(self.game_player._workflow_placement_transactions):
+            if transaction.get("slotIndex") == slot_index and not transaction.get("cleanupVerified"):
+                transaction["cleanupVerified"] = bool(verified)
+                return
         
     def safe_single_icon_operation(self, icon, target_slot, filename, recording_duration=14):
         """
@@ -148,8 +184,13 @@ class SafeOperationManager:
             self.logger.info(f"🎯 Dragging icon to slot index {target_slot.get('index', 'unknown')} at coords ({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
             drag_success = self.game_player.corrected_drag_and_drop(icon, target_slot)
             
-            if not drag_success:
+            if not drag_success or not (
+                getattr(getattr(drag_success, "status", None), "value", None) == "VERIFIED"
+                and getattr(drag_success, "target_verified", False)
+            ):
                 return False, None, "Failed to drag icon"
+
+            transaction = self._record_placement(icon.get("index"), target_slot, drag_success)
             
             icon_placed = True
             self.active_slots.append(target_slot)
@@ -204,8 +245,12 @@ class SafeOperationManager:
         Returns: (success, output_path, error_message)
         """
         icons_placed = []
+        transactions = []
         recording_started = False
         output_path = None
+
+        if not isinstance(remix_icons, (list, tuple)) or not remix_icons:
+            return False, None, "Empty remix cannot be recorded"
         
         try:
             # STEP 1: Drag all icons
@@ -220,14 +265,21 @@ class SafeOperationManager:
                 
                 drag_success = self.game_player.corrected_drag_and_drop(current_icon, target_slot, False)
                 
-                if not drag_success:
+                if not drag_success or not (
+                    getattr(getattr(drag_success, "status", None), "value", None) == "VERIFIED"
+                    and getattr(drag_success, "target_verified", False)
+                ):
                     raise Exception(f"Failed to drag icon {icon_index} to slot {slot_position}")
+
+                transactions.append(self._record_placement(icon_index, target_slot, drag_success))
                 
                 icons_placed.append(target_slot)
                 self.active_slots.append(target_slot)
                 time.sleep(0.3)
             
             self.logger.info(f"✅ All {len(icons_placed)} icons placed successfully")
+            if not icons_placed:
+                raise Exception("Remix produced no verified placements")
             
             # STEP 2: OBS setup
             self.logger.info(f"🎬 Setting up OBS for remix: {filename}")
@@ -300,6 +352,7 @@ class SafeOperationManager:
                         return_status == "ALREADY_EMPTY"
                         or (return_status == "VERIFIED" and target_verified)
                     ):
+                        self._mark_cleanup(slot_index, True)
                         self.logger.info(f"✅ Icon returned successfully from slot index {slot_index}")
                         if target_slot in self.active_slots:
                             self.active_slots.remove(target_slot)
@@ -346,6 +399,7 @@ class SafeOperationManager:
                             return_status == "ALREADY_EMPTY"
                             or (return_status == "VERIFIED" and target_verified)
                         ) and slot in self.active_slots:
+                            self._mark_cleanup(slot.get("index"), True)
                             self.active_slots.remove(slot)
                         time.sleep(0.1)
                     except Exception as e:
@@ -665,6 +719,7 @@ class UnifiedProcessingManager:
                 item.recorded_identity_status,
                 item.recorded_identity_reason or "none",
             )
+            return False
         else:
             self.logger.error(
                 "❌ Recorded identity resolver failed for %s (exit=%s, status=%s)",
@@ -687,9 +742,13 @@ class UnifiedProcessingManager:
         try:
             self.logger.info(f"📄 Generating manifest for {item.project_slug}...")
             
-            if not self.config or not item.json_data:
-                self.logger.error("Cannot generate manifest: Missing config or json_data.")
+            if not self.config:
+                self.logger.error("Cannot generate manifest: Missing config.")
                 return
+
+            # A malformed/manual JSON failure still needs an evidence manifest.
+            # Use an empty structural view instead of dropping the report.
+            manifest_json_data = item.json_data if isinstance(item.json_data, dict) else {}
 
             # Xác định thư mục output
             project_slug = item.project_slug or f"unknown-project-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -700,18 +759,15 @@ class UnifiedProcessingManager:
                 os.makedirs(project_folder, exist_ok=True)
             
             # 1. Thu thập thông tin
-            page_title = item.json_data.get('pageTitle', 'Unknown Title')
-            source_url = item.json_data.get('currentUrl', item.source_url or '')
+            page_title = manifest_json_data.get('pageTitle', 'Unknown Title')
+            source_url = manifest_json_data.get('currentUrl', item.source_url or '')
             domain = urlparse(source_url).netloc.replace('www.', '') if source_url else ''
 
             # Xác định overallStatus cho pipeline showcase-only.
             if item.status == "completed":
                 overall_status = "success"
             elif item.status == "failed":
-                if item.master_mode_status == "success":
-                    overall_status = "partial_success"
-                else:
-                    overall_status = "failure"
+                overall_status = "failure"
             else:
                 overall_status = item.status # pending, processing...
 
@@ -726,12 +782,12 @@ class UnifiedProcessingManager:
                     "pageTitle": page_title, "domain": domain, "outputDirectory": project_folder
                 },
                 "layoutSummary": {
-                    "recordingArea": getattr(item, 'recording_area', None) or item.json_data.get('layout', {}).get('recordingArea'),
-                    "totalIcons": len(item.json_data.get('layout', {}).get('icons', [])),
-                    "totalSlots": len(item.json_data.get('layout', {}).get('slots', []))
+                    "recordingArea": getattr(item, 'recording_area', None) or manifest_json_data.get('layout', {}).get('recordingArea'),
+                    "totalIcons": len(manifest_json_data.get('layout', {}).get('icons', [])),
+                    "totalSlots": len(manifest_json_data.get('layout', {}).get('slots', []))
                 },
                 "processingSummary": {
-                    "mode": "master" if item.mode in ("both", "individual") else item.mode, "overallStatus": overall_status,
+                    "mode": item.mode, "overallStatus": overall_status,
                     "statusDetails": {
                         "jsonGeneration": item.json_generation_status,
                         "masterMode": item.master_mode_status,
@@ -741,8 +797,33 @@ class UnifiedProcessingManager:
                     "startTime": item.start_time.isoformat() if item.start_time else None,
                     "endTime": item.end_time.isoformat() if item.end_time else None,
                     "durationSeconds": (item.end_time - item.start_time).total_seconds() if item.start_time and item.end_time else 0,
-                    "hasHorror": False
+                    "hasHorror": bool(manifest_json_data.get('gameSettings', {}).get('hasHorror', False)),
+                    "coverage": (
+                        item.workflow_report.coverage
+                        if isinstance(item.workflow_report, WorkflowReport)
+                        else {"normal": "unknown", "horror": "not_checked_by_policy"}
+                    ),
+                    "entryStrategy": (
+                        item.workflow_report.evidence.get("entryStrategy", {})
+                        if isinstance(item.workflow_report, WorkflowReport)
+                        else {}
+                    )
                 },
+                "qualityGates": (
+                    {
+                        "result": item.workflow_report.quality_gate.as_dict()
+                        if isinstance(item.workflow_report, WorkflowReport)
+                        and item.workflow_report.quality_gate is not None
+                        else None,
+                        "failureCode": getattr(item, "failure_code", None),
+                        "evidence": item.workflow_report.evidence
+                        if isinstance(item.workflow_report, WorkflowReport)
+                        else {},
+                        "phaseReports": item.workflow_report.phase_reports
+                        if isinstance(item.workflow_report, WorkflowReport)
+                        else {},
+                    }
+                ),
                 "outputs": {}, "errors": []
             }
             
@@ -769,11 +850,18 @@ class UnifiedProcessingManager:
             }
             if item.error_message:
                 manifest_data["errors"].append({"timestamp": datetime.now().isoformat(), "stage": "general", "message": item.error_message})
+            if getattr(item, "failure_code", None):
+                manifest_data["errors"].append({
+                    "timestamp": datetime.now().isoformat(),
+                    "stage": "quality_gate",
+                    "code": item.failure_code,
+                    "message": item.error_message or item.failure_code,
+                })
             
             for file_path in item.output_files:
                 filename = os.path.basename(file_path)
                 file_info = {
-                    "status": "success", "filename": filename, "relativePath": f"./{filename}",
+                    "status": "success", "filename": filename, "path": str(file_path), "relativePath": f"./{filename}",
                     "fileSizeMb": round(os.path.getsize(file_path) / (1024*1024), 2) if os.path.exists(file_path) else 0
                 }
                 if 'showcase' in filename:
@@ -799,6 +887,7 @@ class UnifiedProcessingManager:
                 return {
                     "status": "success",
                     "filename": os.path.basename(file_path),
+                    "path": str(file_path),
                     "relativePath": f"./{os.path.basename(file_path)}",
                     "fileSizeMb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
                 }
@@ -933,17 +1022,9 @@ class UnifiedProcessingManager:
         """Validate JSON data structure"""
         try:
             required_fields = ['currentUrl', 'layout']
-            for field in required_fields:
-                if field not in json_data:
-                    return False
-            
-            layout = json_data['layout']
-            required_layout = ['icons', 'slots']
-            for field in required_layout:
-                if field not in layout:
-                    return False
-            
-            return True
+            if any(field not in json_data for field in required_fields):
+                return False
+            return bool(validate_playable_layout(json_data).passed)
         except:
             return False
     
@@ -1109,8 +1190,14 @@ class UnifiedProcessingManager:
         except Exception as e:
             self.logger.error(f"Critical error in processing pipeline: {e}")
             if item:
-                item.status = "failed"
-                item.error_message = f"Critical pipeline error: {e}"
+                self._record_quality_failure(
+                    item,
+                    getattr(item, "failure_code", None) or "runtime_verification_unknown",
+                    f"Critical pipeline error: {e}",
+                    evidence={"error": str(e)},
+                    status="UNKNOWN",
+                    retryable=True,
+                )
         
         finally:
             # TẠO MANIFEST SAU KHI XỬ LÝ XONG (DÙ THÀNH CÔNG HAY THẤT BẠI)
@@ -1140,7 +1227,11 @@ class UnifiedProcessingManager:
             
             success, json_path, json_data = self.json_generator.generate_complete_json(item.source_url)
             
-            if success and json_data:
+            layout_quality = validate_playable_layout(json_data) if json_data else QualityGateResult.failure(
+                "manual_json_invalid",
+                message="JSON generator returned no data.",
+            )
+            if success and json_data and layout_quality.passed:
                 item.json_path = json_path
                 item.json_data = json_data
                 item.status = "pending"  # Ready for video processing
@@ -1148,9 +1239,12 @@ class UnifiedProcessingManager:
                 self.logger.info(f"JSON generated successfully: {json_path}")
                 return True
             else:
-                item.status = "failed"
-                item.error_message = "JSON generation failed"
-                item.end_time = datetime.now()
+                self._record_quality_failure(
+                    item,
+                    layout_quality.failure_code or "manual_json_invalid",
+                    layout_quality.message or "JSON generation failed",
+                    evidence=layout_quality.evidence,
+                )
                 item.json_generation_status = "failure" # GHI LẠI TRẠNG THÁI
                 self.logger.error(f"JSON generation failed for: {item.source_url}")
                 return False
@@ -1159,15 +1253,134 @@ class UnifiedProcessingManager:
             error_msg = f"JSON generation error: {str(e)}"
             self.logger.error(f"Error for {item.source_url}: {error_msg}", exc_info=True)
             
-            item.status = "failed"
-            item.error_message = error_msg  # Lưu lỗi chi tiết vào item
-            item.end_time = datetime.now()
+            self._record_quality_failure(
+                item,
+                "manual_json_invalid",
+                error_msg,
+                evidence={"error": error_msg},
+            )
             item.json_generation_status = "failure"
             return False
-    
+
+    def _finalize_item_quality(self, item: ProcessingItem) -> bool:
+        """Apply runtime, identity, and artifact gates before completed."""
+        report = item.workflow_report
+        if not isinstance(report, WorkflowReport):
+            player_report = getattr(getattr(self.master_controller, "game_player", None), "last_workflow_report", None)
+            report = player_report if isinstance(player_report, WorkflowReport) else WorkflowReport(mode=item.mode)
+            item.workflow_report = report
+
+        identity_status = str(getattr(item, "recorded_identity_status", "not_started") or "not_started")
+        report.identity_status = identity_status
+        gate = evaluate_workflow_report(
+            report,
+            mode=item.mode,
+            identity_status=identity_status,
+            require_identity=False,
+        )
+
+        if gate.passed and identity_status.lower() != "verified":
+            identity_code = (
+                "recorded_identity_needs_review"
+                if identity_status.lower() in {"needs_review", "unavailable"}
+                else "recorded_identity_missing"
+            )
+            gate = report.apply_quality_gate(
+                QualityGateResult.failure(
+                    identity_code,
+                    coverage=report.coverage,
+                    evidence={
+                        "identityStatus": identity_status,
+                        "identityReason": getattr(item, "recorded_identity_reason", None),
+                    },
+                    message=f"Recorded identity is not verified: {identity_status}.",
+                )
+            )
+
+        artifact_result = validate_artifacts(item.output_files)
+        report.artifact_validation = artifact_result.evidence
+        if gate.passed and not artifact_result.passed:
+            gate = report.apply_quality_gate(
+                QualityGateResult.failure(
+                    "artifact_missing",
+                    coverage=report.coverage,
+                    evidence=artifact_result.evidence,
+                    message=artifact_result.message,
+                )
+            )
+        elif gate.passed:
+            report.evidence["artifactValidation"] = artifact_result.evidence
+
+        item.workflow_report = report
+        if gate.passed:
+            item.failure_code = None
+            return True
+
+        item.failure_code = gate.failure_code or item.failure_code or "placement_not_verified"
+        item.error_message = gate.message or item.error_message or item.failure_code
+        item.status = "failed"
+        item.end_time = item.end_time or datetime.now()
+        return False
+
+    def _record_quality_failure(
+        self,
+        item: ProcessingItem,
+        failure_code: str,
+        message: str = "",
+        *,
+        evidence: Optional[Dict[str, Any]] = None,
+        status: str = "FAIL",
+        retryable: Optional[bool] = None,
+    ) -> WorkflowReport:
+        """Persist a fail-closed report for failures before a workflow starts."""
+        report = item.workflow_report
+        if not isinstance(report, WorkflowReport):
+            report = WorkflowReport(mode=item.mode)
+            item.workflow_report = report
+
+        json_data = item.json_data if isinstance(item.json_data, dict) else {}
+        layout = json_data.get("layout", {}) if isinstance(json_data, dict) else {}
+        report.layout_icons = len(layout.get("icons", []) or []) if isinstance(layout, dict) else 0
+        report.layout_slots = len(layout.get("slots", []) or []) if isinstance(layout, dict) else 0
+        report.identity_status = str(getattr(item, "recorded_identity_status", "not_started"))
+        failure_evidence = dict(evidence or {})
+        failure_evidence.setdefault("mode", item.mode)
+        failure_evidence.setdefault("layoutIcons", report.layout_icons)
+        failure_evidence.setdefault("layoutSlots", report.layout_slots)
+
+        existing_gate = report.quality_gate
+        if existing_gate is None or existing_gate.passed:
+            gate = report.apply_quality_gate(
+                QualityGateResult.failure(
+                    failure_code,
+                    status=status,
+                    retryable=retryable,
+                    coverage=report.coverage,
+                    evidence=failure_evidence,
+                    message=message or failure_code,
+                )
+            )
+        else:
+            # Preserve the first, most specific quality failure while retaining
+            # evidence from later cleanup/transport failures.
+            report.evidence.update(failure_evidence)
+            gate = existing_gate
+
+        item.workflow_report = report
+        item.failure_code = gate.failure_code or failure_code
+        item.error_message = item.error_message or gate.message or message or failure_code
+        item.status = "failed"
+        item.end_time = item.end_time or datetime.now()
+        return report
+
     def _process_video_for_item(self, item: ProcessingItem) -> bool:
         """Enhanced video processing with proper mode isolation"""
         project_folder = None
+        identity_checked = False
+        previous_report = item.workflow_report if isinstance(item.workflow_report, WorkflowReport) else None
+        previous_retry_evidence = list(
+            (previous_report.evidence.get("retryAttempts", []) if previous_report else []) or []
+        )
         try:
             item.status = "processing"
             if not item.start_time:
@@ -1180,6 +1393,16 @@ class UnifiedProcessingManager:
             project_folder = os.path.join(output_base_dir, project_slug)
             os.makedirs(project_folder, exist_ok=True)
             self.logger.info(f"✅ [MASTER] Project folder defined: {project_folder}")
+
+            layout_quality = validate_playable_layout(item.json_data)
+            if not layout_quality.passed:
+                self._record_quality_failure(
+                    item,
+                    layout_quality.failure_code or "manual_json_invalid",
+                    layout_quality.message,
+                    evidence=layout_quality.evidence,
+                )
+                return False
             
             # BƯỚC 2: Khởi tạo các component
             if not self.master_controller._initialize_components(item.json_data, self.stop_event):
@@ -1218,20 +1441,42 @@ class UnifiedProcessingManager:
                 success = self._process_master_mode(item)
                 
             elif item.mode == "individual":
-                self.logger.info(f"🎭 INDIVIDUAL mode is deprecated; running showcase-only workflow for {item.display_name}")
-                item.individual_mode_status = "skipped"
-                success = self._process_master_mode(item)
+                self.logger.info(f"🎭 Processing INDIVIDUAL mode for {item.display_name}")
+                success = self._process_individual_mode(item)
                 
             elif item.mode == "both":
-                self.logger.info(f"💎 BOTH mode is deprecated; running showcase-only workflow for {item.display_name}")
-                item.individual_mode_status = "skipped"
-                success = self._process_master_mode(item)
+                self.logger.info(f"💎 Processing BOTH mode for {item.display_name}")
+                success = self._process_both_mode_enhanced(item)
                 
             elif item.mode == "skip":
                 self.logger.info(f"⭐ Skipping {item.display_name}")
-                item.status = "skipped"
-                self.total_skipped += 1
-                return True
+                self._record_quality_failure(
+                    item,
+                    "skipped_by_policy",
+                    "Item was skipped by policy and did not produce a verified workflow.",
+                )
+                return False
+
+            if success and item.mode != "skip":
+                # Identity is a required precondition for completed and must
+                # run before the return value is computed, not only in finally.
+                identity_checked = True
+                identity_ok = bool(
+                    item.json_data
+                    and project_folder
+                    and self._run_recorded_identity_resolver(item, project_folder)
+                )
+                if not identity_ok:
+                    item.failure_code = (
+                        "recorded_identity_needs_review"
+                        if item.recorded_identity_status in {"needs_review", "unavailable"}
+                        else "recorded_identity_missing"
+                    )
+                    item.error_message = item.recorded_identity_reason or "Recorded identity was not verified."
+                    success = False
+
+            if success:
+                success = self._finalize_item_quality(item)
             
             if success:
                 item.status = "completed"
@@ -1239,9 +1484,11 @@ class UnifiedProcessingManager:
                 self.logger.info(f"✅ {item.mode.upper()} mode completed successfully for {item.display_name}")
                 return True
             else:
-                item.status = "failed"
-                item.error_message = f"{item.mode.capitalize()} mode processing failed"
-                item.end_time = datetime.now()
+                self._record_quality_failure(
+                    item,
+                    item.failure_code or "placement_not_verified",
+                    item.error_message or f"{item.mode.capitalize()} mode processing failed",
+                )
                 self.logger.error(f"❌ {item.mode.upper()} mode failed for {item.display_name}")
                 return False
                 
@@ -1249,12 +1496,23 @@ class UnifiedProcessingManager:
             error_msg = f"Video processing error: {str(e)}"
             self.logger.error(f"Error for {item.display_name}: {error_msg}", exc_info=True)
             
-            item.status = "failed"
-            item.error_message = error_msg # Lưu lỗi chi tiết
-            item.end_time = datetime.now()
+            self._record_quality_failure(
+                item,
+                item.failure_code or (
+                    "workflow_stopped" if self.should_stop else "runtime_verification_unknown"
+                ),
+                error_msg,
+                evidence={"error": error_msg},
+                status="FAIL" if self.should_stop else "UNKNOWN",
+                retryable=False if self.should_stop else True,
+            )
             return False
         
         finally:
+            current_report = item.workflow_report if isinstance(item.workflow_report, WorkflowReport) else None
+            if current_report is not None and current_report is not previous_report and previous_retry_evidence:
+                current_report.evidence.setdefault("retryAttempts", [])[:0] = previous_retry_evidence
+
             # ✨ THÊM: Comprehensive OBS cleanup sau mỗi job
             self.logger.info("🧹 Starting comprehensive OBS cleanup after job completion...")
             try:
@@ -1269,19 +1527,126 @@ class UnifiedProcessingManager:
             except Exception as cleanup_error:
                 self.logger.error(f"❌ Error during comprehensive OBS cleanup: {cleanup_error}")
 
-            # Generate identity artifacts only after OBS has finished writing the
-            # showcase and timestamps files. This is a derived post-processing
-            # step and must not change the video's success/failure status.
-            if item.mode != "skip" and item.json_data and project_folder:
+            # A normal completion path already performed identity validation
+            # above.  Keep a best-effort artifact generation fallback for an
+            # interrupted path, but never let it turn a failed item into a
+            # success because the return decision has already been gated.
+            if not identity_checked and item.mode != "skip" and item.json_data and project_folder:
                 self._run_recorded_identity_resolver(item, project_folder)
             
             # Cleanup file handlers after processing
             self._cleanup_logging_handlers()
 
+    def _set_both_workflow_report(
+        self,
+        item: ProcessingItem,
+        master_report: Optional[WorkflowReport],
+        individual_report: Optional[WorkflowReport],
+        master_success: bool,
+        individual_success: bool,
+        *,
+        forced_failure_code: Optional[str] = None,
+    ) -> WorkflowReport:
+        """Persist a complete BOTH report even when a phase is skipped."""
+        report = WorkflowReport(mode="both")
+        json_data = item.json_data or {}
+        layout = json_data.get("layout", {}) if isinstance(json_data, dict) else {}
+        report.layout_icons = len(layout.get("icons", []) or [])
+        report.layout_slots = len(layout.get("slots", []) or [])
+        player = getattr(self.master_controller, "game_player", None)
+        report.entry_candidate = getattr(player, "entry_strategy", {}).get("selected") if player else None
+        report.tested_candidates = list(getattr(player, "entry_strategy", {}).get("tested", []) or []) if player else []
+        report.runtime_state = str(getattr(player, "entry_strategy", {}).get("verification") or "UNKNOWN") if player else "UNKNOWN"
+        # Runtime VM entry verification is authoritative.  The optional dual
+        # placement readers are useful evidence but are not required for a
+        # playable mod to pass this gate.
+        report.runtime_verified = report.runtime_state == "PASS" if player else False
+        report.coverage = {"normal": "not_started", "horror": "not_checked_by_policy"}
+        report.phase_reports = {
+            "master": master_report.as_dict() if isinstance(master_report, WorkflowReport) else None,
+            "individual": individual_report.as_dict() if isinstance(individual_report, WorkflowReport) else None,
+        }
+        report.evidence["entryStrategy"] = {
+            "selected": report.entry_candidate,
+            "tested": report.tested_candidates,
+            "runtimeState": report.runtime_state,
+        }
+        if isinstance(individual_report, WorkflowReport):
+            report.normal_icons_showcased = individual_report.normal_icons_showcased
+            report.normal_icons_total = individual_report.normal_icons_total
+            report.normal_remixes_played = individual_report.normal_remixes_played
+            report.normal_remixes_total = individual_report.normal_remixes_total
+        elif isinstance(master_report, WorkflowReport):
+            report.normal_icons_showcased = master_report.normal_icons_showcased
+            report.normal_icons_total = master_report.normal_icons_total
+            report.normal_remixes_played = master_report.normal_remixes_played
+            report.normal_remixes_total = master_report.normal_remixes_total
+
+        transactions = list(getattr(player, "_workflow_placement_transactions", []) or []) if player else []
+        report.evidence["placementTransactions"] = transactions
+        report.placement_verified = any(
+            transaction.get("status") == "VERIFIED" and transaction.get("targetVerified") is True
+            for transaction in transactions
+        )
+        report.cleanup_verified = report.placement_verified and all(
+            transaction.get("cleanupVerified") is True for transaction in transactions
+        )
+        if transactions:
+            report.placement_before = transactions[0].get("before")
+            report.placement_after = transactions[0].get("after")
+
+        phase_gate_candidates = [
+            phase_report.quality_gate
+            for phase_report in (master_report, individual_report)
+            if isinstance(phase_report, WorkflowReport) and phase_report.quality_gate is not None
+        ]
+
+        if forced_failure_code:
+            report.apply_quality_gate(
+                QualityGateResult.failure(
+                    forced_failure_code,
+                    evidence={"masterSuccess": master_success, "individualSuccess": individual_success},
+                    message="BOTH workflow did not execute all required phases.",
+                )
+            )
+        elif not (master_success and individual_success):
+            failed_phase_gate = next(
+                (gate for gate in phase_gate_candidates if not gate.passed),
+                None,
+            )
+            missing_phase = master_report is None or individual_report is None
+            failure_code = (
+                "phase_skipped"
+                if missing_phase
+                else failed_phase_gate.failure_code
+                if failed_phase_gate and failed_phase_gate.failure_code
+                else ("phase_skipped" if self.should_stop else "remix_threshold_not_met")
+            )
+            report.apply_quality_gate(
+                QualityGateResult.failure(
+                    failure_code,
+                    status=failed_phase_gate.status if failed_phase_gate else "FAIL",
+                    retryable=failed_phase_gate.retryable if failed_phase_gate else None,
+                    evidence={
+                        "masterSuccess": master_success,
+                        "individualSuccess": individual_success,
+                        "phaseFailureCode": getattr(failed_phase_gate, "failure_code", None),
+                    },
+                    message="BOTH workflow requires both Master and Individual phases to pass.",
+                )
+            )
+        else:
+            evaluate_workflow_report(report, mode="both", require_identity=False)
+
+        item.workflow_report = report
+        return report
+
     def _process_both_mode_enhanced(self, item: ProcessingItem) -> bool:
         """Enhanced Both mode with proper isolation and comprehensive cleanup"""
         master_success = False
         individual_success = False
+        master_report = None
+        individual_report = None
         master_output_count = 0
         individual_output_count = 0
         
@@ -1310,6 +1675,7 @@ class UnifiedProcessingManager:
                 
                 self.logger.info("🎬 Executing Master mode with full cleanup support...")
                 master_success = self._process_master_mode(item)
+                master_report = item.workflow_report if isinstance(item.workflow_report, WorkflowReport) else None
                 
                 # Calculate Master mode output
                 master_output_count = len(item.output_files) - initial_output_count
@@ -1328,7 +1694,15 @@ class UnifiedProcessingManager:
                         if self.should_stop:
                             self.logger.warning("🛑 Emergency stop during OBS finalization wait")
                             self.logger.warning("   Master video may not be properly finalized")
-                            return master_success  # Return partial success
+                            self._set_both_workflow_report(
+                                item,
+                                master_report,
+                                None,
+                                master_success,
+                                False,
+                                forced_failure_code="phase_skipped",
+                            )
+                            return False
                         
                         if countdown % 2 == 0 or countdown <= 2:  # Log every 2 seconds, or final 2 seconds
                             self.logger.info(f"   🔄 Finalizing Master video... {countdown}s remaining")
@@ -1387,7 +1761,15 @@ class UnifiedProcessingManager:
                 for countdown in range(browser_cleanup_duration, 0, -1):
                     if self.should_stop:
                         self.logger.warning("🛑 Emergency stop during browser cleanup wait")
-                        return master_success
+                        self._set_both_workflow_report(
+                            item,
+                            master_report,
+                            None,
+                            master_success,
+                            False,
+                            forced_failure_code="phase_skipped",
+                        )
+                        return False
                     
                     # Improved logging for better feedback every 2 seconds.
                     if countdown % 2 == 0 or countdown <= 2:
@@ -1408,7 +1790,15 @@ class UnifiedProcessingManager:
             if self.should_stop:
                 self.logger.warning("🛑 Emergency stop detected before Individual mode")
                 self.logger.info(f"📊 Partial BOTH mode results: Master={master_success}, Individual=skipped")
-                return master_success  # Return partial success based on Master mode
+                self._set_both_workflow_report(
+                    item,
+                    master_report,
+                    None,
+                    master_success,
+                    False,
+                    forced_failure_code="phase_skipped",
+                )
+                return False
             
             # ================================================================
             # PHASE 2: INDIVIDUAL MODE (with completely fresh browser)
@@ -1432,6 +1822,7 @@ class UnifiedProcessingManager:
                 self.logger.info("   Mode: Individual icons + remixes with enhanced error handling")
                 
                 individual_success = self._process_individual_mode(item)
+                individual_report = item.workflow_report if isinstance(item.workflow_report, WorkflowReport) else None
                 
                 # Calculate Individual mode output
                 individual_output_count = len(item.output_files) - pre_individual_output_count
@@ -1473,6 +1864,15 @@ class UnifiedProcessingManager:
             # Determine final success status based on strict rules
             final_success = master_success and individual_success
 
+            aggregate_report = self._set_both_workflow_report(
+                item,
+                master_report,
+                individual_report,
+                master_success,
+                individual_success,
+            )
+            final_success = final_success and aggregate_report.was_successful
+
             if final_success:
                 self.logger.info("🎉 BOTH MODE: COMPLETE SUCCESS!")
                 self.logger.info("   Both Master and Individual modes met their success thresholds.")
@@ -1494,6 +1894,15 @@ class UnifiedProcessingManager:
             item.error_message = error_msg
             item.master_mode_status = item.master_mode_status if item.master_mode_status != "not_started" else "failure"
             item.individual_mode_status = item.individual_mode_status if item.individual_mode_status != "not_started" else "failure"
+            item.failure_code = "workflow_stopped" if self.should_stop else "runtime_verification_unknown"
+            self._set_both_workflow_report(
+                item,
+                master_report,
+                individual_report,
+                master_success,
+                individual_success,
+                forced_failure_code=item.failure_code,
+            )
             return False
         
         finally:
@@ -1544,6 +1953,10 @@ class UnifiedProcessingManager:
             if not self.master_controller.obs_controller.force_obs_filename(master_filename):
                 raise Exception("OBS filename setup failed")
             if not self.master_controller.game_player.setup_game_environment(first_setup=True):
+                setup_result = getattr(self.master_controller.game_player, "last_setup_result", None)
+                if isinstance(setup_result, QualityGateResult):
+                    item.failure_code = setup_result.failure_code
+                    item.error_message = setup_result.message
                 raise Exception("Game environment setup failed")
             game_environment_ready = True
             browser_opened = True
@@ -1554,6 +1967,9 @@ class UnifiedProcessingManager:
             # STEP 5: Execute Full Showcase Workflow and get detailed report
             self.logger.info("🎮 Executing full showcase workflow...")
             workflow_report = self.master_controller.game_player.execute_full_showcase_workflow_corrected()
+            # Persist the report before any failure branch so diagnostics are
+            # available even when the workflow raises below.
+            item.workflow_report = workflow_report
             item.recording_area = getattr(self.master_controller.obs_controller, 'recording_area', None)
             
             # Log any issues from the report
@@ -1565,9 +1981,9 @@ class UnifiedProcessingManager:
             # Intelligent success check based on the report
             if not workflow_report.was_successful:
                 # This is a business logic failure (e.g., no icons)
+                item.failure_code = workflow_report.failure_code or "placement_not_verified"
+                item.error_message = workflow_report.message
                 raise Exception(f"Master workflow failed: {workflow_report.message}")
-            
-            item.workflow_report = workflow_report
             
             self.logger.info(f"✅ Showcase workflow completed: {workflow_report.message}")
             
@@ -1589,6 +2005,8 @@ class UnifiedProcessingManager:
             self.logger.error(error_msg, exc_info=True)
             
             item.error_message = error_msg # Lưu lỗi chi tiết
+            if not item.failure_code:
+                item.failure_code = "workflow_stopped" if self.should_stop else "runtime_verification_unknown"
             item.master_mode_status = "failure"
             return False
             
@@ -1646,6 +2064,9 @@ class UnifiedProcessingManager:
             """Enhanced Individual mode with SafeOperationManager and intelligent success checking."""
             safe_ops = None
             meaningful_content_generated = False
+            report = WorkflowReport(mode="individual")
+            item.workflow_report = report
+            self.master_controller.game_player._workflow_placement_transactions = []
             
             try:
                 self.logger.info(f"Executing enhanced individual workflow for {item.display_name}")
@@ -1654,15 +2075,37 @@ class UnifiedProcessingManager:
                 if not self.master_controller.obs_controller.full_setup(use_full_screen=False):
                     raise Exception("OBS setup failed for individual mode")
                 if not self.master_controller.game_player.setup_game_environment(first_setup=False):
+                    setup_result = getattr(self.master_controller.game_player, "last_setup_result", None)
+                    if isinstance(setup_result, QualityGateResult):
+                        item.failure_code = setup_result.failure_code
+                        item.error_message = setup_result.message
                     raise Exception("Game environment re-setup failed")
                 if not item.json_data or 'layout' not in item.json_data:
                     raise Exception("Invalid JSON data - missing layout")
                 
                 layout = item.json_data['layout']
+                layout_quality = validate_playable_layout(item.json_data)
+                if not layout_quality.passed:
+                    item.failure_code = layout_quality.failure_code
+                    raise Exception(layout_quality.message)
                 icons = layout['icons']
                 slots = layout['slots']
+                report.layout_icons = len(icons)
+                report.layout_slots = len(slots)
+                player = self.master_controller.game_player
+                report.entry_candidate = getattr(player, "entry_strategy", {}).get("selected")
+                report.tested_candidates = list(getattr(player, "entry_strategy", {}).get("tested", []) or [])
+                report.evidence["entryStrategy"] = dict(getattr(player, "entry_strategy", {}) or {})
+                report.runtime_state = str(getattr(player, "entry_strategy", {}).get("verification") or "UNKNOWN")
+                report.runtime_verified = report.runtime_state == "PASS"
                 game_settings = item.json_data.get('gameSettings', {})
-                has_horror = game_settings.get('hasHorror', False)
+                has_horror = bool(game_settings.get('verifyHorror', False)) and bool(
+                    game_settings.get('hasHorror', False)
+                )
+                report.coverage = {
+                    "normal": "not_started",
+                    "horror": "verified" if has_horror else "not_checked_by_policy",
+                }
                 
                 # If there are no icons AND no remixes can be made, it's a failure
                 if not icons:
@@ -1738,12 +2181,35 @@ class UnifiedProcessingManager:
 
                 is_successful = (icon_rate >= ICON_THRESHOLD and remix_rate >= REMIX_THRESHOLD)
 
-                if is_successful:
+                report.normal_icons_showcased = actual_icon_videos
+                report.normal_icons_total = total_icons_expected
+                report.normal_remixes_played = actual_remix_videos
+                report.normal_remixes_total = total_remixes_expected
+                report.evidence["outputFiles"] = list(output_files)
+                report.evidence["meaningfulContentGenerated"] = meaningful_content_generated
+                transactions = getattr(player, "_workflow_placement_transactions", [])
+                report.evidence["placementTransactions"] = list(transactions)
+                report.placement_verified = any(
+                    transaction.get("status") == "VERIFIED"
+                    and transaction.get("targetVerified") is True
+                    for transaction in transactions
+                )
+                report.cleanup_verified = report.placement_verified and all(
+                    transaction.get("cleanupVerified") is True for transaction in transactions
+                )
+                if transactions:
+                    report.placement_before = transactions[0].get("before")
+                    report.placement_after = transactions[0].get("after")
+                evaluate_workflow_report(report, mode="individual", require_identity=False)
+                item.workflow_report = report
+
+                if is_successful and report.was_successful:
                     self.logger.info(f"✅ Enhanced Individual Mode completed successfully (Icons: {icon_rate:.0%}, Remixes: {remix_rate:.0%})")
                     item.individual_mode_status = "success"
                     return True
                 else:
-                    item.error_message = f"Individual mode failed thresholds (Icons: {icon_rate:.0%}, Remixes: {remix_rate:.0%})"
+                    item.failure_code = report.failure_code or "remix_threshold_not_met"
+                    item.error_message = report.message or f"Individual mode failed thresholds (Icons: {icon_rate:.0%}, Remixes: {remix_rate:.0%})"
                     self.logger.error(item.error_message)
                     item.individual_mode_status = "failure"
                     return False
@@ -1753,6 +2219,18 @@ class UnifiedProcessingManager:
                 self.logger.error(error_msg, exc_info=True)
                 
                 item.error_message = error_msg # Lưu lỗi chi tiết
+                item.failure_code = item.failure_code or (
+                    "workflow_stopped" if self.should_stop else "runtime_verification_unknown"
+                )
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        item.failure_code,
+                        status="FAIL" if self.should_stop else "UNKNOWN",
+                        retryable=False if self.should_stop else True,
+                        evidence={"error": error_msg},
+                        message=error_msg,
+                    )
+                )
                 item.individual_mode_status = "failure"
                 return False
             finally:
@@ -1760,6 +2238,7 @@ class UnifiedProcessingManager:
                     safe_ops.emergency_cleanup_all()
                 if self.master_controller.game_player:
                     self.master_controller.game_player.close_game_window()
+                item.workflow_report = report
 
     def _safe_record_individual_remixes(self, item, icons, slots, safe_ops) -> List[str]:
         """Safe remix recording using SafeOperationManager"""

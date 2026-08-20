@@ -1,6 +1,7 @@
 # sprunki_game_player.py - ENHANCED with Drag Verification
 # CHANGES: Added "Putted characters" variable monitoring and 5-coordinate retry logic
 
+import builtins
 import json
 import time
 import webbrowser
@@ -28,7 +29,7 @@ import ctypes
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from sprunki_obs_controller import SprunkiController
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 
 from character_identity import SCRATCH_VM_ICON_STATE_JS, write_character_identity_map
 from manual_profile_manager import find_profile, load_profile_from_path, validate_profile
@@ -52,26 +53,19 @@ from placement_verifier import (
     observe_until_verified,
     wait_for_stable_snapshot,
 )
+from workflow_quality import (
+    UNKNOWN,
+    QualityGateResult,
+    RemixResult,
+    WorkflowReport,
+    evaluate_workflow_report,
+    validate_playable_layout,
+)
 
 class WorkflowIncompatibleError(Exception):
     """Custom exception raised when the workflow detects a persistent,
     unrecoverable incompatibility with the current game mod."""
     pass
-
-@dataclass
-class WorkflowReport:
-    """Báo cáo chi tiết về kết quả của một workflow."""
-    was_successful: bool = False
-    message: str = "Workflow did not run."
-    normal_icons_showcased: int = 0
-    normal_icons_total: int = 0
-    horror_icons_showcased: int = 0
-    horror_icons_total: int = 0
-    normal_remixes_played: int = 0
-    normal_remixes_total: int = 0
-    horror_remixes_played: int = 0
-    horror_remixes_total: int = 0
-    issues: List[str] = field(default_factory=list)
 
 class ThreadSafeProgressUpdater:
     def __init__(self, root, action_var):
@@ -268,6 +262,17 @@ class SprunkiGamePlayer:
         self._batch_reconnect_attempts = 0
         self._batch_snapshot_sequence = 0
         self._snapshot_sequence = 0
+
+        # Shared quality-gate evidence.  These fields are reset for every
+        # workflow and are never inferred from cleanup-only observations.
+        self.last_workflow_report: Optional[WorkflowReport] = None
+        self.last_setup_result: Optional[QualityGateResult] = None
+        self.entry_strategy: Dict[str, Any] = {
+            "selected": None,
+            "tested": [],
+            "verification": "UNKNOWN",
+        }
+        self._workflow_placement_transactions: List[Dict[str, Any]] = []
 
         # Some mods keep permanent entries in the monitored Scratch arrays even
         # when every visible slot is empty.  Learn that per-mod empty state from
@@ -1135,16 +1140,29 @@ class SprunkiGamePlayer:
             response.close()
 
             print(f"   HTTP status: {status_code} ({final_url})")
-            if status_code in (404, 410):
+            if status_code >= 400:
                 print(f"[FAIL] URL preflight failed: page returned HTTP {status_code}")
-                return False
+                return QualityGateResult.failure(
+                    "no_playable_entry",
+                    evidence={"statusCode": status_code, "finalUrl": final_url},
+                    message=f"URL returned HTTP {status_code}.",
+                )
 
-            return True
+            return QualityGateResult.pass_result(
+                evidence={"statusCode": status_code, "finalUrl": final_url},
+                message="URL preflight passed.",
+            )
 
         except requests.RequestException as e:
             print(f"[WARN] URL preflight inconclusive: {e}")
-            print("   Continuing with browser verification...")
-            return True
+            print("   Browser verification must resolve this UNKNOWN state.")
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(e), "url": target_url},
+                message="URL preflight was inconclusive.",
+            )
 
     def detect_cocrea_error_page_fast(self):
         """Detect Cocrea error pages from the already loaded DOM."""
@@ -1193,8 +1211,13 @@ class SprunkiGamePlayer:
 
         try:
             result = self._execute_verification_js(error_page_js)
-            if not result:
-                return False
+            if not isinstance(result, dict):
+                return QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="Error-page detector returned no result.",
+                )
 
             if result.get("isErrorPage"):
                 print("[FAIL] Cocrea error page detected before game verification")
@@ -1202,13 +1225,26 @@ class SprunkiGamePlayer:
                 print(f"   Title: {result.get('title')}")
                 print(f"   Heading: {result.get('headingText')}")
                 print(f"   URL: {result.get('currentUrl')}")
-                return True
+                return QualityGateResult.failure(
+                    "no_playable_entry",
+                    evidence=result,
+                    message="Cocrea rendered an error page.",
+                )
 
-            return False
+            return QualityGateResult.pass_result(
+                evidence=result,
+                message="No Cocrea error page detected.",
+            )
 
         except Exception as e:
             print(f"[WARN] Error-page preflight inconclusive: {e}")
-            return False
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(e)},
+                message="Error-page detection was inconclusive.",
+            )
 
     def verify_page_fully_loaded(self, target_url):
         """
@@ -1217,8 +1253,12 @@ class SprunkiGamePlayer:
         """
         try:
             if not self.page_verification_enabled:
-                print("ðŸ” Page verification disabled, assuming page ready")
-                return True
+                print("ðŸ” Page verification disabled; readiness is UNKNOWN")
+                return QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    message="Page verification is disabled.",
+                )
             
             print(f"\nðŸ” SMART PAGE VERIFICATION: {target_url}")
             print("="*70)
@@ -1298,7 +1338,10 @@ class SprunkiGamePlayer:
             
             for attempt in range(1, max_retries + 1):
                 if self.stop_event.is_set():
-                    return False
+                    return QualityGateResult.failure(
+                        "workflow_stopped",
+                        message="Page verification stopped by the job.",
+                    )
                 
                 print(f"ðŸ” Page verification attempt {attempt}/{max_retries}")
                 
@@ -1322,7 +1365,10 @@ class SprunkiGamePlayer:
                         elapsed = time.time() - start_time
                         print(f"âœ… PAGE VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
                         print("="*70)
-                        return True
+                        return QualityGateResult.pass_result(
+                            evidence=verification_result,
+                            message="Page verification passed.",
+                        )
                     else:
                         if loading_spinners.get('count', 0) > 0:
                             spinner_types = ', '.join(loading_spinners.get('types', []))
@@ -1338,29 +1384,48 @@ class SprunkiGamePlayer:
                     simple_check = self._execute_verification_js("document.readyState")
                     if simple_check == 'complete':
                         print(f"   âœ… Fallback check passed: document.readyState = complete")
-                        return True
+                        return QualityGateResult.pass_result(
+                            evidence={"fallback": "document.readyState", "state": simple_check},
+                            message="Page verification passed using readyState fallback.",
+                        )
                 
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed > self.page_verification_timeout:
                     print(f"âš ï¸ Page verification timeout ({self.page_verification_timeout}s exceeded)")
-                    print("   Proceeding anyway with image detection...")
-                    return True  # Don't fail completely, proceed with image detection
+                    print("   Verification is UNKNOWN; workflow must not continue as success.")
+                    return QualityGateResult.failure(
+                        "runtime_verification_unknown",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={"attempt": attempt, "timeoutSeconds": self.page_verification_timeout},
+                        message="Page verification timed out.",
+                    )
                 
                 # Wait before next attempt
                 if attempt < max_retries:
                     print(f"   â³ Waiting {self.page_verification_interval}s before next check...")
                     time.sleep(self.page_verification_interval)
             
-            # All attempts failed, but don't block the workflow
+            # All attempts failed; do not fail open.
             print(f"âš ï¸ Page verification failed after {max_retries} attempts")
-            print("   Proceeding anyway with image detection...")
-            return True
-            
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"attempts": max_retries},
+                message="Page verification remained inconclusive.",
+            )
+
         except Exception as e:
             print(f"âš ï¸ Error in page verification: {e}")
-            print("   Proceeding anyway with image detection...")
-            return True  # Don't block workflow on verification errors
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(e)},
+                message="Page verification raised an exception.",
+            )
 
     def verify_game_components_ready(self, timeout_override: Optional[float] = None):
         """
@@ -1369,8 +1434,12 @@ class SprunkiGamePlayer:
         """
         try:
             if not self.game_verification_enabled:
-                print("ðŸŽ® Game verification disabled, assuming game ready")
-                return True
+                print("ðŸŽ® Game verification disabled; readiness is UNKNOWN")
+                return QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    message="Game verification is disabled.",
+                )
             
             # [MODIFIED] Use override or default timeout from config
             timeout = timeout_override if timeout_override is not None else self.game_verification_timeout
@@ -1591,7 +1660,10 @@ class SprunkiGamePlayer:
             
             for attempt in range(1, max_attempts + 1):
                 if self.stop_event.is_set():
-                    return False
+                    return QualityGateResult.failure(
+                        "workflow_stopped",
+                        message="Game verification stopped by the job.",
+                    )
                 
                 print(f"ðŸŽ® Game verification attempt {attempt}/{max_attempts}")
                 
@@ -1610,7 +1682,11 @@ class SprunkiGamePlayer:
                         print(f"   Pattern: {error_page.get('pattern')}")
                         print(f"   Title: {error_page.get('title')}")
                         print(f"   Heading: {error_page.get('headingText')}")
-                        return False
+                        return QualityGateResult.failure(
+                            "no_playable_entry",
+                            evidence=error_page,
+                            message="Game verification detected an error page.",
+                        )
                     
                     print(f"   ðŸŽ¯ Game containers found: {len(game_containers)}")
                     for container in game_containers[:3]:  # Show first 3
@@ -1630,7 +1706,10 @@ class SprunkiGamePlayer:
                         elapsed = time.time() - start_time
                         print(f"âœ… GAME VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
                         print("="*70)
-                        return True
+                        return QualityGateResult.pass_result(
+                            evidence=game_result,
+                            message="Game components verified.",
+                        )
                     else:
                         if len(game_containers) < self.min_containers_required:
                             print(f"   â³ Waiting for game containers to load ({len(game_containers)}/{self.min_containers_required})")
@@ -1646,8 +1725,13 @@ class SprunkiGamePlayer:
                 elapsed = time.time() - start_time
                 if elapsed > timeout:
                     print(f"âš ï¸  Game verification timeout ({timeout}s exceeded)")
-                    # [MODIFIED] Trả về False khi timeout, thay vì True
-                    return False
+                    return QualityGateResult.failure(
+                        "runtime_verification_unknown",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={"attempt": attempt, "timeoutSeconds": timeout},
+                        message="Game component verification timed out.",
+                    )
                 
                 # Wait before next attempt
                 if attempt < max_attempts:
@@ -1656,14 +1740,26 @@ class SprunkiGamePlayer:
             
             # All attempts failed within the timeout
             print(f"âš ï¸  Game verification failed after {max_attempts} attempts")
-            return False
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"attempts": max_attempts},
+                message="Game component verification remained inconclusive.",
+            )
             
         except Exception as e:
             print(f"âš ï¸  Error in game verification: {e}")
-            return False # Trả về False khi có lỗi
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(e)},
+                message="Game component verification raised an exception.",
+            )
 
     def verify_page_fully_loaded_lightweight(self, target_url):
-        """Lightweight version for continuous monitoring"""
+        """Lightweight readiness probe with the same tri-state contract."""
         try:
             # Simplified check for continuous use
             verification_js = """
@@ -1702,18 +1798,41 @@ class SprunkiGamePlayer:
             """
             
             result = self._execute_verification_js(verification_js)
-            if result:
+            if isinstance(result, dict):
                 print(f"      ðŸ“Š Page score: {result.get('score', 0)}/100, Spinners: {result.get('loadingSpinners', 'N/A')}")
-                return result.get('ready', False)
-            return False
+                if result.get('ready', False):
+                    return QualityGateResult.pass_result(
+                        evidence={"targetUrl": target_url, **result},
+                        message="Lightweight page readiness passed.",
+                    )
+                return QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"targetUrl": target_url, **result},
+                    message="Lightweight page readiness is not yet proven.",
+                )
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"targetUrl": target_url},
+                message="Lightweight page probe returned no result.",
+            )
             
         except Exception as e:
             print(f"   âš ï¸ Page check error: {e}")
-            return False
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"targetUrl": target_url, "error": str(e)},
+                message="Lightweight page probe raised an exception.",
+            )
 
 
     def verify_game_components_ready_lightweight(self):
-        """Lightweight version for continuous monitoring"""
+        """Lightweight component probe with the same tri-state contract."""
         try:
             # Simplified game check
             game_js = """
@@ -1769,16 +1888,38 @@ class SprunkiGamePlayer:
             """
             
             result = self._execute_verification_js(game_js)
-            if result:
+            if isinstance(result, dict):
                 containers = result.get('gameContainers', 0)
                 has_button = result.get('runButton', False)
                 print(f"      ðŸ“Š Containers: {containers}, Run button: {'âœ…' if has_button else 'âŒ'}")
-                return result.get('ready', False)
-            return False
+                if result.get('ready', False):
+                    return QualityGateResult.pass_result(
+                        evidence=result,
+                        message="Lightweight game component readiness passed.",
+                    )
+                return QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence=result,
+                    message="Lightweight game component readiness is not yet proven.",
+                )
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                message="Lightweight game component probe returned no result.",
+            )
             
         except Exception as e:
             print(f"   âš ï¸ Game check error: {e}")
-            return False
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(e)},
+                message="Lightweight game component probe raised an exception.",
+            )
 
     # ================================================================
     # == CHROME DEBUG BROWSER MANAGEMENT (from json_generator.py) ==
@@ -2309,9 +2450,19 @@ class SprunkiGamePlayer:
             print(f"\n🚀 STARTING GAME SETUP (FINAL STRATEGY): {url}")
             print("======================================================================")
             self.game_url = url
+            self.entry_strategy = {
+                "selected": None,
+                "tested": [],
+                "verification": UNKNOWN,
+            }
 
-            if not self.preflight_url_playable(url):
-                print("[FAIL] SETUP FAILED: URL is not playable (404/410).")
+            preflight_result = self.preflight_url_playable(url)
+            if not preflight_result:
+                self.last_setup_result = preflight_result
+                print(
+                    "[FAIL] SETUP FAILED: URL preflight did not pass: "
+                    f"{getattr(preflight_result, 'failure_code', 'unknown')}"
+                )
                 return False
 
             # --- PHASE 1: BROWSER LAUNCH (Không thay đổi) ---
@@ -2430,15 +2581,22 @@ class SprunkiGamePlayer:
             # --- PHASE 2: PATIENTLY VERIFY GAME COMPONENTS (Logic quyết định duy nhất) ---
             # Đây là logic cốt lõi. Nếu trang là 404, nó sẽ không có component game và sẽ timeout.
             # Nếu là trang game, nó sẽ chờ cho đến khi component xuất hiện.
-            if self.detect_cocrea_error_page_fast():
-                print("[FAIL] SETUP FAILED: Cocrea rendered an error/404 page.")
+            error_page_result = self.detect_cocrea_error_page_fast()
+            if not isinstance(error_page_result, QualityGateResult) or error_page_result.status != "PASS":
+                self.last_setup_result = error_page_result
+                print(
+                    "[FAIL] SETUP FAILED: Cocrea error-page verification did not pass: "
+                    f"{getattr(error_page_result, 'failure_code', 'unknown')}"
+                )
                 self.cleanup_chrome_complete()
                 return False
 
             print(f"PHASE 2: Patiently Verifying Game Components (Timeout: {self.game_verification_timeout}s)...")
             
             # Chúng ta sẽ gọi hàm verify_game_components_ready với timeout mặc định (dài) từ config
-            if not self.verify_game_components_ready():
+            component_result = self.verify_game_components_ready()
+            if not component_result:
+                self.last_setup_result = component_result
                 # Nếu sau 120 giây mà vẫn không tìm thấy component game, chúng ta có thể chắc chắn
                 # đây là trang lỗi (404, sign-in) hoặc một game bị hỏng nặng.
                 print(f"❌ SETUP FAILED: Game components did not appear within {self.game_verification_timeout}s.")
@@ -2452,6 +2610,12 @@ class SprunkiGamePlayer:
             print("PHASE 3: Interacting with Game Interface...")
 
             if not self._click_run_button_cdp_only():
+                self.last_setup_result = QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="Run button interaction was not verified.",
+                )
                 print("❌ SETUP FAILED: Could not find or click the 'Run' button.")
                 self.cleanup_chrome_complete()
                 return False
@@ -2460,6 +2624,12 @@ class SprunkiGamePlayer:
             time.sleep(self.game_load_wait)
 
             if not self._click_fullscreen_button_cdp_only():
+                self.last_setup_result = QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="Fullscreen interaction was not verified.",
+                )
                 print("❌ SETUP FAILED: Could not find or click the 'Fullscreen' button.")
                 self.cleanup_chrome_complete()
                 return False
@@ -2475,6 +2645,13 @@ class SprunkiGamePlayer:
             print(f"❌ CRITICAL ERROR during game setup: {e}")
             import traceback
             traceback.print_exc()
+            self.last_setup_result = QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(e), "url": getattr(self, "game_url", None)},
+                message="Game setup raised an exception.",
+            )
             self.cleanup_chrome_complete()
             try:
                 messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
@@ -7991,6 +8168,95 @@ class SprunkiGamePlayer:
             return response.get('result', {}).get('result', {}).get('value')
         return None
 
+    def verify_playable_runtime_entry(self):
+        """Verify that the selected runtime is a real playable Sprunki stage.
+
+        DOM/container presence is not enough: the Scratch VM must expose at
+        least one icon and one slot.  This is deliberately a read-only check;
+        placement evidence is collected later by the bounded drag verifier.
+        """
+        ws = None
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                result = QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="No CDP websocket is available for runtime entry verification.",
+                )
+                self.entry_strategy["verification"] = "UNKNOWN"
+                self.entry_strategy["verificationResult"] = result.as_dict()
+                return result
+
+            ws = websocket.create_connection(ws_url, timeout=10)
+            state = self._evaluate_entry_state_via_ws(ws)
+            if not isinstance(state, dict) or not state.get("ok"):
+                result = QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"state": state},
+                    message="Scratch runtime entry state could not be read.",
+                )
+                self.entry_strategy["verification"] = "UNKNOWN"
+                self.entry_strategy["verificationResult"] = result.as_dict()
+                return result
+
+            icons = int(state.get("iconCount") or 0)
+            slots = int(state.get("slotCount") or 0)
+            evidence = {
+                "icons": icons,
+                "slots": slots,
+                "playButtons": int(state.get("playButtonCount") or 0),
+                "openIndicators": len(state.get("openPanelIndicators") or []),
+            }
+            self.entry_strategy["runtimeState"] = evidence
+
+            if icons <= 0:
+                result = QualityGateResult.failure(
+                    "no_icons",
+                    evidence=evidence,
+                    message="Runtime stage contains no playable icons.",
+                )
+            elif slots <= 0:
+                result = QualityGateResult.failure(
+                    "no_slots",
+                    evidence=evidence,
+                    message="Runtime stage contains no playable slots.",
+                )
+            else:
+                result = QualityGateResult.pass_result(
+                    evidence=evidence,
+                    message="Playable runtime entry verified.",
+                )
+
+            self.entry_strategy["verification"] = result.status
+            self.entry_strategy["verificationResult"] = result.as_dict()
+            if result.passed and not self.entry_strategy.get("selected"):
+                self.entry_strategy["selected"] = {
+                    "strategy": "runtime_vm",
+                    "reason": "runtime_exposes_icons_and_slots",
+                }
+            return result
+        except Exception as error:
+            result = QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(error)},
+                message="Runtime entry verification raised an exception.",
+            )
+            self.entry_strategy["verification"] = "UNKNOWN"
+            self.entry_strategy["verificationResult"] = result.as_dict()
+            return result
+        finally:
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
+
     def _summarize_entry_state(self, state):
         if not isinstance(state, dict):
             return "state unavailable"
@@ -8029,6 +8295,23 @@ class SprunkiGamePlayer:
             return characters_count
         if putted_count is not None:
             return putted_count
+        return None
+
+    @staticmethod
+    def _transition_count_from_details(details, side):
+        """Extract a numeric before/after count from verifier evidence."""
+        details = details or {}
+        keys = (
+            f"{side}CharactersCount",
+            f"{side}PuttedCount",
+        )
+        for key in keys:
+            value = details.get(key)
+            if value is not None and not isinstance(value, bool):
+                try:
+                    return int(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
         return None
 
     def _is_board_count_clean(self, characters_count=None, putted_count=None):
@@ -8421,6 +8704,11 @@ class SprunkiGamePlayer:
     def intro_skip_via_cdp(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using CDP with smart detection + blind clicks"""
         try:
+            self.entry_strategy = {
+                "selected": None,
+                "tested": [],
+                "verification": "UNKNOWN",
+            }
             ws_url = self._get_websocket_url()
             if not ws_url:
                 print("âš ï¸ Could not get WebSocket URL for enhanced intro skipping, using pyautogui fallback")
@@ -8474,7 +8762,9 @@ class SprunkiGamePlayer:
 
                     candidate_trials_attempted = True
                     trial_result = self._trial_action_buttons_via_ws(ws, buttons)
+                    self.entry_strategy["tested"].extend((trial_result or {}).get("tested", [])[:10])
                     if trial_result.get("success"):
+                        self.entry_strategy["selected"] = trial_result.get("selected")
                         smart_clicks_performed += 1
                         print(f"   \u2705 Selected one playable action candidate in round {scan_round}")
                         break
@@ -8531,6 +8821,9 @@ class SprunkiGamePlayer:
                 print("   ⚠️ Skipping blind center clicks after smart clicks to avoid menu/gallery overlays.")
             
             ws.close()
+
+            self.entry_strategy["introClicks"] = smart_clicks_performed + blind_clicks_performed
+            self.entry_strategy["candidateTrialsAttempted"] = candidate_trials_attempted
             
             # Summary
             if smart_clicks_performed > 0:
@@ -8554,6 +8847,9 @@ class SprunkiGamePlayer:
     def intro_skip_via_pyautogui(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using PyAutoGUI with smart detection + blind drags"""
         try:
+            self.entry_strategy.setdefault("tested", []).append(
+                {"strategy": "pyautogui_fallback", "result": "attempted"}
+            )
             try:
                 intro_drag_limit = min(max(int(self.intro_skip_clicks), 0), 10)
             except (TypeError, ValueError, OverflowError):
@@ -8895,9 +9191,22 @@ class SprunkiGamePlayer:
         FIXED: Setup with CDP verification and enhanced individual mode handling
         """
         try:
+            self.last_setup_result = None
+            # Do not carry a previous job/phase's entry candidate into the
+            # next runtime proof.  Every setup must record a fresh strategy
+            # and a fresh PASS/FAIL/UNKNOWN verification state.
+            self.entry_strategy = {
+                "selected": None,
+                "tested": [],
+                "verification": UNKNOWN,
+            }
             if not self.config:
                 print("🚫 CRITICAL ERROR: No config loaded - Cannot continue setup")
                 print("   💡 Please load a JSON configuration file first")
+                self.last_setup_result = QualityGateResult.failure(
+                    "manual_json_invalid",
+                    message="Configuration was not loaded.",
+                )
                 return False
 
             # A newly loaded game gets a fresh recovery/cleanup budget.  A
@@ -8995,6 +9304,13 @@ class SprunkiGamePlayer:
 
             if not success:
                 print("⚠️ Chrome debug launch failed")
+                if not isinstance(self.last_setup_result, QualityGateResult):
+                    self.last_setup_result = QualityGateResult.failure(
+                        "runtime_verification_unknown",
+                        status="UNKNOWN",
+                        retryable=True,
+                        message="Browser/game navigation did not pass verification.",
+                    )
                 return False
 
             # 🔍 NEW: CDP READINESS VERIFICATION
@@ -9007,6 +9323,12 @@ class SprunkiGamePlayer:
             if not cdp_ready:
                 print("❌ CDP verification failed - automation will not work properly")
                 print("💡 This is likely why drag operations fail in Both mode")
+                self.last_setup_result = QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="CDP readiness was not verified.",
+                )
                 return False
             else:
                 print("✅ CDP verification successful - automation ready!")
@@ -9018,8 +9340,16 @@ class SprunkiGamePlayer:
                     "🛑 Manual profile is invalid; refusing automatic intro fallback: "
                     f"{profile_resolution_error}"
                 )
+                self.last_setup_result = QualityGateResult.failure(
+                    "manual_json_invalid",
+                    evidence={"profileError": profile_resolution_error},
+                    message="Manual entry profile is invalid.",
+                )
                 return False
             if manual_profile:
+                self.entry_strategy.setdefault("tested", []).append(
+                    {"strategy": "manual_profile", "path": manual_profile_path}
+                )
                 if progress_callback:
                     progress_callback("🧭 Replaying manual profile prepare actions...")
                 print(f"🧭 Using manual profile: {manual_profile_path}")
@@ -9029,7 +9359,16 @@ class SprunkiGamePlayer:
                 )
                 if not replay_success:
                     print("🛑 Manual profile replay failed; refusing blind automatic input on a partially prepared game")
+                    self.last_setup_result = QualityGateResult.failure(
+                        "manual_json_invalid",
+                        evidence={"profilePath": manual_profile_path},
+                        message="Manual entry profile replay failed.",
+                    )
                     return False
+                self.entry_strategy["selected"] = {
+                    "strategy": "manual_profile",
+                    "path": manual_profile_path,
+                }
             else:
                 # Skip intros (existing logic, keep as-is)
                 if progress_callback:
@@ -9037,6 +9376,12 @@ class SprunkiGamePlayer:
 
                 if not self.intro_skip_via_cdp():
                     print("🛑 CDP intro skipping failed; refusing to continue on an unprepared game")
+                    self.last_setup_result = QualityGateResult.failure(
+                        "runtime_verification_unknown",
+                        status="UNKNOWN",
+                        retryable=True,
+                        message="Automatic entry preparation was not verified.",
+                    )
                     return False
 
             # 🔄 DUAL VERIFICATION SETUP (existing logic, keep as-is)
@@ -9060,6 +9405,18 @@ class SprunkiGamePlayer:
             # 🎮 FINAL GAME PREPARATION (existing logic, keep as-is)
             self.prepare_game_for_playing()
             time.sleep(1)
+
+            # Containers and a Run button are only structural evidence.  The
+            # VM must expose real icons and slots before any recording starts.
+            runtime_entry = self.verify_playable_runtime_entry()
+            if not runtime_entry:
+                self.last_setup_result = runtime_entry
+                print(
+                    "🛑 SETUP FAILED: runtime playability was not proven: "
+                    f"{runtime_entry.failure_code or runtime_entry.status}"
+                )
+                self.cleanup_chrome_complete()
+                return False
 
             if progress_callback:
                 progress_callback("✅ Enhanced game environment ready!")
@@ -9985,6 +10342,8 @@ class SprunkiGamePlayer:
                 obs_controller.log_event_timestamp("start_icon_showcase", f"Start showcase cycle for icon {icon_index}", showcase_context)
             
             # --- GIAI ĐOẠN KÉO THẢ ---
+            before_state = self.get_comprehensive_slot_state() if (self.characters_available or self.putted_chars_available) else None
+            before_count = self._get_board_progress_count(before_state)
             if obs_controller:
                 obs_controller.log_event_timestamp("start_drag", f"Dragging icon {icon_index}", {"success": None})
             
@@ -10000,10 +10359,38 @@ class SprunkiGamePlayer:
                     },
                 )
 
-            if not drag_success:
+            drag_verified = bool(
+                drag_success
+                and getattr(getattr(drag_success, "status", None), "value", None) == OperationStatus.VERIFIED.value
+                and getattr(drag_success, "target_verified", False)
+            )
+            if not drag_verified:
                 if obs_controller:
                     obs_controller.log_event_timestamp("icon_showcase_failed", f"Drag failed for icon {icon_index}", {"stage": "drag"})
                 return False
+
+            after_state = self.get_comprehensive_slot_state() if (self.characters_available or self.putted_chars_available) else None
+            after_count = self._get_board_progress_count(after_state)
+            transition_details = dict(getattr(drag_success, "details", {}) or {})
+            transition_details["verificationEvidence"] = list(
+                getattr(drag_success, "evidence", ()) or ()
+            )
+            if before_count is None:
+                before_count = self._transition_count_from_details(transition_details, "before")
+            if after_count is None:
+                after_count = self._transition_count_from_details(transition_details, "after")
+            transaction = {
+                "iconIndex": icon_index,
+                "slotIndex": target_slot.get("index"),
+                "before": before_count,
+                "after": after_count,
+                "status": "VERIFIED",
+                "targetVerified": True,
+                "cleanupVerified": False,
+                "operationId": getattr(drag_success, "operation_id", None),
+                "transitionEvidence": transition_details,
+            }
+            self._workflow_placement_transactions.append(transaction)
 
             if self.stop_event.is_set(): return False
             
@@ -10060,6 +10447,15 @@ class SprunkiGamePlayer:
                     f"{getattr(getattr(return_success, 'status', None), 'value', return_success)}"
                 )
                 return False
+
+            return_status = getattr(getattr(return_success, "status", None), "value", None)
+            transaction["cleanupVerified"] = (
+                return_status == OperationStatus.ALREADY_EMPTY.value
+                or (
+                    return_status == OperationStatus.VERIFIED.value
+                    and getattr(return_success, "target_verified", False)
+                )
+            )
 
             if obs_controller:
                 if return_success:
@@ -10721,6 +11117,11 @@ class SprunkiGamePlayer:
             
             remix_name = remix_data.get('name', 'Unknown Remix')
             remix_icons = remix_data.get('icons', [])
+            if not isinstance(remix_icons, list) or not remix_icons:
+                print("🛑 Remix has no icons; refusing to report a successful empty remix.")
+                return False
+
+            transaction_start = len(self._workflow_placement_transactions)
             
             emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             
@@ -10736,6 +11137,7 @@ class SprunkiGamePlayer:
             
             # Phase 1: Drag all icons to slots
             print("ðŸŽ¯ PHASE 1: Dragging all icons to slots for remix...")
+            placed_count = 0
             for slot_position, icon_index in enumerate(remix_icons):
                 if self.stop_event.is_set(): return False
                 
@@ -10757,9 +11159,38 @@ class SprunkiGamePlayer:
                         f"{getattr(getattr(drag_result, 'status', None), 'value', drag_result)}"
                     )
                     return False
+                if not (
+                    getattr(getattr(drag_result, "status", None), "value", None) == OperationStatus.VERIFIED.value
+                    and getattr(drag_result, "target_verified", False)
+                ):
+                    print("🛑 Remix drag did not prove a target-specific placement.")
+                    return False
+
+                placed_count += 1
+                transition_details = dict(getattr(drag_result, "details", {}) or {})
+                transition_details["verificationEvidence"] = list(
+                    getattr(drag_result, "evidence", ()) or ()
+                )
+                self._workflow_placement_transactions.append(
+                    {
+                        "iconIndex": icon_index,
+                        "slotIndex": target_slot.get("index"),
+                        "before": self._transition_count_from_details(transition_details, "before"),
+                        "after": self._transition_count_from_details(transition_details, "after"),
+                        "status": "VERIFIED",
+                        "targetVerified": True,
+                        "cleanupVerified": False,
+                        "operationId": getattr(drag_result, "operation_id", None),
+                        "transitionEvidence": transition_details,
+                    }
+                )
                 time.sleep(0.3)
 
                 if self.stop_event.is_set(): return False
+
+            if placed_count <= 0:
+                print("🛑 Remix contained no valid icon placements.")
+                return False
             
             # === BƯỚC 2: GHI TIMESTAMP BẮT ĐẦU NGHE NHẠC ===
             if obs_controller:
@@ -10807,8 +11238,10 @@ class SprunkiGamePlayer:
                 obs_controller=obs_controller # Truyền controller tường minh
             )
             
-            if success_count == total_attempted:
+            if total_attempted > 0 and success_count == total_attempted:
                 print(f"  âœ… Smart batch return: {success_count}/{total_attempted} icons returned successfully")
+                for transaction in self._workflow_placement_transactions[transaction_start:]:
+                    transaction["cleanupVerified"] = True
             else:
                 print(f"  âš ï¸  Smart batch return: {success_count}/{total_attempted} icons returned")
                 if error_log:
@@ -10830,18 +11263,42 @@ class SprunkiGamePlayer:
         """
         ENHANCED: Execute full workflow with verification, resilience, and detailed reporting.
         """
-        report = WorkflowReport()
+        report = WorkflowReport(mode="master")
+        self.last_workflow_report = report
+        self._workflow_placement_transactions = []
         self._reset_cleanup_guard()
         try:
             if not self.config:
-                report.message = "Configuration not loaded."
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        "manual_json_invalid",
+                        message="Configuration not loaded.",
+                    )
+                )
                 report.issues.append("Config not loaded.")
                 return report
                 
             game_settings = self.config.get('gameSettings', {})
             configured_has_horror = bool(game_settings.get('hasHorror', False))
-            has_horror = False
+            # Current production policy verifies Normal only.  Horror is
+            # opt-in through an explicit setting and is otherwise recorded as
+            # not_checked_by_policy rather than silently treated as absent.
+            has_horror = bool(game_settings.get('verifyHorror', False)) and configured_has_horror
             has_bonus = game_settings.get('hasBonus', False)
+            layout = self.config.get('layout', {}) or {}
+            report.layout_icons = len(layout.get('icons', []) or [])
+            report.layout_slots = len(layout.get('slots', []) or [])
+            report.entry_candidate = self.entry_strategy.get('selected')
+            report.tested_candidates = list(self.entry_strategy.get('tested', []) or [])
+            report.evidence["entryStrategy"] = dict(self.entry_strategy)
+            report.runtime_state = str(self.entry_strategy.get('verification') or UNKNOWN)
+            # Runtime entry verification is authoritative for playability;
+            # optional dual placement readers are not a prerequisite.
+            report.runtime_verified = report.runtime_state == "PASS"
+            report.coverage = {
+                "normal": "not_started",
+                "horror": "verified" if has_horror else "not_checked_by_policy",
+            }
             
             print("\n🎪 STARTING ENHANCED FULL SHOWCASE WORKFLOW")
             print("="*60)
@@ -10889,12 +11346,14 @@ class SprunkiGamePlayer:
 
             # Normal remixes
             if not self.should_stop:
-                success, total = self.play_all_remixes_corrected("Normal", progress_callback=progress_callback)
-                report.normal_remixes_played = success
-                report.normal_remixes_total = total
-                if success < total:
+                remix_result = self.play_all_remixes_corrected("Normal", progress_callback=progress_callback)
+                report.normal_remixes_played = remix_result.succeeded
+                report.normal_remixes_total = remix_result.attempted
+                if remix_result.succeeded < remix_result.attempted:
                     is_normal_phase_perfect = False
-                    report.issues.append(f"Normal remixes failed for {total - success} item(s).")
+                    report.issues.append(
+                        f"Normal remixes failed for {remix_result.attempted - remix_result.succeeded} item(s)."
+                    )
 
             # Report Normal Phase Result
             if is_normal_phase_perfect:
@@ -10903,7 +11362,7 @@ class SprunkiGamePlayer:
                 print("\n🔶 NORMAL PHASE COMPLETED WITH WARNINGS. Horror phase is disabled by policy.")
             print("="*60)
             
-            normal_phase_did_run = True 
+            normal_phase_did_run = True
 
             # === HORROR MODE (with error resilience) ===
             if has_horror and not self.should_stop:
@@ -10936,12 +11395,14 @@ class SprunkiGamePlayer:
 
                     # Horror remixes
                     if not self.should_stop:
-                        success, total = self.play_all_remixes_corrected("Horror", progress_callback=progress_callback)
-                        report.horror_remixes_played = success
-                        report.horror_remixes_total = total
-                        if success < total:
+                        remix_result = self.play_all_remixes_corrected("Horror", progress_callback=progress_callback)
+                        report.horror_remixes_played = remix_result.succeeded
+                        report.horror_remixes_total = remix_result.attempted
+                        if remix_result.succeeded < remix_result.attempted:
                             is_horror_phase_perfect = False
-                            report.issues.append(f"Horror remixes failed for {total - success} item(s).")
+                            report.issues.append(
+                                f"Horror remixes failed for {remix_result.attempted - remix_result.succeeded} item(s)."
+                            )
                     
                     if is_horror_phase_perfect:
                         print("\n✅ HORROR PHASE COMPLETED SUCCESSFULLY!")
@@ -10952,65 +11413,70 @@ class SprunkiGamePlayer:
                     print(f"\n⚠️ HORROR PHASE ERROR: {horror_error}")
                     is_horror_phase_perfect = False
                     report.issues.append(f"Horror phase critical error: {horror_error}")
-                    # Error resilience logic for hasHorror
-                    print("="*60)
-                    print("🛡️ ERROR RESILIENCE ACTIVATED:")
-                    print("   - Normal phase was completed.")
-                    print("   - Horror phase failed, likely due to incorrect 'hasHorror' detection.")
-                    print("   - SOLUTION: Updating JSON to set hasHorror = false for future runs.")
-                    print("="*60)
-                    try:
-                        self.update_json_has_horror(False)
-                    except Exception as json_error:
-                        report.issues.append(f"Failed to auto-correct JSON: {json_error}")
-            
-            # === FINAL DETERMINATION OF SUCCESS ===
-            # Tính toán các tỷ lệ thành công
-            normal_icon_rate = report.normal_icons_showcased / report.normal_icons_total if report.normal_icons_total > 0 else 1.0
-            normal_remix_rate = report.normal_remixes_played / report.normal_remixes_total if report.normal_remixes_total > 0 else 1.0
-            
-            # Định nghĩa ngưỡng thành công cho Master Mode
-            ICON_SUCCESS_THRESHOLD = 0.8  # 80%
-            REMIX_SUCCESS_THRESHOLD = 0.5 # 50%
+                    print("   Horror coverage remains failed; source JSON is not mutated automatically.")
+            # === SHARED QUALITY-GATE DETERMINATION ===
+            # A clean board alone is not positive evidence.  It is accepted
+            # only after at least one target-specific verified placement.
+            report.placement_verified = any(
+                transaction.get("status") == "VERIFIED"
+                and transaction.get("targetVerified") is True
+                for transaction in self._workflow_placement_transactions
+            )
+            if self._workflow_placement_transactions:
+                first_transaction = self._workflow_placement_transactions[0]
+                report.placement_before = first_transaction.get("before")
+                report.placement_after = first_transaction.get("after")
+            report.evidence["placementTransactions"] = list(self._workflow_placement_transactions)
 
-            # Kiểm tra thành công của Normal Phase
-            normal_phase_success = (normal_icon_rate >= ICON_SUCCESS_THRESHOLD and 
-                                    normal_remix_rate >= REMIX_SUCCESS_THRESHOLD)
+            completion_state = self.validate_workflow_completion()
+            report.cleanup_verified = bool(completion_state[0]) and report.placement_verified
 
-            # Kiểm tra thành công của Horror Phase (nếu có)
-            horror_phase_success = True # Mặc định là True nếu không có horror mode
-            if has_horror:
-                horror_icon_rate = report.horror_icons_showcased / report.horror_icons_total if report.horror_icons_total > 0 else 1.0
-                horror_remix_rate = report.horror_remixes_played / report.horror_remixes_total if report.horror_remixes_total > 0 else 1.0
-                horror_phase_success = (horror_icon_rate >= ICON_SUCCESS_THRESHOLD and 
-                                        horror_remix_rate >= REMIX_SUCCESS_THRESHOLD)
-
-            # Quyết định cuối cùng
-            report.was_successful = normal_phase_success and horror_phase_success
-
-            if report.was_successful:
-                if is_normal_phase_perfect and (not has_horror or is_horror_phase_perfect):
-                    report.message = "Workflow completed perfectly."
-                else:
-                    report.message = f"Workflow completed with partial success (Normal Icons: {normal_icon_rate:.0%}, Remixes: {normal_remix_rate:.0%})."
+            if self.should_stop or self.stop_event.is_set():
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        "workflow_stopped",
+                        evidence={"placementTransactions": len(self._workflow_placement_transactions)},
+                        message="Workflow stopped before all required evidence was collected.",
+                    )
+                )
             else:
-                report.message = "Workflow failed due to low success rates."
-                if not normal_phase_success:
-                    report.issues.append(f"Normal phase failed thresholds (Icons: {normal_icon_rate:.0%}, Remixes: {normal_remix_rate:.0%}).")
-                if has_horror and not horror_phase_success:
-                    report.issues.append("Horror phase failed thresholds.")
+                evaluate_workflow_report(report, mode="master", require_identity=False)
+
+            if has_horror and not is_horror_phase_perfect and report.was_successful:
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        "phase_skipped",
+                        coverage={"normal": "verified", "horror": "failed"},
+                        evidence={"horror": "verification_failed"},
+                        message="Explicit horror verification was requested but failed.",
+                    )
+                )
+
+            self.last_workflow_report = report
 
         except WorkflowIncompatibleError as e:
             print(f"🛑 Workflow halted by Circuit Breaker: {e}")
-            report.was_successful = False
-            report.message = f"Workflow failed: {e}"
+            report.apply_quality_gate(
+                QualityGateResult.failure(
+                    "workflow_stopped" if self.should_stop or self.stop_event.is_set() else "placement_not_verified",
+                    evidence={"error": str(e)},
+                    message=f"Workflow failed: {e}",
+                )
+            )
             report.issues.append(str(e))
             # Không cần làm gì thêm, khối finally sẽ xử lý dọn dẹp
             
         except Exception as e:
             print("❌ Critical error in full showcase workflow: " + str(e))
-            report.was_successful = False
-            report.message = f"Critical error: {e}"
+            report.apply_quality_gate(
+                QualityGateResult.failure(
+                    "workflow_stopped" if self.should_stop or self.stop_event.is_set() else "runtime_verification_unknown",
+                    status="UNKNOWN" if not (self.should_stop or self.stop_event.is_set()) else "FAIL",
+                    retryable=not (self.should_stop or self.stop_event.is_set()),
+                    evidence={"error": str(e)},
+                    message=f"Critical error: {e}",
+                )
+            )
             report.issues.append(f"Critical error: {e}")
 
         finally:
@@ -11024,19 +11490,51 @@ class SprunkiGamePlayer:
                 context={"workflow": "full_showcase"},
                 obs_controller=self.obs_controller,
             )
-            if cleanup_result.status not in {
+            cleanup_ok = cleanup_result.status in {
                 OperationStatus.VERIFIED,
                 OperationStatus.ALREADY_EMPTY,
-            }:
-                report.was_successful = False
-            if cleanup_result.status not in {
-                OperationStatus.VERIFIED,
-                OperationStatus.ALREADY_EMPTY,
-            }:
+            }
+            report.cleanup_verified = cleanup_ok and report.placement_verified
+            if not cleanup_ok:
                 report.issues.append(
                     f"Final cleanup: {cleanup_result.status.value} ({cleanup_result.message})"
                 )
-            self.validate_workflow_completion()
+                if report.was_successful or not report.failure_code:
+                    report.apply_quality_gate(
+                        QualityGateResult.failure(
+                            "placement_not_verified",
+                            evidence={"cleanupStatus": cleanup_result.status.value},
+                            message="Final cleanup was not verified.",
+                        )
+                    )
+            final_validation = self.validate_workflow_completion()
+            if not final_validation[0] and report.was_successful:
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        "placement_not_verified",
+                        evidence={"validationIssues": final_validation[1]},
+                        message="Final board validation failed.",
+                    )
+                )
+            if report.quality_gate is None:
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        report.failure_code or (
+                            "workflow_stopped"
+                            if self.should_stop or self.stop_event.is_set()
+                            else "placement_not_verified"
+                        ),
+                        status=(
+                            "UNKNOWN"
+                            if report.failure_code == "runtime_verification_unknown"
+                            else "FAIL"
+                        ),
+                        retryable=report.failure_code == "runtime_verification_unknown",
+                        evidence={"issues": list(report.issues)},
+                        message=report.message or "Workflow did not pass the quality gate.",
+                    )
+                )
+            self.last_workflow_report = report
             print("\n📊 ENHANCED WORKFLOW SUMMARY:")
             print(self.get_enhanced_workflow_summary())
             print("="*70)
@@ -11186,12 +11684,31 @@ class SprunkiGamePlayer:
             return False
     
     def play_all_remixes_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
-        """ENHANCED: Play all remixes and report detailed results."""
+        """Play all remixes and return explicit counters.
+
+        The old tuple return made ``(0, 0)`` truthy in remix-only mode.  The
+        structured result keeps compatibility with unpacking while all new
+        callers use named fields and the object fails closed in boolean
+        contexts.
+        """
+        builtin_print = builtins.print
+
+        def safe_print(*args, **kwargs):
+            try:
+                builtin_print(*args, **kwargs)
+            except UnicodeEncodeError:
+                fallback_args = tuple(
+                    str(arg).encode("ascii", errors="replace").decode("ascii")
+                    for arg in args
+                )
+                builtin_print(*fallback_args, **kwargs)
+
+        print = safe_print
         total_count = len(self.remix_library)
         try:
             if not self.remix_library:
                 print("ℹ️ No remixes in library to play.")
-                return 0, 0
+                return RemixResult(failure_code="empty_remix")
             
             emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} REMIX SESSION")
@@ -11199,12 +11716,15 @@ class SprunkiGamePlayer:
             print("="*60)
             
             success_count = 0
+            processed_count = 0
             consecutive_failures = 0
             REMIX_FAILURE_THRESHOLD = 2 # Ngưỡng: 2 remix thất bại liên tiếp
 
             for remix_index, remix in enumerate(self.remix_library):
                 if self.stop_event.is_set():
                     break
+
+                processed_count += 1
                 
                 self.current_remix_index = remix_index
                 
@@ -11228,13 +11748,34 @@ class SprunkiGamePlayer:
                     time.sleep(2.0)
             
             print(f"\n✅ ENHANCED {mode.upper()} REMIX SESSION COMPLETED")
-            print(f"📊 Success: {success_count}/{total_count} remixes")
+            print(f"📊 Success: {success_count}/{processed_count} attempted remixes ({total_count} expected)")
             print("="*60)
-            return success_count, total_count
-            
+            return RemixResult(
+                attempted=processed_count,
+                succeeded=success_count,
+                failed=max(processed_count - success_count, 0),
+                skipped=max(total_count - processed_count, 0),
+                failure_code=(
+                    "workflow_stopped"
+                    if self.should_stop or self.stop_event.is_set()
+                    else None
+                ),
+            )
+
         except Exception as e:
             print("❌ Error in enhanced " + mode + " remix session: " + str(e))
-            return 0, total_count
+            processed = processed_count if "processed_count" in locals() else 0
+            return RemixResult(
+                attempted=processed,
+                succeeded=success_count if "success_count" in locals() else 0,
+                failed=max(processed - (success_count if "success_count" in locals() else 0), 0),
+                skipped=max(total_count - processed, 0),
+                failure_code=(
+                    "workflow_stopped"
+                    if self.should_stop or self.stop_event.is_set()
+                    else "remix_threshold_not_met"
+                ),
+            )
     
     def trigger_horror_mode_transition_corrected(self, transition_duration=15, progress_callback=None):
         """
@@ -11428,10 +11969,40 @@ class SprunkiGamePlayer:
             return False
     
     def execute_remix_only_workflow_corrected(self, progress_callback=None):
-        """ENHANCED: Remix-only workflow with verification system"""
+        """Run remix-only workflow through the same fail-closed quality gate."""
+        builtin_print = builtins.print
+
+        def safe_print(*args, **kwargs):
+            try:
+                builtin_print(*args, **kwargs)
+            except UnicodeEncodeError:
+                # Console encoding must never hide the workflow's actual
+                # quality-gate result or prevent its failure report from being
+                # persisted.
+                fallback_args = tuple(
+                    str(arg).encode("ascii", errors="replace").decode("ascii")
+                    for arg in args
+                )
+                builtin_print(*fallback_args, **kwargs)
+
+        print = safe_print
         success = False
+        report = WorkflowReport(mode="remix_only")
+        self.last_workflow_report = report
+        self._workflow_placement_transactions = []
+        cleanup_result = None
         try:
             self._reset_cleanup_guard()
+            layout = (self.config or {}).get("layout", {}) or {}
+            report.layout_icons = len(layout.get("icons", []) or [])
+            report.layout_slots = len(layout.get("slots", []) or [])
+            report.entry_candidate = self.entry_strategy.get("selected")
+            report.tested_candidates = list(self.entry_strategy.get("tested", []) or [])
+            report.evidence["entryStrategy"] = dict(self.entry_strategy)
+            report.runtime_state = str(self.entry_strategy.get("verification") or UNKNOWN)
+            report.runtime_verified = report.runtime_state == "PASS"
+            report.coverage = {"normal": "not_started", "horror": "not_checked_by_policy"}
+
             if progress_callback:
                 progress_callback("ðŸŽµ Starting enhanced remix-only workflow...")
             
@@ -11442,9 +12013,24 @@ class SprunkiGamePlayer:
                 print("âš ï¸ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
-            success = self.play_all_remixes_corrected("Test", progress_callback=progress_callback)
-            
-            if success:
+            remix_result = self.play_all_remixes_corrected("Test", progress_callback=progress_callback)
+            report.normal_remixes_played = remix_result.succeeded
+            report.normal_remixes_total = remix_result.attempted
+            report.evidence["remixResult"] = remix_result.as_dict()
+
+            if remix_result.failure_code:
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        remix_result.failure_code,
+                        evidence=remix_result.as_dict(),
+                        message=(
+                            "Remix-only workflow stopped before finalization."
+                            if remix_result.failure_code == "workflow_stopped"
+                            else "Remix session did not complete its required attempts."
+                        ),
+                    )
+                )
+            elif remix_result.attempted > 0 and remix_result.succeeded > 0:
                 if progress_callback:
                     progress_callback("ðŸŽ‰ Enhanced remix-only workflow completed!")
                 print("\nðŸŽ‰ ENHANCED REMIX-ONLY WORKFLOW COMPLETED!")
@@ -11470,7 +12056,9 @@ class SprunkiGamePlayer:
                     cleanup_total = 1
                     cleanup_success_count = 1 if cleanup_success else 0
                     if not cleanup_success:
-                        success = False
+                        report.issues.append(
+                            f"Remix cleanup failed: {cleanup_result.status.value}"
+                        )
                     
                     if cleanup_total == 0:
                         print("âœ… No remix cleanup needed - all slots clean")
@@ -11488,6 +12076,7 @@ class SprunkiGamePlayer:
                         print(f"âš ï¸ REMIX VALIDATION: {len(remaining_issues)} cleanup issues")
                         for issue in remaining_issues[:2]:
                             print(f"   - {issue}")
+                    report.cleanup_verified = bool(is_complete)
                     
                     # Enhanced remix summary
                     print("\nðŸ“Š ENHANCED REMIX WORKFLOW STATS:")
@@ -11500,12 +12089,28 @@ class SprunkiGamePlayer:
                     print(self.get_drag_statistics())
                 
                 print("="*60)
-
-            return success
+            else:
+                report.apply_quality_gate(
+                    QualityGateResult.failure(
+                        "empty_remix" if remix_result.attempted <= 0 else "remix_threshold_not_met",
+                        evidence=remix_result.as_dict(),
+                        message=(
+                            "Remix-only workflow had no remix to attempt."
+                            if remix_result.attempted <= 0
+                            else "Remix-only workflow produced no successful remix."
+                        ),
+                    )
+                )
             
         except Exception as e:
             print("âŒ Error in enhanced remix-only workflow: " + str(e))
-            return False
+            report.apply_quality_gate(
+                QualityGateResult.failure(
+                    "workflow_stopped" if self.should_stop or self.stop_event.is_set() else "remix_threshold_not_met",
+                    evidence={"error": str(e)},
+                    message=f"Remix-only workflow failed: {e}",
+                )
+            )
         finally:
             # A partial remix can still have occupied slots.  The guard makes
             # this safe even when the success branch already performed its
@@ -11520,7 +12125,59 @@ class SprunkiGamePlayer:
                     OperationStatus.VERIFIED,
                     OperationStatus.ALREADY_EMPTY,
                 }:
-                    success = False
+                    report.issues.append(
+                        f"Final remix cleanup failed: {cleanup_result.status.value}"
+                    )
+
+            report.placement_verified = any(
+                transaction.get("status") == "VERIFIED"
+                and transaction.get("targetVerified") is True
+                for transaction in self._workflow_placement_transactions
+            )
+            report.evidence["placementTransactions"] = list(self._workflow_placement_transactions)
+            if self._workflow_placement_transactions:
+                report.placement_before = self._workflow_placement_transactions[0].get("before")
+                report.placement_after = self._workflow_placement_transactions[0].get("after")
+
+            cleanup_ok = bool(cleanup_result) and cleanup_result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }
+            if report.failure_code:
+                final_validation = (False, [report.failure_code], [])
+            else:
+                final_validation = self.validate_workflow_completion()
+            report.evidence["finalCleanupValidation"] = {
+                "isComplete": bool(final_validation[0]),
+                "issues": list(final_validation[1]),
+            }
+            report.cleanup_verified = (
+                cleanup_ok
+                and report.placement_verified
+                and bool(final_validation[0])
+            )
+            if not report.failure_code:
+                if self.should_stop or self.stop_event.is_set():
+                    report.apply_quality_gate(
+                        QualityGateResult.failure(
+                            "workflow_stopped",
+                            message="Remix-only workflow stopped before finalization.",
+                        )
+                    )
+                elif not final_validation[0]:
+                    report.apply_quality_gate(
+                        QualityGateResult.failure(
+                            "placement_not_verified",
+                            evidence={"validationIssues": final_validation[1]},
+                            message="Final remix board validation failed.",
+                        )
+                    )
+                else:
+                    evaluate_workflow_report(report, mode="remix_only", require_identity=False)
+            self.last_workflow_report = report
+
+        success = report.quality_gate is not None and report.quality_gate.passed is True
+        return success
 
     # ================================================================
     # == LEGACY METHOD REDIRECTS ==
@@ -11933,6 +12590,9 @@ class SprunkiGamePlayer:
                 # Baselines are specific to the loaded mod and must never leak
                 # into the next configuration handled by the same player.
                 self.empty_board_baseline = {'characters': None, 'putted': None}
+                self.entry_strategy = {"selected": None, "tested": [], "verification": "UNKNOWN"}
+                self._workflow_placement_transactions = []
+                self.last_workflow_report = None
                 
                 if 'currentUrl' not in self.config or 'layout' not in self.config:
                     raise ValueError("Invalid JSON structure")
