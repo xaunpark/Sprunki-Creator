@@ -16,6 +16,8 @@ from image_detector import ImageDetector
 import numpy as np
 from page_load_verifier import PageLoadVerifier
 from manual_profile_manager import find_profile, validate_profile
+from manual_prepare_gestures import DOUBLE_CLICK_DRAG_TYPE
+from cdp_gesture_executor import execute_cdp_gesture
 
 from sprunki_game_player import SprunkiGamePlayer
 
@@ -2187,47 +2189,27 @@ class SprunkiJSONGenerator:
                 print("   ❌ CRITICAL: Cannot get any verification counts. Aborting test.")
                 return False, "failed_get_dual_counts"
 
-            # BƯỚC 2: Thực hiện hành động Double-Click và Drag (Giữ nguyên)
+            # BƯỚC 2: Dùng cùng compound gesture primitive với gameplay/manual replay.
             print("   🖱️ Executing double-click and drag...")
             start_x, start_y = icon_coords['x'], icon_coords['y']
             end_x, end_y = slot_coords['x'], slot_coords['y']
-            
-            # First click
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
-            })
-            time.sleep(0.1)
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mouseReleased", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
-            })
-            time.sleep(0.2)
-            
-            # Second click and hold
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 2}
-            })
-            time.sleep(0.2)
-            
-            # Drag while holding
-            steps = 10
-            for i in range(1, steps + 1):
-                progress = i / steps
-                curr_x = start_x + (end_x - start_x) * progress
-                curr_y = start_y + (end_y - start_y) * progress
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent", 
-                    "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}
-                })
-                time.sleep(0.02)
-            
-            # Release at target
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent", 
-                "params": {"type": "mouseReleased", "x": end_x, "y": end_y, "button": "left", "clickCount": 2}
-            })
+            gesture_result = execute_cdp_gesture(
+                ws,
+                self._send_cdp_command,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                mode=DOUBLE_CLICK_DRAG_TYPE,
+                drag_duration_ms=400,
+                click_interval_ms=300,
+                first_click_duration_ms=100,
+                hold_before_move_ms=200,
+                move_steps=10,
+                sleep_fn=time.sleep,
+            )
+            if not gesture_result.success:
+                return False, f"gesture_failed:{gesture_result.error}"
             
             # BƯỚC 3: Chờ game xử lý và lấy lại số đếm
             time.sleep(3)

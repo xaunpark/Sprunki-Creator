@@ -2,7 +2,9 @@
 
 The recorder stores the delay before each action in ``prepareActions[*].delayMs``.
 Drag actions additionally contain ``startX``, ``startY``, ``endX``, ``endY`` and
-``dragDurationMs`` so a drag can be replayed as a real mouse gesture.
+``dragDurationMs`` so a drag can be replayed as a real mouse gesture.  A
+``double_click_drag`` action keeps the first-click interval and hold timing
+explicit so replay does not silently split the compound gesture.
 The delay after the last action, up to the user's PREPARE -> ICONS transition,
 is stored in ``prepareTiming.endDelayMs``.  Keeping the timing model here lets
 all replay entry points apply the same timing rules while remaining compatible
@@ -15,6 +17,11 @@ import threading
 import time
 import math
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+
+from manual_prepare_gestures import (
+    DOUBLE_CLICK_DRAG_TYPE,
+    DRAG_TYPE,
+)
 
 
 PREPARE_TIMING_KEY = "prepareTiming"
@@ -126,10 +133,12 @@ def validate_prepare_timeline(
         if not isinstance(action, Mapping):
             return False, f"invalid_action:{index}"
         action_type = str(action.get("type") or "").strip().lower()
-        if action_type not in {"click", "drag", "key"}:
+        if action_type not in {"click", DRAG_TYPE, DOUBLE_CLICK_DRAG_TYPE, "key"}:
             return False, f"unsupported_action:{index}:{action_type or 'missing_type'}"
         coordinate_fields = ("x", "y") if action_type == "click" else (
-            ("startX", "startY", "endX", "endY") if action_type == "drag" else ()
+            ("startX", "startY", "endX", "endY")
+            if action_type in {DRAG_TYPE, DOUBLE_CLICK_DRAG_TYPE}
+            else ()
         )
         for field_name in coordinate_fields:
             coordinate_valid, coordinate_reason = valid_coordinate(
@@ -148,10 +157,45 @@ def validate_prepare_timeline(
         )
         if not valid:
             return False, reason
+        if action_type in {DRAG_TYPE, DOUBLE_CLICK_DRAG_TYPE}:
+            valid, hold_before_move_ms, reason = parse_delay(
+                action.get("holdBeforeMoveMs", 0),
+                "holdBeforeMoveMs",
+                index,
+            )
+            if not valid:
+                return False, reason
+            if hold_before_move_ms > max_single_delay_ms:
+                return False, f"delay_exceeds_limit:{index}:holdBeforeMoveMs:{hold_before_move_ms}"
+            if hold_before_move_ms > drag_duration_ms:
+                return False, f"hold_exceeds_drag_duration:{index}"
+        if action_type == DOUBLE_CLICK_DRAG_TYPE:
+            valid, click_interval_ms, reason = parse_delay(
+                action.get("clickIntervalMs", 0),
+                "clickIntervalMs",
+                index,
+            )
+            if not valid:
+                return False, reason
+            valid, first_click_duration_ms, reason = parse_delay(
+                action.get("firstClickDurationMs", 0),
+                "firstClickDurationMs",
+                index,
+            )
+            if not valid:
+                return False, reason
+            if click_interval_ms > max_single_delay_ms:
+                return False, f"delay_exceeds_limit:{index}:clickIntervalMs:{click_interval_ms}"
+            if first_click_duration_ms > max_single_delay_ms:
+                return False, f"delay_exceeds_limit:{index}:firstClickDurationMs:{first_click_duration_ms}"
+            if first_click_duration_ms > click_interval_ms:
+                return False, f"first_click_exceeds_interval:{index}"
+        else:
+            click_interval_ms = 0
         for field_name, value in (("delayMs", delay_ms), ("dragDurationMs", drag_duration_ms)):
             if value > max_single_delay_ms:
                 return False, f"delay_exceeds_limit:{index}:{field_name}:{value}"
-        total_ms += delay_ms + drag_duration_ms
+        total_ms += delay_ms + drag_duration_ms + click_interval_ms
 
     timing = extract_prepare_timing(profile_or_timing)
     valid, end_delay_ms, reason = parse_delay(timing.get(END_DELAY_KEY, timing.get("prepareEndDelayMs", 0)), END_DELAY_KEY)
@@ -291,6 +335,33 @@ class PrepareTimelineRecorder:
                 self._event_times[-1]
                 if self._event_times
                 else self._started_at
+            )
+            self._finished = False
+
+    def merge_last_events(self, event_count: int = 2) -> None:
+        """Collapse raw event markers while retaining the final boundary.
+
+        A recorded click followed by a drag initially creates two markers.
+        Once those actions become one compound gesture, the final marker is
+        still the drag mouse-up boundary; only the earlier marker is removed.
+        """
+        count = max(int(event_count), 1)
+        with self._lock:
+            if len(self._event_times) >= count and count > 1:
+                del self._event_times[-count:-1]
+            self._finished = False
+
+    def split_last_merged_event(self, interval_ms: Any, duration_ms: Any) -> None:
+        """Restore a marker before the current final compound boundary."""
+        interval = max(float(interval_ms or 0), 0.0)
+        duration = max(float(duration_ms or 0), 0.0)
+        with self._lock:
+            if not self._event_times:
+                return
+            final_timestamp = self._event_times[-1]
+            self._event_times.insert(
+                len(self._event_times) - 1,
+                final_timestamp - ((interval + duration) / 1000.0),
             )
             self._finished = False
 

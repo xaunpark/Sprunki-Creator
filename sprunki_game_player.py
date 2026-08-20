@@ -40,6 +40,8 @@ from manual_prepare_timeline import (
     replay_prepare_timeline,
     validate_prepare_timeline,
 )
+from manual_prepare_gestures import DOUBLE_CLICK_DRAG_TYPE
+from cdp_gesture_executor import execute_cdp_gesture
 from placement_verifier import (
     OperationContext,
     OperationResult,
@@ -7160,14 +7162,10 @@ class SprunkiGamePlayer:
         end_x,
         end_y,
         drag_duration_ms=0,
+        hold_before_move_ms=0,
     ):
         """Replay one manually recorded drag with browser-native mouse events."""
         ws = None
-        mouse_pressed = False
-        mouse_released = False
-        duration_seconds = coerce_delay_ms(drag_duration_ms) / 1000.0
-        if duration_seconds <= 0:
-            duration_seconds = 0.8
 
         try:
             ws_url = self._get_websocket_url()
@@ -7178,86 +7176,74 @@ class SprunkiGamePlayer:
 
             ws = websocket.create_connection(ws_url, timeout=30)
             self._send_cdp_command(ws, {"method": "Page.bringToFront"})
-
-            start_x = float(start_x)
-            start_y = float(start_y)
-            end_x = float(end_x)
-            end_y = float(end_y)
-
-            move_response = self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {"type": "mouseMoved", "x": start_x, "y": start_y},
-            })
-            if not move_response or "error" in move_response:
-                return False
-
-            time.sleep(0.05)
-            press_response = self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {
-                    "type": "mousePressed",
-                    "x": start_x,
-                    "y": start_y,
-                    "button": "left",
-                    "buttons": 1,
-                    "clickCount": 1,
-                },
-            })
-            if not press_response or "error" in press_response:
-                return False
-            mouse_pressed = True
-
-            steps = max(5, min(40, int(round(duration_seconds * 30))))
-            step_delay = duration_seconds / steps
-            for step in range(1, steps + 1):
-                progress = step / steps
-                current_x = start_x + ((end_x - start_x) * progress)
-                current_y = start_y + ((end_y - start_y) * progress)
-                move_response = self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {
-                        "type": "mouseMoved",
-                        "x": current_x,
-                        "y": current_y,
-                        "button": "left",
-                        "buttons": 1,
-                    },
-                })
-                if not move_response or "error" in move_response:
-                    return False
-                time.sleep(step_delay)
-
-            release_response = self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {
-                    "type": "mouseReleased",
-                    "x": end_x,
-                    "y": end_y,
-                    "button": "left",
-                    "buttons": 0,
-                    "clickCount": 1,
-                },
-            })
-            mouse_released = bool(release_response and "error" not in release_response)
-            return mouse_released
+            result = execute_cdp_gesture(
+                ws,
+                self._send_cdp_command,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                mode="drag",
+                drag_duration_ms=coerce_delay_ms(drag_duration_ms) or 800,
+                hold_before_move_ms=coerce_delay_ms(hold_before_move_ms),
+                focus_delay_ms=50,
+                sleep_fn=time.sleep,
+            )
+            if not result.success:
+                print(f"🛑 CDP manual drag inconclusive: {result.error}")
+            return bool(result.success)
         except Exception as drag_error:
             print(f"âŒ CDP manual drag failed: {drag_error}")
             return False
         finally:
             if ws:
                 try:
-                    if mouse_pressed and not mouse_released:
-                        self._send_cdp_command(ws, {
-                            "method": "Input.dispatchMouseEvent",
-                            "params": {
-                                "type": "mouseReleased",
-                                "x": end_x,
-                                "y": end_y,
-                                "button": "left",
-                                "buttons": 0,
-                                "clickCount": 1,
-                            },
-                        })
+                    ws.close()
+                except Exception:
+                    pass
+
+    def _execute_cdp_double_click_drag(
+        self,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        drag_duration_ms=0,
+        click_interval_ms=300,
+        first_click_duration_ms=100,
+        hold_before_move_ms=200,
+    ):
+        """Replay one recorded compound double-click-and-drag gesture."""
+        ws = None
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return False
+            ws = websocket.create_connection(ws_url, timeout=30)
+            self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+            result = execute_cdp_gesture(
+                ws,
+                self._send_cdp_command,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                mode=DOUBLE_CLICK_DRAG_TYPE,
+                drag_duration_ms=coerce_delay_ms(drag_duration_ms),
+                click_interval_ms=coerce_delay_ms(click_interval_ms),
+                first_click_duration_ms=coerce_delay_ms(first_click_duration_ms),
+                hold_before_move_ms=coerce_delay_ms(hold_before_move_ms),
+                sleep_fn=time.sleep,
+            )
+            if not result.success:
+                print(f"🛑 CDP double-click drag inconclusive: {result.error}")
+            return bool(result.success)
+        except Exception as gesture_error:
+            print(f"❌ CDP manual double-click drag failed: {gesture_error}")
+            return False
+        finally:
+            if ws:
+                try:
                     ws.close()
                 except Exception:
                     pass
@@ -8337,12 +8323,43 @@ class SprunkiGamePlayer:
                     y = int(action.get("y"))
                     print(f"   {index}. Click @ ({x}, {y})")
                     return bool(self._execute_cdp_single_click(x, y))
+                if action_type == DOUBLE_CLICK_DRAG_TYPE:
+                    start_x = int(action.get("startX"))
+                    start_y = int(action.get("startY"))
+                    end_x = int(action.get("endX"))
+                    end_y = int(action.get("endY"))
+                    drag_duration_ms = coerce_delay_ms(action.get("dragDurationMs", 0))
+                    click_interval_ms = coerce_delay_ms(action.get("clickIntervalMs", 300))
+                    first_click_duration_ms = coerce_delay_ms(
+                        action.get("firstClickDurationMs", 100)
+                    )
+                    hold_before_move_ms = coerce_delay_ms(
+                        action.get("holdBeforeMoveMs", 200)
+                    )
+                    print(
+                        f"   {index}. Double-click drag @ ({start_x}, {start_y}) -> "
+                        f"({end_x}, {end_y}) ({drag_duration_ms} ms, "
+                        f"interval {click_interval_ms} ms)"
+                    )
+                    return bool(self._execute_cdp_double_click_drag(
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y,
+                        drag_duration_ms,
+                        click_interval_ms,
+                        first_click_duration_ms,
+                        hold_before_move_ms,
+                    ))
                 if action_type == "drag":
                     start_x = int(action.get("startX"))
                     start_y = int(action.get("startY"))
                     end_x = int(action.get("endX"))
                     end_y = int(action.get("endY"))
                     drag_duration_ms = coerce_delay_ms(action.get("dragDurationMs", 0))
+                    hold_before_move_ms = coerce_delay_ms(
+                        action.get("holdBeforeMoveMs", 0)
+                    )
                     print(
                         f"   {index}. Drag @ ({start_x}, {start_y}) -> "
                         f"({end_x}, {end_y}) ({drag_duration_ms} ms)"
@@ -8353,6 +8370,7 @@ class SprunkiGamePlayer:
                         end_x,
                         end_y,
                         drag_duration_ms,
+                        hold_before_move_ms,
                     ))
                 if action_type == "key":
                     key_name = action.get("key")
@@ -9454,97 +9472,55 @@ class SprunkiGamePlayer:
 
     def _execute_dynamic_drag_cdp(self, ws, start_x, start_y, end_x, end_y, control_type, is_first_icon):
         """
-        [FIXED v2] Executes a dynamic drag via CDP, now returns precise start time.
+        Execute the gameplay drag through the same bounded CDP gesture primitive
+        used by manual PREPARE replay.
         """
         try:
-            print(f"   Executing UPGRADED DYNAMIC CDP DRAG (is_first_icon: {is_first_icon}, type: '{control_type}')")
-            
-            # BƯỚC 1: Lấy bộ thời gian trễ phù hợp
+            print(
+                f"   Executing shared CDP drag (is_first_icon: {is_first_icon}, "
+                f"type: '{control_type}')"
+            )
             timing_key = 'first_icon' if is_first_icon else 'normal_icon'
             delays = self.DRAG_DELAYS[timing_key].copy()
             domain_adj = self.get_domain_adjustments()
             stability_factor = domain_adj.get('stability_factor', 1.0)
             for key in delays:
                 delays[key] *= stability_factor
-            
-            # Xử lý đặc biệt cho first_icon (chờ lâu hơn)
+
             if is_first_icon:
                 print("   🎪 First icon - applying extended timing and extra wait...")
                 time.sleep(delays['approach'])
                 time.sleep(domain_adj['extra_focus_time'])
+            is_double = control_type == DOUBLE_CLICK_DRAG_TYPE
+            total_drag_ms = int(round((delays['hold'] + delays['drag']) * 1000))
+            hold_ms = int(round(delays['hold'] * 1000))
+            result = execute_cdp_gesture(
+                ws,
+                self._send_cdp_command,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                mode=DOUBLE_CLICK_DRAG_TYPE if is_double else "drag",
+                drag_duration_ms=total_drag_ms,
+                click_interval_ms=300,
+                first_click_duration_ms=100,
+                hold_before_move_ms=hold_ms,
+                approach_ms=0 if is_first_icon else int(round(delays['approach'] * 1000)),
+                focus_delay_ms=int(round(delays['focus'] * 1000)),
+                focus_click=not is_double,
+                drop_wait_ms=int(round(delays['drop'] * 1.3 * 1000)),
+                post_drop_ms=int(round(delays['post_drop'] * 1000)),
+                move_steps=20,
+                sleep_fn=time.sleep,
+            )
+            if not result.success:
+                print(f"   🛑 Shared CDP drag inconclusive: {result.error}")
+                return False, result.action_start_time, result.drop_time
 
-            # 🔥 GHI LẠI THỜI GIAN NGAY TRƯỚC HÀNH ĐỘNG ĐẦU TIÊN
-            action_start_time = time.monotonic()
-
-            # Di chuyển chuột đến vị trí bắt đầu
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {"type": "mouseMoved", "x": start_x, "y": start_y}
-            })
-            if not is_first_icon: # Nếu không phải icon đầu, dùng approach delay bình thường
-                time.sleep(delays['approach'])
-
-            # BƯỚC 2: Focus vào icon (click "mồi")
-            if control_type == "double_click_drag":
-                print("   Using DOUBLE-CLICK AND DRAG (CDP)...")
-                # Click đầu tiên
-                self._simulate_click_via_cdp(ws, start_x, start_y)
-                time.sleep(0.15) 
-                
-                # Click thứ hai và giữ
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 2}
-                })
-            else: # Mặc định là "click_drag"
-                print("   Using standard CLICK-DRAG (CDP)...")
-                self._simulate_click_via_cdp(ws, start_x, start_y)
-                time.sleep(delays['focus']) # Sử dụng delay từ bộ timing
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1}
-                })
-
-            # BƯỚC 3: Thời gian giữ chuột dài hơn (sử dụng delay từ bộ timing)
-            extended_hold = delays['hold']
-            print(f"   Holding for {extended_hold:.2f}s before dragging...")
-            time.sleep(extended_hold)
-
-            # BƯỚC 4: Kéo chuột đến vị trí đích
-            print(f"   Dragging from ({start_x}, {start_y}) to ({end_x}, {end_y})")
-            steps = 20
-            drag_duration = delays['drag']
-            sleep_per_step = drag_duration / steps
-            for i in range(1, steps + 1):
-                progress = i / steps
-                curr_x = start_x + (end_x - start_x) * progress
-                curr_y = start_y + (end_y - start_y) * progress
-                self._send_cdp_command(ws, {
-                    "method": "Input.dispatchMouseEvent",
-                    "params": {"type": "mouseMoved", "x": curr_x, "y": curr_y, "button": "left"}
-                })
-                time.sleep(sleep_per_step)
-
-            # BƯỚC 5: Thời gian chuẩn bị thả (CRITICAL)
-            enhanced_drop_wait = delays['drop'] * 1.3
-            print(f"   Preparing to drop for {enhanced_drop_wait:.2f}s...")
-            time.sleep(enhanced_drop_wait)
-
-            # BƯỚC 6: Thả chuột tại đích
-            drop_time = time.monotonic()
-
-            release_params = {
-                "type": "mouseReleased", "x": end_x, "y": end_y, "button": "left",
-                "clickCount": 2 if control_type == "double_click_drag" else 1
-            }
-            self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": release_params})
-            time.sleep(delays['post_drop'])
-            
-            # BƯỚC 7: Di chuyển chuột đến vị trí an toàn (CRITICAL)
             self.move_mouse_to_safe_position()
-            
-            print("   ✅ Upgraded Dynamic CDP drag successful.")
-            return True, action_start_time, drop_time
+            print("   ✅ Shared CDP drag successful.")
+            return True, result.action_start_time, result.drop_time
 
         except Exception as e:
             print(f"   ❌ Exception during dynamic CDP drag: {e}")

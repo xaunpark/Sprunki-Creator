@@ -14,6 +14,13 @@ from manual_prepare_timeline import (
     format_duration_ms,
     validate_prepare_timeline,
 )
+from manual_prepare_gestures import (
+    DOUBLE_CLICK_DRAG_TYPE,
+    action_type,
+    force_double_click_drag,
+    merge_click_and_drag,
+    split_double_click_drag,
+)
 from sprunki_game_player import SprunkiGamePlayer
 
 
@@ -40,7 +47,7 @@ class ManualProfileRecorder:
         self.root.title("Manual Profile Recorder")
         self.root.attributes("-topmost", True)
         self.root.resizable(False, False)
-        self.root.geometry("500x500+20+20")
+        self.root.geometry("500x560+20+20")
 
         self.phase = "PREPARE"
         self.prepare_actions = []
@@ -52,6 +59,7 @@ class ManualProfileRecorder:
         self.game_ready = False
         self.prepare_timeline = PrepareTimelineRecorder()
         self.prepare_timing = {}
+        self.timeline_adjustment_ms = 0
         self.last_prepare_action_text = "Mốc vừa ghi: chưa có action"
         self.timing_refresh_job = None
         self.last_key_name = None
@@ -61,6 +69,7 @@ class ManualProfileRecorder:
         self.keyboard_hook = None
         self.mouse_thread = None
         self.save_result_path = None
+        self.double_drag_override_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self._install_hotkeys()
@@ -111,6 +120,15 @@ class ManualProfileRecorder:
         tk.Label(frame, textvariable=self.action_count_var, anchor="w").pack(fill="x", pady=(8, 0))
         tk.Label(frame, textvariable=self.icon_count_var, anchor="w").pack(fill="x")
         tk.Label(frame, textvariable=self.slot_count_var, anchor="w").pack(fill="x")
+        self.double_drag_override_checkbutton = tk.Checkbutton(
+            frame,
+            text="Double-click + drag cho thao tác kéo vừa ghi",
+            variable=self.double_drag_override_var,
+            command=self._toggle_latest_double_drag,
+            anchor="w",
+            justify="left",
+        )
+        self.double_drag_override_checkbutton.pack(fill="x", pady=(6, 0))
         tk.Label(frame, textvariable=self.last_saved_var, anchor="w", justify="left", wraplength=330).pack(fill="x", pady=(8, 10))
 
         button_row = tk.Frame(frame)
@@ -180,6 +198,19 @@ class ManualProfileRecorder:
             self.start_button.configure(
                 state=("normal" if self.game_ready and not self.recording_enabled and self.phase == "PREPARE" else "disabled")
             )
+        if hasattr(self, "double_drag_override_checkbutton"):
+            latest_drag = self._latest_drag_action()
+            can_toggle = (
+                self.phase == "PREPARE"
+                and self.recording_enabled
+                and latest_drag is not None
+            )
+            self.double_drag_override_checkbutton.configure(
+                state=("normal" if can_toggle else "disabled")
+            )
+            self.double_drag_override_var.set(
+                bool(latest_drag is not None and action_type(latest_drag) == DOUBLE_CLICK_DRAG_TYPE)
+            )
         self._refresh_prepare_timing_display()
         self.root.update_idletasks()
 
@@ -193,6 +224,13 @@ class ManualProfileRecorder:
                 f"kéo ({action.get('startX')}, {action.get('startY')}) → "
                 f"({action.get('endX')}, {action.get('endY')}) "
                 f"trong {format_duration_ms(action.get('dragDurationMs', 0))}"
+            )
+        elif action_type == DOUBLE_CLICK_DRAG_TYPE:
+            description = (
+                f"double-click + kéo ({action.get('startX')}, {action.get('startY')}) → "
+                f"({action.get('endX')}, {action.get('endY')}) "
+                f"[nhịp {format_duration_ms(action.get('clickIntervalMs', 0))}, "
+                f"kéo {format_duration_ms(action.get('dragDurationMs', 0))}]"
             )
         elif action_type == "key":
             description = f"phím {action.get('key')}"
@@ -248,7 +286,9 @@ class ManualProfileRecorder:
                 "1. Chờ game load xong, đưa chuột ra khỏi bảng này rồi bấm 'Start recording'.\n"
                 "2. Sau Start, mọi click, kéo thả và phím bấm trong PREPARE sẽ được ghi lại.\n"
                 "3. Đồng hồ lấy đúng thời điểm bấm Start làm mốc 0; mỗi action mới chốt khoảng chờ trước đó.\n"
-                "4. Khi game sẵn sàng ghi layout, bấm 'Sang ICONS' hoặc Ctrl+Shift+Enter.",
+                "4. Click gần như ngay trước drag tại cùng icon sẽ tự gộp thành double-click + drag. "
+                "Có thể dùng checkbox cho drag vừa ghi nếu game yêu cầu ép kiểu này.\n"
+                "5. Khi game sẵn sàng ghi layout, bấm 'Sang ICONS' hoặc Ctrl+Shift+Enter.",
                 "Sang ICONS",
             )
         if self.phase == "ICONS":
@@ -285,18 +325,21 @@ class ManualProfileRecorder:
         left, top, right, bottom = self._ui_bounds()
         return left <= x <= right and top <= y <= bottom
 
-    def _record_click(self, x: int, y: int, event_time=None) -> None:
+    def _record_click(self, x: int, y: int, event_time=None, press_duration_ms: int = 0) -> None:
         if self.phase != "PREPARE" or not self.recording_enabled:
             return
         if self._point_inside_ui(x, y):
             return
         delay_ms = self._mark_event_time(event_time=event_time)
-        self.prepare_actions.append({
+        action = {
             "type": "click",
             "x": int(x),
             "y": int(y),
             "delayMs": delay_ms,
-        })
+        }
+        if press_duration_ms > 0:
+            action["pressDurationMs"] = int(press_duration_ms)
+        self.prepare_actions.append(action)
         self._sync_last_prepare_action_text()
         self._set_last_saved(f"Recorded click @ ({x}, {y})")
 
@@ -310,7 +353,7 @@ class ManualProfileRecorder:
             event_time=end_time,
             duration_ms=drag_duration_ms,
         )
-        self.prepare_actions.append({
+        action = {
             "type": "drag",
             "startX": int(gesture["startX"]),
             "startY": int(gesture["startY"]),
@@ -318,7 +361,27 @@ class ManualProfileRecorder:
             "endY": int(end_y),
             "dragDurationMs": drag_duration_ms,
             "delayMs": delay_ms,
-        })
+            "holdBeforeMoveMs": max(
+                int(round(((gesture.get("firstMoveTime") or end_time) - start_time) * 1000)),
+                0,
+            ),
+        }
+        self.prepare_actions.append(action)
+        merged = None
+        if len(self.prepare_actions) >= 2:
+            merged = merge_click_and_drag(
+                self.prepare_actions[-2],
+                self.prepare_actions[-1],
+            )
+        if merged is not None:
+            self.prepare_actions[-2:] = [merged]
+            self.prepare_timeline.merge_last_events(2)
+            self._sync_last_prepare_action_text()
+            self._set_last_saved(
+                "Recorded double-click + drag: "
+                f"({gesture['startX']}, {gesture['startY']}) → ({end_x}, {end_y})"
+            )
+            return
         self._sync_last_prepare_action_text()
         self._set_last_saved(
             f"Recorded drag: ({gesture['startX']}, {gesture['startY']}) → ({end_x}, {end_y})"
@@ -366,6 +429,7 @@ class ManualProfileRecorder:
             "startY": int(y),
             "startTime": now,
             "maxDistanceSquared": 0,
+            "firstMoveTime": None,
         }
         self.last_prepare_action_text = (
             f"Đang giữ chuột tại ({int(x)}, {int(y)}) — chờ phân loại click/kéo..."
@@ -383,6 +447,11 @@ class ManualProfileRecorder:
             gesture["maxDistanceSquared"],
             distance_squared,
         )
+        if (
+            gesture["firstMoveTime"] is None
+            and distance_squared >= self.DRAG_THRESHOLD_PX * self.DRAG_THRESHOLD_PX
+        ):
+            gesture["firstMoveTime"] = time.monotonic()
 
     def _finish_mouse_gesture(self, x: int, y: int) -> None:
         gesture = self.active_mouse_gesture
@@ -399,6 +468,10 @@ class ManualProfileRecorder:
                 gesture["startX"],
                 gesture["startY"],
                 event_time=gesture["startTime"],
+                press_duration_ms=max(
+                    int(round((end_time - gesture["startTime"]) * 1000)),
+                    0,
+                ),
             )
 
     def _capture_mouse_loop(self) -> None:
@@ -449,6 +522,19 @@ class ManualProfileRecorder:
         if self.phase == "PREPARE" and self.prepare_actions:
             removed = self.prepare_actions.pop()
             self.prepare_timeline.undo_last()
+            if removed.get("type") == DOUBLE_CLICK_DRAG_TYPE and removed.get("syntheticFirstClick"):
+                extension_ms = max(
+                    int(removed.get("clickIntervalMs", 0) or 0)
+                    - min(
+                        int(removed.get("clickIntervalMs", 0) or 0),
+                        int(removed.get("_originalDragDelayMs", 0) or 0),
+                    ),
+                    0,
+                )
+                self.timeline_adjustment_ms = max(
+                    self.timeline_adjustment_ms - extension_ms,
+                    0,
+                )
             self._sync_last_prepare_action_text()
             self._set_last_saved(f"Undo prepare action: {removed.get('type')}")
         elif self.phase == "ICONS" and self.icons:
@@ -459,6 +545,67 @@ class ManualProfileRecorder:
             self._set_last_saved(f"Undo slot {removed.get('index')}")
         self._refresh_ui()
 
+    def _latest_drag_action(self):
+        if not self.prepare_actions:
+            return None
+        latest = self.prepare_actions[-1]
+        return latest if action_type(latest) in {"drag", DOUBLE_CLICK_DRAG_TYPE} else None
+
+    def _toggle_latest_double_drag(self) -> None:
+        """Apply or remove the explicit double-click-drag override for the last drag."""
+        if self.phase != "PREPARE" or not self.recording_enabled or not self.prepare_actions:
+            self.double_drag_override_var.set(False)
+            return
+
+        latest = self.prepare_actions[-1]
+        latest_kind = action_type(latest)
+        enabled = bool(self.double_drag_override_var.get())
+
+        if enabled and latest_kind == "drag":
+            merged = None
+            if len(self.prepare_actions) >= 2:
+                merged = merge_click_and_drag(
+                    self.prepare_actions[-2],
+                    latest,
+                )
+            if merged is not None:
+                self.prepare_actions[-2:] = [merged]
+                self.prepare_timeline.merge_last_events(2)
+                self._set_last_saved("Đã gộp click + drag cuối thành double-click + drag.")
+            else:
+                converted, extension_ms = force_double_click_drag(latest)
+                self.prepare_actions[-1] = converted
+                self.timeline_adjustment_ms += extension_ms
+                self._set_last_saved(
+                    "Đã ép drag cuối thành double-click + drag "
+                    f"(timeline +{extension_ms} ms)."
+                )
+        elif not enabled and latest_kind == DOUBLE_CLICK_DRAG_TYPE:
+            restored = list(split_double_click_drag(latest))
+            if latest.get("syntheticFirstClick"):
+                extension_ms = max(
+                    int(latest.get("clickIntervalMs", 0) or 0)
+                    - min(
+                        int(latest.get("clickIntervalMs", 0) or 0),
+                        int(latest.get("_originalDragDelayMs", 0) or 0),
+                    ),
+                    0,
+                )
+                self.timeline_adjustment_ms = max(
+                    self.timeline_adjustment_ms - extension_ms,
+                    0,
+                )
+            else:
+                self.prepare_timeline.split_last_merged_event(
+                    latest.get("clickIntervalMs", 0),
+                    latest.get("dragDurationMs", 0),
+                )
+            self.prepare_actions[-1:] = restored
+            self._set_last_saved("Đã tách double-click + drag cuối về action gốc.")
+
+        self._sync_last_prepare_action_text()
+        self._refresh_ui()
+
     def advance_phase(self) -> None:
         if self.phase == "PREPARE":
             if not self.recording_enabled:
@@ -466,6 +613,12 @@ class ManualProfileRecorder:
                 return
             self.recording_enabled = False
             self.prepare_timing = self.prepare_timeline.finish()
+            if self.timeline_adjustment_ms:
+                self.prepare_timing["durationMs"] = max(
+                    int(self.prepare_timing.get("durationMs", 0))
+                    + self.timeline_adjustment_ms,
+                    0,
+                )
             self.phase = "ICONS"
             self._set_last_saved(
                 "Prepare complete. "
@@ -495,6 +648,7 @@ class ManualProfileRecorder:
             return
         self.prepare_actions = []
         self.prepare_timing = {}
+        self.timeline_adjustment_ms = 0
         self.prepare_timeline.start()
         self.recording_enabled = True
         self.last_key_name = None
@@ -525,13 +679,20 @@ class ManualProfileRecorder:
 
         width, height = pyautogui.size()
         profile_data = {
-            "version": 1,
+            "version": 2,
             "sourceUrl": self.url,
             "canonicalUrl": self.url,
             "urlKey": "",
             "viewport": {"width": int(width), "height": int(height)},
             "coordinateSpace": f"screen_{int(width)}x{int(height)}_with_menu",
-            "prepareActions": self.prepare_actions,
+            "prepareActions": [
+                {
+                    key: value
+                    for key, value in action.items()
+                    if not str(key).startswith("_")
+                }
+                for action in self.prepare_actions
+            ],
             "prepareTiming": self.prepare_timing,
             "layout": {
                 "icons": self.icons,

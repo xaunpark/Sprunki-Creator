@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from manual_prepare_timeline import validate_prepare_timeline
+
 
 MANUAL_PROFILES_DIR = "manual_profiles"
 MANUAL_PROFILES_INDEX_PATH = os.path.join(MANUAL_PROFILES_DIR, "index.json")
@@ -83,6 +85,14 @@ def validate_profile(profile_data: Optional[Dict], expected_url: Optional[str] =
         return False, "profile is missing icons"
     if not slots:
         return False, "profile is missing slots"
+
+    if "prepareActions" in profile_data:
+        timeline_valid, timeline_reason = validate_prepare_timeline(
+            profile_data.get("prepareActions") or [],
+            profile_data.get("prepareTiming") or {},
+        )
+        if not timeline_valid:
+            return False, f"invalid PREPARE timeline: {timeline_reason}"
 
     if expected_url:
         expected_canonical = canonicalize_url(expected_url)
