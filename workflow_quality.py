@@ -1,16 +1,14 @@
 """Shared quality contracts for Sprunki production workflows.
 
 This module intentionally contains no browser, GUI, OBS, or filesystem side
-effects beyond the small artifact existence check.  It is the single source of
-truth for deciding whether a workflow has enough evidence to be published as
-completed.
+effects.  It is the single source of truth for deciding whether a workflow has
+enough core gameplay evidence to be published as completed.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 PASS = "PASS"
@@ -26,9 +24,6 @@ NON_RETRYABLE_FAILURE_CODES = frozenset(
         "empty_remix",
         "remix_threshold_not_met",
         "phase_skipped",
-        "recorded_identity_missing",
-        "recorded_identity_needs_review",
-        "artifact_missing",
         "manual_json_invalid",
         "skipped_by_policy",
         "workflow_stopped",
@@ -169,7 +164,6 @@ class WorkflowReport:
     placement_verified: bool = False
     cleanup_verified: bool = False
     identity_status: str = "not_started"
-    artifact_validation: Dict[str, Any] = field(default_factory=dict)
     quality_gate: Optional[QualityGateResult] = None
 
     # Existing counters retained for manifest/API compatibility.
@@ -264,64 +258,6 @@ def validate_playable_layout(config_data: Any) -> QualityGateResult:
     )
 
 
-def validate_artifacts(paths: Iterable[str]) -> QualityGateResult:
-    """Perform only basic artifact checks; no codec/audio/frame analysis."""
-
-    normalized = [str(path) for path in (paths or []) if path]
-    if not normalized:
-        return QualityGateResult.failure(
-            "artifact_missing",
-            message="No output artifact was produced.",
-        )
-
-    invalid = []
-    valid = []
-    extensions = {}
-    sizes = {}
-    unexpected_extensions = []
-    for path in normalized:
-        try:
-            extension = os.path.splitext(path)[1].lower()
-            extensions[path] = extension
-            if extension not in {".mp4", ".mkv"}:
-                unexpected_extensions.append(path)
-            size = os.path.getsize(path) if os.path.isfile(path) else 0
-            sizes[path] = size
-            if size > 0:
-                # Read one byte as a lightweight readability check.  This is
-                # intentionally not media decoding or ffprobe QA.
-                with open(path, "rb") as artifact:
-                    artifact.read(1)
-                valid.append(path)
-            else:
-                invalid.append(path)
-        except OSError:
-            invalid.append(path)
-
-    evidence = {
-        "paths": normalized,
-        "valid": valid,
-        "invalid": invalid,
-        "extensions": extensions,
-        "sizes": sizes,
-        "unexpectedExtensions": unexpected_extensions,
-    }
-    if invalid or not valid:
-        return QualityGateResult.failure(
-            "artifact_missing",
-            evidence=evidence,
-            message="One or more output artifacts are missing or empty.",
-        )
-    return QualityGateResult.pass_result(
-        evidence=evidence,
-        message=(
-            "Basic artifacts validated; extension warning recorded."
-            if unexpected_extensions
-            else "Basic artifacts validated."
-        ),
-    )
-
-
 def evaluate_workflow_report(
     report: WorkflowReport,
     *,
@@ -329,7 +265,12 @@ def evaluate_workflow_report(
     identity_status: Optional[str] = None,
     require_identity: bool = True,
 ) -> QualityGateResult:
-    """Evaluate runtime evidence and configured thresholds fail-closed."""
+    """Evaluate core gameplay evidence and configured thresholds fail-closed.
+
+    ``require_identity`` remains in the signature for source compatibility,
+    but recorded identity is diagnostic metadata rather than a completion
+    blocker under the Tracker Diagnostic Contract.
+    """
 
     effective_mode = (mode or report.mode or "master").lower()
     identity = str(identity_status or report.identity_status or "not_started").lower()
@@ -542,17 +483,6 @@ def evaluate_workflow_report(
                 )
             )
 
-    if require_identity and identity != "verified":
-        code = "recorded_identity_needs_review" if identity in {"needs_review", "unavailable"} else "recorded_identity_missing"
-        return report.apply_quality_gate(
-            QualityGateResult.failure(
-                code,
-                coverage=coverage,
-                evidence={"identityStatus": identity},
-                message=f"Recorded identity is not verified: {identity}.",
-            )
-        )
-
     coverage["normal"] = "verified"
     return report.apply_quality_gate(
         QualityGateResult.pass_result(
@@ -562,6 +492,7 @@ def evaluate_workflow_report(
                 "placementVerified": report.placement_verified,
                 "cleanupVerified": report.cleanup_verified,
                 "identityStatus": identity,
+                "identityVerified": identity == "verified",
             },
             message="Workflow passed the shared quality gate.",
         )

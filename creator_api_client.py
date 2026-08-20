@@ -900,38 +900,26 @@ class CreatorService:
                 try:
                     manifest_data = self.processing_manager._generate_manifest_for_item(item)
                 except Exception as manifest_error:
-                    terminal_error = terminal_error or f"Manifest generation failed: {manifest_error}"
-                    self.logger.error("❌ Manifest generation failed for %s: %s", queue_id, manifest_error, exc_info=True)
-                    self.processing_manager._record_quality_failure(
-                        item,
-                        "artifact_missing",
-                        terminal_error,
-                        evidence={"manifest_generation_error": str(manifest_error)},
-                        retryable=False,
+                    self.logger.warning(
+                        "⚠️ Manifest generation failed for %s; keeping core workflow result: %s",
+                        queue_id,
+                        manifest_error,
+                        exc_info=True,
                     )
-                    workflow_report_obj = getattr(item, "workflow_report", None)
                 if manifest_data is None:
-                    terminal_error = terminal_error or "Manifest generation returned no data."
-                    self.processing_manager._record_quality_failure(
-                        item,
-                        "artifact_missing",
-                        terminal_error,
-                        evidence={"manifest_generation": "no_data"},
-                        retryable=False,
+                    self.logger.warning(
+                        "⚠️ Manifest generation returned no data for %s; keeping core workflow result.",
+                        queue_id,
                     )
-                    workflow_report_obj = getattr(item, "workflow_report", None)
 
                 try:
                     video_files_payload = self._organize_output_files(item.output_files)
                 except Exception as output_error:
-                    terminal_error = terminal_error or f"Output organization failed: {output_error}"
-                    self.logger.error("❌ Output organization failed for %s: %s", queue_id, output_error, exc_info=True)
-                    self.processing_manager._record_quality_failure(
-                        item,
-                        "artifact_missing",
-                        terminal_error,
-                        evidence={"output_organization_error": str(output_error)},
-                        retryable=False,
+                    self.logger.warning(
+                        "⚠️ Output organization failed for %s; sending empty video_files payload: %s",
+                        queue_id,
+                        output_error,
+                        exc_info=True,
                     )
 
             # Dọn dẹp các component của job hiện tại trước khi chụp log cuối.
@@ -1663,21 +1651,31 @@ class CreatorService:
                     return False
 
                 project_folder = getattr(self.obs_controller, 'current_project_folder', None)
-                if item.mode != "skip" and project_folder:
-                    identity_ok = self.processing_manager._run_recorded_identity_resolver(item, project_folder)
-                    if not identity_ok:
-                        identity_code = (
-                            "recorded_identity_needs_review"
-                            if item.recorded_identity_status in {"needs_review", "unavailable"}
-                            else "recorded_identity_missing"
+                if item.mode != "skip":
+                    try:
+                        identity_ok = bool(
+                            item.json_data
+                            and project_folder
+                            and self.processing_manager._run_recorded_identity_resolver(item, project_folder)
                         )
-                        self.processing_manager._record_quality_failure(
-                            item,
-                            identity_code,
-                            item.recorded_identity_reason or "Recorded identity was not verified.",
-                            evidence={"identityStatus": item.recorded_identity_status},
+                        if not identity_ok:
+                            self.logger.warning(
+                                "⚠️ Recorded identity is non-blocking for %s: status=%s reason=%s",
+                                item.project_slug,
+                                item.recorded_identity_status,
+                                item.recorded_identity_reason,
+                            )
+                    except Exception as identity_error:
+                        # Identity is evidence/tagging only.  Preserve the
+                        # real resolver state when available and never turn a
+                        # resolver exception into a core workflow failure.
+                        item.recorded_identity_status = "unavailable"
+                        item.recorded_identity_reason = str(identity_error)
+                        self.logger.warning(
+                            "⚠️ Recorded identity resolver failed non-blockingly for %s: %s",
+                            item.project_slug,
+                            identity_error,
                         )
-                        return False
 
                 if not self.processing_manager._finalize_item_quality(item):
                     self.logger.error(
@@ -1687,47 +1685,51 @@ class CreatorService:
                     )
                     return False
                 
-                # --- File validation ---
-                self.logger.info(f"✅ Video processing workflow completed for {item.project_slug}. Proceeding to file validation.")
-                
-                print(f"🔍 Validating output files for quality control...")
-                self.api_client.update_job_progress(
-                    queue_id, 'validation', 'files', 95.0, 'active',
-                    metadata={'output_files_count': len(item.output_files)}
+                # Output organization is transport/observability only.  It
+                # must not decide completion because Syncthing or a downstream
+                # consumer may move files before this code runs.
+                self.logger.info(
+                    "✅ Core gameplay workflow passed for %s. Collecting optional output transport metadata.",
+                    item.project_slug,
                 )
+                video_files = {}
+                validation_summary = {}
+                try:
+                    self.api_client.update_job_progress(
+                        queue_id,
+                        'validation',
+                        'transport_metadata',
+                        95.0,
+                        'active',
+                        metadata={'output_files_count': len(item.output_files)},
+                    )
+                    video_files = self._organize_output_files(item.output_files) or {}
+                    validation_summary = video_files.get('validation_summary', {}) if isinstance(video_files, dict) else {}
+                except Exception as output_error:
+                    self.logger.warning(
+                        "⚠️ Optional output transport metadata failed for %s; continuing with empty video_files: %s",
+                        item.project_slug,
+                        output_error,
+                        exc_info=True,
+                    )
+                    video_files = {}
+                    validation_summary = {}
 
-                video_files = self._organize_output_files(item.output_files)
-                validation_summary = video_files.get('validation_summary', {})
-                
-                validation_success = self._check_validation_requirements(validation_summary, item)
-                
-                if validation_success:
-                    item.status = "completed"
-                    item.end_time = datetime.now()
-                    self.logger.info(f"✅ File validation passed: {validation_summary.get('success_rate', 0)}% success rate")
-                    self.api_client.update_job_progress(
-                        queue_id, 'completion', 'finalizing', 100.0, 'completed',
-                        metadata={
-                            'validation_summary': validation_summary,
-                            'total_valid_files': validation_summary.get('valid_files', 0)
-                        }
-                    )
-                    return True
-                else:
-                    failure_reason = f"Validation failed: {validation_summary.get('invalid_files', 0)} invalid files out of {validation_summary.get('total_files', 0)}."
-                    self.logger.error(f"❌ File validation failed: {validation_summary.get('success_rate', 0)}% success rate. Reason: {failure_reason}")
-                    
-                    self.api_client.update_job_progress(
-                        queue_id, 'validation', 'failed', 95.0, 'failed',
-                        error_details=failure_reason
-                    )
-                    self.processing_manager._record_quality_failure(
-                        item,
-                        "artifact_missing",
-                        failure_reason,
-                        evidence={"validationSummary": validation_summary},
-                    )
-                    return False
+                item.status = "completed"
+                item.end_time = datetime.now()
+                self.api_client.update_job_progress(
+                    queue_id,
+                    'completion',
+                    'finalizing',
+                    100.0,
+                    'completed',
+                    metadata={
+                        'validation_summary': validation_summary,
+                        'total_valid_files': validation_summary.get('valid_files', 0),
+                        'quality_gate_only': True,
+                    },
+                )
+                return True
                         
             except Exception as e:
                 error_msg = f"Critical exception in _process_video_for_item: {str(e)}"
@@ -1942,7 +1944,12 @@ class CreatorService:
 
     def _check_validation_requirements(self, validation_summary: dict, item) -> bool:
         """
-        [REWRITTEN] Check if validation meets DYNAMIC requirements based on the input JSON.
+        Legacy auxiliary output summary helper.
+
+        This method is retained for source compatibility only.  It is not
+        called by the completion path; Creator completion is decided solely by
+        the core gameplay quality gate so moved/missing local files cannot
+        block the job.
         """
         try:
             mode = item.mode

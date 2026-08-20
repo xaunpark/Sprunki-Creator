@@ -26,6 +26,14 @@ SKIPPED = "SKIPPED"
 NOT_STARTED = "NOT_STARTED"
 NOT_CHECKED_BY_POLICY = "NOT_CHECKED_BY_POLICY"
 
+_NON_BLOCKING_LEGACY_FAILURE_CODES = frozenset(
+    {
+        "artifact_missing",
+        "recorded_identity_missing",
+        "recorded_identity_needs_review",
+    }
+)
+
 _SENSITIVE_KEYS = {
     "password",
     "passwd",
@@ -87,18 +95,13 @@ _FAILURE_CONTEXT = {
     ),
     "recorded_identity_missing": (
         "identity",
-        "Thiếu recorded identity bắt buộc.",
-        "Chạy lại identity resolver và kiểm tra artifact identity.",
+        "Recorded identity chưa sẵn sàng; không block core gameplay.",
+        "Kiểm tra identity resolver để Tracker có tag đầy đủ.",
     ),
     "recorded_identity_needs_review": (
         "identity",
-        "Recorded identity cần review.",
-        "Review identity report trước khi cho phép completed.",
-    ),
-    "artifact_missing": (
-        "artifacts",
-        "Artifact output thiếu, rỗng hoặc không đọc được.",
-        "Kiểm tra output path và quyền đọc file.",
+        "Recorded identity cần review; không block core gameplay.",
+        "Review identity report và cập nhật tag khi có thể.",
     ),
     "skipped_by_policy": (
         "policy",
@@ -135,6 +138,47 @@ def json_safe(value: Any) -> Any:
     """Public JSON-safe conversion used by Creator before requests.json."""
 
     return _safe_value(value)
+
+
+def _strip_artifact_quality_fields(value: Any, parent_key: Optional[str] = None) -> Any:
+    """Remove legacy artifact quality fields without touching video outputs.
+
+    Current Creator reports do not emit these fields.  The contextual cleanup
+    keeps old workflow/manifest snapshots from reintroducing an ``artifacts``
+    phase or quality check while preserving ``outputs.video_files`` transport.
+    """
+
+    parent = str(parent_key or "").lower()
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, entry in value.items():
+            normalized_key = str(key).lower()
+            if normalized_key in {"artifact_validation", "artifactvalidation"}:
+                continue
+            if normalized_key == "artifacts" and parent in {"phases", "statuses", "phase_statuses"}:
+                continue
+            if parent in {"quality_gate", "qualitygate"} and normalized_key == "checks":
+                if isinstance(entry, list):
+                    entry = [
+                        check
+                        for check in entry
+                        if not (
+                            isinstance(check, dict)
+                            and str(check.get("name", "")).lower() == "artifacts"
+                        )
+                    ]
+            if parent in {"quality_gate", "qualitygate"} and normalized_key == "failed_checks":
+                if isinstance(entry, list):
+                    entry = [
+                        check
+                        for check in entry
+                        if str(check).lower() != "artifacts"
+                    ]
+            cleaned[str(key)] = _strip_artifact_quality_fields(entry, normalized_key)
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_artifact_quality_fields(entry, parent) for entry in value]
+    return value
 
 
 def _redact_text(text: str) -> tuple[str, list[str]]:
@@ -250,8 +294,8 @@ def _report_dict(workflow_report: Any) -> Dict[str, Any]:
     if workflow_report is None:
         return {}
     if hasattr(workflow_report, "as_dict"):
-        return json_safe(workflow_report.as_dict())
-    return json_safe(workflow_report) if isinstance(workflow_report, dict) else {}
+        return json_safe(_strip_artifact_quality_fields(workflow_report.as_dict()))
+    return json_safe(_strip_artifact_quality_fields(workflow_report)) if isinstance(workflow_report, dict) else {}
 
 
 def _normalise_status(value: Any) -> str:
@@ -402,13 +446,29 @@ def build_tracker_diagnostic_report(
         or report.get("failure_code")
         or gate.get("failure_code")
     )
+    # Older Creator builds could persist artifact/identity as blocking error
+    # codes.  They are diagnostic-only in this contract and must not reappear
+    # as Tracker quality failures. Prefer the actual core gate code when one
+    # exists; otherwise let the terminal status fall back to workflow_stopped.
+    if failure_code in _NON_BLOCKING_LEGACY_FAILURE_CODES:
+        gate_failure_code = gate.get("failure_code")
+        failure_code = (
+            gate_failure_code
+            if gate_failure_code not in _NON_BLOCKING_LEGACY_FAILURE_CODES
+            else None
+        )
     if not workflow_report and not failure_code:
         failure_code = "runtime_verification_unknown"
-    final_status = str(terminal_status or ("completed" if gate.get("passed") is True else "failed")).lower()
-    if final_status != "completed" and not failure_code:
+    gate_passed = gate.get("passed") is True
+    requested_status = str(terminal_status or ("completed" if gate_passed else "failed")).lower()
+    final_status = "failed" if requested_status == "completed" and not gate_passed else requested_status
+    if final_status == "completed" and gate_passed:
+        # A passing core gate is authoritative; stale legacy item errors must
+        # not turn into a blocking failure in a completed report.
+        failure_code = None
+    elif final_status != "completed" and not failure_code:
         failure_code = "workflow_stopped"
     gate_status = _normalise_status(gate.get("status") or (PASS if gate.get("passed") is True else UNKNOWN if not workflow_report else FAIL))
-    gate_passed = gate.get("passed") is True
     retryable = bool(
         getattr(item, "recorded_identity_retryable", False)
         if failure_code in {"recorded_identity_missing", "recorded_identity_needs_review"}
@@ -447,16 +507,6 @@ def build_tracker_diagnostic_report(
         else NOT_STARTED
     )
 
-    artifact_validation = report.get("artifact_validation") if isinstance(report.get("artifact_validation"), dict) else {}
-    artifact_paths = artifact_validation.get("paths") or getattr(item, "output_files", []) or []
-    artifact_status = (
-        PASS
-        if artifact_validation and artifact_validation.get("invalid") == [] and artifact_validation.get("valid")
-        else FAIL
-        if artifact_validation or artifact_paths
-        else NOT_STARTED
-    )
-
     phase_statuses = {
         "json_generation": _phase_from_item(getattr(item, "json_generation_status", None) if item is not None else None),
         "runtime_entry": runtime_status,
@@ -465,7 +515,6 @@ def build_tracker_diagnostic_report(
         "placement": placement_status,
         "cleanup": cleanup_status,
         "identity": identity_phase_status,
-        "artifacts": artifact_status,
     }
     if str(mode).lower() == "both":
         phase_statuses["master"] = _phase_status_from_report(phase_reports.get("master") or {})
@@ -553,18 +602,13 @@ def build_tracker_diagnostic_report(
             _check(
                 "recorded_identity",
                 identity_phase_status,
+                required=False,
                 failure_code=(failure_code if failure_code in {"recorded_identity_missing", "recorded_identity_needs_review"} else None),
                 evidence={
                     "status": identity_status,
                     "reason": getattr(item, "recorded_identity_reason", None) if item is not None else None,
                     "files": getattr(item, "recorded_identity_files", []) if item is not None else [],
                 },
-            ),
-            _check(
-                "artifacts",
-                artifact_status,
-                failure_code="artifact_missing" if artifact_status != PASS else None,
-                evidence=artifact_validation,
             ),
         ]
     )
@@ -718,11 +762,6 @@ def build_tracker_diagnostic_report(
                 "retryable": getattr(item, "recorded_identity_retryable", False) if item is not None else False,
                 "files": getattr(item, "recorded_identity_files", []) if item is not None else [],
             },
-            "artifacts": {
-                "status": artifact_status,
-                "validation": artifact_validation,
-                "files": [file_reference(path, kind="video", hash_file=False) for path in artifact_paths],
-            },
             "phase_reports": phase_reports,
         },
         "quality_gate": {
@@ -738,7 +777,7 @@ def build_tracker_diagnostic_report(
         "attempts": retry_attempts,
         "outputs": {
             "manifest_ref": manifest_ref,
-            "manifest_snapshot": json_safe(manifest_data) if manifest_data else None,
+            "manifest_snapshot": json_safe(_strip_artifact_quality_fields(manifest_data)) if manifest_data else None,
             "video_files": json_safe(output_files_payload or {}),
         },
         "logs": json_safe(log_snapshot),

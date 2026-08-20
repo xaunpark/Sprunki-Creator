@@ -28,7 +28,6 @@ try:
         QualityGateResult,
         WorkflowReport,
         evaluate_workflow_report,
-        validate_artifacts,
         validate_playable_layout,
     )
 except ImportError as e:
@@ -1263,7 +1262,11 @@ class UnifiedProcessingManager:
             return False
 
     def _finalize_item_quality(self, item: ProcessingItem) -> bool:
-        """Apply runtime, identity, and artifact gates before completed."""
+        """Apply core gameplay quality gates before completed.
+
+        Recorded identity is intentionally diagnostic-only.  It is preserved
+        on the item/report for Tracker tags but does not block completion.
+        """
         report = item.workflow_report
         if not isinstance(report, WorkflowReport):
             player_report = getattr(getattr(self.master_controller, "game_player", None), "last_workflow_report", None)
@@ -1278,38 +1281,6 @@ class UnifiedProcessingManager:
             identity_status=identity_status,
             require_identity=False,
         )
-
-        if gate.passed and identity_status.lower() != "verified":
-            identity_code = (
-                "recorded_identity_needs_review"
-                if identity_status.lower() in {"needs_review", "unavailable"}
-                else "recorded_identity_missing"
-            )
-            gate = report.apply_quality_gate(
-                QualityGateResult.failure(
-                    identity_code,
-                    coverage=report.coverage,
-                    evidence={
-                        "identityStatus": identity_status,
-                        "identityReason": getattr(item, "recorded_identity_reason", None),
-                    },
-                    message=f"Recorded identity is not verified: {identity_status}.",
-                )
-            )
-
-        artifact_result = validate_artifacts(item.output_files)
-        report.artifact_validation = artifact_result.evidence
-        if gate.passed and not artifact_result.passed:
-            gate = report.apply_quality_gate(
-                QualityGateResult.failure(
-                    "artifact_missing",
-                    coverage=report.coverage,
-                    evidence=artifact_result.evidence,
-                    message=artifact_result.message,
-                )
-            )
-        elif gate.passed:
-            report.evidence["artifactValidation"] = artifact_result.evidence
 
         item.workflow_report = report
         if gate.passed:
@@ -1458,22 +1429,32 @@ class UnifiedProcessingManager:
                 return False
 
             if success and item.mode != "skip":
-                # Identity is a required precondition for completed and must
-                # run before the return value is computed, not only in finally.
+                # Identity is best-effort diagnostic evidence.  Run it before
+                # finalization so Tracker receives the real tag/status, but
+                # never turn an identity miss into a workflow failure.
                 identity_checked = True
-                identity_ok = bool(
-                    item.json_data
-                    and project_folder
-                    and self._run_recorded_identity_resolver(item, project_folder)
-                )
-                if not identity_ok:
-                    item.failure_code = (
-                        "recorded_identity_needs_review"
-                        if item.recorded_identity_status in {"needs_review", "unavailable"}
-                        else "recorded_identity_missing"
+                try:
+                    identity_ok = bool(
+                        item.json_data
+                        and project_folder
+                        and self._run_recorded_identity_resolver(item, project_folder)
                     )
-                    item.error_message = item.recorded_identity_reason or "Recorded identity was not verified."
-                    success = False
+                    if not identity_ok:
+                        self.logger.warning(
+                            "⚠️ Recorded identity is non-blocking for %s: status=%s reason=%s",
+                            item.project_slug,
+                            item.recorded_identity_status,
+                            item.recorded_identity_reason,
+                        )
+                except Exception as identity_error:
+                    item.recorded_identity_status = "unavailable"
+                    item.recorded_identity_reason = str(identity_error)
+                    self.logger.warning(
+                        "⚠️ Recorded identity resolver failed non-blockingly for %s: %s",
+                        item.project_slug,
+                        identity_error,
+                        exc_info=True,
+                    )
 
             if success:
                 success = self._finalize_item_quality(item)
@@ -1527,12 +1508,21 @@ class UnifiedProcessingManager:
             except Exception as cleanup_error:
                 self.logger.error(f"❌ Error during comprehensive OBS cleanup: {cleanup_error}")
 
-            # A normal completion path already performed identity validation
-            # above.  Keep a best-effort artifact generation fallback for an
-            # interrupted path, but never let it turn a failed item into a
-            # success because the return decision has already been gated.
+            # A normal completion path already attempted identity resolution
+            # above.  Keep a best-effort evidence fallback for an interrupted
+            # path; identity remains non-blocking for the workflow result.
             if not identity_checked and item.mode != "skip" and item.json_data and project_folder:
-                self._run_recorded_identity_resolver(item, project_folder)
+                try:
+                    self._run_recorded_identity_resolver(item, project_folder)
+                except Exception as identity_error:
+                    item.recorded_identity_status = "unavailable"
+                    item.recorded_identity_reason = str(identity_error)
+                    self.logger.warning(
+                        "⚠️ Recorded identity fallback failed non-blockingly for %s: %s",
+                        item.project_slug,
+                        identity_error,
+                        exc_info=True,
+                    )
             
             # Cleanup file handlers after processing
             self._cleanup_logging_handlers()

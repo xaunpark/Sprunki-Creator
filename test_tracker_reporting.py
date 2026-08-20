@@ -99,6 +99,12 @@ class TrackerReportingTests(unittest.TestCase):
         self.assertEqual(diagnostic["mod"]["layout"]["icon_count"], 0)
         self.assertEqual(diagnostic["mod"]["game_settings"]["password"], "[REDACTED]")
         self.assertEqual(diagnostic["tracker_ui"]["badge"], "FAILED")
+        identity_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "recorded_identity"
+        )
+        self.assertFalse(identity_check["required"])
+        self.assertNotIn("recorded_identity", diagnostic["quality_gate"]["failed_checks"])
         json.dumps(diagnostic)
 
     def test_report_contains_placement_transition_retry_and_policy_coverage(self):
@@ -146,6 +152,100 @@ class TrackerReportingTests(unittest.TestCase):
         self.assertEqual(diagnostic["phases"]["horror"]["status"], "NOT_CHECKED_BY_POLICY")
         self.assertEqual(diagnostic["attempts"][0]["duration_ms"], 1000)
         self.assertEqual(diagnostic["tracker_ui"]["badge"], "COMPLETED")
+        self.assertNotIn("artifacts", diagnostic["phases"])
+        self.assertNotIn("artifacts", diagnostic["phases"]["statuses"])
+        self.assertNotIn("artifact_validation", diagnostic)
+        self.assertNotIn(
+            "artifacts",
+            {check["name"] for check in diagnostic["quality_gate"]["checks"]},
+        )
+        self.assertIn("video_files", diagnostic["outputs"])
+
+    def test_core_pass_does_not_require_local_output_files(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/moved-output",
+            project_slug="moved-output",
+            mode="master",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/moved-output",
+                "layout": {
+                    "icons": [{"index": 0}],
+                    "slots": [{"index": 0}],
+                },
+            },
+            failure_code=None,
+            error_message=None,
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=datetime(2026, 8, 20, 10, 0, 3),
+            # This path is intentionally absent because Syncthing may have
+            # moved the file before Creator builds the report.
+            output_files=[r"G:\\Syncthing\\moved-output\\showcase.mp4"],
+            recorded_identity_status="needs_review",
+            recorded_identity_reason="fixture_review",
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 3030, "production_mode": "master"},
+            item,
+            passing_report(),
+            output_files_payload={},
+            terminal_status="completed",
+        )
+
+        self.assertEqual(diagnostic["status"], "completed")
+        self.assertTrue(diagnostic["quality_gate"]["passed"])
+        self.assertEqual(diagnostic["outputs"]["video_files"], {})
+        identity_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "recorded_identity"
+        )
+        self.assertEqual(identity_check["status"], "FAIL")
+        self.assertFalse(identity_check["required"])
+        self.assertNotIn("recorded_identity", diagnostic["quality_gate"]["failed_checks"])
+
+    def test_legacy_artifact_quality_fields_are_not_forwarded(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/legacy-fields",
+            project_slug="legacy-fields",
+            mode="master",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/legacy-fields",
+                "layout": {"icons": [{"index": 0}], "slots": [{"index": 0}]},
+            },
+            failure_code=None,
+            error_message=None,
+            start_time=None,
+            end_time=None,
+            output_files=[],
+            recorded_identity_status="verified",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        legacy_report = passing_report().as_dict()
+        legacy_report["artifact_validation"] = {"valid": ["old.mp4"]}
+        legacy_report["phases"] = {
+            "statuses": {"artifacts": "PASS"},
+            "artifacts": {"status": "PASS"},
+        }
+        legacy_report["quality_gate"]["checks"] = [
+            {"name": "artifacts", "status": "PASS", "required": True}
+        ]
+        legacy_report["quality_gate"]["failed_checks"] = ["artifacts"]
+
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 3032, "production_mode": "master"},
+            item,
+            legacy_report,
+            output_files_payload={"master": []},
+            terminal_status="completed",
+        )
+
+        serialized = json.dumps(diagnostic)
+        self.assertNotIn('"artifact_validation"', serialized)
+        self.assertNotIn('"artifacts"', serialized)
+        self.assertIn("video_files", diagnostic["outputs"])
 
     def test_log_snapshot_has_reference_excerpt_and_redaction(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -323,6 +423,121 @@ class TrackerReportingTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["diagnostic_report"]["summary"]["failure_code"], "no_icons")
         self.assertIn("logs", payload["diagnostic_report"])
+
+    def test_creator_completion_ignores_moved_output_transport_failure(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            from creator_api_client import CreatorService
+
+        import threading
+
+        class Logger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                pass
+
+            def error(self, *args, **kwargs):
+                pass
+
+        class Capture:
+            log_path = None
+
+            def start(self):
+                return True
+
+            def stop(self):
+                pass
+
+            def snapshot(self):
+                return {
+                    "upload_status": "not_available",
+                    "full_log_ref": {"exists": False, "path": None},
+                    "excerpt": "",
+                    "truncated": False,
+                    "line_count": 0,
+                    "redactions": [],
+                }
+
+        class API:
+            service_name = "creator-test"
+
+            def __init__(self):
+                self.final_calls = []
+
+            def update_job_status(self, *args, **kwargs):
+                if kwargs.get("final"):
+                    self.final_calls.append(kwargs)
+                return True
+
+            def update_job_progress(self, *args, **kwargs):
+                return True
+
+        class Manager:
+            config = SimpleNamespace(max_retries=2)
+
+            def _generate_manifest_for_item(self, current_item):
+                raise OSError("manifest moved with output")
+
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/moved-output",
+            project_slug="moved-output",
+            mode="master",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/moved-output",
+                "layout": {
+                    "icons": [{"index": 0}],
+                    "slots": [{"index": 0}],
+                },
+            },
+            status="processing",
+            failure_code=None,
+            error_message=None,
+            output_files=[r"G:\\Syncthing\\moved-output\\showcase.mp4"],
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=None,
+            workflow_report=passing_report(),
+            recorded_identity_status="needs_review",
+            recorded_identity_reason="review_required",
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+
+        service = CreatorService.__new__(CreatorService)
+        service.logger = Logger()
+        service.service_stop_event = threading.Event()
+        service.processing_manager = Manager()
+        service.api_client = API()
+        service.performance_analyzer = SimpleNamespace(
+            record_job_start=lambda *args, **kwargs: None,
+            record_job_completion=lambda *args, **kwargs: None,
+        )
+        service._create_job_log_capture = lambda queue_id: Capture()
+        service._convert_job_to_processing_item = lambda job: item
+        def process_success(current_item, queue_id):
+            current_item.status = "completed"
+            return True
+
+        service._process_with_smart_retry = process_success
+        service._organize_output_files = lambda files: (_ for _ in ()).throw(
+            OSError("Syncthing moved output before inspection")
+        )
+        service.obs_controller = None
+        service.game_player = None
+        service._watchdog_failures = {}
+        service._watchdog_failures_lock = threading.Lock()
+        service.config_manager = SimpleNamespace(get=lambda *args, **kwargs: 60)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = service._process_job({"id": 3031, "production_mode": "master"})
+
+        self.assertTrue(result)
+        self.assertEqual(item.status, "completed")
+        self.assertEqual(len(service.api_client.final_calls), 1)
+        payload = service.api_client.final_calls[0]
+        self.assertEqual(payload["status"], "completed")
+        self.assertTrue(payload["diagnostic_report"]["quality_gate"]["passed"])
+        self.assertEqual(payload["diagnostic_report"]["outputs"]["video_files"], {})
 
 
 if __name__ == "__main__":

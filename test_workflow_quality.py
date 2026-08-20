@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-from pathlib import Path
 
 from workflow_quality import (
     PASS,
@@ -9,7 +8,6 @@ from workflow_quality import (
     WorkflowReport,
     evaluate_workflow_report,
     failure_is_retryable,
-    validate_artifacts,
     validate_playable_layout,
 )
 
@@ -107,19 +105,23 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.failure_code, "empty_remix")
 
-    def test_identity_missing_blocks_completion(self):
+    def test_identity_missing_is_non_blocking_but_remains_evidence(self):
         report = verified_report()
         report.identity_status = "not_started"
         result = evaluate_workflow_report(report, require_identity=True)
-        self.assertFalse(result.passed)
-        self.assertEqual(result.failure_code, "recorded_identity_missing")
+        self.assertTrue(result.passed)
+        self.assertIsNone(result.failure_code)
+        self.assertEqual(report.identity_status, "not_started")
+        self.assertFalse(result.evidence["identityVerified"])
 
-    def test_identity_needs_review_blocks_completion(self):
+    def test_identity_needs_review_is_non_blocking_but_remains_evidence(self):
         report = verified_report()
         report.identity_status = "needs_review"
         result = evaluate_workflow_report(report, require_identity=True)
-        self.assertFalse(result.passed)
-        self.assertEqual(result.failure_code, "recorded_identity_needs_review")
+        self.assertTrue(result.passed)
+        self.assertIsNone(result.failure_code)
+        self.assertEqual(report.identity_status, "needs_review")
+        self.assertFalse(result.evidence["identityVerified"])
 
     def test_individual_threshold_is_strict(self):
         report = verified_report("individual")
@@ -149,7 +151,7 @@ class WorkflowQualityTests(unittest.TestCase):
     def test_retry_policy_only_retries_transient_codes(self):
         self.assertTrue(failure_is_retryable("runtime_verification_unknown"))
         self.assertFalse(failure_is_retryable("no_icons"))
-        self.assertFalse(failure_is_retryable("recorded_identity_missing"))
+        self.assertTrue(failure_is_retryable("recorded_identity_missing"))
 
     def test_both_requires_both_phase_reports(self):
         report = verified_report("both")
@@ -161,19 +163,12 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.failure_code, "phase_skipped")
 
-    def test_artifact_validation_is_basic_and_fail_closed(self):
-        with tempfile.TemporaryDirectory() as temp:
-            empty = Path(temp) / "empty.mp4"
-            empty.write_bytes(b"")
-            result = validate_artifacts([str(empty)])
-            self.assertFalse(result.passed)
-            self.assertEqual(result.failure_code, "artifact_missing")
-
-            valid = Path(temp) / "recording.mkv"
-            valid.write_bytes(b"x")
-            result = validate_artifacts([str(valid)])
-            self.assertTrue(result.passed)
-            self.assertEqual(result.evidence["extensions"][str(valid)], ".mkv")
+    def test_empty_or_moved_output_files_do_not_participate_in_core_gate(self):
+        report = verified_report()
+        result = evaluate_workflow_report(report, require_identity=False)
+        self.assertTrue(result.passed)
+        self.assertFalse(hasattr(report, "artifact_validation"))
+        self.assertNotIn("artifact_missing", result.evidence)
 
     def test_failure_report_is_persisted_for_manifest_generation(self):
         import tempfile
