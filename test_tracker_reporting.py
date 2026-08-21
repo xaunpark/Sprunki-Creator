@@ -200,7 +200,48 @@ class TrackerReportingTests(unittest.TestCase):
             check for check in diagnostic["quality_gate"]["checks"]
             if check["name"] == "recorded_identity"
         )
+        self.assertEqual(identity_check["status"], "NEEDS_REVIEW")
+        self.assertFalse(identity_check["passed"])
+        self.assertFalse(identity_check["required"])
+        self.assertEqual(diagnostic["phases"]["identity"]["status"], "NEEDS_REVIEW")
+        self.assertEqual(diagnostic["phases"]["identity"]["identity_status"], "needs_review")
+        self.assertEqual(diagnostic["phases"]["statuses"]["identity"], "NEEDS_REVIEW")
+        self.assertNotIn("recorded_identity", diagnostic["quality_gate"]["failed_checks"])
+
+    def test_recorded_identity_failed_is_non_blocking_but_remains_failed(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/identity-failure",
+            project_slug="identity-failure",
+            mode="master",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/identity-failure",
+                "layout": {"icons": [{"index": 0}], "slots": [{"index": 0}]},
+            },
+            failure_code=None,
+            error_message=None,
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=datetime(2026, 8, 20, 10, 0, 3),
+            recorded_identity_status="failed",
+            recorded_identity_reason="recorded_identity_json_invalid",
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 3031, "production_mode": "master"},
+            item,
+            passing_report(),
+            output_files_payload={},
+            terminal_status="completed",
+        )
+
+        identity_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "recorded_identity"
+        )
+        self.assertEqual(diagnostic["status"], "completed")
+        self.assertTrue(diagnostic["quality_gate"]["passed"])
         self.assertEqual(identity_check["status"], "FAIL")
+        self.assertFalse(identity_check["passed"])
         self.assertFalse(identity_check["required"])
         self.assertNotIn("recorded_identity", diagnostic["quality_gate"]["failed_checks"])
 

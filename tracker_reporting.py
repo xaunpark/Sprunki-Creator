@@ -22,6 +22,7 @@ SCHEMA_VERSION = "sprunki.tracker.report.v1"
 PASS = "PASS"
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
+NEEDS_REVIEW = "NEEDS_REVIEW"
 SKIPPED = "SKIPPED"
 NOT_STARTED = "NOT_STARTED"
 NOT_CHECKED_BY_POLICY = "NOT_CHECKED_BY_POLICY"
@@ -312,6 +313,8 @@ def _normalise_status(value: Any) -> str:
         "failure": FAIL,
         "error": FAIL,
         "unknown": UNKNOWN,
+        "needs_review": NEEDS_REVIEW,
+        "needs review": NEEDS_REVIEW,
         "skipped": SKIPPED,
         "skip": SKIPPED,
         "not_started": NOT_STARTED,
@@ -322,6 +325,27 @@ def _normalise_status(value: Any) -> str:
 
 def _phase_from_item(value: Any) -> str:
     return _normalise_status(value)
+
+
+def _identity_phase_status(identity_status: str) -> str:
+    """Project raw recorded-identity state without calling review a failure.
+
+    ``needs_review`` means that the resolver produced reviewable evidence but
+    could not verify the identity automatically.  It is intentionally
+    non-blocking and must remain distinguishable from an actual resolver
+    failure in Tracker diagnostics.
+    """
+
+    normalized = str(identity_status or "not_started").strip().lower()
+    if normalized == "verified":
+        return PASS
+    if normalized == "needs_review":
+        return NEEDS_REVIEW
+    if normalized in {"failed", "unavailable"}:
+        return FAIL
+    if normalized in {"not_started", "generated"}:
+        return NOT_STARTED
+    return _normalise_status(normalized)
 
 
 def _ratio(numerator: Any, denominator: Any) -> float:
@@ -487,7 +511,7 @@ def build_tracker_diagnostic_report(
         or report.get("identity_status")
         or "not_started"
     ).lower()
-    identity_phase_status = PASS if identity_status == "verified" else FAIL if identity_status in {"failed", "needs_review", "unavailable"} else NOT_STARTED
+    identity_phase_status = _identity_phase_status(identity_status)
 
     normal_icons_total = int(report.get("normal_icons_total") or 0)
     normal_icons_showcased = int(report.get("normal_icons_showcased") or 0)

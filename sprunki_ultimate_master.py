@@ -681,13 +681,22 @@ class UnifiedProcessingManager:
             return False
 
         identity_payload: Dict[str, Any] = {}
+        identity_read_error: Optional[str] = None
         identity_path = expected_paths[0]
         if identity_path.exists():
             try:
                 with identity_path.open("r", encoding="utf-8-sig") as handle:
-                    identity_payload = json.load(handle)
-            except (OSError, json.JSONDecodeError) as exc:
+                    loaded_payload = json.load(handle)
+                if not isinstance(loaded_payload, dict):
+                    identity_read_error = "recorded_identity_json_invalid"
+                else:
+                    identity_payload = loaded_payload
+            except json.JSONDecodeError as exc:
+                identity_read_error = "recorded_identity_json_invalid"
                 self.logger.error("❌ Recorded identity JSON is invalid for %s: %s", project.name, exc)
+            except OSError as exc:
+                identity_read_error = "recorded_identity_json_read_failed"
+                self.logger.error("❌ Recorded identity JSON could not be read for %s: %s", project.name, exc)
 
         item.recorded_identity_files = [str(path) for path in expected_paths if path.exists()]
         missing_paths = [path.name for path in expected_paths if not path.exists()]
@@ -705,7 +714,25 @@ class UnifiedProcessingManager:
                 self.logger.error("Resolver errors: %s", completed.stderr.strip()[-2000:])
             return False
 
-        item.recorded_identity_status = str(identity_payload.get("status") or "generated")
+        if identity_read_error:
+            item.recorded_identity_status = "failed"
+            item.recorded_identity_reason = identity_read_error
+            item.recorded_identity_retryable = False
+            if completed.stdout:
+                self.logger.error("Resolver output: %s", completed.stdout.strip()[-2000:])
+            if completed.stderr:
+                self.logger.error("Resolver errors: %s", completed.stderr.strip()[-2000:])
+            return False
+
+        raw_identity_status = identity_payload.get("status")
+        if not isinstance(raw_identity_status, str) or not raw_identity_status.strip():
+            item.recorded_identity_status = "failed"
+            item.recorded_identity_reason = "recorded_identity_status_missing"
+            item.recorded_identity_retryable = False
+            self.logger.error("❌ Recorded identity JSON has no usable status for %s", project.name)
+            return False
+
+        item.recorded_identity_status = raw_identity_status.strip().lower()
         item.recorded_identity_reason = identity_payload.get("needsReviewReason")
         item.recorded_identity_retryable = bool(identity_payload.get("retryable", False))
 
