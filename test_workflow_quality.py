@@ -56,6 +56,36 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual((succeeded, attempted), (0, 0))
         self.assertFalse(result.meets(0.5))
 
+    def test_icon_showcase_exception_preserves_completed_icon_count(self):
+        import threading
+
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}, {"index": 1}],
+                "slots": [{"index": 0}],
+            },
+            "gameSettings": {},
+        }
+        player.stop_event = threading.Event()
+        player.character_identity_map_written = True
+        calls = []
+
+        def fake_showcase(icon, mode, listen_duration, progress_callback):
+            calls.append(icon["index"])
+            if len(calls) == 1:
+                return True
+            raise RuntimeError("late cleanup read timeout")
+
+        player.showcase_single_icon_corrected = fake_showcase
+
+        result = player.showcase_all_icons_corrected("Normal")
+
+        self.assertEqual(result, (1, 2))
+        self.assertEqual(calls, [0, 1])
+
     def test_master_thresholds_and_coverage_pass(self):
         report = verified_report()
         result = evaluate_workflow_report(report, require_identity=True)

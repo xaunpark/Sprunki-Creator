@@ -11028,6 +11028,8 @@ class SprunkiGamePlayer:
 
     def showcase_all_icons_corrected(self, mode="Normal", skip_icon_19=False, listen_duration=15, progress_callback=None):
         """ENHANCED: Showcase all icons - FLEXIBLE & RESILIENT"""
+        success_count = 0
+        total_count = 0
         try:
             if not self.config:
                 return 0, 0 # success_count, total_count
@@ -11064,7 +11066,6 @@ class SprunkiGamePlayer:
                 self.write_character_identity_map_for_current_project()
                 self.character_identity_map_written = True
 
-            success_count = 0
             consecutive_failures = 0
             FAILURE_THRESHOLD = 3  # Ngưỡng: 3 icon thất bại liên tiếp
 
@@ -11101,7 +11102,10 @@ class SprunkiGamePlayer:
                 
         except Exception as e:
             print("❌ Error in enhanced " + mode + " showcase: " + str(e))
-            return 0, len(self.config['layout']['icons']) if self.config else 0
+            # Preserve the verified successes already completed.  Returning
+            # ``0,total`` here erased real evidence whenever a late CDP read
+            # or cleanup check failed after one or more icons had been shown.
+            return success_count, total_count
 
     def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
         """
@@ -11328,6 +11332,12 @@ class SprunkiGamePlayer:
                 success, total = self.showcase_all_icons_corrected("Normal", skip_icon_19=configured_has_horror, progress_callback=progress_callback)
                 report.normal_icons_showcased = success
                 report.normal_icons_total = total
+                report.evidence["normalIconShowcase"] = {
+                    "showcased": success,
+                    "total": total,
+                    "failed": max(total - success, 0),
+                    "status": "PASS" if total > 0 and success == total else "FAIL",
+                }
                 if success < total:
                     is_normal_phase_perfect = False
                     report.issues.append(f"Normal showcase failed for {total - success} icon(s).")

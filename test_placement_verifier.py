@@ -268,6 +268,36 @@ class PlacementVerifierTests(unittest.TestCase):
         self.assertEqual(result.status, OperationStatus.UNKNOWN)
         self.assertIn("transition_seen", result.message)
 
+    def test_atomic_empty_return_transition_survives_late_read_timeout(self):
+        clock = FakeClock()
+        baseline = _snapshot(
+            1,
+            1,
+            characters_count=1,
+            putted_characters=1,
+        )
+        reads = iter([
+            _snapshot(2, 2, characters_count=0, putted_characters=0),
+            None,
+            None,
+            None,
+        ])
+
+        result = observe_until_verified(
+            baseline,
+            lambda: next(reads),
+            "return",
+            4,
+            timeout_ms=3000,
+            poll_ms=50,
+            clock=clock.now,
+            sleep_fn=clock.sleep,
+        )
+
+        self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
+        self.assertIn("atomic_empty_after_return_transition", result.message)
+        self.assertIn("characters_empty_after_return", result.evidence)
+
     def test_failure_signature_and_no_progress_stop_after_two_cycles(self):
         context = OperationContext.begin("place", 0, max_input_attempts=5)
         signature = "place:0:no_transition"

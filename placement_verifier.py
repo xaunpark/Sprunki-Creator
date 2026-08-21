@@ -630,6 +630,60 @@ def wait_for_stable_snapshot(
     return None
 
 
+def _confirmed_empty_return_result(
+    before_snapshot: PlacementSnapshot,
+    last_eval: Optional[TransitionEvaluation],
+    *,
+    direction: str,
+    operation_id: str,
+    reads: int,
+) -> Optional[OperationResult]:
+    """Promote an explicit one-icon -> empty cleanup transition.
+
+    A late CDP read can time out after an atomic snapshot already captured
+    both board counters at zero.  For a return operation, that snapshot is
+    sufficient when the same atomic read also proves that the board started
+    non-empty.  This is deliberately narrower than treating ``UNKNOWN`` as
+    success: placement still requires its normal stable target evidence, and
+    partial/unknown counters are never promoted.
+    """
+    if str(direction).lower() not in {"return", "cleanup"}:
+        return None
+    if last_eval is None or last_eval.status != OperationStatus.VERIFIED:
+        return None
+
+    details = dict(last_eval.details or {})
+    before_characters = details.get("beforeCharactersCount", before_snapshot.characters_count)
+    before_putted = details.get("beforePuttedCount", before_snapshot.putted_count)
+    after_characters = details.get("afterCharactersCount")
+    after_putted = details.get("afterPuttedCount")
+    if not all(
+        isinstance(value, int)
+        for value in (before_characters, before_putted, after_characters, after_putted)
+    ):
+        return None
+    if before_characters <= 0 or before_putted <= 0:
+        return None
+    if after_characters != 0 or after_putted != 0:
+        return None
+
+    details["targetSpecific"] = last_eval.target_specific
+    details["aggregateFallback"] = last_eval.aggregate_fallback
+    details["stabilityFallback"] = "atomic_empty_after_return"
+    return OperationResult(
+        OperationStatus.ALREADY_EMPTY,
+        operation_id=operation_id,
+        direction="return",
+        message="atomic_empty_after_return_transition",
+        evidence=tuple(last_eval.evidence) + (
+            "characters_empty_after_return",
+            "putted_empty_after_return",
+        ),
+        details=details,
+        reads=reads,
+    )
+
+
 def observe_until_verified(
     before: Any,
     read_snapshot: Callable[[], Any],
@@ -678,6 +732,15 @@ def observe_until_verified(
                 reads=reads,
             )
         if context is not None and context.expired(clock):
+            confirmed_empty = _confirmed_empty_return_result(
+                before_snapshot,
+                last_eval,
+                direction=direction,
+                operation_id=operation_id,
+                reads=reads,
+            )
+            if confirmed_empty is not None:
+                return confirmed_empty
             return OperationResult(
                 OperationStatus.STOPPED,
                 operation_id=operation_id,
@@ -686,6 +749,15 @@ def observe_until_verified(
                 reads=reads,
             )
         if context is not None and not context.can_read_again():
+            confirmed_empty = _confirmed_empty_return_result(
+                before_snapshot,
+                last_eval,
+                direction=direction,
+                operation_id=operation_id,
+                reads=reads,
+            )
+            if confirmed_empty is not None:
+                return confirmed_empty
             return OperationResult(
                 OperationStatus.UNKNOWN,
                 operation_id=operation_id,
@@ -707,6 +779,15 @@ def observe_until_verified(
         if current is None or not current.has_known_signal or current.read_error:
             consecutive_read_failures += 1
             if consecutive_read_failures >= 3:
+                confirmed_empty = _confirmed_empty_return_result(
+                    before_snapshot,
+                    last_eval,
+                    direction=direction,
+                    operation_id=operation_id,
+                    reads=reads,
+                )
+                if confirmed_empty is not None:
+                    return confirmed_empty
                 return OperationResult(
                     OperationStatus.UNKNOWN,
                     operation_id=operation_id,
@@ -726,6 +807,15 @@ def observe_until_verified(
                 )
                 consecutive_read_failures += 1
                 if consecutive_read_failures >= 3:
+                    confirmed_empty = _confirmed_empty_return_result(
+                        before_snapshot,
+                        last_eval,
+                        direction=direction,
+                        operation_id=operation_id,
+                        reads=reads,
+                    )
+                    if confirmed_empty is not None:
+                        return confirmed_empty
                     return OperationResult(
                         OperationStatus.UNKNOWN,
                         operation_id=operation_id,
@@ -773,6 +863,16 @@ def observe_until_verified(
         if remaining <= 0:
             break
         sleep_fn(min(safe_poll_ms / 1000.0, remaining))
+
+    confirmed_empty = _confirmed_empty_return_result(
+        before_snapshot,
+        last_eval,
+        direction=direction,
+        operation_id=operation_id,
+        reads=reads,
+    )
+    if confirmed_empty is not None:
+        return confirmed_empty
 
     status = OperationStatus.UNKNOWN if transition_seen or last_eval is None else OperationStatus.FAILED
     message = "transition_seen_but_not_stable" if transition_seen else (
