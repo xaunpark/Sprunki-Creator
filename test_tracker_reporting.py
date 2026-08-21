@@ -448,6 +448,148 @@ class TrackerReportingTests(unittest.TestCase):
         )
         self.assertTrue(all("/api/mods/" not in call[1] for call in client.session.calls))
 
+    def test_creator_mode_aliases_normalize_before_dispatch(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            from creator_api_client import CreatorService
+            from sprunki_ultimate_master import ProcessingItem
+
+        service = CreatorService.__new__(CreatorService)
+        cases = (
+            ("master", "master"),
+            ("normal", "master"),
+            ("individual", "individual"),
+            ("both", "both"),
+        )
+        for requested, expected in cases:
+            item = service._convert_job_to_processing_item(
+                {
+                    "id": 4000,
+                    "production_mode": requested,
+                    "mod_game_url": "https://cocrea.world/@author/mod",
+                }
+            )
+            self.assertEqual(item.mode, expected)
+            self.assertEqual(item.requested_production_mode, requested)
+
+        class API:
+            def update_job_progress(self, *args, **kwargs):
+                return True
+
+        class Manager:
+            def __init__(self):
+                self.dispatched = []
+
+            def _process_master_mode(self, item):
+                self.dispatched.append(item.mode)
+                return True
+
+            def _process_individual_mode(self, item):
+                self.dispatched.append(item.mode)
+                return True
+
+            def _process_both_mode_enhanced(self, item):
+                self.dispatched.append(item.mode)
+                return True
+
+        manager = Manager()
+        service.api_client = API()
+        service.processing_manager = manager
+        service.performance_analyzer = SimpleNamespace(
+            record_job_progress=lambda *args, **kwargs: None
+        )
+        normal_item = SimpleNamespace(
+            mode="normal",
+            requested_production_mode="normal",
+            project_slug="normal-alias",
+        )
+        self.assertTrue(service._process_with_progress_callbacks(normal_item, 4001))
+        self.assertEqual(manager.dispatched, ["master"])
+
+    def test_diagnostic_keeps_received_mode_and_reports_effective_master(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/normal-alias",
+            project_slug="normal-alias",
+            mode="master",
+            requested_production_mode="normal",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/normal-alias",
+                "layout": {"icons": [{"index": 0}], "slots": [{"index": 0}]},
+            },
+            failure_code=None,
+            error_message=None,
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=datetime(2026, 8, 20, 10, 0, 3),
+            recorded_identity_status="verified",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 4002, "production_mode": "normal"},
+            item,
+            passing_report(),
+            terminal_status="completed",
+        )
+
+        self.assertEqual(diagnostic["job"]["mode"], "normal")
+        self.assertEqual(diagnostic["job"]["effective_mode"], "master")
+        self.assertTrue(diagnostic["quality_gate"]["passed"])
+
+    def test_skip_is_internal_and_never_serialized_as_tracker_mode(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/skipped",
+            project_slug="skipped",
+            mode="skip",
+            requested_production_mode="skip",
+            json_data={},
+            failure_code="skipped_by_policy",
+            error_message="Skipped by local policy.",
+            recorded_identity_status="not_started",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 4003, "production_mode": "skip"},
+            item,
+            None,
+            terminal_status="failed",
+        )
+
+        self.assertNotEqual(diagnostic["job"]["mode"], "skip")
+        self.assertEqual(diagnostic["job"]["mode"], "unknown")
+        self.assertEqual(diagnostic["job"]["effective_mode"], "unknown")
+        self.assertEqual(diagnostic["job"]["internal_action"], "skip")
+        self.assertNotIn("production_mode", json.dumps(diagnostic))
+
+    def test_placement_failure_projects_failed_check_without_workflow_report(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/placement-failure-no-report",
+            project_slug="placement-failure-no-report",
+            mode="master",
+            json_data={},
+            failure_code="placement_not_verified",
+            error_message="placement_not_verified",
+            recorded_identity_status="not_started",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 4004, "production_mode": "master"},
+            item,
+            None,
+            terminal_status="failed",
+        )
+
+        placement = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "placement"
+        )
+        self.assertEqual(placement["status"], "FAIL")
+        self.assertIn("placement", diagnostic["quality_gate"]["failed_checks"])
+        self.assertEqual(diagnostic["summary"]["failure_code"], "placement_not_verified")
+
     def test_callback_422_logs_full_response_body(self):
         with contextlib.redirect_stdout(io.StringIO()):
             from creator_api_client import TrackerAPIClient

@@ -28,7 +28,9 @@ from smart_retry_manager import SmartRetryManager
 from file_validator import FileQualityValidator
 from manual_profile_manager import suggested_profile_path_for_url, url_key_from_url
 from workflow_quality import (
+    CREATOR_PRODUCTION_MODES,
     NON_RETRYABLE_FAILURE_CODES,
+    normalize_production_mode,
     validate_playable_layout,
 )
 from tracker_reporting import (
@@ -192,6 +194,9 @@ class TrackerAPIClient:
         
         self.capabilities = {
             'master': True,
+            # Backward-compatible Tracker alias.  The queue payload remains
+            # authoritative; Creator never rewrites every job to normal.
+            'normal': True,
             'individual': True, 
             'both': True,
             'max_concurrent': 1,
@@ -533,9 +538,13 @@ class TrackerAPIClient:
                     f"{requested_status!r}; use /api/queue/status/{{queue_id}}."
                 )
                 return False
+            requested_mode = summary.get('mode')
+            effective_mode = normalize_production_mode(requested_mode, allow_skip=True)
             payload = {
                 'status': summary.get('overallStatus'),
-                'mode': summary.get('mode'),
+                # ``skip`` is local policy state and must not be forwarded to
+                # Tracker, even through this deprecated non-terminal path.
+                'mode': None if effective_mode == 'skip' else requested_mode,
                 'output_path': manifest_data.get("projectInfo", {}).get("outputDirectory"),
                 'produced_at': summary.get('endTime'),
                 'production_details': summary.get('statusDetails'),
@@ -549,6 +558,8 @@ class TrackerAPIClient:
                 json=payload,
                 timeout=self.timeout
             )
+            if response.status_code != 200:
+                self._log_callback_failure("Legacy production-status", response)
             return response.status_code == 200
         except Exception as e:
             print(f"❌ Error updating mod production status: {e}")
@@ -970,6 +981,17 @@ class CreatorService:
             item = self._convert_job_to_processing_item(job)
             if getattr(item, "start_time", None) is None:
                 item.start_time = datetime.now()
+
+            self.logger.info(
+                "🎛️ Production mode for queue %s: requested=%s effective=%s",
+                queue_id,
+                getattr(item, "requested_production_mode", None),
+                item.mode,
+            )
+            print(
+                f"🎛️ Effective production mode: {item.mode} "
+                f"(requested={getattr(item, 'requested_production_mode', None)})"
+            )
             
             # --- HIỂN THỊ SLUG ĐỂ USER DỄ COPY ---
             print(f"🔑 Project Slug: {item.project_slug}")
@@ -1600,9 +1622,12 @@ class CreatorService:
         # Nếu không có URL, một slug dựa trên thời gian sẽ được tạo ra bên trong _create_slug_from_url.
         url_for_slug = game_url or ""
 
+        requested_mode = job.get('production_mode')
+        effective_mode = normalize_production_mode(requested_mode, allow_skip=True)
         item = ProcessingItem(
             source_url=game_url,
-            mode=job['production_mode'],
+            mode=effective_mode,
+            requested_production_mode=requested_mode,
             # SỬA ĐỔI QUAN TRỌNG: Gọi hàm mới và truyền URL vào
             project_slug=self._create_slug_from_url(url_for_slug)
         )
@@ -1683,6 +1708,15 @@ class CreatorService:
             stop_event propagation.
             """
             try:
+                item.mode = normalize_production_mode(item.mode, allow_skip=True)
+                service_logger = getattr(self, "logger", None)
+                if service_logger is not None:
+                    service_logger.info(
+                        "🎛️ Effective production mode for %s: %s (requested=%s)",
+                        item.project_slug,
+                        item.mode,
+                        getattr(item, "requested_production_mode", None),
+                    )
                 if item.mode == "skip":
                     self.processing_manager._record_quality_failure(
                         item,
@@ -1912,7 +1946,46 @@ class CreatorService:
     def _process_with_progress_callbacks(self, item, queue_id: int) -> bool:
         """Enhanced processing with progress callbacks - PHASE 1"""
         try:
-            mode = item.mode
+            mode = normalize_production_mode(item.mode, allow_skip=True)
+            item.mode = mode
+
+            if mode == "skip":
+                self.processing_manager._record_quality_failure(
+                    item,
+                    "skipped_by_policy",
+                    "Item was skipped by policy and did not run gameplay verification.",
+                )
+                self.api_client.update_job_progress(
+                    queue_id,
+                    'video_processing',
+                    'skipped_by_policy',
+                    0.0,
+                    'failed',
+                    error_details=item.error_message,
+                )
+                return False
+
+            if mode not in CREATOR_PRODUCTION_MODES:
+                error_details = f"Unsupported production mode: {mode}"
+                self.processing_manager._record_quality_failure(
+                    item,
+                    "unsupported_production_mode",
+                    error_details,
+                    evidence={
+                        "requestedMode": getattr(item, "requested_production_mode", None),
+                        "effectiveMode": mode,
+                    },
+                    retryable=False,
+                )
+                self.api_client.update_job_progress(
+                    queue_id,
+                    'video_processing',
+                    'unsupported_mode',
+                    0.0,
+                    'failed',
+                    error_details=error_details,
+                )
+                return False
             
             if mode == "master":
                 self.api_client.update_job_progress(
@@ -2112,7 +2185,7 @@ class CreatorService:
         block the job.
         """
         try:
-            mode = item.mode
+            mode = normalize_production_mode(item.mode, allow_skip=True)
             json_data = item.json_data
             if not json_data:
                 self.logger.error("Validation check failed: Input JSON data is missing.")

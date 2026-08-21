@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import urlparse
 
+from workflow_quality import normalize_production_mode
+
 
 SCHEMA_VERSION = "sprunki.tracker.report.v1"
 PASS = "PASS"
@@ -114,6 +116,11 @@ _FAILURE_CONTEXT = {
         "workflow",
         "Workflow bị dừng trước khi hoàn tất.",
         "Kiểm tra stop reason và phase cuối cùng đã chạy.",
+    ),
+    "unsupported_production_mode": (
+        "mode",
+        "Production mode không được Creator hỗ trợ.",
+        "Kiểm tra mode do Tracker gửi và mapping alias normal/master.",
     ),
 }
 
@@ -467,9 +474,24 @@ def build_tracker_diagnostic_report(
     )
     project_slug = getattr(item, "project_slug", None) or job.get("project_slug")
     # ``production_mode`` is the authoritative mode selected by Tracker for
-    # this queue attempt.  The ProcessingItem is a derived/local view and can
-    # be stale when a job is converted or resumed.
-    mode = job.get("production_mode") or getattr(item, "mode", None) or report.get("mode") or "unknown"
+    # this queue attempt.  Keep the received value for ``job.mode`` so Tracker
+    # can normalize its communication alias, while using the effective mode
+    # for all Creator-side threshold/phase projections.
+    requested_mode = (
+        job.get("production_mode")
+        or getattr(item, "requested_production_mode", None)
+        or getattr(item, "mode", None)
+        or report.get("mode")
+        or "unknown"
+    )
+    effective_mode = normalize_production_mode(requested_mode, allow_skip=True)
+    internal_action = "skip" if effective_mode == "skip" else None
+    # ``skip`` is an internal Creator action, never a Tracker production mode.
+    # Preserve a useful, non-production label in the diagnostic instead of
+    # leaking the internal value to Tracker.
+    mode = "unknown" if internal_action else requested_mode
+    if internal_action:
+        effective_mode = "unknown"
     failure_code = (
         getattr(item, "failure_code", None)
         or report.get("failure_code")
@@ -503,7 +525,13 @@ def build_tracker_diagnostic_report(
     placement_before = report.get("placement_before")
     placement_after = report.get("placement_after")
     placement_transactions = report.get("evidence", {}).get("placementTransactions", []) if isinstance(report.get("evidence"), dict) else []
-    placement_status = PASS if report.get("placement_verified") is True and placement_before != placement_after else FAIL if workflow_report else NOT_STARTED
+    placement_status = (
+        PASS
+        if report.get("placement_verified") is True and placement_before != placement_after
+        else FAIL
+        if workflow_report or failure_code == "placement_not_verified"
+        else NOT_STARTED
+    )
     cleanup_status = PASS if report.get("cleanup_verified") is True else FAIL if workflow_report else NOT_STARTED
     identity_status = str(
         getattr(item, "recorded_identity_status", None)
@@ -518,7 +546,7 @@ def build_tracker_diagnostic_report(
     normal_remixes_played = int(report.get("normal_remixes_played") or 0)
     icon_ratio = _ratio(normal_icons_showcased, normal_icons_total)
     remix_ratio = _ratio(normal_remixes_played, normal_remixes_total)
-    threshold_remix = 2 / 3 if str(mode).lower() in {"individual", "both"} else 0.50
+    threshold_remix = 2 / 3 if effective_mode in {"individual", "both"} else 0.50
     normal_gameplay_status = (
         PASS
         if normal_icons_total > 0
@@ -539,7 +567,7 @@ def build_tracker_diagnostic_report(
         "cleanup": cleanup_status,
         "identity": identity_phase_status,
     }
-    if str(mode).lower() == "both":
+    if effective_mode == "both":
         phase_statuses["master"] = _phase_status_from_report(phase_reports.get("master") or {})
         phase_statuses["individual"] = _phase_status_from_report(phase_reports.get("individual") or {})
 
@@ -553,7 +581,7 @@ def build_tracker_diagnostic_report(
         phase_statuses["cleanup"],
         phase_statuses["normal_gameplay"],
     ]
-    if str(mode).lower() == "both":
+    if effective_mode == "both":
         blocking_statuses.extend(
             phase_statuses[name] for name in ("master", "individual")
         )
@@ -648,7 +676,7 @@ def build_tracker_diagnostic_report(
             accepted_by_policy=True,
         ),
     ]
-    if str(mode).lower() == "both":
+    if effective_mode == "both":
         for phase_name in ("master", "individual"):
             phase_report = phase_reports.get(phase_name)
             checks.append(
@@ -737,6 +765,8 @@ def build_tracker_diagnostic_report(
             "attempt": attempt,
             "max_attempts": max_attempts,
             "mode": mode,
+            "effective_mode": effective_mode,
+            "internal_action": internal_action,
             "producer": job.get("producer") or job.get("service_name"),
         },
         "mod": {

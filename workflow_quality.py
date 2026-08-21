@@ -26,9 +26,45 @@ NON_RETRYABLE_FAILURE_CODES = frozenset(
         "phase_skipped",
         "manual_json_invalid",
         "skipped_by_policy",
+        "unsupported_production_mode",
         "workflow_stopped",
     }
 )
+
+
+# Tracker may use ``normal`` as its canonical database value while the
+# Creator-facing queue contract uses ``master`` for the same full-showcase
+# workflow.  Keep the translation in one pure helper so claim, retry,
+# dispatch, manifest and quality-gate paths cannot drift apart.
+PRODUCTION_MODE_ALIASES = {
+    "normal": "master",
+    "master": "master",
+    "individual": "individual",
+    "both": "both",
+    "horror": "horror",
+    "skip": "skip",
+}
+
+
+def normalize_production_mode(value: Any, *, allow_skip: bool = True) -> str:
+    """Return the Creator's effective mode for a Tracker job.
+
+    ``normal`` is an external alias for the Creator's ``master`` workflow.
+    ``skip`` is retained only for local policy handling and must never be
+    serialized as a Tracker production mode.  Unknown values remain visible
+    to the caller so they can be rejected with an explicit diagnostic rather
+    than silently falling into another workflow.
+    """
+
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "unknown"
+    if raw == "skip" and not allow_skip:
+        return "unknown"
+    return PRODUCTION_MODE_ALIASES.get(raw, raw)
+
+
+CREATOR_PRODUCTION_MODES = frozenset({"master", "individual", "both"})
 
 
 @dataclass
@@ -272,11 +308,25 @@ def evaluate_workflow_report(
     blocker under the Tracker Diagnostic Contract.
     """
 
-    effective_mode = (mode or report.mode or "master").lower()
+    effective_mode = normalize_production_mode(mode or report.mode or "master", allow_skip=False)
     identity = str(identity_status or report.identity_status or "not_started").lower()
     report.identity_status = identity
     coverage = dict(report.coverage or {})
     coverage.setdefault("horror", "not_checked_by_policy")
+
+    if effective_mode not in CREATOR_PRODUCTION_MODES and effective_mode not in {
+        "remix_only",
+        "remix-only",
+        "test",
+    }:
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "unsupported_production_mode",
+                coverage=coverage,
+                evidence={"requestedMode": mode or report.mode, "effectiveMode": effective_mode},
+                message=f"Unsupported production mode: {mode or report.mode}",
+            )
+        )
 
     if report.layout_icons <= 0:
         return report.apply_quality_gate(

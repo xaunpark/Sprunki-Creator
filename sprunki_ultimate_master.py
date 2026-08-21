@@ -25,9 +25,11 @@ try:
     from sprunki_obs_controller import SprunkiController
     from json_generator import SprunkiJSONGenerator
     from workflow_quality import (
+        CREATOR_PRODUCTION_MODES,
         QualityGateResult,
         WorkflowReport,
         evaluate_workflow_report,
+        normalize_production_mode,
         validate_playable_layout,
     )
 except ImportError as e:
@@ -69,6 +71,7 @@ class ProcessingItem:
     json_path: Optional[str] = None
     json_data: Optional[Dict[str, Any]] = None
     mode: str = "both"
+    requested_production_mode: Optional[str] = None
     status: str = "pending"
     error_message: Optional[str] = None
     output_files: List[str] = field(default_factory=list)
@@ -88,6 +91,14 @@ class ProcessingItem:
     recorded_identity_reason: Optional[str] = None
     recorded_identity_retryable: bool = False
     recorded_identity_files: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Tracker's ``normal`` queue value and Creator's ``master`` workflow
+        # are the same full-showcase operation.  Keep the received value for
+        # diagnostics, but use only the effective mode internally.
+        if self.requested_production_mode is None:
+            self.requested_production_mode = self.mode
+        self.mode = normalize_production_mode(self.mode, allow_skip=True)
 
     @property
     def display_name(self) -> str:
@@ -766,6 +777,7 @@ class UnifiedProcessingManager:
         Thu thập dữ liệu và tạo file manifest.json cho một item đã xử lý xong.
         """
         try:
+            item.mode = normalize_production_mode(item.mode, allow_skip=True)
             self.logger.info(f"📄 Generating manifest for {item.project_slug}...")
             
             if not self.config:
@@ -1294,6 +1306,7 @@ class UnifiedProcessingManager:
         Recorded identity is intentionally diagnostic-only.  It is preserved
         on the item/report for Tracker tags but does not block completion.
         """
+        item.mode = normalize_production_mode(item.mode, allow_skip=True)
         report = item.workflow_report
         if not isinstance(report, WorkflowReport):
             player_report = getattr(getattr(self.master_controller, "game_player", None), "last_workflow_report", None)
@@ -1380,6 +1393,26 @@ class UnifiedProcessingManager:
             (previous_report.evidence.get("retryAttempts", []) if previous_report else []) or []
         )
         try:
+            item.mode = normalize_production_mode(item.mode, allow_skip=True)
+            self.logger.info(
+                "🎛️ Effective production mode for %s: %s (requested=%s)",
+                item.project_slug,
+                item.mode,
+                getattr(item, "requested_production_mode", None),
+            )
+            if item.mode not in CREATOR_PRODUCTION_MODES and item.mode != "skip":
+                self._record_quality_failure(
+                    item,
+                    "unsupported_production_mode",
+                    f"Unsupported production mode: {item.mode}",
+                    evidence={
+                        "requestedMode": getattr(item, "requested_production_mode", None),
+                        "effectiveMode": item.mode,
+                    },
+                    retryable=False,
+                )
+                return False
+
             item.status = "processing"
             if not item.start_time:
                 item.start_time = datetime.now()
