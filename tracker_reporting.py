@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -440,6 +441,7 @@ def build_tracker_diagnostic_report(
     log_snapshot: Optional[Dict[str, Any]] = None,
     output_files_payload: Optional[Dict[str, Any]] = None,
     report_id: Optional[str] = None,
+    attempt_nonce: Optional[str] = None,
     attempt: int = 1,
     max_attempts: Optional[int] = None,
     generated_at: Optional[datetime] = None,
@@ -464,7 +466,10 @@ def build_tracker_diagnostic_report(
         or ""
     )
     project_slug = getattr(item, "project_slug", None) or job.get("project_slug")
-    mode = getattr(item, "mode", None) or job.get("production_mode") or report.get("mode") or "unknown"
+    # ``production_mode`` is the authoritative mode selected by Tracker for
+    # this queue attempt.  The ProcessingItem is a derived/local view and can
+    # be stale when a job is converted or resumed.
+    mode = job.get("production_mode") or getattr(item, "mode", None) or report.get("mode") or "unknown"
     failure_code = (
         getattr(item, "failure_code", None)
         or report.get("failure_code")
@@ -483,15 +488,9 @@ def build_tracker_diagnostic_report(
         )
     if not workflow_report and not failure_code:
         failure_code = "runtime_verification_unknown"
-    gate_passed = gate.get("passed") is True
-    requested_status = str(terminal_status or ("completed" if gate_passed else "failed")).lower()
-    final_status = "failed" if requested_status == "completed" and not gate_passed else requested_status
-    if final_status == "completed" and gate_passed:
-        # A passing core gate is authoritative; stale legacy item errors must
-        # not turn into a blocking failure in a completed report.
-        failure_code = None
-    elif final_status != "completed" and not failure_code:
-        failure_code = "workflow_stopped"
+    reported_gate_passed = gate.get("passed") is True
+    requested_status = str(terminal_status or ("completed" if reported_gate_passed else "failed")).lower()
+    final_status = requested_status
     gate_status = _normalise_status(gate.get("status") or (PASS if gate.get("passed") is True else UNKNOWN if not workflow_report else FAIL))
     retryable = bool(
         getattr(item, "recorded_identity_retryable", False)
@@ -544,6 +543,38 @@ def build_tracker_diagnostic_report(
         phase_statuses["master"] = _phase_status_from_report(phase_reports.get("master") or {})
         phase_statuses["individual"] = _phase_status_from_report(phase_reports.get("individual") or {})
 
+    # Tracker must never receive ``completed`` when a generated required
+    # check is not verified, even if an older workflow report incorrectly
+    # marked its aggregate gate as passed.
+    blocking_statuses = [
+        PASS if icons and slots else FAIL,
+        phase_statuses["runtime_entry"],
+        phase_statuses["placement"],
+        phase_statuses["cleanup"],
+        phase_statuses["normal_gameplay"],
+    ]
+    if str(mode).lower() == "both":
+        blocking_statuses.extend(
+            phase_statuses[name] for name in ("master", "individual")
+        )
+    blocking_checks_passed = all(status == PASS for status in blocking_statuses)
+    gate_passed = reported_gate_passed and blocking_checks_passed
+    if requested_status == "completed" and not gate_passed:
+        final_status = "failed"
+        if not failure_code:
+            if phase_statuses["placement"] != PASS:
+                failure_code = "placement_not_verified"
+            elif phase_statuses["runtime_entry"] != PASS:
+                failure_code = "runtime_verification_unknown"
+            else:
+                failure_code = gate.get("failure_code") or "workflow_stopped"
+    if final_status == "completed" and gate_passed:
+        # A passing core gate is authoritative; stale legacy item errors must
+        # not turn into a blocking failure in a completed report.
+        failure_code = None
+    elif final_status != "completed" and not failure_code:
+        failure_code = "workflow_stopped"
+
     checks = [
         _check(
             "layout",
@@ -565,8 +596,12 @@ def build_tracker_diagnostic_report(
         _check(
             "placement",
             placement_status,
-            failure_code="placement_not_verified" if placement_status != PASS else None,
+            # The quality contract identifies the check by name.  Keep the
+            # diagnostic reason in evidence instead of creating a second
+            # failure-code namespace on the check itself.
+            failure_code=None,
             evidence={
+                "reason": "placement_not_verified" if placement_status != PASS else None,
                 "before": placement_before,
                 "after": placement_after,
                 "delta": placement_after - placement_before
@@ -578,8 +613,11 @@ def build_tracker_diagnostic_report(
         _check(
             "cleanup",
             cleanup_status,
-            failure_code="placement_not_verified" if cleanup_status != PASS else None,
-            evidence={"cleanup_verified": report.get("cleanup_verified")},
+            failure_code=None,
+            evidence={
+                "reason": "cleanup_not_verified" if cleanup_status != PASS else None,
+                "cleanup_verified": report.get("cleanup_verified"),
+            },
         ),
         _check(
             "normal_icons",
@@ -662,7 +700,9 @@ def build_tracker_diagnostic_report(
     generated = generated_at or datetime.now()
     generated_iso = generated.isoformat() if isinstance(generated, datetime) else str(generated)
     if not report_id:
-        report_id = f"job-{job.get('id', 'unknown')}-{generated.strftime('%Y%m%d%H%M%S%f')}"
+        report_id = str(uuid.uuid4())
+    if not attempt_nonce:
+        attempt_nonce = str(uuid.uuid4())
 
     start_time = getattr(item, "start_time", None) if item is not None else None
     end_time = getattr(item, "end_time", None) if item is not None else None
@@ -687,6 +727,7 @@ def build_tracker_diagnostic_report(
     diagnostic = {
         "schema_version": SCHEMA_VERSION,
         "report_id": report_id,
+        "attempt_nonce": attempt_nonce,
         "generated_at": generated_iso,
         "status": final_status,
         "job": {
@@ -718,6 +759,7 @@ def build_tracker_diagnostic_report(
             "input_snapshot": input_snapshot,
         },
         "summary": {
+            "status": final_status,
             "outcome": final_status,
             "headline": headline,
             "blocking_stage": context[0] if final_status != "completed" else None,
@@ -789,8 +831,8 @@ def build_tracker_diagnostic_report(
             "phase_reports": phase_reports,
         },
         "quality_gate": {
-            "passed": gate_passed,
-            "status": gate_status,
+            "passed": gate_passed and final_status == "completed",
+            "status": gate_status if final_status == "completed" else FAIL,
             "failure_code": failure_code,
             "retryable": retryable,
             "coverage": report.get("coverage") or gate.get("coverage") or {},

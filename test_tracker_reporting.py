@@ -340,8 +340,192 @@ class TrackerReportingTests(unittest.TestCase):
         self.assertEqual(client.session.payload["schema_version"], SCHEMA_VERSION)
         self.assertTrue(client.session.payload["final"])
         self.assertEqual(client.session.payload["report_id"], "report-1")
+        self.assertTrue(client.session.payload["attempt_nonce"])
         self.assertEqual(client.session.payload["sequence"], 7)
         self.assertIn("diagnostic_report", client.session.payload)
+        self.assertEqual(
+            client.session.payload["diagnostic_report"]["attempt_nonce"],
+            client.session.payload["attempt_nonce"],
+        )
+
+    def test_tracker_attempt_callbacks_share_identity_and_sequence(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            from creator_api_client import TrackerAPIClient
+
+        class Response:
+            status_code = 200
+            text = '{"accepted":true}'
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            def put(self, url, json, timeout):
+                self.calls.append(("PUT", url, json))
+                return Response()
+
+            def post(self, url, json, timeout):
+                self.calls.append(("POST", url, json))
+                return Response()
+
+        client = TrackerAPIClient.__new__(TrackerAPIClient)
+        client.tracker_url = "http://tracker.test"
+        client.timeout = 3
+        client.service_name = "creator-contract-test"
+        client.session = Session()
+
+        queue_id = 900001
+        report_id = "report-900001"
+        attempt_nonce = "nonce-900001"
+        client.bind_job_report(queue_id, report_id, attempt_nonce)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(
+                client.update_job_status(
+                    queue_id,
+                    "processing",
+                    details={"stage": "starting"},
+                    report_id=report_id,
+                    attempt_nonce=attempt_nonce,
+                    sequence=0,
+                    stage="video_processing",
+                    final=False,
+                )
+            )
+            self.assertTrue(
+                client.update_job_progress(
+                    queue_id,
+                    "video_processing",
+                    "starting",
+                    50,
+                    "active",
+                )
+            )
+            self.assertTrue(
+                client.update_job_status(
+                    queue_id,
+                    "failed",
+                    report_id=report_id,
+                    attempt_nonce=attempt_nonce,
+                    diagnostic_report={
+                        "schema_version": "wrong",
+                        "report_id": "wrong",
+                        "attempt_nonce": "wrong",
+                        "status": "failed",
+                        "job": {},
+                        "mod": {},
+                        "summary": {},
+                        "timing": {},
+                        "phases": {"statuses": {}},
+                        "quality_gate": {"passed": False, "checks": []},
+                        "outputs": {},
+                        "logs": {},
+                    },
+                    final=True,
+                )
+            )
+
+        self.assertEqual([call[2]["sequence"] for call in client.session.calls], [0, 1, 2])
+        self.assertEqual(
+            {call[2]["report_id"] for call in client.session.calls},
+            {report_id},
+        )
+        self.assertEqual(
+            {call[2]["attempt_nonce"] for call in client.session.calls},
+            {attempt_nonce},
+        )
+        self.assertFalse(client.session.calls[0][2]["final"])
+        self.assertFalse(client.session.calls[1][2]["final"])
+        terminal_payload = client.session.calls[2][2]
+        self.assertTrue(terminal_payload["final"])
+        self.assertEqual(terminal_payload["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(terminal_payload["worker_id"], "creator-contract-test")
+        self.assertEqual(
+            terminal_payload["diagnostic_report"]["report_id"], report_id
+        )
+        self.assertEqual(
+            terminal_payload["diagnostic_report"]["attempt_nonce"], attempt_nonce
+        )
+        self.assertTrue(all("/api/mods/" not in call[1] for call in client.session.calls))
+
+    def test_callback_422_logs_full_response_body(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            from creator_api_client import TrackerAPIClient
+
+        class Response:
+            status_code = 422
+            text = '{"error_code":"attempt_nonce_required","message":"Terminal status requires attempt_nonce."}'
+
+        class Session:
+            def put(self, url, json, timeout):
+                return Response()
+
+        client = TrackerAPIClient.__new__(TrackerAPIClient)
+        client.tracker_url = "http://tracker.test"
+        client.timeout = 3
+        client.service_name = "creator-contract-test"
+        client.session = Session()
+        client.bind_job_report(900002, "report-900002", "nonce-900002")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = client.update_job_status(
+                900002,
+                "processing",
+                sequence=0,
+                final=False,
+                stage="video_processing",
+            )
+
+        self.assertFalse(result)
+        self.assertIn("HTTP 422", output.getvalue())
+        self.assertIn("attempt_nonce_required", output.getvalue())
+        self.assertIn("Terminal status requires attempt_nonce.", output.getvalue())
+
+    def test_completed_report_is_downgraded_when_placement_fails(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/placement-failure",
+            project_slug="placement-failure",
+            mode="individual",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/placement-failure",
+                "layout": {"icons": [{"index": 0}], "slots": [{"index": 0}]},
+            },
+            failure_code=None,
+            error_message="placement_not_verified",
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=datetime(2026, 8, 20, 10, 0, 2),
+            recorded_identity_status="unavailable",
+            recorded_identity_reason="missing_timestamps",
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        report = passing_report()
+        report.placement_verified = False
+
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 3079, "mod_id": 196711, "production_mode": "master"},
+            item,
+            report,
+            report_id="report-3079",
+            attempt_nonce="nonce-3079",
+            terminal_status="completed",
+        )
+
+        self.assertEqual(diagnostic["status"], "failed")
+        self.assertEqual(diagnostic["summary"]["status"], "failed")
+        self.assertEqual(diagnostic["summary"]["failure_code"], "placement_not_verified")
+        self.assertFalse(diagnostic["quality_gate"]["passed"])
+        self.assertEqual(diagnostic["job"]["mode"], "master")
+        placement_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "placement"
+        )
+        self.assertIsNone(placement_check["failure_code"])
+        self.assertEqual(placement_check["evidence"]["reason"], "placement_not_verified")
+        self.assertEqual(diagnostic["attempt_nonce"], "nonce-3079")
+        for section in ("mod", "summary", "timing", "phases", "quality_gate", "outputs", "logs"):
+            self.assertIn(section, diagnostic)
 
     def test_creator_finalizer_sends_one_authoritative_diagnostic_report(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -382,6 +566,7 @@ class TrackerReportingTests(unittest.TestCase):
 
             def __init__(self):
                 self.final_calls = []
+                self.legacy_calls = 0
 
             def update_job_status(self, *args, **kwargs):
                 if kwargs.get("final"):
@@ -392,6 +577,7 @@ class TrackerReportingTests(unittest.TestCase):
                 return True
 
             def update_mod_production_status(self, *args, **kwargs):
+                self.legacy_calls += 1
                 return True
 
         item = SimpleNamespace(
@@ -462,8 +648,13 @@ class TrackerReportingTests(unittest.TestCase):
         payload = service.api_client.final_calls[0]
         self.assertTrue(payload["final"])
         self.assertEqual(payload["status"], "failed")
+        self.assertTrue(payload["attempt_nonce"])
+        self.assertEqual(
+            payload["diagnostic_report"]["attempt_nonce"], payload["attempt_nonce"]
+        )
         self.assertEqual(payload["diagnostic_report"]["summary"]["failure_code"], "no_icons")
         self.assertIn("logs", payload["diagnostic_report"])
+        self.assertEqual(service.api_client.legacy_calls, 0)
 
     def test_creator_completion_ignores_moved_output_transport_failure(self):
         with contextlib.redirect_stdout(io.StringIO()):

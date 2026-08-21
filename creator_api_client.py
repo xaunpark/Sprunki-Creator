@@ -186,7 +186,9 @@ class TrackerAPIClient:
         self.session = requests.Session()
         self.timeout = 30
         self._active_report_ids = {}
+        self._active_attempts = {}
         self._progress_sequences = {}
+        self._callback_state_lock = threading.Lock()
         
         self.capabilities = {
             'master': True,
@@ -207,26 +209,110 @@ class TrackerAPIClient:
         print(f"   Service: {self.service_name}")
         print(f"   Tracker: {self.tracker_url}")
 
-    def bind_job_report(self, queue_id: int, report_id: str) -> None:
-        """Associate progress events with the job's final diagnostic report."""
+    def _ensure_attempt(
+        self,
+        queue_id: int,
+        report_id: Optional[str] = None,
+        attempt_nonce: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return the immutable callback identity for one queue attempt."""
+        if not hasattr(self, "_active_attempts"):
+            self._active_attempts = {}
         if not hasattr(self, "_active_report_ids"):
             self._active_report_ids = {}
         if not hasattr(self, "_progress_sequences"):
             self._progress_sequences = {}
-        self._active_report_ids[queue_id] = report_id
+
+        existing = self._active_attempts.get(queue_id)
+        if existing is not None:
+            if report_id and report_id != existing["report_id"]:
+                raise ValueError(f"report_id changed within queue attempt {queue_id}")
+            if attempt_nonce and attempt_nonce != existing["attempt_nonce"]:
+                raise ValueError(f"attempt_nonce changed within queue attempt {queue_id}")
+            return existing
+
+        state = {
+            "report_id": report_id or str(uuid.uuid4()),
+            "attempt_nonce": attempt_nonce or str(uuid.uuid4()),
+            "next_sequence": 0,
+        }
+        self._active_attempts[queue_id] = state
+        self._active_report_ids[queue_id] = state["report_id"]
         self._progress_sequences[queue_id] = 0
+        return state
+
+    def bind_job_report(
+        self,
+        queue_id: int,
+        report_id: Optional[str] = None,
+        attempt_nonce: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Bind immutable diagnostic identity and reset the shared sequence."""
+        state = self._ensure_attempt(queue_id, report_id, attempt_nonce)
+        return {
+            "report_id": state["report_id"],
+            "attempt_nonce": state["attempt_nonce"],
+        }
 
     def unbind_job_report(self, queue_id: int) -> None:
+        if hasattr(self, "_active_attempts"):
+            self._active_attempts.pop(queue_id, None)
         if hasattr(self, "_active_report_ids"):
             self._active_report_ids.pop(queue_id, None)
         if hasattr(self, "_progress_sequences"):
             self._progress_sequences.pop(queue_id, None)
 
     def _next_progress_sequence(self, queue_id: int) -> int:
-        if not hasattr(self, "_progress_sequences"):
-            self._progress_sequences = {}
-        self._progress_sequences[queue_id] = self._progress_sequences.get(queue_id, 0) + 1
-        return self._progress_sequences[queue_id]
+        state = self._ensure_attempt(queue_id)
+        lock = getattr(self, "_callback_state_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._callback_state_lock = lock
+        with lock:
+            sequence = state["next_sequence"]
+            state["next_sequence"] = sequence + 1
+            self._progress_sequences[queue_id] = state["next_sequence"]
+        return sequence
+
+    def _reserve_callback_sequence(self, queue_id: int, sequence: Optional[int]) -> int:
+        """Reserve one monotonically increasing sequence shared by callbacks."""
+        state = self._ensure_attempt(queue_id)
+        lock = getattr(self, "_callback_state_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._callback_state_lock = lock
+        with lock:
+            expected = state["next_sequence"]
+            effective = expected if sequence is None else int(sequence)
+            if effective < expected:
+                raise ValueError(
+                    f"sequence {effective} is stale for queue attempt {queue_id}; expected >= {expected}"
+                )
+            state["next_sequence"] = effective + 1
+            self._progress_sequences[queue_id] = state["next_sequence"]
+            return effective
+
+    @staticmethod
+    def _diagnostic_for_attempt(
+        diagnostic_report: Optional[Dict],
+        report_id: str,
+        attempt_nonce: str,
+    ) -> Optional[Dict]:
+        if not isinstance(diagnostic_report, dict):
+            return diagnostic_report
+        normalized = dict(diagnostic_report)
+        normalized["schema_version"] = TRACKER_REPORT_SCHEMA_VERSION
+        normalized["report_id"] = report_id
+        normalized["attempt_nonce"] = attempt_nonce
+        return normalized
+
+    @staticmethod
+    def _log_callback_failure(callback_name: str, response) -> None:
+        body = getattr(response, "text", "")
+        print(
+            f"⚠️ {callback_name} callback failed: HTTP {getattr(response, 'status_code', 'unknown')}"
+            f" - response body: {body}"
+        )
     
     def register_service(self) -> bool:
         """Register this Creator instance with Tracker"""
@@ -307,15 +393,28 @@ class TrackerAPIClient:
                          log_ref: Optional[Dict] = None,
                          report_id: Optional[str] = None,
                          final: bool = False,
-                         sequence: Optional[int] = None) -> bool:
-        """Update job status in Tracker with backward-compatible diagnostics.
-
-        ``final`` is intentionally explicit.  Intermediate status calls may
-        still be accepted by older Trackers, but only the final call carries
-        the authoritative quality/evidence report.
-        """
+                         sequence: Optional[int] = None,
+                         attempt_nonce: Optional[str] = None,
+                         stage: Optional[str] = None,
+                         worker_id: Optional[str] = None) -> bool:
+        """Send a status callback using the current queue-attempt identity."""
         try:
-            active_report_id = getattr(self, "_active_report_ids", {}).get(queue_id)
+            state = self._ensure_attempt(queue_id, report_id, attempt_nonce)
+            effective_report_id = state["report_id"]
+            effective_attempt_nonce = state["attempt_nonce"]
+            normalized_diagnostic = self._diagnostic_for_attempt(
+                diagnostic_report,
+                effective_report_id,
+                effective_attempt_nonce,
+            )
+            if final and not isinstance(normalized_diagnostic, dict):
+                print(
+                    f"⚠️ Terminal status callback for queue {queue_id} requires diagnostic_report."
+                )
+                return False
+            if final and isinstance(normalized_diagnostic, dict):
+                normalized_diagnostic["status"] = status
+            effective_sequence = self._reserve_callback_sequence(queue_id, sequence)
             payload = {
                 'status': status,
                 'details': details,
@@ -325,12 +424,15 @@ class TrackerAPIClient:
             }
             payload.update({
                 'schema_version': TRACKER_REPORT_SCHEMA_VERSION,
-                'diagnostic_report': diagnostic_report,
+                'diagnostic_report': normalized_diagnostic,
                 'manifest_ref': manifest_ref,
                 'log_ref': log_ref,
-                'report_id': report_id or active_report_id,
+                'report_id': effective_report_id,
+                'attempt_nonce': effective_attempt_nonce,
+                'stage': stage or (details or {}).get('stage'),
+                'worker_id': worker_id or getattr(self, 'service_name', 'creator'),
                 'final': bool(final),
-                'sequence': sequence,
+                'sequence': effective_sequence,
             })
             
             response = self.session.put(
@@ -343,7 +445,7 @@ class TrackerAPIClient:
                 print(f"📊 Updated job {queue_id} status: {status}")
                 return True
             else:
-                print(f"⚠️ Status update failed: {response.status_code} - {response.text}")
+                self._log_callback_failure("Status", response)
                 return False
                 
         except Exception as e:
@@ -354,23 +456,26 @@ class TrackerAPIClient:
                         progress_percent: float = 0.0, status: str = 'active',
                         metadata: Optional[Dict] = None, error_details: Optional[str] = None,
                         report_id: Optional[str] = None, sequence: Optional[int] = None,
-                        final: bool = False) -> bool:
-        """Report detailed job progress to Tracker - PHASE 1"""
+                        final: bool = False,
+                        attempt_nonce: Optional[str] = None,
+                        worker_id: Optional[str] = None) -> bool:
+        """Send a progress callback using the current queue-attempt identity."""
         try:
-            active_report_id = getattr(self, "_active_report_ids", {}).get(queue_id)
-            effective_report_id = report_id or active_report_id
-            effective_sequence = sequence
-            if effective_sequence is None and effective_report_id:
-                effective_sequence = self._next_progress_sequence(queue_id)
+            state = self._ensure_attempt(queue_id, report_id, attempt_nonce)
+            effective_report_id = state["report_id"]
+            effective_attempt_nonce = state["attempt_nonce"]
+            effective_sequence = self._reserve_callback_sequence(queue_id, sequence)
             payload = {
                 'stage': stage,
                 'substep': substep,
                 'progress_percent': progress_percent,
                 'status': status,
-                'metadata': metadata,
+                'metadata': metadata or {},
                 'error_details': error_details,
                 'schema_version': TRACKER_REPORT_SCHEMA_VERSION,
                 'report_id': effective_report_id,
+                'attempt_nonce': effective_attempt_nonce,
+                'worker_id': worker_id or getattr(self, 'service_name', 'creator'),
                 'sequence': effective_sequence,
                 'final': bool(final),
             }
@@ -387,7 +492,7 @@ class TrackerAPIClient:
                     print(f"📊 Progress {queue_id}: {stage}/{substep} -> {progress_percent}% ({status})")
                 return True
             else:
-                print(f"⚠️ Progress update failed: {response.status_code}")
+                self._log_callback_failure("Progress", response)
                 return False
             
         except Exception as e:
@@ -414,9 +519,20 @@ class TrackerAPIClient:
             return {}
 
     def update_mod_production_status(self, mod_id: int, manifest_data: Dict) -> bool:
-        """Gửi thông tin từ manifest để cập nhật production_status của mod."""
+        """Deprecated legacy endpoint; terminal state belongs to queue status."""
         try:
             summary = manifest_data.get("processingSummary", {})
+            requested_status = str(summary.get('overallStatus') or '').strip().lower()
+            if requested_status in {
+                'success', 'successful', 'completed', 'complete',
+                'failed', 'failure', 'partial_success', 'partial-success',
+                'cancelled', 'canceled',
+            }:
+                print(
+                    f"⚠️ Skipping legacy production-status callback for terminal status "
+                    f"{requested_status!r}; use /api/queue/status/{{queue_id}}."
+                )
+                return False
             payload = {
                 'status': summary.get('overallStatus'),
                 'mode': summary.get('mode'),
@@ -797,26 +913,59 @@ class CreatorService:
         final_success = False
         start_time = time.monotonic()
         terminal_error = None
-        report_id = f"{getattr(self.api_client, 'service_name', 'creator')}:{queue_id}:{uuid.uuid4().hex}"
+        # These two identifiers are immutable for the lifetime of this queue
+        # attempt.  Tracker does not provide attempt_nonce in /queue/next.
+        report_id = str(uuid.uuid4())
+        attempt_nonce = str(uuid.uuid4())
+        attempt_bound = False
         bind_report = getattr(self.api_client, "bind_job_report", None)
         if callable(bind_report):
-            bind_report(queue_id, report_id)
+            try:
+                bind_report(queue_id, report_id, attempt_nonce)
+            except TypeError:
+                # Keep test doubles/older local adapters callable while the
+                # real Tracker client always receives both identifiers.
+                bind_report(queue_id, report_id)
         
         # 1. TẠO CỜ DỪNG RIÊNG CHO JOB NÀY
         job_stop_event = threading.Event()
         
-        # 2. Bắt đầu Watchdog và truyền cờ stop của job vào
-        watchdog_thread = threading.Thread(
-            target=self._job_watchdog,
-            args=(queue_id, start_time, job_stop_event),
-            daemon=True
-        )
-        watchdog_thread.start()
-        self.logger.info(f"🐶 Watchdog started for job {queue_id}.")
-        
         try:
-            # 3. Truyền cờ stop của job xuống các tầng dưới
+            # Bind the attempt before doing any work.  Processing is allowed
+            # to continue only after Tracker accepts sequence 0.
+            attempt_bound = self.api_client.update_job_status(
+                queue_id,
+                'processing',
+                {
+                    'stage': 'starting',
+                    'started_by': getattr(self.api_client, 'service_name', 'creator'),
+                },
+                report_id=report_id,
+                attempt_nonce=attempt_nonce,
+                final=False,
+                sequence=0,
+                stage='video_processing',
+                worker_id=getattr(self.api_client, 'service_name', 'creator'),
+            )
+            if not attempt_bound:
+                terminal_error = "Tracker rejected the attempt-binding callback; job processing was not started."
+                self.logger.error(
+                    "❌ Cannot start job %s because Tracker did not accept the sequence-0 binding callback.",
+                    queue_id,
+                )
+                return False
+
+            # 2. Truyền cờ stop của job xuống các tầng dưới
             self.processing_manager.stop_event = job_stop_event
+
+            # 3. Bắt đầu Watchdog and truyền cờ stop của job vào
+            watchdog_thread = threading.Thread(
+                target=self._job_watchdog,
+                args=(queue_id, start_time, job_stop_event),
+                daemon=True
+            )
+            watchdog_thread.start()
+            self.logger.info(f"🐶 Watchdog started for job {queue_id}.")
             
             item = self._convert_job_to_processing_item(job)
             if getattr(item, "start_time", None) is None:
@@ -826,8 +975,6 @@ class CreatorService:
             print(f"🔑 Project Slug: {item.project_slug}")
             # ---------------------------------------
 
-            self.api_client.update_job_status(queue_id, 'processing', {'stage': 'starting', 'started_by': self.api_client.service_name})
-            
             self.performance_analyzer.record_job_start(queue_id, job)
 
             # 4. Thực thi workflow. Nó sẽ tự dừng nếu job_stop_event được set (bởi watchdog hoặc lỗi)
@@ -847,7 +994,8 @@ class CreatorService:
                     retryable=True,
                 )
             job_successful = False
-            self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
+            if attempt_bound:
+                self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
         
         finally:
             # 5. BÁO HIỆU CHO WATCHDOG DỪNG LẠI vì job đã xong (dù thành công hay thất bại)
@@ -935,8 +1083,21 @@ class CreatorService:
 
             # The final status is calculated only after all evidence-producing
             # steps above have had a chance to record their own failures.
-            next_sequence = getattr(self.api_client, "_next_progress_sequence", None)
-            final_sequence = next_sequence(queue_id) if callable(next_sequence) else 1
+            if not attempt_bound:
+                # The queue attempt was never accepted by Tracker, so do not
+                # emit a terminal callback that Tracker cannot bind.
+                unbind_report = getattr(self.api_client, "unbind_job_report", None)
+                if callable(unbind_report):
+                    unbind_report(queue_id)
+                duration = time.monotonic() - start_time
+                self.performance_analyzer.record_job_completion(queue_id, False, {
+                    "report_id": report_id,
+                    "attempt_nonce": attempt_nonce,
+                    "duration_seconds": duration,
+                    "attempt_bound": False,
+                })
+                return False
+
             if item:
                 workflow_report_obj = getattr(item, "workflow_report", None)
                 quality_passed = (
@@ -955,6 +1116,7 @@ class CreatorService:
                     log_snapshot=self._snapshot_job_log(job_log_capture),
                     output_files_payload=video_files_payload,
                     report_id=report_id,
+                    attempt_nonce=attempt_nonce,
                     max_attempts=getattr(getattr(self.processing_manager, "config", None), "max_retries", None),
                     terminal_status=final_status,
                     terminal_error=terminal_error,
@@ -979,15 +1141,10 @@ class CreatorService:
                     manifest_ref=diagnostic_report["outputs"].get("manifest_ref"),
                     log_ref=diagnostic_report["logs"],
                     report_id=report_id,
+                    attempt_nonce=attempt_nonce,
                     final=True,
-                    sequence=final_sequence,
+                    sequence=None,
                 )
-
-                if manifest_data:
-                    mod_id = job.get('mod_id')
-                    if mod_id:
-                        self.logger.info(f"Syncing production status for mod {mod_id}...")
-                        self.api_client.update_mod_production_status(mod_id, manifest_data)
             else:
                 final_status = "failed"
                 final_success = False
@@ -997,6 +1154,7 @@ class CreatorService:
                     None,
                     log_snapshot=self._snapshot_job_log(job_log_capture),
                     report_id=report_id,
+                    attempt_nonce=attempt_nonce,
                     terminal_status=final_status,
                     terminal_error=terminal_error or "Job ended before a ProcessingItem was created.",
                 )
@@ -1015,8 +1173,9 @@ class CreatorService:
                     manifest_ref=diagnostic_report["outputs"].get("manifest_ref"),
                     log_ref=diagnostic_report["logs"],
                     report_id=report_id,
+                    attempt_nonce=attempt_nonce,
                     final=True,
-                    sequence=final_sequence,
+                    sequence=None,
                 )
 
             unbind_report = getattr(self.api_client, "unbind_job_report", None)
@@ -1026,6 +1185,7 @@ class CreatorService:
             duration = time.monotonic() - start_time
             self.performance_analyzer.record_job_completion(queue_id, final_success, {
                 "report_id": report_id,
+                "attempt_nonce": attempt_nonce,
                 "duration_seconds": duration,
             })
         # The orchestration result must agree with the status sent to the

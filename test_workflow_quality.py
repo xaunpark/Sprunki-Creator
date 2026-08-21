@@ -302,6 +302,7 @@ class WorkflowQualityTests(unittest.TestCase):
 
             def update_job_status(self, *args, **kwargs):
                 self.statuses.append(kwargs.get("status", args[1] if len(args) > 1 else None))
+                return True
 
             def update_job_progress(self, *args, **kwargs):
                 pass
