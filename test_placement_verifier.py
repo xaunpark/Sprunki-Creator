@@ -12,7 +12,9 @@ from placement_verifier import (
     OperationStatus,
     classify_precondition,
     evaluate_transition,
+    is_progress_verified,
     observe_until_verified,
+    promote_aggregate_transition,
     wait_for_stable_snapshot,
 )
 
@@ -267,6 +269,46 @@ class PlacementVerifierTests(unittest.TestCase):
         )
         self.assertEqual(result.status, OperationStatus.UNKNOWN)
         self.assertIn("transition_seen", result.message)
+
+    def test_unstable_exact_aggregate_delta_is_soft_success(self):
+        result = OperationResult(
+            OperationStatus.UNKNOWN,
+            direction="place",
+            message="transition_seen_but_not_stable",
+            details={
+                "beforeCharactersCount": 0,
+                "afterCharactersCount": 1,
+                "beforePuttedCount": 0,
+                "afterPuttedCount": 1,
+            },
+        )
+
+        soft = promote_aggregate_transition(result, "place")
+
+        self.assertIsNotNone(soft)
+        self.assertEqual(soft.status, OperationStatus.VERIFIED)
+        self.assertFalse(soft.target_verified)
+        self.assertTrue(soft.details["softVerified"])
+        self.assertTrue(is_progress_verified(soft))
+        self.assertIn("unstable_transition_soft_accept", soft.evidence)
+
+    def test_unknown_without_exact_delta_stays_unknown(self):
+        result = OperationResult(
+            OperationStatus.UNKNOWN,
+            direction="place",
+            message="transition_seen_but_not_stable",
+            details={
+                "beforeCharactersCount": 1,
+                "afterCharactersCount": 1,
+                "beforePuttedCount": 1,
+                "afterPuttedCount": 1,
+            },
+        )
+
+        unchanged = promote_aggregate_transition(result, "place")
+
+        self.assertEqual(unchanged.status, OperationStatus.UNKNOWN)
+        self.assertFalse(is_progress_verified(unchanged))
 
     def test_atomic_empty_return_transition_survives_late_read_timeout(self):
         clock = FakeClock()

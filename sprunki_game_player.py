@@ -50,7 +50,9 @@ from placement_verifier import (
     PlacementSnapshot,
     classify_precondition,
     evaluate_transition,
+    is_progress_verified,
     observe_until_verified,
+    promote_aggregate_transition,
     wait_for_stable_snapshot,
 )
 from workflow_quality import (
@@ -59,6 +61,7 @@ from workflow_quality import (
     RemixResult,
     WorkflowReport,
     evaluate_workflow_report,
+    placement_transaction_proves_progress,
     validate_playable_layout,
 )
 
@@ -528,6 +531,7 @@ class SprunkiGamePlayer:
         *,
         max_input_attempts=5,
         deadline_seconds=12.0,
+        max_read_failures=None,
     ):
         """Create exactly one finite budget for one place/return operation."""
         active = getattr(self, "_active_operation_context", None)
@@ -540,6 +544,14 @@ class SprunkiGamePlayer:
             target_slot,
             max_input_attempts=max_input_attempts,
             deadline_seconds=deadline_seconds,
+            max_read_failures=max(
+                1,
+                int(
+                    max_read_failures
+                    if max_read_failures is not None
+                    else getattr(self, "verifier_max_read_failures", 5)
+                ),
+            ),
             max_recovery_attempts=1,
             operation_id=f"{direction}-{self._operation_counter}",
         )
@@ -635,7 +647,17 @@ class SprunkiGamePlayer:
             return None
         return state
 
-    def _capture_stable_placement_snapshot(self, timeout_ms=1000, context=None):
+    def _capture_stable_placement_snapshot(
+        self,
+        timeout_ms=None,
+        context=None,
+        stable_samples=None,
+    ):
+        if timeout_ms is None:
+            timeout_ms = getattr(self, "verifier_snapshot_timeout_ms", 1500)
+        if stable_samples is None:
+            stable_samples = 2
+
         def read_snapshot():
             # A state reader gets at most three consecutive failures for the
             # whole operation.  Do not start a fresh polling window after the
@@ -651,7 +673,7 @@ class SprunkiGamePlayer:
             read_snapshot,
             timeout_ms=timeout_ms,
             poll_ms=50,
-            stable_samples=2,
+            stable_samples=stable_samples,
             stop_requested=lambda: self.stop_event.is_set() or (
                 context is not None and context.expired()
             ),
@@ -853,6 +875,7 @@ class SprunkiGamePlayer:
                 
                 # Load verification settings
                 self.load_verification_config()
+                self.load_placement_verification_config()
                 
                 print(f"âœ… Game Player configured from config.json:")
                 print(f"   Debug port: {self.debugging_port}")
@@ -890,6 +913,7 @@ class SprunkiGamePlayer:
                 self.min_containers_required = 1
                 self.check_react_components = True
                 self.check_run_button_dom = True
+                self._set_default_placement_verification_config()
 
     def load_verification_config(self):
             """Load verification configuration from config.json"""
@@ -933,6 +957,110 @@ class SprunkiGamePlayer:
                 self.min_containers_required = 1
                 self.check_react_components = True
                 self.check_run_button_dom = True
+
+    def _set_default_placement_verification_config(self):
+        """Use the lenient-but-safe placement policy when config is absent."""
+        self.placement_verification_config = {
+            "policy": "lenient",
+            "accept_aggregate_progress": True,
+            "accept_unstable_delta": True,
+            "post_action_stable_samples": 1,
+            "snapshot_timeout_ms": 1500,
+            "post_action_timeout_ms": 5000,
+            "max_read_failures": 5,
+            "target_proof_required_for_cache": True,
+            "target_proof_required_for_cleanup": False,
+            "final_board_must_be_empty": True,
+        }
+        self.verifier_policy = "lenient"
+        self.verifier_accept_aggregate_progress = True
+        self.verifier_accept_unstable_delta = True
+        self.verifier_post_action_stable_samples = 1
+        self.verifier_snapshot_timeout_ms = 1500
+        self.verifier_post_action_timeout_ms = 5000
+        self.verifier_max_read_failures = 5
+        self.verifier_target_proof_required_for_cache = True
+        self.verifier_target_proof_required_for_cleanup = False
+        self.verifier_final_board_must_be_empty = True
+
+    def load_placement_verification_config(self):
+        """Load the relaxed operation evidence policy from config.json."""
+        self._set_default_placement_verification_config()
+        try:
+            configured = self.app_config.get("placement_verification", {})
+            if not isinstance(configured, dict):
+                configured = {}
+            self.placement_verification_config.update(configured)
+
+            policy = str(
+                self.placement_verification_config.get("policy", "lenient")
+            ).strip().lower()
+            self.verifier_policy = policy or "lenient"
+            self.verifier_accept_aggregate_progress = bool(
+                self.placement_verification_config.get(
+                    "accept_aggregate_progress", True
+                )
+            )
+            self.verifier_accept_unstable_delta = bool(
+                self.placement_verification_config.get("accept_unstable_delta", True)
+            )
+            self.verifier_post_action_stable_samples = max(
+                1,
+                int(
+                    self.placement_verification_config.get(
+                        "post_action_stable_samples", 1
+                    )
+                ),
+            )
+            self.verifier_snapshot_timeout_ms = max(
+                250,
+                int(
+                    self.placement_verification_config.get(
+                        "snapshot_timeout_ms", 1500
+                    )
+                ),
+            )
+            self.verifier_post_action_timeout_ms = max(
+                1000,
+                int(
+                    self.placement_verification_config.get(
+                        "post_action_timeout_ms", 5000
+                    )
+                ),
+            )
+            self.verifier_max_read_failures = max(
+                3,
+                int(
+                    self.placement_verification_config.get(
+                        "max_read_failures", 5
+                    )
+                ),
+            )
+            self.verifier_target_proof_required_for_cache = bool(
+                self.placement_verification_config.get(
+                    "target_proof_required_for_cache", True
+                )
+            )
+            self.verifier_target_proof_required_for_cleanup = bool(
+                self.placement_verification_config.get(
+                    "target_proof_required_for_cleanup", False
+                )
+            )
+            self.verifier_final_board_must_be_empty = bool(
+                self.placement_verification_config.get(
+                    "final_board_must_be_empty", True
+                )
+            )
+            print(
+                "✅ Placement verifier policy: "
+                f"{self.verifier_policy} "
+                f"(aggregate={'✅' if self.verifier_accept_aggregate_progress else '❌'}, "
+                f"unstable_delta={'✅' if self.verifier_accept_unstable_delta else '❌'}, "
+                f"stable_samples={self.verifier_post_action_stable_samples})"
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            print(f"⚠️ Invalid placement verification config; using defaults: {error}")
+            self._set_default_placement_verification_config()
 
     def get_project_folder(self):
         """Get current project folder for external use (OBS Controller integration)"""
@@ -5079,7 +5207,10 @@ class SprunkiGamePlayer:
                     "expression": "window.getBatchPlacementSnapshot()",
                     "returnByValue": True,
                 },
-            }, timeout_seconds=0.5)
+            }, timeout_seconds=max(
+                1.0,
+                float(getattr(self, "verifier_snapshot_timeout_ms", 1500)) / 1000.0,
+            ))
             if response and "result" in response:
                 value = response.get("result", {}).get("result", {}).get("value")
                 if isinstance(value, dict):
@@ -5273,12 +5404,13 @@ class SprunkiGamePlayer:
             print("   ðŸŽ¯ Strategy: Sequential slot-by-slot carpet bombing")
             print("   ðŸ“Š Progression: 2â†’3â†’4â†’5... coordinates per slot")
             
-            # Capture a stable baseline before any carpet input.  The two
-            # identical samples are part of this operation's evidence, not a
-            # best-effort single read.
+            # Capture a bounded cleanup baseline.  Cleanup relies on the
+            # aggregate board count, so one fresh atomic sample is sufficient;
+            # target-specific stability is not required for this operation.
             initial_snapshot = self._capture_stable_placement_snapshot(
-                timeout_ms=1000,
+                timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
                 context=context,
+                stable_samples=1,
             )
             initial_count = (
                 initial_snapshot.characters_count
@@ -5322,8 +5454,9 @@ class SprunkiGamePlayer:
                 operation_context=context,
             )
             final_snapshot = self._capture_stable_placement_snapshot(
-                timeout_ms=1000,
+                timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
                 context=context,
+                stable_samples=1,
             )
             if final_snapshot is None:
                 print("   🛑 Final cleanup state is UNKNOWN")
@@ -6689,9 +6822,13 @@ class SprunkiGamePlayer:
                         message=f"return_exception:{error}",
                     )
 
-                if (
-                    result.status in {OperationStatus.ALREADY_EMPTY, OperationStatus.ALREADY_PLACED}
-                    or (result.status == OperationStatus.VERIFIED and result.target_verified)
+                if is_progress_verified(
+                    result,
+                    allow_soft=not getattr(
+                        self,
+                        "verifier_target_proof_required_for_cleanup",
+                        False,
+                    ),
                 ):
                     print(f"âœ… Slot {slot_index} return status: {result.status.value}")
                     success_count += 1
@@ -7554,9 +7691,9 @@ class SprunkiGamePlayer:
             "place",
             context.target_slot,
             operation_id=context.operation_id,
-            timeout_ms=3000,
+            timeout_ms=getattr(self, "verifier_post_action_timeout_ms", 5000),
             poll_ms=50,
-            stable_samples=2,
+            stable_samples=getattr(self, "verifier_post_action_stable_samples", 1),
             stop_requested=lambda: self.stop_event.is_set(),
             context=context,
         )
@@ -7574,6 +7711,12 @@ class SprunkiGamePlayer:
             },
             reads=context.read_count,
         )
+        if getattr(self, "verifier_accept_aggregate_progress", True):
+            result = promote_aggregate_transition(
+                result,
+                "place",
+                allow_unstable=getattr(self, "verifier_accept_unstable_delta", True),
+            )
         self.last_operation_result = result
         self.move_mouse_to_safe_position()
         return result
@@ -10119,9 +10262,9 @@ class SprunkiGamePlayer:
                 "return",
                 context.target_slot,
                 operation_id=context.operation_id,
-                timeout_ms=3000,
+                timeout_ms=getattr(self, "verifier_post_action_timeout_ms", 5000),
                 poll_ms=50,
-                stable_samples=2,
+                stable_samples=getattr(self, "verifier_post_action_stable_samples", 1),
                 stop_requested=lambda: self.stop_event.is_set(),
                 context=context,
             )
@@ -10133,6 +10276,12 @@ class SprunkiGamePlayer:
                 details=observed_result.details,
                 reads=context.read_count,
             )
+            if getattr(self, "verifier_accept_aggregate_progress", True):
+                result = promote_aggregate_transition(
+                    result,
+                    "return",
+                    allow_unstable=getattr(self, "verifier_accept_unstable_delta", True),
+                )
             if result.status == OperationStatus.VERIFIED:
                 self._remember_empty_board_baseline(
                     result.details.get("after", (None, None))[0]
@@ -10367,10 +10516,9 @@ class SprunkiGamePlayer:
                     },
                 )
 
-            drag_verified = bool(
-                drag_success
-                and getattr(getattr(drag_success, "status", None), "value", None) == OperationStatus.VERIFIED.value
-                and getattr(drag_success, "target_verified", False)
+            drag_verified = is_progress_verified(
+                drag_success,
+                allow_soft=getattr(self, "verifier_accept_aggregate_progress", True),
             )
             if not drag_verified:
                 if obs_controller:
@@ -10393,7 +10541,16 @@ class SprunkiGamePlayer:
                 "before": before_count,
                 "after": after_count,
                 "status": "VERIFIED",
-                "targetVerified": True,
+                "targetVerified": bool(getattr(drag_success, "target_verified", False)),
+                "softVerified": bool(
+                    (getattr(drag_success, "details", {}) or {}).get("softVerified")
+                    or (getattr(drag_success, "details", {}) or {}).get("aggregateFallback")
+                ),
+                "verificationConfidence": (
+                    "strong"
+                    if getattr(drag_success, "target_verified", False)
+                    else "soft"
+                ),
                 "cleanupVerified": False,
                 "operationId": getattr(drag_success, "operation_id", None),
                 "transitionEvidence": transition_details,
@@ -10461,7 +10618,14 @@ class SprunkiGamePlayer:
                 return_status == OperationStatus.ALREADY_EMPTY.value
                 or (
                     return_status == OperationStatus.VERIFIED.value
-                    and getattr(return_success, "target_verified", False)
+                    and (
+                        getattr(return_success, "target_verified", False)
+                        or not getattr(
+                            self,
+                            "verifier_target_proof_required_for_cleanup",
+                            False,
+                        )
+                    )
                 )
             )
 
@@ -11171,11 +11335,13 @@ class SprunkiGamePlayer:
                         f"{getattr(getattr(drag_result, 'status', None), 'value', drag_result)}"
                     )
                     return False
-                if not (
-                    getattr(getattr(drag_result, "status", None), "value", None) == OperationStatus.VERIFIED.value
-                    and getattr(drag_result, "target_verified", False)
+                if not is_progress_verified(
+                    drag_result,
+                    allow_soft=getattr(
+                        self, "verifier_accept_aggregate_progress", True
+                    ),
                 ):
-                    print("🛑 Remix drag did not prove a target-specific placement.")
+                    print("🛑 Remix drag produced no verified aggregate progress.")
                     return False
 
                 placed_count += 1
@@ -11190,7 +11356,16 @@ class SprunkiGamePlayer:
                         "before": self._transition_count_from_details(transition_details, "before"),
                         "after": self._transition_count_from_details(transition_details, "after"),
                         "status": "VERIFIED",
-                        "targetVerified": True,
+                        "targetVerified": bool(getattr(drag_result, "target_verified", False)),
+                        "softVerified": bool(
+                            transition_details.get("softVerified")
+                            or transition_details.get("aggregateFallback")
+                        ),
+                        "verificationConfidence": (
+                            "strong"
+                            if getattr(drag_result, "target_verified", False)
+                            else "soft"
+                        ),
                         "cleanupVerified": False,
                         "operationId": getattr(drag_result, "operation_id", None),
                         "transitionEvidence": transition_details,
@@ -11659,11 +11834,10 @@ class SprunkiGamePlayer:
                     report.issues.append(f"Horror phase critical error: {horror_error}")
                     print("   Horror coverage remains failed; source JSON is not mutated automatically.")
             # === SHARED QUALITY-GATE DETERMINATION ===
-            # A clean board alone is not positive evidence.  It is accepted
-            # only after at least one target-specific verified placement.
+            # Aggregate/soft placement evidence is valid workflow progress;
+            # target-specific proof remains diagnostic and cache-only.
             report.placement_verified = any(
-                transaction.get("status") == "VERIFIED"
-                and transaction.get("targetVerified") is True
+                placement_transaction_proves_progress(transaction)
                 for transaction in self._workflow_placement_transactions
             )
             if self._workflow_placement_transactions:
@@ -11673,7 +11847,7 @@ class SprunkiGamePlayer:
             report.evidence["placementTransactions"] = list(self._workflow_placement_transactions)
 
             completion_state = self.validate_workflow_completion()
-            report.cleanup_verified = bool(completion_state[0]) and report.placement_verified
+            report.cleanup_verified = bool(completion_state[0])
 
             if self.should_stop or self.stop_event.is_set():
                 report.apply_quality_gate(
@@ -11738,7 +11912,7 @@ class SprunkiGamePlayer:
                 OperationStatus.VERIFIED,
                 OperationStatus.ALREADY_EMPTY,
             }
-            report.cleanup_verified = cleanup_ok and report.placement_verified
+            report.cleanup_verified = cleanup_ok
             if not cleanup_ok:
                 report.issues.append(
                     f"Final cleanup: {cleanup_result.status.value} ({cleanup_result.message})"
@@ -11752,6 +11926,7 @@ class SprunkiGamePlayer:
                         )
                     )
             final_validation = self.validate_workflow_completion()
+            report.cleanup_verified = cleanup_ok and bool(final_validation[0])
             if not final_validation[0] and report.was_successful:
                 report.apply_quality_gate(
                     QualityGateResult.failure(
@@ -12425,8 +12600,7 @@ class SprunkiGamePlayer:
                     )
 
             report.placement_verified = any(
-                transaction.get("status") == "VERIFIED"
-                and transaction.get("targetVerified") is True
+                placement_transaction_proves_progress(transaction)
                 for transaction in self._workflow_placement_transactions
             )
             report.evidence["placementTransactions"] = list(self._workflow_placement_transactions)
@@ -12446,11 +12620,7 @@ class SprunkiGamePlayer:
                 "isComplete": bool(final_validation[0]),
                 "issues": list(final_validation[1]),
             }
-            report.cleanup_verified = (
-                cleanup_ok
-                and report.placement_verified
-                and bool(final_validation[0])
-            )
+            report.cleanup_verified = cleanup_ok and bool(final_validation[0])
             if not report.failure_code:
                 if self.should_stop or self.stop_event.is_set():
                     report.apply_quality_gate(

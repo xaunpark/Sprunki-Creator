@@ -250,6 +250,61 @@ class WorkflowReport:
         return asdict(self)
 
 
+def _known_int(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def placement_transaction_proves_progress(transaction: Any) -> bool:
+    """Return whether a strong or soft transaction proves a state change.
+
+    Lenient verification may accept aggregate counter evidence when a mod does
+    not expose a reliable target-specific array.  It still must prove that the
+    before/after state changed; a claimed ``0 -> 0`` transaction never counts.
+    """
+
+    if not isinstance(transaction, dict):
+        return False
+    if transaction.get("status") != "VERIFIED":
+        return False
+    if not (
+        transaction.get("targetVerified") is True
+        or transaction.get("softVerified") is True
+        or transaction.get("verificationConfidence") == "soft"
+    ):
+        return False
+
+    before = _known_int(transaction.get("before"))
+    after = _known_int(transaction.get("after"))
+    if before is not None and after is not None:
+        return before != after
+
+    evidence = transaction.get("transitionEvidence") or {}
+    if isinstance(evidence, dict):
+        semantic_before = evidence.get("before")
+        semantic_after = evidence.get("after")
+        if semantic_before is not None and semantic_after is not None:
+            if semantic_before != semantic_after:
+                return True
+        before_values = (
+            _known_int(evidence.get("beforeCharactersCount")),
+            _known_int(evidence.get("beforePuttedCount")),
+        )
+        after_values = (
+            _known_int(evidence.get("afterCharactersCount")),
+            _known_int(evidence.get("afterPuttedCount")),
+        )
+        for before_value, after_value in zip(before_values, after_values):
+            if before_value is not None and after_value is not None:
+                if before_value != after_value:
+                    return True
+    return False
+
+
 def validate_playable_layout(config_data: Any) -> QualityGateResult:
     """Validate the minimum static layout contract before browser work."""
 
@@ -397,9 +452,7 @@ def evaluate_workflow_report(
     if isinstance(transactions, list) and transactions:
         transition_proven = False
         for transaction in transactions:
-            if not isinstance(transaction, dict):
-                continue
-            if transaction.get("status") != "VERIFIED" or transaction.get("targetVerified") is not True:
+            if not placement_transaction_proves_progress(transaction):
                 continue
             before = transaction.get("before")
             after = transaction.get("after")
@@ -412,6 +465,9 @@ def evaluate_workflow_report(
             semantic_before = evidence.get("before")
             semantic_after = evidence.get("after")
             if semantic_before is not None and semantic_after is not None and semantic_before != semantic_after:
+                transition_proven = True
+                break
+            if placement_transaction_proves_progress(transaction):
                 transition_proven = True
                 break
         if not transition_proven:

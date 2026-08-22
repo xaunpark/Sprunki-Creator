@@ -542,6 +542,123 @@ def evaluate_transition(
     )
 
 
+def _aggregate_delta_from_details(details: Any, direction: str) -> Tuple[str, ...]:
+    """Return aggregate counters that show the expected one-icon delta.
+
+    A target-specific array is not required here.  This helper is deliberately
+    narrow: it only accepts an exact ``+1`` placement or ``-1`` return from a
+    counter that was captured in the same before/after observation.
+    """
+
+    if not isinstance(details, Mapping):
+        return ()
+    expected_delta = _expected_delta(direction)
+    matched = []
+    for label in ("Characters", "Putted"):
+        before = _optional_int(details.get(f"before{label}Count"))
+        after = _optional_int(details.get(f"after{label}Count"))
+        if before is not None and after is not None and after - before == expected_delta:
+            matched.append(label.lower())
+    return tuple(matched)
+
+
+def promote_aggregate_transition(
+    result: Optional[OperationResult],
+    direction: str,
+    *,
+    allow_unstable: bool = True,
+) -> Optional[OperationResult]:
+    """Promote narrowly-proven aggregate progress to a soft success.
+
+    Some Scratch/Cocrea mods update their aggregate counters before the
+    target-specific arrays become observable.  A late CDP read can therefore
+    return ``UNKNOWN`` even though an atomic snapshot already recorded the
+    exact one-icon delta.  That is safe to treat as *soft* progress: callers
+    may continue, but they must not learn a target coordinate from it.
+
+    Unknown results without an exact aggregate delta remain unknown.  This
+    keeps the relaxed policy from turning a missing or unchanged state into a
+    false success.
+    """
+
+    if result is None:
+        return None
+    if result.status in {OperationStatus.ALREADY_PLACED, OperationStatus.ALREADY_EMPTY}:
+        return result
+
+    details = dict(result.details or {})
+    aggregate_signals = _aggregate_delta_from_details(details, direction)
+
+    if result.status == OperationStatus.VERIFIED and result.target_verified:
+        details.setdefault("verificationConfidence", "strong")
+        result.details = details
+        return result
+
+    is_aggregate_verified = result.status == OperationStatus.VERIFIED and bool(
+        result.details.get("aggregateFallback")
+        or result.details.get("softVerified")
+        or not result.details.get("targetSpecific", True)
+    )
+    is_unstable_transition = (
+        allow_unstable
+        and result.status == OperationStatus.UNKNOWN
+        and result.message == "transition_seen_but_not_stable"
+    )
+    if not aggregate_signals or not (is_aggregate_verified or is_unstable_transition):
+        return result
+
+    details.update(
+        {
+            "targetSpecific": False,
+            "aggregateFallback": True,
+            "softVerified": True,
+            "verificationConfidence": "soft",
+            "aggregateSignals": list(aggregate_signals),
+            "unstableTransitionAccepted": bool(is_unstable_transition),
+            "originalStatus": result.status.value,
+        }
+    )
+    evidence = tuple(result.evidence or ())
+    if "aggregate_delta" not in evidence:
+        evidence += ("aggregate_delta",)
+    if is_unstable_transition and "unstable_transition_soft_accept" not in evidence:
+        evidence += ("unstable_transition_soft_accept",)
+
+    return OperationResult(
+        OperationStatus.VERIFIED,
+        operation_id=result.operation_id,
+        direction=result.direction or str(direction),
+        message="soft_aggregate_transition_verified",
+        evidence=evidence,
+        details=details,
+        attempts=result.attempts,
+        reads=result.reads,
+        recovery_attempts=result.recovery_attempts,
+    )
+
+
+def is_progress_verified(result: Optional[OperationResult], *, allow_soft: bool = True) -> bool:
+    """Return whether an operation is safe to count as progress.
+
+    ``target_verified`` remains reserved for strong target evidence.  Soft
+    aggregate progress is intentionally accepted for workflow continuation,
+    while coordinate learning and diagnostics can still distinguish it.
+    """
+
+    if result is None:
+        return False
+    if result.status in {OperationStatus.ALREADY_PLACED, OperationStatus.ALREADY_EMPTY}:
+        return True
+    if result.status != OperationStatus.VERIFIED:
+        return False
+    if result.target_verified:
+        return True
+    if not allow_soft:
+        return False
+    details = result.details or {}
+    return bool(details.get("softVerified") or details.get("aggregateFallback"))
+
+
 def classify_precondition(
     snapshot: Any,
     direction: str,

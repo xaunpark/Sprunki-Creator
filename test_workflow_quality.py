@@ -127,6 +127,26 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.failure_code, "placement_not_verified")
 
+    def test_soft_aggregate_transaction_can_pass_with_clean_board(self):
+        report = verified_report()
+        report.placement_verified = True
+        report.evidence["placementTransactions"] = [
+            {
+                "status": "VERIFIED",
+                "targetVerified": False,
+                "softVerified": True,
+                "verificationConfidence": "soft",
+                "before": 0,
+                "after": 1,
+                "cleanupVerified": True,
+            }
+        ]
+
+        result = evaluate_workflow_report(report, require_identity=False)
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.coverage["normal"], "verified")
+
     def test_zero_remixes_is_rejected_instead_of_defaulting_to_one(self):
         report = verified_report()
         report.normal_remixes_played = 0
