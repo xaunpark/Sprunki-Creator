@@ -971,6 +971,11 @@ class SprunkiGamePlayer:
             "target_proof_required_for_cache": True,
             "target_proof_required_for_cleanup": False,
             "final_board_must_be_empty": True,
+            "targeted_cleanup_recovery_enabled": True,
+            "targeted_cleanup_recovery_rounds": 2,
+            "targeted_cleanup_radius_px": 24,
+            "targeted_cleanup_backend_fallback": True,
+            "targeted_cleanup_timeout_ms": 1500,
         }
         self.verifier_policy = "lenient"
         self.verifier_accept_aggregate_progress = True
@@ -982,6 +987,11 @@ class SprunkiGamePlayer:
         self.verifier_target_proof_required_for_cache = True
         self.verifier_target_proof_required_for_cleanup = False
         self.verifier_final_board_must_be_empty = True
+        self.verifier_targeted_cleanup_recovery_enabled = True
+        self.verifier_targeted_cleanup_recovery_rounds = 2
+        self.verifier_targeted_cleanup_radius_px = 24
+        self.verifier_targeted_cleanup_backend_fallback = True
+        self.verifier_targeted_cleanup_timeout_ms = 1500
 
     def load_placement_verification_config(self):
         """Load the relaxed operation evidence policy from config.json."""
@@ -1050,6 +1060,40 @@ class SprunkiGamePlayer:
                 self.placement_verification_config.get(
                     "final_board_must_be_empty", True
                 )
+            )
+            self.verifier_targeted_cleanup_recovery_enabled = bool(
+                self.placement_verification_config.get(
+                    "targeted_cleanup_recovery_enabled", True
+                )
+            )
+            self.verifier_targeted_cleanup_recovery_rounds = max(
+                1,
+                int(
+                    self.placement_verification_config.get(
+                        "targeted_cleanup_recovery_rounds", 2
+                    )
+                ),
+            )
+            self.verifier_targeted_cleanup_radius_px = max(
+                8,
+                int(
+                    self.placement_verification_config.get(
+                        "targeted_cleanup_radius_px", 24
+                    )
+                ),
+            )
+            self.verifier_targeted_cleanup_backend_fallback = bool(
+                self.placement_verification_config.get(
+                    "targeted_cleanup_backend_fallback", True
+                )
+            )
+            self.verifier_targeted_cleanup_timeout_ms = max(
+                500,
+                int(
+                    self.placement_verification_config.get(
+                        "targeted_cleanup_timeout_ms", 1500
+                    )
+                ),
             )
             print(
                 "✅ Placement verifier policy: "
@@ -5368,6 +5412,305 @@ class SprunkiGamePlayer:
         # Use current method for individual operations
         return self.corrected_return_icon(target_slot, use_cdp)
 
+    def _occupied_slot_indices_from_state(self, state):
+        """Return occupied slot indices only when the Polos signal is reliable."""
+        if not isinstance(state, dict):
+            return None
+        polos = state.get("polos_array")
+        if not isinstance(polos, (list, tuple)):
+            return None
+
+        normalized = [str(value).strip().lower() for value in polos]
+        if any(value not in {"0", "1", "true", "false"} for value in normalized):
+            return None
+        return [
+            index
+            for index, value in enumerate(normalized)
+            if value in {"1", "true"}
+        ]
+
+    def _targeted_cleanup_coordinate_candidates(self, target_slot, round_num=1):
+        """Generate a small deterministic coordinate fallback for one slot."""
+        try:
+            center_x = int(round(float(target_slot["x"])))
+            center_y = int(round(float(target_slot["y"])))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return []
+
+        base_radius = max(
+            8,
+            int(getattr(self, "verifier_targeted_cleanup_radius_px", 24)),
+        )
+        radius = base_radius * max(1, int(round_num))
+        offsets = [
+            (0, 0),
+            (-radius, 0),
+            (radius, 0),
+            (0, -radius),
+            (0, radius),
+            (-radius, -radius),
+            (radius, -radius),
+            (-radius, radius),
+            (radius, radius),
+        ]
+        seen = set()
+        candidates = []
+        for offset_x, offset_y in offsets:
+            candidate = (center_x + offset_x, center_y + offset_y)
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+        return candidates
+
+    def _targeted_cleanup_recovery(
+        self,
+        use_cdp=False,
+        operation_context=None,
+    ):
+        """Retry only the slots still occupied after carpet bombing.
+
+        This is deliberately narrower than a second blind carpet-bombing pass:
+        it re-reads ``Polos``, targets each known occupied slot, and accepts a
+        cleanup result only after the whole board is verified empty.
+        """
+        context = operation_context or getattr(self, "_active_operation_context", None)
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="cleanup",
+                message="targeted_cleanup_missing_context",
+            )
+        if not getattr(self, "verifier_targeted_cleanup_recovery_enabled", True):
+            return self._operation_result(
+                context,
+                OperationStatus.FAILED,
+                "targeted_cleanup_recovery_disabled",
+            )
+
+        max_rounds = max(
+            1,
+            int(getattr(self, "verifier_targeted_cleanup_recovery_rounds", 2)),
+        )
+        backend_fallback = bool(
+            getattr(self, "verifier_targeted_cleanup_backend_fallback", True)
+        )
+        attempts = []
+
+        for round_num in range(1, max_rounds + 1):
+            if self.stop_event.is_set():
+                return self._operation_result(
+                    context,
+                    OperationStatus.STOPPED,
+                    "targeted_cleanup_stop_requested",
+                    details={"attempts": attempts},
+                )
+
+            state = self.get_comprehensive_slot_state()
+            if not state:
+                return self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "targeted_cleanup_state_unknown",
+                    details={"attempts": attempts},
+                )
+            if self._is_board_count_clean(
+                characters_count=state.get("characters_count"),
+                putted_count=state.get("putted_characters"),
+            ):
+                return self._operation_result(
+                    context,
+                    OperationStatus.VERIFIED,
+                    "targeted_cleanup_verified",
+                    details={"attempts": attempts, "round": round_num},
+                )
+
+            occupied_slots = self._occupied_slot_indices_from_state(state)
+            if occupied_slots is None:
+                # Do not guess a slot from aggregate counters.  Return FAILED
+                # rather than UNKNOWN so the caller can use the bounded Re-Run
+                # recovery, which itself verifies the fresh board state.
+                return self._operation_result(
+                    context,
+                    OperationStatus.FAILED,
+                    "targeted_cleanup_slots_unknown",
+                    details={"attempts": attempts},
+                )
+            if not occupied_slots:
+                # Polos says empty while the aggregate counters above still
+                # say occupied.  Preserve the hard empty-board gate and let
+                # the bounded Re-Run recovery reconcile the inconsistent
+                # signals instead of promoting Polos alone to success.
+                return self._operation_result(
+                    context,
+                    OperationStatus.FAILED,
+                    "targeted_cleanup_state_inconsistent",
+                    details={"attempts": attempts, "round": round_num},
+                )
+
+            configured_slots = (self.config or {}).get("layout", {}).get("slots", [])
+            slots_by_index = {}
+            for slot in configured_slots:
+                try:
+                    slots_by_index[int(slot.get("index"))] = slot
+                except (AttributeError, TypeError, ValueError):
+                    continue
+
+            print(
+                f"   🎯 Targeted cleanup round {round_num}/{max_rounds}; "
+                f"occupied slots: {occupied_slots}"
+            )
+            progressed = False
+
+            for slot_index in occupied_slots:
+                target_slot = slots_by_index.get(slot_index)
+                if not target_slot:
+                    attempts.append({"slot": slot_index, "status": "missing_config"})
+                    continue
+
+                coordinates = self._targeted_cleanup_coordinate_candidates(
+                    target_slot,
+                    round_num=round_num,
+                )
+
+                for click_index, (click_x, click_y) in enumerate(coordinates, 1):
+                    transports = [use_cdp]
+                    # Use the alternate transport only for the exact center.
+                    # A full backend x coordinate cross-product would make a
+                    # no-progress recovery unnecessarily long.
+                    if backend_fallback and click_index == 1:
+                        transports.append(not use_cdp)
+                    for transport_use_cdp in transports:
+                        if not context.can_send_input(
+                            stop_requested=self.stop_event.is_set()
+                        ):
+                            return self._operation_result(
+                                context,
+                                OperationStatus.FAILED,
+                                "targeted_cleanup_input_budget_exhausted",
+                                details={"attempts": attempts},
+                            )
+
+                        candidate_slot = dict(target_slot)
+                        candidate_slot["x"] = click_x
+                        candidate_slot["y"] = click_y
+                        before_state = self.get_comprehensive_slot_state()
+                        before_snapshot = PlacementSnapshot.from_mapping(before_state)
+                        if before_snapshot is None:
+                            return self._operation_result(
+                                context,
+                                OperationStatus.UNKNOWN,
+                                "targeted_cleanup_baseline_unknown",
+                                details={"attempts": attempts},
+                            )
+
+                        result = self._execute_precision_return_click(
+                            candidate_slot,
+                            transport_use_cdp,
+                            operation_context=context,
+                            before_snapshot=before_snapshot,
+                            target_slot_index=slot_index,
+                            timeout_ms=getattr(
+                                self,
+                                "verifier_targeted_cleanup_timeout_ms",
+                                1500,
+                            ),
+                        )
+                        attempt = {
+                            "round": round_num,
+                            "slot": slot_index,
+                            "click": click_index,
+                            "x": click_x,
+                            "y": click_y,
+                            "useCdp": bool(transport_use_cdp),
+                            "status": result.status.value,
+                            "message": result.message,
+                        }
+                        attempts.append(attempt)
+
+                        if result.status in {
+                            OperationStatus.UNKNOWN,
+                            OperationStatus.STOPPED,
+                        }:
+                            return self._operation_result(
+                                context,
+                                result.status,
+                                f"targeted_cleanup_{result.status.value.lower()}",
+                                details={"attempts": attempts},
+                            )
+
+                        after_state = self.get_comprehensive_slot_state()
+                        if not after_state:
+                            return self._operation_result(
+                                context,
+                                OperationStatus.UNKNOWN,
+                                "targeted_cleanup_post_state_unknown",
+                                details={"attempts": attempts},
+                            )
+                        if self._is_board_count_clean(
+                            characters_count=after_state.get("characters_count"),
+                            putted_count=after_state.get("putted_characters"),
+                        ):
+                            return self._operation_result(
+                                context,
+                                OperationStatus.VERIFIED,
+                                "targeted_cleanup_verified",
+                                details={"attempts": attempts, "round": round_num},
+                            )
+
+                        after_occupied = self._occupied_slot_indices_from_state(after_state)
+                        before_count = self._get_board_progress_count(before_state)
+                        after_count = self._get_board_progress_count(after_state)
+                        slot_cleared = (
+                            after_occupied is not None
+                            and slot_index not in after_occupied
+                        )
+                        aggregate_progress = (
+                            before_count is not None
+                            and after_count is not None
+                            and after_count < before_count
+                        )
+                        if slot_cleared or aggregate_progress:
+                            progressed = True
+                            break
+
+                    if progressed:
+                        break
+
+                if progressed:
+                    # Re-scan immediately.  The click may have cleared a
+                    # different slot, so the next operation must use fresh
+                    # Polos evidence rather than the old queue.
+                    break
+
+            if not progressed:
+                print(
+                    "   ⚠️ Targeted cleanup made no progress; "
+                    "bounded recovery will decide whether to restart"
+                )
+            else:
+                time.sleep(0.2)
+
+        final_state = self.get_comprehensive_slot_state()
+        if final_state and self._is_board_count_clean(
+            characters_count=final_state.get("characters_count"),
+            putted_count=final_state.get("putted_characters"),
+        ):
+            return self._operation_result(
+                context,
+                OperationStatus.VERIFIED,
+                "targeted_cleanup_verified",
+                details={"attempts": attempts, "round": max_rounds},
+            )
+        return self._operation_result(
+            context,
+            OperationStatus.FAILED,
+            "targeted_cleanup_incomplete",
+            details={
+                "attempts": attempts,
+                "occupiedSlots": self._occupied_slot_indices_from_state(final_state),
+            },
+        )
+
     def execute_remix_return_strategy(self, target_slot, use_cdp=False, operation_context=None):
         """
         ðŸŽµ Bounded sequential carpet bombing with a structured result.
@@ -5473,10 +5816,48 @@ class SprunkiGamePlayer:
                 )
             if self.stop_event.is_set():
                 return finish(OperationStatus.STOPPED, "cleanup_stop_requested")
+
+            # Aggregate progress is useful evidence, but it is not cleanup
+            # success.  Re-scan Polos and target only the slots still occupied
+            # before allowing the caller to use the bounded Re-Run recovery.
+            targeted_result = self._targeted_cleanup_recovery(
+                use_cdp=use_cdp,
+                operation_context=context,
+            )
+            if targeted_result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }:
+                return finish(
+                    OperationStatus.VERIFIED,
+                    "cleanup_verified_after_targeted_recovery",
+                    details={
+                        "initialCount": initial_count,
+                        "carpetProgress": bool(success),
+                        "targetedRecovery": targeted_result.as_dict(),
+                    },
+                )
+            if targeted_result.status in {
+                OperationStatus.UNKNOWN,
+                OperationStatus.STOPPED,
+            }:
+                return finish(
+                    targeted_result.status,
+                    targeted_result.message,
+                    details={
+                        "initialCount": initial_count,
+                        "carpetProgress": bool(success),
+                        "targetedRecovery": targeted_result.as_dict(),
+                    },
+                )
             return finish(
-                OperationStatus.FAILED if not success else OperationStatus.UNKNOWN,
+                OperationStatus.FAILED,
                 "cleanup_incomplete",
-                details={"initialCount": initial_count},
+                details={
+                    "initialCount": initial_count,
+                    "carpetProgress": bool(success),
+                    "targetedRecovery": targeted_result.as_dict(),
+                },
             )
 
         except Exception as e:
@@ -5914,16 +6295,25 @@ class SprunkiGamePlayer:
                     self._finish_operation(operation_context, result)
                 return 1, 1, []
 
-            if strategy_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+            if strategy_result.status == OperationStatus.STOPPED:
                 print(
                     f"   🛑 Cleanup strategy stopped with "
-                    f"{strategy_result.status.value}; no blind recovery input is sent"
+                    f"{strategy_result.status.value}; no recovery input is sent"
                 )
                 if owns_context:
                     self._finish_operation(operation_context, strategy_result)
                 return 0, 1, [
                     f"cleanup_{strategy_result.status.value.lower()}:{strategy_result.message}"
                 ]
+
+            if strategy_result.status == OperationStatus.UNKNOWN:
+                # A read-unknown result forbids another guessed slot click,
+                # but the bounded Re-Run path is itself a recovery operation
+                # and verifies the fresh board before it is accepted.
+                print(
+                    "   ⚠️ Cleanup state is UNKNOWN; using bounded Re-Run "
+                    "recovery instead of another blind slot click"
+                )
 
             if self._session_recovery_count >= self._max_session_recoveries:
                 result = self._operation_result(
@@ -5970,13 +6360,16 @@ class SprunkiGamePlayer:
             if restart_result.status == OperationStatus.RECOVERED:
                 result = self._operation_result(
                     operation_context,
-                    OperationStatus.RECOVERED,
-                    "cleanup_recovered_not_verified",
-                    details={"recovery": restart_result.as_dict()},
+                    OperationStatus.VERIFIED,
+                    "cleanup_verified_after_restart",
+                    details={
+                        "recovery": restart_result.as_dict(),
+                        "boardEmptyVerified": True,
+                    },
                 )
                 if owns_context:
                     self._finish_operation(operation_context, result)
-                return 0, 1, ["cleanup_recovered_not_verified"]
+                return 1, 1, []
 
             result = self._operation_result(
                 operation_context,
@@ -9124,6 +9517,41 @@ class SprunkiGamePlayer:
             print(f"âŒ PyAutoGUI intro skipping failed: {e}")
             return False
 
+    @staticmethod
+    def _evaluate_restart_state(post_state):
+        """Evaluate a fresh post-Re-Run snapshot without trusting one signal."""
+        if post_state is None:
+            return False, {}
+
+        signal_checks = {}
+        polos = getattr(post_state, "polos", None)
+        counters = [
+            value
+            for value in (
+                getattr(post_state, "characters_count", None),
+                getattr(post_state, "putted_count", None),
+            )
+            if value is not None
+        ]
+
+        if polos is not None:
+            signal_checks["polos"] = {
+                "clean": all(str(value).strip() == "0" for value in polos),
+                "active": sum(
+                    1 for value in polos if str(value).strip() == "1"
+                ),
+            }
+        if counters:
+            signal_checks["counters"] = {
+                "clean": all(value == 0 for value in counters),
+                "values": list(counters),
+            }
+
+        verified = bool(signal_checks) and all(
+            check["clean"] for check in signal_checks.values()
+        )
+        return verified, signal_checks
+
     def restart_game_to_initial_state(self, use_cdp=True, operation_context=None):
         """Perform one bounded Re-run recovery and verify the fresh state."""
         context = operation_context or getattr(self, "_active_operation_context", None)
@@ -9296,16 +9724,35 @@ class SprunkiGamePlayer:
                     context.end_recovery()
                 return self._finish_operation(context, result) if owns_context else result
 
-            polos = post_state.polos
-            counters = [value for value in (post_state.characters_count, post_state.putted_count) if value is not None]
-            polos_clean = polos is not None and all(str(value) == "0" for value in polos)
-            counters_clean = bool(counters) and all(value == 0 for value in counters)
-            if not (polos_clean or counters_clean):
-                print("   RESTART UNCLEAR: state is known but not initial/empty")
-                result = self._operation_result(context, OperationStatus.UNKNOWN, "post_restart_not_empty")
+            # Re-Run is only a physical recovery action; it is not proof that
+            # every runtime signal was reset.  Require all signals that are
+            # available in the fresh snapshot to agree before accepting the
+            # recovery.  The previous ``polos_clean or counters_clean`` gate
+            # could accept a visually empty board while Characters/Putted
+            # still reported an occupied slot (or the reverse).
+            restart_verified, signal_checks = self._evaluate_restart_state(post_state)
+            if not restart_verified:
+                print(
+                    "   RESTART UNCLEAR: available placement signals do not "
+                    "all report an empty board"
+                )
+                result = self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "post_restart_not_empty",
+                    details={"signals": signal_checks},
+                )
             else:
-                print("   RESTART VERIFIED: Game returned to initial state!")
-                result = self._operation_result(context, OperationStatus.RECOVERED, "game_recovered")
+                print(
+                    "   RESTART VERIFIED: all available placement signals "
+                    "report an empty board!"
+                )
+                result = self._operation_result(
+                    context,
+                    OperationStatus.RECOVERED,
+                    "game_recovered",
+                    details={"signals": signal_checks},
+                )
 
             print("GAME RESTART COMPLETED!")
             print("="*60)
@@ -10204,9 +10651,12 @@ class SprunkiGamePlayer:
             if recovery_result.status == OperationStatus.RECOVERED:
                 result = self._operation_result(
                     context,
-                    OperationStatus.RECOVERED,
-                    "game_recovered_target_return_not_verified",
-                    details={"recovery": recovery_result.as_dict()},
+                    OperationStatus.ALREADY_EMPTY,
+                    "return_verified_after_restart",
+                    details={
+                        "recovery": recovery_result.as_dict(),
+                        "boardEmptyVerified": True,
+                    },
                 )
             else:
                 result = self._operation_result(
@@ -10228,6 +10678,8 @@ class SprunkiGamePlayer:
         use_cdp,
         operation_context=None,
         before_snapshot=None,
+        target_slot_index=None,
+        timeout_ms=None,
     ):
         """Execute exactly one precision click and observe its transition."""
         try:
@@ -10243,6 +10695,11 @@ class SprunkiGamePlayer:
             if before_snapshot is None:
                 return self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable")
             context.set_baseline(before_snapshot)
+            observed_target_slot = (
+                context.target_slot
+                if target_slot_index is None
+                else target_slot_index
+            )
             if not context.can_send_input(stop_requested=self.stop_event.is_set()):
                 return self._operation_result(context, OperationStatus.FAILED, "input_budget_exhausted")
 
@@ -10260,9 +10717,13 @@ class SprunkiGamePlayer:
                 before_snapshot,
                 self._capture_placement_snapshot,
                 "return",
-                context.target_slot,
+                observed_target_slot,
                 operation_id=context.operation_id,
-                timeout_ms=getattr(self, "verifier_post_action_timeout_ms", 5000),
+                timeout_ms=(
+                    timeout_ms
+                    if timeout_ms is not None
+                    else getattr(self, "verifier_post_action_timeout_ms", 5000)
+                ),
                 poll_ms=50,
                 stable_samples=getattr(self, "verifier_post_action_stable_samples", 1),
                 stop_requested=lambda: self.stop_event.is_set(),
@@ -11654,6 +12115,9 @@ class SprunkiGamePlayer:
             )
             detail["cleanup"] = cleanup_detail
             detail["cleanupVerified"] = cleanup_verified
+            detail["retryable"] = bool(input_valid and cleanup_verified)
+            if not cleanup_verified:
+                detail["retryBlockedReason"] = "cleanup_not_verified"
             attempt_details.append(detail)
 
             if not cleanup_verified or not input_valid:
@@ -11913,25 +12377,65 @@ class SprunkiGamePlayer:
                 OperationStatus.ALREADY_EMPTY,
             }
             report.cleanup_verified = cleanup_ok
+            cleanup_retryable = bool(
+                not self.should_stop
+                and not self.stop_event.is_set()
+                and cleanup_result.status in {
+                    OperationStatus.FAILED,
+                    OperationStatus.UNKNOWN,
+                }
+                and any(
+                    marker in str(cleanup_result.message or "")
+                    for marker in (
+                        "cleanup_incomplete",
+                        "targeted_cleanup",
+                        "cleanup_recovery",
+                    )
+                )
+            )
+            report.evidence.update(
+                {
+                    "cleanupStatus": cleanup_result.status.value,
+                    "cleanupIncomplete": not cleanup_ok,
+                    "cleanupRetryable": cleanup_retryable,
+                }
+            )
             if not cleanup_ok:
                 report.issues.append(
                     f"Final cleanup: {cleanup_result.status.value} ({cleanup_result.message})"
                 )
-                if report.was_successful or not report.failure_code:
+                if report.was_successful or not report.failure_code or report.failure_code == "placement_not_verified":
                     report.apply_quality_gate(
                         QualityGateResult.failure(
                             "placement_not_verified",
-                            evidence={"cleanupStatus": cleanup_result.status.value},
+                            retryable=cleanup_retryable,
+                            evidence={
+                                "cleanupStatus": cleanup_result.status.value,
+                                "cleanupIncomplete": True,
+                                "cleanupRetryable": cleanup_retryable,
+                            },
                             message="Final cleanup was not verified.",
                         )
                     )
             final_validation = self.validate_workflow_completion()
             report.cleanup_verified = cleanup_ok and bool(final_validation[0])
-            if not final_validation[0] and report.was_successful:
+            if (
+                not final_validation[0]
+                and (
+                    report.was_successful
+                    or not report.failure_code
+                    or report.failure_code == "placement_not_verified"
+                )
+            ):
                 report.apply_quality_gate(
                     QualityGateResult.failure(
                         "placement_not_verified",
-                        evidence={"validationIssues": final_validation[1]},
+                        retryable=cleanup_retryable,
+                        evidence={
+                            "validationIssues": final_validation[1],
+                            "cleanupIncomplete": True,
+                            "cleanupRetryable": cleanup_retryable,
+                        },
                         message="Final board validation failed.",
                     )
                 )
@@ -12621,6 +13125,17 @@ class SprunkiGamePlayer:
                 "issues": list(final_validation[1]),
             }
             report.cleanup_verified = cleanup_ok and bool(final_validation[0])
+            cleanup_retryable = bool(
+                not self.should_stop
+                and not self.stop_event.is_set()
+                and not report.cleanup_verified
+            )
+            report.evidence.update(
+                {
+                    "cleanupIncomplete": not report.cleanup_verified,
+                    "cleanupRetryable": cleanup_retryable,
+                }
+            )
             if not report.failure_code:
                 if self.should_stop or self.stop_event.is_set():
                     report.apply_quality_gate(
@@ -12633,7 +13148,12 @@ class SprunkiGamePlayer:
                     report.apply_quality_gate(
                         QualityGateResult.failure(
                             "placement_not_verified",
-                            evidence={"validationIssues": final_validation[1]},
+                            retryable=cleanup_retryable,
+                            evidence={
+                                "validationIssues": final_validation[1],
+                                "cleanupIncomplete": True,
+                                "cleanupRetryable": cleanup_retryable,
+                            },
                             message="Final remix board validation failed.",
                         )
                     )

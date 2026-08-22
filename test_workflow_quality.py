@@ -110,6 +110,17 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.failure_code, "placement_not_verified")
 
+    def test_cleanup_only_failure_can_be_marked_retryable(self):
+        report = verified_report()
+        report.cleanup_verified = False
+        report.evidence["cleanupRetryable"] = True
+
+        result = evaluate_workflow_report(report, require_identity=False)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.failure_code, "placement_not_verified")
+        self.assertTrue(result.retryable)
+
     def test_claimed_zero_to_zero_transaction_is_rejected(self):
         report = verified_report()
         report.evidence["placementTransactions"] = [
@@ -202,6 +213,179 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertTrue(failure_is_retryable("runtime_verification_unknown"))
         self.assertFalse(failure_is_retryable("no_icons"))
         self.assertTrue(failure_is_retryable("recorded_identity_missing"))
+        self.assertFalse(failure_is_retryable("placement_not_verified"))
+        self.assertTrue(
+            failure_is_retryable(
+                "placement_not_verified",
+                {"cleanupRetryable": True},
+            )
+        )
+
+    def test_targeted_cleanup_recovery_re_scans_occupied_polos_slot(self):
+        import threading
+
+        from placement_verifier import OperationContext, OperationResult, OperationStatus
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "slots": [
+                    {"index": 3, "x": 100, "y": 200},
+                ]
+            }
+        }
+        player.stop_event = threading.Event()
+        player.empty_board_baseline = {"characters": None, "putted": None}
+        player.verifier_targeted_cleanup_recovery_enabled = True
+        player.verifier_targeted_cleanup_recovery_rounds = 1
+        player.verifier_targeted_cleanup_radius_px = 24
+        player.verifier_targeted_cleanup_backend_fallback = True
+        player.verifier_targeted_cleanup_timeout_ms = 500
+
+        state = {
+            "characters_count": 1,
+            "putted_characters": 1,
+            "polos_array": ["0", "0", "0", "1"],
+        }
+        calls = []
+
+        def read_state():
+            return dict(state)
+
+        def fake_precision(target_slot, use_cdp, **kwargs):
+            calls.append(
+                {
+                    "slot": kwargs["target_slot_index"],
+                    "x": target_slot["x"],
+                    "y": target_slot["y"],
+                }
+            )
+            state.update(
+                {
+                    "characters_count": 0,
+                    "putted_characters": 0,
+                    "polos_array": ["0", "0", "0", "0"],
+                }
+            )
+            return OperationResult(OperationStatus.VERIFIED, direction="cleanup")
+
+        player.get_comprehensive_slot_state = read_state
+        player._execute_precision_return_click = fake_precision
+        context = OperationContext.begin("cleanup", 3, max_input_attempts=20)
+        player._active_operation_context = context
+
+        result = player._targeted_cleanup_recovery(
+            use_cdp=False,
+            operation_context=context,
+        )
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertEqual(calls[0]["slot"], 3)
+        self.assertEqual(state["polos_array"][3], "0")
+
+    def test_cleanup_aggregate_progress_still_requires_empty_board(self):
+        import threading
+
+        from placement_verifier import OperationContext, OperationResult, OperationStatus, PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "slots": [{"index": 0, "x": 100, "y": 200}],
+            }
+        }
+        player.stop_event = threading.Event()
+        player._active_operation_context = OperationContext.begin(
+            "cleanup", 3, max_input_attempts=20
+        )
+        player._targeted_cleanup_recovery = lambda **kwargs: OperationResult(
+            OperationStatus.FAILED,
+            direction="cleanup",
+            message="targeted_cleanup_incomplete",
+        )
+        player.execute_sequential_carpet_bombing_sets = lambda *args, **kwargs: True
+        snapshots = iter(
+            [
+                PlacementSnapshot(1.0, characters_count=2, putted_count=2),
+                PlacementSnapshot(2.0, characters_count=1, putted_count=1),
+            ]
+        )
+        player._capture_stable_placement_snapshot = lambda **kwargs: next(snapshots)
+        player._is_board_count_clean = lambda characters_count=None, putted_count=None: (
+            characters_count == 0 and putted_count == 0
+        )
+
+        result = player.execute_remix_return_strategy(
+            {"index": 3, "x": 100, "y": 200},
+            operation_context=player._active_operation_context,
+        )
+
+        self.assertEqual(result.status, OperationStatus.FAILED)
+        self.assertEqual(result.message, "cleanup_incomplete")
+
+    def test_restart_recovery_is_accepted_only_as_verified_empty_cleanup(self):
+        import threading
+
+        from placement_verifier import OperationContext, OperationResult, OperationStatus
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.stop_event = threading.Event()
+        player.obs_controller = None
+        player._session_recovery_count = 0
+        player._max_session_recoveries = 2
+        player._active_operation_context = OperationContext.begin(
+            "cleanup", 3, max_input_attempts=20
+        )
+        player.execute_remix_return_strategy = lambda *args, **kwargs: OperationResult(
+            OperationStatus.FAILED,
+            direction="cleanup",
+            message="cleanup_incomplete",
+        )
+        player.restart_game_to_initial_state = lambda *args, **kwargs: OperationResult(
+            OperationStatus.RECOVERED,
+            direction="recovery",
+            message="game_recovered",
+        )
+
+        result = player.smart_batch_return_all_slots_with_mode(
+            context={"workflow": "test"},
+            use_cdp=False,
+        )
+
+        self.assertEqual(result, (1, 1, []))
+
+    def test_restart_state_requires_all_available_signals_to_be_empty(self):
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        mixed_state = PlacementSnapshot(
+            timestamp=1.0,
+            characters_count=1,
+            putted_count=0,
+            polos=("0", "0", "0", "0"),
+        )
+        clean_state = PlacementSnapshot(
+            timestamp=1.0,
+            characters_count=0,
+            putted_count=0,
+            polos=("0", "0", "0", "0"),
+        )
+
+        mixed_verified, mixed_checks = SprunkiGamePlayer._evaluate_restart_state(
+            mixed_state
+        )
+        clean_verified, clean_checks = SprunkiGamePlayer._evaluate_restart_state(
+            clean_state
+        )
+
+        self.assertFalse(mixed_verified)
+        self.assertFalse(mixed_checks["counters"]["clean"])
+        self.assertTrue(mixed_checks["polos"]["clean"])
+        self.assertTrue(clean_verified)
+        self.assertTrue(all(check["clean"] for check in clean_checks.values()))
 
     def test_both_requires_both_phase_reports(self):
         report = verified_report("both")

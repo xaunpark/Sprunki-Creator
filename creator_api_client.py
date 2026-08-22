@@ -29,7 +29,7 @@ from file_validator import FileQualityValidator
 from manual_profile_manager import suggested_profile_path_for_url, url_key_from_url
 from workflow_quality import (
     CREATOR_PRODUCTION_MODES,
-    NON_RETRYABLE_FAILURE_CODES,
+    failure_is_retryable,
     normalize_production_mode,
     validate_playable_layout,
 )
@@ -1410,6 +1410,12 @@ class CreatorService:
                     failed_item = (context or {}).get('item')
                     failure_code = getattr(failed_item, 'failure_code', None)
                     failed_gate = getattr(getattr(failed_item, 'workflow_report', None), 'quality_gate', None)
+                    failure_evidence = getattr(failed_gate, "evidence", {}) or {}
+                    failure_retryable = (
+                        True
+                        if not failure_code
+                        else failure_is_retryable(failure_code, failure_evidence)
+                    )
                     error_msg = (
                         f"{operation_name} failed with {failure_code}"
                         if failure_code
@@ -1420,11 +1426,14 @@ class CreatorService:
                         step_attempt,
                         error=error_msg,
                         status="FAIL",
-                        retryable=(failure_code not in NON_RETRYABLE_FAILURE_CODES),
+                        retryable=failure_retryable,
                         started_at=attempt_started_at,
                     )
 
-                    if failure_code in NON_RETRYABLE_FAILURE_CODES or (
+                    if (
+                        failure_code
+                        and not failure_retryable
+                    ) or (
                         failed_gate is not None and not getattr(failed_gate, "retryable", True)
                     ):
                         self.logger.error(
@@ -1542,6 +1551,12 @@ class CreatorService:
                 failed_item = (context or {}).get('item')
                 failure_code = getattr(failed_item, 'failure_code', None)
                 failed_gate = getattr(getattr(failed_item, 'workflow_report', None), 'quality_gate', None)
+                failure_evidence = getattr(failed_gate, "evidence", {}) or {}
+                failure_retryable = (
+                    True
+                    if not failure_code
+                    else failure_is_retryable(failure_code, failure_evidence)
+                )
                 error_msg = f"{operation_name} exception: {str(e)}"
                 print(f"❌ {operation_name} exception on attempt {step_attempt}: {e}")
                 record_retry_evidence(
@@ -1549,11 +1564,14 @@ class CreatorService:
                     error=error_msg,
                     exception=True,
                     status="FAIL",
-                    retryable=(failure_code not in NON_RETRYABLE_FAILURE_CODES),
+                    retryable=failure_retryable,
                     started_at=attempt_started_at,
                 )
 
-                if failure_code in NON_RETRYABLE_FAILURE_CODES or (
+                if (
+                    failure_code
+                    and not failure_retryable
+                ) or (
                     failed_gate is not None and not getattr(failed_gate, "retryable", True)
                 ):
                     self.logger.error(

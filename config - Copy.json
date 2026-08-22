@@ -69,7 +69,12 @@
     "max_read_failures": 5,
     "target_proof_required_for_cache": true,
     "target_proof_required_for_cleanup": false,
-    "final_board_must_be_empty": true
+    "final_board_must_be_empty": true,
+    "targeted_cleanup_recovery_enabled": true,
+    "targeted_cleanup_recovery_rounds": 2,
+    "targeted_cleanup_radius_px": 24,
+    "targeted_cleanup_backend_fallback": true,
+    "targeted_cleanup_timeout_ms": 1500
   },
   "page_verification": {
     "enabled": true,

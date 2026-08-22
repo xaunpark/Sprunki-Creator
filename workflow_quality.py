@@ -481,11 +481,16 @@ def evaluate_workflow_report(
             )
 
     if not report.cleanup_verified:
+        cleanup_retryable = bool(report.evidence.get("cleanupRetryable", False))
         return report.apply_quality_gate(
             QualityGateResult.failure(
                 "placement_not_verified",
+                retryable=cleanup_retryable,
                 coverage=coverage,
-                evidence={"cleanupVerified": False},
+                evidence={
+                    "cleanupVerified": False,
+                    "cleanupRetryable": cleanup_retryable,
+                },
                 message="Workflow cleanup was not verified after placement.",
             )
         )
@@ -607,7 +612,20 @@ def evaluate_workflow_report(
     )
 
 
-def failure_is_retryable(code: Optional[str]) -> bool:
-    """Return false for deterministic quality/data failures."""
+def failure_is_retryable(
+    code: Optional[str],
+    evidence: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return whether a quality failure has an explicitly safe retry path.
 
-    return bool(code) and code not in NON_RETRYABLE_FAILURE_CODES
+    ``placement_not_verified`` normally remains fail-closed.  The one
+    exception is a cleanup-only failure that completed its bounded recovery
+    chain and explicitly marked itself retryable; the next workflow attempt
+    starts from a fresh board and still has to pass the empty-board gate.
+    """
+
+    if not code:
+        return False
+    if code == "placement_not_verified":
+        return bool((evidence or {}).get("cleanupRetryable", False))
+    return code not in NON_RETRYABLE_FAILURE_CODES
