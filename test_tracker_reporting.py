@@ -48,6 +48,53 @@ def passing_report() -> WorkflowReport:
 
 
 class TrackerReportingTests(unittest.TestCase):
+    def test_final_cleanup_policy_is_reported_as_pass_without_new_status(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/final-cleanup",
+            project_slug="final-cleanup",
+            mode="master",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/final-cleanup",
+                "layout": {
+                    "icons": [{"index": 0}],
+                    "slots": [{"index": 0}],
+                },
+            },
+            failure_code=None,
+            error_message=None,
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=datetime(2026, 8, 20, 10, 0, 3),
+            output_files=[],
+            recorded_identity_status="verified",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        report = passing_report()
+        report.cleanup_verified = False
+        report.evidence.update(
+            {
+                "finalCleanupOptional": True,
+                "finalRemixContentComplete": True,
+            }
+        )
+
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 3031, "production_mode": "master"},
+            item,
+            report,
+            terminal_status="completed",
+        )
+
+        cleanup_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "cleanup"
+        )
+        self.assertTrue(diagnostic["quality_gate"]["passed"])
+        self.assertEqual(cleanup_check["status"], "PASS")
+        self.assertTrue(cleanup_check["evidence"]["accepted_by_policy"])
+        self.assertEqual(diagnostic["tracker_ui"]["badge"], "COMPLETED")
+
     def test_report_contains_structured_failure_and_full_input_snapshot(self):
         item = SimpleNamespace(
             source_url="https://www.cocrea.world/@author/mod",

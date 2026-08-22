@@ -259,8 +259,18 @@ class SprunkiGamePlayer:
         self._active_operation_context = None
         self._session_recovery_count = 0
         self._max_session_recoveries = 2
+        self._recovery_budget_scope = None
         self._cleanup_started = False
         self._cleanup_completed = False
+        self._cleanup_attempts = 0
+        self._max_cleanup_attempts = 2
+        self._last_cleanup_result = None
+        self._last_remix_cleanup_outcome = None
+        # A remix may still be valid when a bounded cleanup leaves a small,
+        # known number of icons on the board.  Keep the policy as one
+        # SUCCESS/FAILED decision; these fields only carry internal evidence.
+        self.remix_cleanup_max_residual_icons = 2
+        self._active_remix_final_cleanup_optional = False
         self._physical_input_context = None
         self._batch_reconnect_attempts = 0
         self._batch_snapshot_sequence = 0
@@ -558,6 +568,62 @@ class SprunkiGamePlayer:
         self._active_operation_context = context
         return context
 
+    def _cleanup_input_budget(self):
+        """Reserve enough input budget for one complete cleanup attempt.
+
+        A cleanup may use the progressive carpet, targeted coordinate
+        recovery, and then replay a validated manual entry profile after
+        Re-Run.  The old fixed ``120 + profile`` budget could be exhausted by
+        the first two layers before the recovery profile had a chance to run.
+        Keep the budget finite, but derive it from the configured slot count
+        and recovery rounds.
+        """
+        try:
+            slots = (self.config or {}).get("layout", {}).get("slots", [])
+            slot_count = max(1, len(slots) if isinstance(slots, list) else 0)
+        except Exception:
+            slot_count = 1
+        try:
+            max_sets = min(
+                6,
+                max(1, int(getattr(self, "carpet_bombing_config", {}).get("max_sets", 3))),
+            )
+        except (TypeError, ValueError, AttributeError):
+            max_sets = 3
+        carpet_inputs = slot_count * sum(2 + set_index for set_index in range(max_sets))
+        try:
+            recovery_rounds = max(
+                1, int(getattr(self, "verifier_targeted_cleanup_recovery_rounds", 2))
+            )
+        except (TypeError, ValueError):
+            recovery_rounds = 2
+        center_transport_fallback = 1 if getattr(
+            self, "verifier_targeted_cleanup_backend_fallback", True
+        ) else 0
+        targeted_inputs = slot_count * recovery_rounds * (9 + center_transport_fallback)
+        cleanup_inputs = max(120, carpet_inputs + targeted_inputs)
+        return MAX_PREPARE_ACTIONS + cleanup_inputs + 8
+
+    @staticmethod
+    def _cleanup_deadline_seconds():
+        """Return a finite deadline with room for cleanup after profile replay."""
+        return (MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 300.0
+
+    def _activate_recovery_scope(self, context):
+        """Scope the session recovery breaker to one physical operation.
+
+        The operation context already limits a single cleanup/return chain to
+        one recovery.  The old session-wide counter allowed earlier showcase
+        recoveries to disable recovery for a later remix or final cleanup.
+        A new operation gets a fresh breaker; nested calls keep the same
+        scope because they share the same OperationContext.
+        """
+        scope = getattr(context, "operation_id", None) or id(context)
+        if getattr(self, "_recovery_budget_scope", None) != scope:
+            self._session_recovery_count = 0
+            self._recovery_budget_scope = scope
+        return scope
+
     def _finish_operation(self, context, result):
         if context is not None:
             context.close()
@@ -674,7 +740,8 @@ class SprunkiGamePlayer:
             timeout_ms=timeout_ms,
             poll_ms=50,
             stable_samples=stable_samples,
-            stop_requested=lambda: self.stop_event.is_set() or (
+            stop_requested=lambda: getattr(self, "stop_event", None) is not None
+            and self.stop_event.is_set() or (
                 context is not None and context.expired()
             ),
         )
@@ -718,30 +785,64 @@ class SprunkiGamePlayer:
     def _reset_cleanup_guard(self):
         self._cleanup_started = False
         self._cleanup_completed = False
+        self._cleanup_attempts = 0
+        self._last_cleanup_result = None
 
-    def _run_cleanup_once(self, use_cdp=False, context=None, obs_controller=None):
-        """Run final cleanup at most once for the current workflow/session."""
-        if self._cleanup_completed:
-            return OperationResult(
+    def _run_cleanup_once(
+        self,
+        use_cdp=False,
+        context=None,
+        obs_controller=None,
+        force_retry=False,
+    ):
+        """Run cleanup with one explicit retry, never an unbounded loop.
+
+        A failed/UNKNOWN cleanup is not marked completed.  This lets a second
+        finally/validation phase perform one fresh cleanup attempt, while the
+        attempt counter prevents accidental repeated physical input.
+        """
+        last_result = getattr(self, "_last_cleanup_result", None)
+        if getattr(self, "_cleanup_completed", False) and not force_retry:
+            return last_result or OperationResult(
                 OperationStatus.ALREADY_EMPTY,
                 direction="cleanup",
                 message="cleanup_already_completed",
             )
-        if self._cleanup_started:
+        if getattr(self, "_cleanup_started", False):
             return OperationResult(
                 OperationStatus.UNKNOWN,
                 direction="cleanup",
                 message="cleanup_already_in_progress",
             )
 
+        attempts = int(getattr(self, "_cleanup_attempts", 0) or 0)
+        max_attempts = max(1, int(getattr(self, "_max_cleanup_attempts", 2) or 2))
+        if attempts >= max_attempts:
+            return last_result or OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="cleanup",
+                message="cleanup_retry_budget_exhausted",
+            )
+
+        self._cleanup_attempts = attempts + 1
         self._cleanup_started = True
+
+        def finish(result):
+            self._last_cleanup_result = result
+            self._cleanup_started = False
+            self._cleanup_completed = result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }
+            return result
+
         try:
             if not self.config:
-                return OperationResult(
+                return finish(OperationResult(
                     OperationStatus.FAILED,
                     direction="cleanup",
                     message="cleanup_config_unavailable",
-                )
+                ))
             success_count, total_attempted, errors = self.smart_batch_return_all_slots_with_mode(
                 use_cdp=use_cdp,
                 context=context,
@@ -788,17 +889,13 @@ class SprunkiGamePlayer:
                     message="cleanup_incomplete",
                     details={"successCount": success_count, "total": total_attempted, "errors": errors},
                 )
-            return result
+            return finish(result)
         except Exception as error:
-            return OperationResult(
+            return finish(OperationResult(
                 OperationStatus.FAILED,
                 direction="cleanup",
                 message=f"cleanup_exception:{error}",
-            )
-        finally:
-            # A failed cleanup must not be re-entered automatically from a
-            # second finally/exception path; the caller receives the failure.
-            self._cleanup_completed = True
+            ))
 
     def setup_thread_safe_progress(self):
         """Setup thread-safe progress updater"""
@@ -872,6 +969,10 @@ class SprunkiGamePlayer:
                 self.remix_retry_delay_seconds = max(
                     0.0, float(self.game_config.get('remix_retry_delay_seconds', 1.0))
                 )
+                self.remix_cleanup_max_residual_icons = max(
+                    0,
+                    int(self.game_config.get('remix_cleanup_max_residual_icons', 2)),
+                )
                 
                 # Load verification settings
                 self.load_verification_config()
@@ -900,6 +1001,7 @@ class SprunkiGamePlayer:
                 self.intro_skip_clicks = 10
                 self.remix_max_attempts = 2
                 self.remix_retry_delay_seconds = 1.0
+                self.remix_cleanup_max_residual_icons = 2
                 
                 # Set default verification settings
                 self.page_verification_enabled = True
@@ -968,6 +1070,8 @@ class SprunkiGamePlayer:
             "snapshot_timeout_ms": 1500,
             "post_action_timeout_ms": 5000,
             "max_read_failures": 5,
+            "final_snapshot_timeout_ms": 2500,
+            "final_stable_samples": 2,
             "target_proof_required_for_cache": True,
             "target_proof_required_for_cleanup": False,
             "final_board_must_be_empty": True,
@@ -984,6 +1088,8 @@ class SprunkiGamePlayer:
         self.verifier_snapshot_timeout_ms = 1500
         self.verifier_post_action_timeout_ms = 5000
         self.verifier_max_read_failures = 5
+        self.verifier_final_snapshot_timeout_ms = 2500
+        self.verifier_final_stable_samples = 2
         self.verifier_target_proof_required_for_cache = True
         self.verifier_target_proof_required_for_cleanup = False
         self.verifier_final_board_must_be_empty = True
@@ -1043,6 +1149,22 @@ class SprunkiGamePlayer:
                 int(
                     self.placement_verification_config.get(
                         "max_read_failures", 5
+                    )
+                ),
+            )
+            self.verifier_final_snapshot_timeout_ms = max(
+                750,
+                int(
+                    self.placement_verification_config.get(
+                        "final_snapshot_timeout_ms", 2500
+                    )
+                ),
+            )
+            self.verifier_final_stable_samples = max(
+                2,
+                int(
+                    self.placement_verification_config.get(
+                        "final_stable_samples", 2
                     )
                 ),
             )
@@ -5513,10 +5635,7 @@ class SprunkiGamePlayer:
                     "targeted_cleanup_state_unknown",
                     details={"attempts": attempts},
                 )
-            if self._is_board_count_clean(
-                characters_count=state.get("characters_count"),
-                putted_count=state.get("putted_characters"),
-            ):
+            if self._is_board_state_clean(state):
                 return self._operation_result(
                     context,
                     OperationStatus.VERIFIED,
@@ -5548,12 +5667,19 @@ class SprunkiGamePlayer:
                 )
 
             configured_slots = (self.config or {}).get("layout", {}).get("slots", [])
-            slots_by_index = {}
+            normalized_slots = []
             for slot in configured_slots:
                 try:
-                    slots_by_index[int(slot.get("index"))] = slot
+                    normalized_slots.append((int(slot.get("index")), slot))
                 except (AttributeError, TypeError, ValueError):
                     continue
+            normalized_slots.sort(key=lambda item: item[0])
+            # Prefer an exact configured index.  Also add a positional
+            # fallback because Polos is an array on mods whose JSON uses
+            # one-based or sparse slot identifiers.
+            slots_by_index = dict(normalized_slots)
+            for position, (_config_index, slot) in enumerate(normalized_slots):
+                slots_by_index.setdefault(position, slot)
 
             print(
                 f"   🎯 Targeted cleanup round {round_num}/{max_rounds}; "
@@ -5646,10 +5772,7 @@ class SprunkiGamePlayer:
                                 "targeted_cleanup_post_state_unknown",
                                 details={"attempts": attempts},
                             )
-                        if self._is_board_count_clean(
-                            characters_count=after_state.get("characters_count"),
-                            putted_count=after_state.get("putted_characters"),
-                        ):
+                        if self._is_board_state_clean(after_state):
                             return self._operation_result(
                                 context,
                                 OperationStatus.VERIFIED,
@@ -5691,10 +5814,7 @@ class SprunkiGamePlayer:
                 time.sleep(0.2)
 
         final_state = self.get_comprehensive_slot_state()
-        if final_state and self._is_board_count_clean(
-            characters_count=final_state.get("characters_count"),
-            putted_count=final_state.get("putted_characters"),
-        ):
+        if final_state and self._is_board_state_clean(final_state):
             return self._operation_result(
                 context,
                 OperationStatus.VERIFIED,
@@ -5724,8 +5844,8 @@ class SprunkiGamePlayer:
                 # Reserve room for one bounded cleanup strategy plus a
                 # validated manual-profile replay if the single recovery is
                 # needed.  This remains a hard finite budget.
-                max_input_attempts=120 + MAX_PREPARE_ACTIONS + 2,
-                deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 60.0,
+                max_input_attempts=self._cleanup_input_budget(),
+                deadline_seconds=self._cleanup_deadline_seconds(),
             )
             owns_context = True
         if context is None:
@@ -5734,6 +5854,7 @@ class SprunkiGamePlayer:
                 direction="cleanup",
                 message="another_operation_is_active",
             )
+        self._activate_recovery_scope(context)
 
         def finish(status, message, details=None):
             result = self._operation_result(context, status, message, details=details)
@@ -5765,10 +5886,7 @@ class SprunkiGamePlayer:
             if initial_snapshot is None or initial_count is None:
                 print("   🛑 Initial board state is UNKNOWN; refusing cleanup input")
                 return finish(OperationStatus.UNKNOWN, "cleanup_initial_state_unknown")
-            if self._is_board_count_clean(
-                characters_count=initial_snapshot.characters_count,
-                putted_count=initial_snapshot.putted_count,
-            ):
+            if self._is_board_state_clean(initial_snapshot):
                 print("   âœ… Already clean")
                 return finish(OperationStatus.ALREADY_EMPTY, "cleanup_already_empty")
             context.set_baseline(initial_snapshot)
@@ -5804,10 +5922,7 @@ class SprunkiGamePlayer:
             if final_snapshot is None:
                 print("   🛑 Final cleanup state is UNKNOWN")
                 return finish(OperationStatus.UNKNOWN, "cleanup_final_state_unknown")
-            verified_clean = self._is_board_count_clean(
-                characters_count=final_snapshot.characters_count,
-                putted_count=final_snapshot.putted_count,
-            )
+            verified_clean = self._is_board_state_clean(final_snapshot)
             if verified_clean:
                 return finish(
                     OperationStatus.VERIFIED,
@@ -6265,12 +6380,13 @@ class SprunkiGamePlayer:
             operation_context = self._begin_operation(
                 "cleanup",
                 None,
-                max_input_attempts=120 + MAX_PREPARE_ACTIONS + 2,
-                deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 60.0,
+                max_input_attempts=self._cleanup_input_budget(),
+                deadline_seconds=self._cleanup_deadline_seconds(),
             )
             owns_context = True
         if operation_context is None:
             return 0, 0, ["cleanup_operation_context_unavailable"]
+        self._activate_recovery_scope(operation_context)
 
         dummy_slot = {"x": 999, "y": 515, "index": 3}
         recovery_started = False
@@ -6733,10 +6849,7 @@ class SprunkiGamePlayer:
                 if current_count is None:
                     print("   ⚠️ Cannot read board progress; stopping carpet bombing")
                     return False
-                if self._is_board_count_clean(
-                    characters_count=current_state.get("characters_count"),
-                    putted_count=current_state.get("putted_characters"),
-                ):
+                if self._is_board_state_clean(current_state):
                     print(f"âœ… COMPLETE! All clear before set {set_num}")
                     return True
                 
@@ -6773,7 +6886,7 @@ class SprunkiGamePlayer:
                 
                 print(f"   ðŸ“Š Set {set_num} result: {current_count} â†’ {after_count} (cleared: {progress})")
                 
-                if self._is_board_count_clean(characters_count=after_count):
+                if self._is_board_state_clean(after_state):
                     print(f"ðŸŽ‰ SUCCESS! All icons cleared after set {set_num}")
                     return True
                 elif progress > 0:
@@ -6793,10 +6906,7 @@ class SprunkiGamePlayer:
             final_state = self._read_comprehensive_state(context)
             final_count = self._get_board_progress_count(final_state)
             
-            if final_state and self._is_board_count_clean(
-                characters_count=final_state.get("characters_count"),
-                putted_count=final_state.get("putted_characters"),
-            ):
+            if final_state and self._is_board_state_clean(final_state):
                 print(f"FINAL SUCCESS! All icons cleared")
                 return True
             else:
@@ -6979,9 +7089,24 @@ class SprunkiGamePlayer:
             if isinstance(batch_state, dict) and not batch_state.get("read_error"):
                 snapshot = PlacementSnapshot.from_mapping(batch_state)
                 if snapshot and snapshot.has_known_signal:
+                    characters_count = snapshot.characters_count
+                    putted_count = snapshot.putted_count
+                    if characters_count is None or putted_count is None:
+                        # The atomic reader can legitimately expose only one
+                        # aggregate variable on a mod.  Supplement missing
+                        # counters, but let stable-snapshot validation decide
+                        # whether the combined observations are coherent.
+                        try:
+                            fallback_characters, fallback_putted = self.get_dual_counts_individual()
+                        except Exception:
+                            fallback_characters, fallback_putted = None, None
+                        if characters_count is None:
+                            characters_count = fallback_characters
+                        if putted_count is None:
+                            putted_count = fallback_putted
                     state = {
-                        "characters_count": snapshot.characters_count,
-                        "putted_characters": snapshot.putted_count,
+                        "characters_count": characters_count,
+                        "putted_characters": putted_count,
                         "polos_array": list(snapshot.polos) if snapshot.polos is not None else None,
                         "characters_array": list(snapshot.characters) if snapshot.characters is not None else None,
                         "button_enable_list": (
@@ -7377,32 +7502,36 @@ class SprunkiGamePlayer:
         try:
             print(f"\nâœ… WORKFLOW COMPLETION VALIDATION")
             print("="*50)
-            
-            state = self.get_comprehensive_slot_state()
-            if not state:
-                return False, ["Cannot get final state"], ["Manual verification needed"]
-            
-            characters_count = state.get('characters_count')
-            putted_count = state.get('putted_characters')
-            if characters_count is None:
-                characters_count = putted_count
-            if characters_count is None:
+
+            # A single read immediately after cleanup can observe a transient
+            # counter/Polos mismatch.  Require a short stable sample window,
+            # but keep the final empty-board predicate strict.
+            final_snapshot = self._capture_stable_placement_snapshot(
+                timeout_ms=getattr(self, "verifier_final_snapshot_timeout_ms", 2500),
+                stable_samples=getattr(self, "verifier_final_stable_samples", 2),
+            )
+            if final_snapshot is None:
+                return False, ["Final placement state is UNKNOWN"], ["Retry cleanup and read the board again"]
+
+            is_complete, signal_checks = self._evaluate_empty_snapshot(final_snapshot)
+            if not signal_checks:
                 return False, ["Final placement state is UNKNOWN"], ["Manual verification needed"]
-            
+
             issues = []
             recommendations = []
-            
-            # Check: Characters count should be 0
-            if not self._is_board_count_clean(
-                characters_count=state.get("characters_count"),
-                putted_count=state.get("putted_characters"),
-            ):
-                issues.append(f"Characters count = {characters_count} (expected: 0)")
+            if not is_complete:
+                for signal_name, check in signal_checks.items():
+                    if check.get("clean") is False:
+                        value = check.get("value")
+                        if value is not None:
+                            issues.append(f"{signal_name} = {value} (expected empty)")
+                        else:
+                            issues.append(f"{signal_name} still reports occupied slots")
+                    elif check.get("clean") is None:
+                        issues.append(f"{signal_name} state is UNKNOWN")
                 recommendations.append("Run additional return operations")
             else:
-                print("âœ… Characters count = 0 (perfect)")
-            
-            is_complete = len(issues) == 0
+                print("âœ… All available placement signals report an empty board")
             
             print(f"\nðŸ“Š VALIDATION RESULT: {'âœ… COMPLETE' if is_complete else 'âš ï¸ ISSUES FOUND'}")
             if issues:
@@ -7414,8 +7543,7 @@ class SprunkiGamePlayer:
                     print(f"   - {rec}")
             else:
                 print("ðŸŽ‰ Characters Array validation passed!")
-                print("   âœ… Characters count = 0")
-                print("   âœ… All characters returned successfully")
+                print("   âœ… Counters/Polos/Characters signals are consistently empty")
             
             return is_complete, issues, recommendations
             
@@ -8818,11 +8946,18 @@ class SprunkiGamePlayer:
         return summary
 
     def _remember_empty_board_baseline(self, characters_count, putted_count):
-        """Remember counts observed after a verified return to an empty board."""
-        if characters_count is not None:
-            self.empty_board_baseline['characters'] = characters_count
-        if putted_count is not None:
-            self.empty_board_baseline['putted'] = putted_count
+        """Record only an explicitly empty count for diagnostics.
+
+        A successful *single-icon* return is not an empty-board observation.
+        Learning its remaining count (for example ``Putted=1``) made every
+        later board with one icon look clean.  Baselines are therefore never
+        allowed to contain a non-zero value, and the actual cleanup gate uses
+        exact zero independently of this diagnostic cache.
+        """
+        if characters_count == 0:
+            self.empty_board_baseline['characters'] = 0
+        if putted_count == 0:
+            self.empty_board_baseline['putted'] = 0
         print(
             "   Empty-board baseline updated: "
             f"Characters={self.empty_board_baseline['characters']}, "
@@ -8859,17 +8994,256 @@ class SprunkiGamePlayer:
         return None
 
     def _is_board_count_clean(self, characters_count=None, putted_count=None):
-        """Return True when available counters are at their learned empty level."""
+        """Return True only when every available aggregate counter is zero."""
         checks = []
-        for key, count in (('characters', characters_count), ('putted', putted_count)):
+        for count in (characters_count, putted_count):
             if count is None:
                 continue
-            baseline = self.empty_board_baseline.get(key)
-            # Preserve compatibility for mods whose counters genuinely reach 0
-            # until a non-zero baseline has been learned.
-            clean_level = baseline if baseline is not None else 0
-            checks.append(count <= clean_level)
+            if isinstance(count, bool):
+                return False
+            try:
+                checks.append(int(count) == 0)
+            except (TypeError, ValueError, OverflowError):
+                return False
         return bool(checks) and all(checks)
+
+    @staticmethod
+    def _occupancy_count_from_signal(values):
+        """Count occupied entries in a known occupancy array.
+
+        Mods expose either ``0/1`` arrays or arrays containing character
+        identities.  Empty tokens are ignored; malformed/unknown tokens keep
+        the result UNKNOWN instead of allowing an optimistic success.
+        """
+        if values is None:
+            return None
+        if not isinstance(values, (list, tuple)):
+            return None
+
+        empty_tokens = {"", "0", "false"}
+        unknown_tokens = {"none", "null"}
+        occupied = 0
+        for value in values:
+            token = str(value).strip().lower()
+            if token in unknown_tokens:
+                return None
+            if token not in empty_tokens:
+                occupied += 1
+        return occupied
+
+    def _remix_cleanup_policy_evidence(
+        self,
+        *,
+        cleanup_attempted,
+        final_remix=False,
+    ):
+        """Evaluate cleanup for remix success without adding a new status.
+
+        Exact empty-board verification remains the preferred result.  A
+        stable, fully-known board with up to the configured residual count is
+        accepted as a valid remix artifact.  Unknown state or a larger
+        residual is rejected for intermediate remixes so dirty boards cannot
+        grow without bound.  The final remix records the same evidence, but
+        its housekeeping cleanup is optional after playback has completed.
+        """
+        try:
+            max_residual = max(
+                0,
+                int(getattr(self, "remix_cleanup_max_residual_icons", 2)),
+            )
+        except (TypeError, ValueError, OverflowError):
+            max_residual = 2
+
+        snapshot = self._capture_stable_placement_snapshot(
+            timeout_ms=getattr(self, "verifier_final_snapshot_timeout_ms", 2500),
+            stable_samples=getattr(self, "verifier_final_stable_samples", 2),
+        )
+        snapshot = PlacementSnapshot.from_mapping(snapshot)
+        base_evidence = {
+            "maxResidualIcons": max_residual,
+            "cleanupAttempted": bool(cleanup_attempted),
+            "finalRemix": bool(final_remix),
+            "cleanupPolicy": (
+                "final_cleanup_optional"
+                if final_remix
+                else "bounded_residual_tolerance"
+            ),
+        }
+        if snapshot is None:
+            return {
+                **base_evidence,
+                "policyAccepted": False,
+                "emptyVerified": False,
+                "residualCount": None,
+                "reason": "cleanup_state_unknown",
+            }
+        if snapshot.read_error:
+            return {
+                **base_evidence,
+                "policyAccepted": False,
+                "emptyVerified": False,
+                "residualCount": None,
+                "reason": "cleanup_state_read_error",
+            }
+
+        verified_empty, checks = self._evaluate_empty_snapshot(snapshot)
+        if not checks or any(check.get("clean") is None for check in checks.values()):
+            return {
+                **base_evidence,
+                "policyAccepted": False,
+                "emptyVerified": False,
+                "residualCount": None,
+                "checks": checks,
+                "reason": "cleanup_signal_unknown",
+            }
+
+        signal_counts = {}
+        for name, value in (
+            ("characters", snapshot.characters_count),
+            ("putted", snapshot.putted_count),
+        ):
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                return {
+                    **base_evidence,
+                    "policyAccepted": False,
+                    "emptyVerified": False,
+                    "residualCount": None,
+                    "checks": checks,
+                    "reason": f"{name}_count_unknown",
+                }
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError, OverflowError):
+                normalized = None
+            if normalized is None or normalized < 0:
+                return {
+                    **base_evidence,
+                    "policyAccepted": False,
+                    "emptyVerified": False,
+                    "residualCount": None,
+                    "checks": checks,
+                    "reason": f"{name}_count_unknown",
+                }
+            signal_counts[name] = normalized
+
+        for name, values in (
+            ("polos", snapshot.polos),
+            ("characters_array", snapshot.characters),
+        ):
+            count = self._occupancy_count_from_signal(values)
+            if count is None:
+                continue
+            signal_counts[name] = count
+
+        if not signal_counts:
+            return {
+                **base_evidence,
+                "policyAccepted": False,
+                "emptyVerified": False,
+                "residualCount": None,
+                "checks": checks,
+                "reason": "cleanup_signal_unavailable",
+            }
+
+        # Use the highest consistent signal as the safety bound.  A stale
+        # lower counter must never hide a still-occupied slot.
+        residual_count = max(signal_counts.values())
+        empty_verified = bool(verified_empty and residual_count == 0)
+        accepted = bool(
+            residual_count <= max_residual
+            and (residual_count == 0 or cleanup_attempted)
+        )
+        return {
+            **base_evidence,
+            "policyAccepted": accepted,
+            "emptyVerified": empty_verified,
+            "residualCount": residual_count,
+            "signalCounts": signal_counts,
+            "checks": checks,
+            "reason": (
+                "cleanup_verified"
+                if empty_verified
+                else "residual_within_tolerance"
+                if accepted
+                else "residual_exceeds_tolerance"
+            ),
+        }
+
+    @staticmethod
+    def _empty_signal_status(values):
+        """Return ``True``/``False``/``None`` for an occupancy array."""
+        if values is None:
+            return None
+        if not isinstance(values, (list, tuple)):
+            return None
+        empty_tokens = {"", "0", "false"}
+        unknown_tokens = {"none", "null"}
+        normalized = [str(value).strip().lower() for value in values]
+        if any(value in unknown_tokens for value in normalized):
+            return None
+        if all(value in empty_tokens for value in normalized):
+            return True
+        # Characters arrays may contain an icon identity (for example
+        # ``n-1``) instead of the literal ``1``.  Any such non-empty token is
+        # still evidence that the board is occupied.
+        return False
+
+    @classmethod
+    def _evaluate_empty_snapshot(cls, snapshot):
+        """Evaluate all reliable occupancy signals in one snapshot.
+
+        Missing signals are ignored because mods expose different subsets.
+        A signal that is present but malformed is reported as UNKNOWN rather
+        than being silently treated as empty.
+        """
+        snapshot = PlacementSnapshot.from_mapping(snapshot)
+        if snapshot is None:
+            return False, {}
+
+        checks = {}
+        for name, value in (
+            ("characters", snapshot.characters_count),
+            ("putted", snapshot.putted_count),
+        ):
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                checks[name] = {"clean": False, "value": value}
+                continue
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError, OverflowError):
+                checks[name] = {"clean": None, "value": value}
+            else:
+                checks[name] = {"clean": normalized == 0, "value": normalized}
+
+        for name, values in (
+            ("polos", snapshot.polos),
+            ("characters_array", snapshot.characters),
+        ):
+            if values is None:
+                continue
+            clean = cls._empty_signal_status(values)
+            checks[name] = {
+                "clean": clean,
+                "active": sum(
+                    1 for value in values
+                    if str(value).strip().lower() in {"1", "true"}
+                ),
+                "length": len(values),
+            }
+
+        verified = bool(checks) and all(
+            check.get("clean") is True for check in checks.values()
+        )
+        return verified, checks
+
+    def _is_board_state_clean(self, state):
+        """Return whether all available occupancy signals report empty."""
+        verified, _checks = self._evaluate_empty_snapshot(state)
+        return verified
 
     def _rollback_open_entry_panel_via_ws(self, ws, state):
         if not isinstance(state, dict):
@@ -9520,36 +9894,25 @@ class SprunkiGamePlayer:
     @staticmethod
     def _evaluate_restart_state(post_state):
         """Evaluate a fresh post-Re-Run snapshot without trusting one signal."""
-        if post_state is None:
+        snapshot = PlacementSnapshot.from_mapping(post_state)
+        if snapshot is None:
             return False, {}
-
-        signal_checks = {}
-        polos = getattr(post_state, "polos", None)
-        counters = [
-            value
-            for value in (
-                getattr(post_state, "characters_count", None),
-                getattr(post_state, "putted_count", None),
-            )
-            if value is not None
+        verified, signal_checks = SprunkiGamePlayer._evaluate_empty_snapshot(snapshot)
+        # Keep the historical ``counters`` key for diagnostics and tests while
+        # still evaluating Characters and Putted independently.
+        counter_checks = [
+            signal_checks[name]
+            for name in ("characters", "putted")
+            if name in signal_checks
         ]
-
-        if polos is not None:
-            signal_checks["polos"] = {
-                "clean": all(str(value).strip() == "0" for value in polos),
-                "active": sum(
-                    1 for value in polos if str(value).strip() == "1"
-                ),
-            }
-        if counters:
+        if counter_checks:
             signal_checks["counters"] = {
-                "clean": all(value == 0 for value in counters),
-                "values": list(counters),
+                "clean": all(check.get("clean") is True for check in counter_checks),
+                "values": [
+                    check.get("value")
+                    for check in counter_checks
+                ],
             }
-
-        verified = bool(signal_checks) and all(
-            check["clean"] for check in signal_checks.values()
-        )
         return verified, signal_checks
 
     def restart_game_to_initial_state(self, use_cdp=True, operation_context=None):
@@ -9557,22 +9920,16 @@ class SprunkiGamePlayer:
         context = operation_context or getattr(self, "_active_operation_context", None)
         owns_context = False
         if context is None:
-            if self._session_recovery_count >= self._max_session_recoveries:
-                return OperationResult(
-                    OperationStatus.FAILED,
-                    direction="recovery",
-                    message="session_recovery_circuit_breaker",
-                )
             context = self._begin_operation(
                 "recovery",
                 None,
                 # One Re-run click plus the worst accepted manual profile
                 # (and one small margin for entry controls).
-                max_input_attempts=MAX_PREPARE_ACTIONS + 2,
+                max_input_attempts=self._cleanup_input_budget(),
                 # A validated manual profile may legally contain a timeline
                 # close to the 30-minute ceiling; the operation still has a
                 # hard deadline rather than inheriting an unbounded wait.
-                deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 5.0,
+                deadline_seconds=self._cleanup_deadline_seconds(),
             )
             owns_context = True
         if context is None:
@@ -9581,6 +9938,7 @@ class SprunkiGamePlayer:
                 direction="recovery",
                 message="another_operation_is_active",
             )
+        self._activate_recovery_scope(context)
         if operation_context is not None and not context.recovery_in_progress:
             return self._operation_result(
                 context,
@@ -10493,8 +10851,8 @@ class SprunkiGamePlayer:
             target_slot_index,
             # Precision/carpet inputs and one possible manual-profile
             # recovery share one finite budget.
-            max_input_attempts=120 + MAX_PREPARE_ACTIONS + 2,
-            deadline_seconds=(MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 60.0,
+            max_input_attempts=self._cleanup_input_budget(),
+            deadline_seconds=self._cleanup_deadline_seconds(),
         )
         if context is None:
             return OperationResult(
@@ -10502,6 +10860,7 @@ class SprunkiGamePlayer:
                 direction="return",
                 message="another_operation_is_active",
             )
+        self._activate_recovery_scope(context)
 
         try:
             if target_slot_index < 0:
@@ -11241,10 +11600,7 @@ class SprunkiGamePlayer:
             if baseline is None:
                 result = self._operation_result(context, OperationStatus.UNKNOWN, "cleanup_state_unknown")
                 return self._finish_operation(context, result)
-            if self._is_board_count_clean(
-                characters_count=baseline.characters_count,
-                putted_count=baseline.putted_count,
-            ):
+            if self._is_board_state_clean(baseline):
                 result = self._operation_result(context, OperationStatus.ALREADY_EMPTY, "cleanup_already_empty")
                 return self._finish_operation(context, result)
             context.set_baseline(baseline)
@@ -11272,10 +11628,7 @@ class SprunkiGamePlayer:
             if final_state is None:
                 status = OperationStatus.UNKNOWN
                 message = "cleanup_final_state_unknown"
-            elif self._is_board_count_clean(
-                characters_count=final_state.characters_count,
-                putted_count=final_state.putted_count,
-            ):
+            elif self._is_board_state_clean(final_state):
                 status = OperationStatus.VERIFIED
                 message = "fast_cleanup_verified"
             else:
@@ -11743,6 +12096,11 @@ class SprunkiGamePlayer:
     def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
         """
         [FIXED & CHUẨN HÓA] Play remix, TRUYỀN obs_controller và context xuống các hàm cấp dưới.
+
+        A remix is successful when playback completes and cleanup either
+        verifies an empty board or leaves only a small, known residual within
+        the configured tolerance.  The latter is deliberately recorded as
+        evidence, not exposed as a second workflow status.
         """
         try:
             if not self.config or not remix_data:
@@ -11759,6 +12117,10 @@ class SprunkiGamePlayer:
                 return False
 
             transaction_start = len(self._workflow_placement_transactions)
+            self._last_remix_cleanup_outcome = None
+            final_remix = bool(
+                getattr(self, "_active_remix_final_cleanup_optional", False)
+            )
             
             emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             
@@ -11775,6 +12137,8 @@ class SprunkiGamePlayer:
             # Phase 1: Drag all icons to slots
             print("ðŸŽ¯ PHASE 1: Dragging all icons to slots for remix...")
             placed_count = 0
+            skipped_count = 0
+            skipped_slots = []
             for slot_position, icon_index in enumerate(remix_icons):
                 if self.stop_event.is_set(): return False
                 
@@ -11790,6 +12154,21 @@ class SprunkiGamePlayer:
                     False,
                     use_cdp=True,
                 )
+                if getattr(drag_result, "status", None) == OperationStatus.ALREADY_PLACED:
+                    skipped_count += 1
+                    skipped_slots.append(
+                        {
+                            "slotPosition": slot_position,
+                            "slotIndex": target_slot.get("index"),
+                            "iconIndex": icon_index,
+                            "reason": "target_already_occupied",
+                        }
+                    )
+                    print(
+                        "   ⚠️ Remix slot already occupied; skipping this icon and "
+                        "continuing with the next slot"
+                    )
+                    continue
                 if not drag_result:
                     print(
                         "🛑 Remix stopped after bounded drag result "
@@ -11828,6 +12207,7 @@ class SprunkiGamePlayer:
                             else "soft"
                         ),
                         "cleanupVerified": False,
+                        "cleanupAccepted": False,
                         "operationId": getattr(drag_result, "operation_id", None),
                         "transitionEvidence": transition_details,
                     }
@@ -11880,21 +12260,128 @@ class SprunkiGamePlayer:
             
             # === BƯỚC 4 (FIX): Truyền context và obs_controller xuống hàm dọn dẹp ===
             # Lời gọi cũ không truyền tham số: self.smart_batch_return_all_slots_with_mode(use_cdp=False)
-            success_count, total_attempted, error_log = self.smart_batch_return_all_slots_with_mode(
-                use_cdp=False, 
-                context=remix_metadata, # Truyền context
-                obs_controller=obs_controller # Truyền controller tường minh
+            cleanup_exception = None
+            try:
+                success_count, total_attempted, error_log = self.smart_batch_return_all_slots_with_mode(
+                    use_cdp=False,
+                    context=remix_metadata, # Truyền context
+                    obs_controller=obs_controller # Truyền controller tường minh
+                )
+            except Exception as cleanup_error:
+                # The final remix no longer needs cleanup to be a content
+                # prerequisite.  Preserve the exception as evidence and let
+                # the final-remix policy decide whether playback can finish.
+                cleanup_exception = cleanup_error
+                success_count, total_attempted, error_log = (
+                    0,
+                    0,
+                    [f"cleanup_exception:{cleanup_error}"],
+                )
+            cleanup_attempted = bool(
+                total_attempted or success_count or error_log
             )
+            try:
+                cleanup_policy = self._remix_cleanup_policy_evidence(
+                    cleanup_attempted=cleanup_attempted,
+                    final_remix=final_remix,
+                )
+            except Exception as policy_error:
+                cleanup_policy = {
+                    "maxResidualIcons": getattr(
+                        self, "remix_cleanup_max_residual_icons", 2
+                    ),
+                    "cleanupAttempted": cleanup_attempted,
+                    "finalRemix": final_remix,
+                    "cleanupPolicy": (
+                        "final_cleanup_optional"
+                        if final_remix
+                        else "bounded_residual_tolerance"
+                    ),
+                    "policyAccepted": False,
+                    "emptyVerified": False,
+                    "residualCount": None,
+                    "reason": f"cleanup_policy_exception:{policy_error}",
+                }
+            # The cleanup coordinator already verifies its own exact success
+            # path.  Preserve that evidence if the extra diagnostic snapshot
+            # is unavailable, while residual acceptance still requires a
+            # known stable snapshot.
+            cleanup_exact_by_result = bool(
+                not error_log
+                and (
+                    (
+                        total_attempted > 0
+                        and success_count == total_attempted
+                    )
+                    or (
+                        total_attempted == 0
+                        and cleanup_policy.get("residualCount") == 0
+                    )
+                )
+            )
+            if cleanup_exact_by_result and not cleanup_policy.get("policyAccepted"):
+                cleanup_policy.update(
+                    {
+                        "policyAccepted": True,
+                        "emptyVerified": True,
+                        "residualCount": 0,
+                        "reason": "cleanup_verified_by_operation_result",
+                    }
+                )
+            if final_remix and not cleanup_policy.get("policyAccepted"):
+                cleanup_policy.update(
+                    {
+                        "policyAccepted": True,
+                        "emptyVerified": bool(
+                            cleanup_policy.get("emptyVerified", False)
+                        ),
+                        "reason": (
+                            "final_cleanup_optional"
+                            f":{cleanup_policy.get('reason', 'not_verified')}"
+                        ),
+                    }
+                )
+            if cleanup_exception is not None:
+                cleanup_policy["cleanupException"] = str(cleanup_exception)
+            # Preserve the cleanup result for the outer whole-remix retry
+            # coordinator.  If this attempt already ran the full cleanup
+            # chain, the coordinator must validate/reuse it instead of
+            # sending a second blind cleanup barrage.
+            self._last_remix_cleanup_outcome = {
+                "transactionStart": transaction_start,
+                "successCount": success_count,
+                "totalAttempted": total_attempted,
+                "errors": list(error_log or []),
+                "placedCount": placed_count,
+                "skippedCount": skipped_count,
+                "skippedSlots": list(skipped_slots),
+                **cleanup_policy,
+            }
             
-            if total_attempted > 0 and success_count == total_attempted:
-                print(f"  âœ… Smart batch return: {success_count}/{total_attempted} icons returned successfully")
+            if cleanup_policy.get("policyAccepted"):
+                residual_count = cleanup_policy.get("residualCount")
+                if cleanup_policy.get("emptyVerified"):
+                    print(
+                        f"  âœ… Smart batch return: {success_count}/{total_attempted} "
+                        "icons returned successfully"
+                    )
+                else:
+                    print(
+                        f"  ⚠️ Smart batch return accepted with known residual: "
+                        f"{residual_count} icon(s) remaining (limit "
+                        f"{cleanup_policy.get('maxResidualIcons')})"
+                    )
                 for transaction in self._workflow_placement_transactions[transaction_start:]:
-                    transaction["cleanupVerified"] = True
+                    transaction["cleanupVerified"] = bool(
+                        cleanup_policy.get("emptyVerified")
+                    )
+                    transaction["cleanupAccepted"] = True
+                    transaction["cleanupResidualCount"] = residual_count
             else:
                 print(f"  âš ï¸  Smart batch return: {success_count}/{total_attempted} icons returned")
                 if error_log:
                     print(f"  ðŸ“‹ Errors: {len(error_log)} issues encountered")
-                print("  🛑 Remix is not considered complete after unverified cleanup")
+                print("  🛑 Remix is not considered complete after unknown/excessive residual cleanup")
                 return False
 
             time.sleep(0.5)
@@ -11927,6 +12414,20 @@ class SprunkiGamePlayer:
         except (TypeError, ValueError):
             retry_delay = 1.0
         return max_attempts, retry_delay
+
+    @staticmethod
+    def _remix_result_allows_workflow_retry(remix_result) -> bool:
+        """Detect a safe job-level retry path from per-attempt evidence."""
+        if not isinstance(remix_result, RemixResult):
+            return False
+        for remix_detail in remix_result.attempt_details or []:
+            for attempt in (remix_detail or {}).get("attempts", []) or []:
+                if (
+                    attempt.get("retryable") is True
+                    and attempt.get("cleanupVerified") is not False
+                ):
+                    return True
+        return False
 
     def _remix_input_is_retryable(self, remix_data: Any) -> Tuple[bool, str]:
         """Reject malformed remix definitions before spending retry budget."""
@@ -11969,13 +12470,28 @@ class SprunkiGamePlayer:
                 transaction["cleanupVerified"] = bool(cleanup_verified)
         return len(transactions)
 
+    def _report_placement_transaction(self):
+        """Select a transaction that actually proves placement progress."""
+        transactions = list(getattr(self, "_workflow_placement_transactions", []) or [])
+        for transaction in transactions:
+            if placement_transaction_proves_progress(transaction):
+                return transaction
+        return transactions[0] if transactions else None
+
     def _cleanup_partial_remix_for_retry(
         self,
         remix_data: Dict[str, Any],
         attempt: int,
         transaction_start: int,
+        prior_cleanup: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, Dict[str, Any]]:
-        """Clean and verify a partial remix before another attempt is allowed."""
+        """Clean and verify a partial remix before another attempt is allowed.
+
+        When ``play_complete_remix_corrected`` already executed its cleanup
+        chain, reuse that result and only perform the final stable validation.
+        This prevents a failed remix from receiving two consecutive blind
+        cleanup barrages.
+        """
         remix_name = str(remix_data.get("name", "Unknown Remix"))
         context = {
             "workflow": "remix_retry_cleanup",
@@ -11987,19 +12503,32 @@ class SprunkiGamePlayer:
         total_attempted = 0
         validation_complete = False
         validation_issues: List[str] = []
+        cleanup_source = "retry_cleanup"
 
         print(
             f"🧹 Cleaning partial remix before retry: {remix_name} "
             f"(attempt {attempt})"
         )
         try:
-            success_count, total_attempted, errors = (
-                self.smart_batch_return_all_slots_with_mode(
-                    use_cdp=False,
-                    context=context,
-                    obs_controller=self.obs_controller,
+            reusable_cleanup = prior_cleanup
+            if not isinstance(reusable_cleanup, dict):
+                reusable_cleanup = getattr(self, "_last_remix_cleanup_outcome", None)
+            if (
+                isinstance(reusable_cleanup, dict)
+                and reusable_cleanup.get("transactionStart") == transaction_start
+            ):
+                success_count = int(reusable_cleanup.get("successCount", 0) or 0)
+                total_attempted = int(reusable_cleanup.get("totalAttempted", 0) or 0)
+                errors = list(reusable_cleanup.get("errors") or [])
+                cleanup_source = "attempt_cleanup_reused"
+            else:
+                success_count, total_attempted, errors = (
+                    self.smart_batch_return_all_slots_with_mode(
+                        use_cdp=False,
+                        context=context,
+                        obs_controller=self.obs_controller,
+                    )
                 )
-            )
             validation = self.validate_workflow_completion()
             if isinstance(validation, tuple):
                 validation_complete = bool(validation[0])
@@ -12030,6 +12559,7 @@ class SprunkiGamePlayer:
             "validationComplete": validation_complete,
             "validationIssues": validation_issues,
             "cleanupVerified": cleanup_verified,
+            "cleanupSource": cleanup_source,
         }
         if cleanup_verified:
             print(
@@ -12070,6 +12600,7 @@ class SprunkiGamePlayer:
                 return False, attempt_details
 
             transaction_start = len(self._workflow_placement_transactions)
+            self._last_remix_cleanup_outcome = None
             started_at = time.monotonic()
             if not input_valid:
                 success = False
@@ -12104,7 +12635,29 @@ class SprunkiGamePlayer:
             }
 
             if success:
-                detail["cleanupVerified"] = True
+                cleanup_outcome = getattr(self, "_last_remix_cleanup_outcome", None)
+                if isinstance(cleanup_outcome, dict):
+                    detail["cleanup"] = dict(cleanup_outcome)
+                    detail["cleanupVerified"] = bool(
+                        cleanup_outcome.get("emptyVerified", False)
+                    )
+                    detail["cleanupAccepted"] = bool(
+                        cleanup_outcome.get("policyAccepted", True)
+                    )
+                    detail["cleanupResidualCount"] = cleanup_outcome.get(
+                        "residualCount"
+                    )
+                    detail["skippedCount"] = int(
+                        cleanup_outcome.get("skippedCount", 0) or 0
+                    )
+                    detail["skippedSlots"] = list(
+                        cleanup_outcome.get("skippedSlots") or []
+                    )
+                else:
+                    # Keep compatibility with test doubles and legacy direct
+                    # callers that return True without emitting cleanup data.
+                    detail["cleanupVerified"] = True
+                    detail["cleanupAccepted"] = True
                 attempt_details.append(detail)
                 return True, attempt_details
 
@@ -12112,6 +12665,7 @@ class SprunkiGamePlayer:
                 remix_data,
                 attempt,
                 transaction_start,
+                prior_cleanup=getattr(self, "_last_remix_cleanup_outcome", None),
             )
             detail["cleanup"] = cleanup_detail
             detail["cleanupVerified"] = cleanup_verified
@@ -12227,10 +12781,17 @@ class SprunkiGamePlayer:
 
             # Normal remixes
             if not self.should_stop:
-                remix_result = self.play_all_remixes_corrected("Normal", progress_callback=progress_callback)
+                remix_result = self.play_all_remixes_corrected(
+                    "Normal",
+                    progress_callback=progress_callback,
+                    final_cleanup_optional=not has_horror,
+                )
                 report.normal_remixes_played = remix_result.succeeded
                 report.normal_remixes_total = remix_result.attempted
                 report.evidence["normalRemixResult"] = remix_result.as_dict()
+                report.evidence["normalRemixRetryable"] = self._remix_result_allows_workflow_retry(
+                    remix_result
+                )
                 if remix_result.succeeded < remix_result.attempted:
                     is_normal_phase_perfect = False
                     report.issues.append(
@@ -12277,7 +12838,11 @@ class SprunkiGamePlayer:
 
                     # Horror remixes
                     if not self.should_stop:
-                        remix_result = self.play_all_remixes_corrected("Horror", progress_callback=progress_callback)
+                        remix_result = self.play_all_remixes_corrected(
+                            "Horror",
+                            progress_callback=progress_callback,
+                            final_cleanup_optional=True,
+                        )
                         report.horror_remixes_played = remix_result.succeeded
                         report.horror_remixes_total = remix_result.attempted
                         report.evidence["horrorRemixResult"] = remix_result.as_dict()
@@ -12305,9 +12870,9 @@ class SprunkiGamePlayer:
                 for transaction in self._workflow_placement_transactions
             )
             if self._workflow_placement_transactions:
-                first_transaction = self._workflow_placement_transactions[0]
-                report.placement_before = first_transaction.get("before")
-                report.placement_after = first_transaction.get("after")
+                placement_transaction = self._report_placement_transaction()
+                report.placement_before = placement_transaction.get("before")
+                report.placement_after = placement_transaction.get("after")
             report.evidence["placementTransactions"] = list(self._workflow_placement_transactions)
 
             completion_state = self.validate_workflow_completion()
@@ -12404,53 +12969,80 @@ class SprunkiGamePlayer:
                 report.issues.append(
                     f"Final cleanup: {cleanup_result.status.value} ({cleanup_result.message})"
                 )
-                if report.was_successful or not report.failure_code or report.failure_code == "placement_not_verified":
-                    report.apply_quality_gate(
-                        QualityGateResult.failure(
-                            "placement_not_verified",
-                            retryable=cleanup_retryable,
-                            evidence={
-                                "cleanupStatus": cleanup_result.status.value,
-                                "cleanupIncomplete": True,
-                                "cleanupRetryable": cleanup_retryable,
-                            },
-                            message="Final cleanup was not verified.",
-                        )
-                    )
             final_validation = self.validate_workflow_completion()
-            report.cleanup_verified = cleanup_ok and bool(final_validation[0])
+            final_cleanup_retry = None
             if (
                 not final_validation[0]
-                and (
-                    report.was_successful
-                    or not report.failure_code
-                    or report.failure_code == "placement_not_verified"
-                )
+                and not self.should_stop
+                and not self.stop_event.is_set()
+                and int(getattr(self, "_cleanup_attempts", 0) or 0)
+                < int(getattr(self, "_max_cleanup_attempts", 2) or 2)
             ):
-                report.apply_quality_gate(
-                    QualityGateResult.failure(
-                        "placement_not_verified",
-                        retryable=cleanup_retryable,
-                        evidence={
-                            "validationIssues": final_validation[1],
-                            "cleanupIncomplete": True,
-                            "cleanupRetryable": cleanup_retryable,
-                        },
-                        message="Final board validation failed.",
-                    )
+                print("🔁 Final board is not stable/empty; running one fresh cleanup retry")
+                final_cleanup_retry = self._run_cleanup_once(
+                    use_cdp=False,
+                    context={"workflow": "full_showcase_final_retry"},
+                    obs_controller=self.obs_controller,
+                    force_retry=True,
                 )
+                cleanup_result = final_cleanup_retry
+                cleanup_ok = cleanup_result.status in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_EMPTY,
+                }
+                final_validation = self.validate_workflow_completion()
+
+            cleanup_retryable = bool(
+                not self.should_stop
+                and not self.stop_event.is_set()
+                and (not cleanup_ok or not final_validation[0])
+            )
+            report.evidence.update(
+                {
+                    "cleanupStatus": cleanup_result.status.value,
+                    "cleanupIncomplete": not (cleanup_ok and bool(final_validation[0])),
+                    "cleanupRetryable": cleanup_retryable,
+                    "finalCleanupRetry": (
+                        final_cleanup_retry.as_dict()
+                        if final_cleanup_retry is not None else None
+                    ),
+                }
+            )
+            # A stable, all-signal empty-board validation is authoritative even
+            # when the preceding cleanup coordinator returned a stale/partial
+            # status after a transport timeout.
+            cleanup_ok = cleanup_ok or bool(final_validation[0])
+            report.cleanup_verified = cleanup_ok and bool(final_validation[0])
+
+            # Final cleanup is housekeeping, not a second remix-content gate.
+            # The content-complete predicate is deliberately independent of
+            # the final empty-board read so a failed final return cannot turn
+            # an otherwise valid video into FAILED.  Earlier remix cleanup
+            # remains bounded and is still enforced by play_complete_remix.
+            final_content_complete = bool(
+                report.placement_verified
+                and report.normal_remixes_total > 0
+                and report.normal_remixes_played >= report.normal_remixes_total
+            )
+            report.evidence.update(
+                {
+                    "finalCleanupOptional": True,
+                    "finalRemixContentComplete": final_content_complete,
+                    "finalCleanupVerified": bool(report.cleanup_verified),
+                    "finalCleanupValidationIssues": list(final_validation[1]),
+                }
+            )
 
             # The first gate evaluation happens before this final cleanup so
             # a partial remix cannot poison the report with a stale cleanup
-            # failure. Re-evaluate only that specific stale code; preserve
-            # independent failures such as remix thresholds, runtime entry,
-            # and explicit horror-phase failures.
+            # failure. Re-evaluate only that specific stale code (or the
+            # earlier successful gate); preserve independent failures such as
+            # remix thresholds, runtime entry, and explicit horror failures.
             if (
-                cleanup_ok
-                and final_validation[0]
-                and not self.should_stop
+                not self.should_stop
                 and not self.stop_event.is_set()
-                and report.failure_code == "placement_not_verified"
+                and final_content_complete
+                and report.failure_code in {None, "placement_not_verified"}
             ):
                 evaluate_workflow_report(report, mode="master", require_identity=False)
                 report.evidence["qualityGateReevaluatedAfterFinalCleanup"] = True
@@ -12621,13 +13213,21 @@ class SprunkiGamePlayer:
             print("❌ Error in enhanced " + mode + " bonus showcase: " + str(e))
             return False
     
-    def play_all_remixes_corrected(self, mode="Normal", listen_duration=15, progress_callback=None):
+    def play_all_remixes_corrected(
+        self,
+        mode="Normal",
+        listen_duration=15,
+        progress_callback=None,
+        final_cleanup_optional=True,
+    ):
         """Play all remixes and return explicit counters.
 
         The old tuple return made ``(0, 0)`` truthy in remix-only mode.  The
         structured result keeps compatibility with unpacking while all new
         callers use named fields and the object fails closed in boolean
-        contexts.
+        contexts.  ``final_cleanup_optional`` applies only to the last remix
+        in this phase; it affects the final housekeeping gate, not playback
+        or the bounded residual limit.
         """
         builtin_print = builtins.print
 
@@ -12660,6 +13260,9 @@ class SprunkiGamePlayer:
             attempt_details: List[Dict[str, Any]] = []
             REMIX_FAILURE_THRESHOLD = 2 # Ngưỡng: 2 remix thất bại liên tiếp
 
+            previous_final_cleanup_optional = getattr(
+                self, "_active_remix_final_cleanup_optional", False
+            )
             for remix_index, remix in enumerate(self.remix_library):
                 if self.stop_event.is_set():
                     break
@@ -12671,12 +13274,20 @@ class SprunkiGamePlayer:
                 if progress_callback:
                     progress_callback(f"{emoji} Remix {remix_index + 1}/{total_count}: {remix['name']}")
                 
-                remix_success, remix_attempt_details = self._play_remix_with_retry(
-                    remix,
-                    mode,
-                    listen_duration,
-                    progress_callback,
+                self._active_remix_final_cleanup_optional = bool(
+                    final_cleanup_optional and remix_index == total_count - 1
                 )
+                try:
+                    remix_success, remix_attempt_details = self._play_remix_with_retry(
+                        remix,
+                        mode,
+                        listen_duration,
+                        progress_callback,
+                    )
+                finally:
+                    self._active_remix_final_cleanup_optional = (
+                        previous_final_cleanup_optional
+                    )
                 total_retry_attempts += max(len(remix_attempt_details) - 1, 0)
                 attempt_details.append(
                     {
@@ -12704,8 +13315,15 @@ class SprunkiGamePlayer:
                         )
                     print(f"⚠️ Failed to play remix: {remix['name']}, continuing...")
 
-                # [REFINED] Kích hoạt ngắt mạch cho remix bằng cách ném Exception
-                if consecutive_failures >= REMIX_FAILURE_THRESHOLD:
+                # A failed remix whose board was cleanly recovered is a
+                # retryable content/runtime failure, not proof that the whole
+                # session is incompatible.  Only trip the circuit breaker for
+                # repeated failures that did not leave a verified recovery
+                # path (malformed input or an explicitly blocked cleanup).
+                if (
+                    consecutive_failures >= REMIX_FAILURE_THRESHOLD
+                    and not last_attempt.get("retryable", False)
+                ):
                     error_msg = f"Circuit breaker tripped after {consecutive_failures} consecutive remix failures."
                     print(f"🚨 [CIRCUIT BREAKER] {error_msg}")
                     raise WorkflowIncompatibleError(error_msg)
@@ -12906,10 +13524,7 @@ class SprunkiGamePlayer:
                     print(f"   Characters count: {characters_count}")
                     
                     # Expect 0 after return (slot should be empty for showcase)
-                    if self._is_board_count_clean(
-                        horror_state.get("characters_count"),
-                        horror_state.get("putted_characters"),
-                    ):
+                    if self._is_board_state_clean(horror_state):
                         print("âœ… Horror mode properly prepared - slot empty for showcase")
                         print("ðŸŽ¯ Ready to showcase all horror icons (0-19)")
                     else:
@@ -12987,16 +13602,32 @@ class SprunkiGamePlayer:
                 print("âš ï¸ Drag verification: DISABLED (fallback mode)")
             print("="*60)
             
-            remix_result = self.play_all_remixes_corrected("Test", progress_callback=progress_callback)
+            remix_result = self.play_all_remixes_corrected(
+                "Test",
+                progress_callback=progress_callback,
+                final_cleanup_optional=True,
+            )
             report.normal_remixes_played = remix_result.succeeded
             report.normal_remixes_total = remix_result.attempted
             report.evidence["remixResult"] = remix_result.as_dict()
+            report.evidence["workflowRetryable"] = self._remix_result_allows_workflow_retry(
+                remix_result
+            )
 
             if remix_result.failure_code:
+                workflow_retryable = self._remix_result_allows_workflow_retry(remix_result)
                 report.apply_quality_gate(
                     QualityGateResult.failure(
                         remix_result.failure_code,
-                        evidence=remix_result.as_dict(),
+                        retryable=(
+                            workflow_retryable
+                            if remix_result.failure_code == "remix_threshold_not_met"
+                            else None
+                        ),
+                        evidence={
+                            **remix_result.as_dict(),
+                            "workflowRetryable": workflow_retryable,
+                        },
                         message=(
                             "Remix-only workflow stopped before finalization."
                             if remix_result.failure_code == "workflow_stopped"
@@ -13064,10 +13695,18 @@ class SprunkiGamePlayer:
                 
                 print("="*60)
             else:
+                workflow_retryable = self._remix_result_allows_workflow_retry(remix_result)
                 report.apply_quality_gate(
                     QualityGateResult.failure(
                         "empty_remix" if remix_result.attempted <= 0 else "remix_threshold_not_met",
-                        evidence=remix_result.as_dict(),
+                        retryable=(
+                            workflow_retryable
+                            if remix_result.attempted > 0 else None
+                        ),
+                        evidence={
+                            **remix_result.as_dict(),
+                            "workflowRetryable": workflow_retryable,
+                        },
                         message=(
                             "Remix-only workflow had no remix to attempt."
                             if remix_result.attempted <= 0
@@ -13109,21 +13748,41 @@ class SprunkiGamePlayer:
             )
             report.evidence["placementTransactions"] = list(self._workflow_placement_transactions)
             if self._workflow_placement_transactions:
-                report.placement_before = self._workflow_placement_transactions[0].get("before")
-                report.placement_after = self._workflow_placement_transactions[0].get("after")
+                placement_transaction = self._report_placement_transaction()
+                report.placement_before = placement_transaction.get("before")
+                report.placement_after = placement_transaction.get("after")
 
             cleanup_ok = bool(cleanup_result) and cleanup_result.status in {
                 OperationStatus.VERIFIED,
                 OperationStatus.ALREADY_EMPTY,
             }
-            if report.failure_code:
-                final_validation = (False, [report.failure_code], [])
-            else:
+            final_validation = self.validate_workflow_completion()
+            final_cleanup_retry = None
+            if (
+                not final_validation[0]
+                and not self.should_stop
+                and not self.stop_event.is_set()
+                and int(getattr(self, "_cleanup_attempts", 0) or 0)
+                < int(getattr(self, "_max_cleanup_attempts", 2) or 2)
+            ):
+                print("🔁 Remix-only final board is not stable/empty; retrying cleanup once")
+                final_cleanup_retry = self._run_cleanup_once(
+                    use_cdp=False,
+                    context={"workflow": "remix_only_final_retry"},
+                    obs_controller=self.obs_controller,
+                    force_retry=True,
+                )
+                cleanup_result = final_cleanup_retry
+                cleanup_ok = cleanup_result.status in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_EMPTY,
+                }
                 final_validation = self.validate_workflow_completion()
             report.evidence["finalCleanupValidation"] = {
                 "isComplete": bool(final_validation[0]),
                 "issues": list(final_validation[1]),
             }
+            cleanup_ok = cleanup_ok or bool(final_validation[0])
             report.cleanup_verified = cleanup_ok and bool(final_validation[0])
             cleanup_retryable = bool(
                 not self.should_stop
@@ -13134,6 +13793,23 @@ class SprunkiGamePlayer:
                 {
                     "cleanupIncomplete": not report.cleanup_verified,
                     "cleanupRetryable": cleanup_retryable,
+                    "finalCleanupRetry": (
+                        final_cleanup_retry.as_dict()
+                        if final_cleanup_retry is not None else None
+                    ),
+                }
+            )
+            final_content_complete = bool(
+                report.placement_verified
+                and report.normal_remixes_total > 0
+                and report.normal_remixes_played >= report.normal_remixes_total
+            )
+            report.evidence.update(
+                {
+                    "finalCleanupOptional": True,
+                    "finalRemixContentComplete": final_content_complete,
+                    "finalCleanupVerified": bool(report.cleanup_verified),
+                    "finalCleanupValidationIssues": list(final_validation[1]),
                 }
             )
             if not report.failure_code:
@@ -13142,19 +13818,6 @@ class SprunkiGamePlayer:
                         QualityGateResult.failure(
                             "workflow_stopped",
                             message="Remix-only workflow stopped before finalization.",
-                        )
-                    )
-                elif not final_validation[0]:
-                    report.apply_quality_gate(
-                        QualityGateResult.failure(
-                            "placement_not_verified",
-                            retryable=cleanup_retryable,
-                            evidence={
-                                "validationIssues": final_validation[1],
-                                "cleanupIncomplete": True,
-                                "cleanupRetryable": cleanup_retryable,
-                            },
-                            message="Final remix board validation failed.",
                         )
                     )
                 else:

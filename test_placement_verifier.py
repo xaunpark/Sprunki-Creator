@@ -234,6 +234,24 @@ class PlacementVerifierTests(unittest.TestCase):
         self.assertIsNotNone(baseline)
         self.assertEqual(baseline.polos, ("0",))
 
+    def test_stability_ignores_flapping_ui_button_list(self):
+        clock = FakeClock()
+        snapshots = iter([
+            _snapshot(1, 1, polos_array=["0"], button_enable_list=["0"]),
+            _snapshot(2, 2, polos_array=["0"], button_enable_list=["1"]),
+        ])
+
+        stable = wait_for_stable_snapshot(
+            lambda: next(snapshots),
+            timeout_ms=500,
+            poll_ms=50,
+            clock=clock.now,
+            sleep_fn=clock.sleep,
+        )
+
+        self.assertIsNotNone(stable)
+        self.assertEqual(stable.polos, ("0",))
+
     def test_no_transition_times_out_without_another_attempt(self):
         clock = FakeClock()
         baseline = _snapshot(1, 1, putted_characters=0)

@@ -429,25 +429,6 @@ def evaluate_workflow_report(
             )
         )
 
-    # A status flag alone is not enough: reject a claimed placement when the
-    # captured state stayed unchanged (the classic 0 -> 0 false-success).
-    if (
-        report.placement_before is not None
-        and report.placement_after is not None
-        and report.placement_before == report.placement_after
-    ):
-        return report.apply_quality_gate(
-            QualityGateResult.failure(
-                "placement_not_verified",
-                coverage=coverage,
-                evidence={
-                    "placementBefore": report.placement_before,
-                    "placementAfter": report.placement_after,
-                },
-                message="Placement evidence shows no state transition.",
-            )
-        )
-
     transactions = report.evidence.get("placementTransactions")
     if isinstance(transactions, list) and transactions:
         transition_proven = False
@@ -479,8 +460,41 @@ def evaluate_workflow_report(
                     message="Placement transactions do not prove a state transition.",
                 )
             )
+    else:
+        # A status flag alone is not enough when no per-transaction evidence
+        # exists: reject the classic 0 -> 0 false-success.  If transaction
+        # evidence exists, it is authoritative and may contain a later valid
+        # placement even when the first captured transaction was unchanged.
+        if (
+            report.placement_before is not None
+            and report.placement_after is not None
+            and report.placement_before == report.placement_after
+        ):
+            return report.apply_quality_gate(
+                QualityGateResult.failure(
+                    "placement_not_verified",
+                    coverage=coverage,
+                    evidence={
+                        "placementBefore": report.placement_before,
+                        "placementAfter": report.placement_after,
+                    },
+                    message="Placement evidence shows no state transition.",
+                )
+            )
 
-    if not report.cleanup_verified:
+    # The final board is housekeeping after the remix content has already
+    # completed.  It remains observable evidence, but it is not a completion
+    # blocker when the caller explicitly marks the final cleanup as optional
+    # and the content itself is complete.  Intermediate remix cleanup keeps
+    # the bounded remix cleanup policy and must still be handled by the remix
+    # coordinator before the next attempt.
+    final_cleanup_optional = bool(report.evidence.get("finalCleanupOptional", False))
+    final_content_complete = bool(
+        report.evidence.get("finalRemixContentComplete", False)
+    )
+    cleanup_accepted_by_policy = final_cleanup_optional and final_content_complete
+
+    if not report.cleanup_verified and not cleanup_accepted_by_policy:
         cleanup_retryable = bool(report.evidence.get("cleanupRetryable", False))
         return report.apply_quality_gate(
             QualityGateResult.failure(
@@ -529,10 +543,18 @@ def evaluate_workflow_report(
             return report.apply_quality_gate(
                 QualityGateResult.failure(
                     "remix_threshold_not_met",
+                    retryable=bool(
+                        report.evidence.get("normalRemixRetryable")
+                        or report.evidence.get("workflowRetryable")
+                    ),
                     coverage=coverage,
                     evidence={
                         "succeeded": report.normal_remixes_played,
                         "attempted": report.normal_remixes_total,
+                        "workflowRetryable": bool(
+                            report.evidence.get("normalRemixRetryable")
+                            or report.evidence.get("workflowRetryable")
+                        ),
                     },
                     message="Remix-only workflow produced no successful remix.",
                 )
@@ -560,12 +582,20 @@ def evaluate_workflow_report(
             return report.apply_quality_gate(
                 QualityGateResult.failure(
                     "remix_threshold_not_met",
+                    retryable=bool(
+                        report.evidence.get("normalRemixRetryable")
+                        or report.evidence.get("workflowRetryable")
+                    ),
                     coverage=coverage,
                     evidence={
                         "iconRatio": report.normal_icons_showcased / report.normal_icons_total,
                         "remixRatio": report.normal_remixes_played / report.normal_remixes_total,
                         "iconThreshold": 0.80,
                         "remixThreshold": 2 / 3,
+                        "workflowRetryable": bool(
+                            report.evidence.get("normalRemixRetryable")
+                            or report.evidence.get("workflowRetryable")
+                        ),
                     },
                     message="Individual workflow did not meet its configured thresholds.",
                 )
@@ -585,12 +615,20 @@ def evaluate_workflow_report(
             return report.apply_quality_gate(
                 QualityGateResult.failure(
                     "remix_threshold_not_met",
+                    retryable=bool(
+                        report.evidence.get("normalRemixRetryable")
+                        or report.evidence.get("workflowRetryable")
+                    ),
                     coverage=coverage,
                     evidence={
                         "iconRatio": report.normal_icons_showcased / report.normal_icons_total,
                         "remixRatio": report.normal_remixes_played / report.normal_remixes_total,
                         "iconThreshold": 0.80,
                         "remixThreshold": 0.50,
+                        "workflowRetryable": bool(
+                            report.evidence.get("normalRemixRetryable")
+                            or report.evidence.get("workflowRetryable")
+                        ),
                     },
                     message="Master workflow did not meet its configured thresholds.",
                 )
@@ -604,6 +642,8 @@ def evaluate_workflow_report(
                 "runtimeVerified": report.runtime_verified,
                 "placementVerified": report.placement_verified,
                 "cleanupVerified": report.cleanup_verified,
+                "cleanupAcceptedByPolicy": cleanup_accepted_by_policy,
+                "finalCleanupOptional": final_cleanup_optional,
                 "identityStatus": identity,
                 "identityVerified": identity == "verified",
             },
@@ -628,4 +668,6 @@ def failure_is_retryable(
         return False
     if code == "placement_not_verified":
         return bool((evidence or {}).get("cleanupRetryable", False))
+    if code == "remix_threshold_not_met":
+        return bool((evidence or {}).get("workflowRetryable", False))
     return code not in NON_RETRYABLE_FAILURE_CODES

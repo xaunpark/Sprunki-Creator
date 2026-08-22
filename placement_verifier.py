@@ -154,6 +154,22 @@ class PlacementSnapshot:
             self.read_error,
         )
 
+    def stability_key(self) -> Tuple[Any, ...]:
+        """Return the board-state key used to detect a settled snapshot.
+
+        ``button_enable_list`` is a UI affordance, not occupancy.  Some mods
+        toggle it while the board is already settled, so including it in the
+        stability key can turn a valid empty-board read into a false UNKNOWN.
+        It remains in ``semantic_key`` for diagnostic/transition evidence.
+        """
+        return (
+            self.characters_count,
+            self.putted_count,
+            self.polos,
+            self.characters,
+            self.read_error,
+        )
+
 
 @dataclass
 class OperationResult:
@@ -731,7 +747,7 @@ def wait_for_stable_snapshot(
             current = None
         if current is not None and current.has_known_signal and not current.read_error:
             consecutive_failures = 0
-            if previous is not None and current.semantic_key() == previous.semantic_key():
+            if previous is not None and current.stability_key() == previous.stability_key():
                 stable += 1
             else:
                 stable = 1
@@ -955,7 +971,7 @@ def observe_until_verified(
             )
             if last_eval.status == OperationStatus.VERIFIED:
                 transition_seen = True
-                current_key = current.semantic_key()
+                current_key = current.stability_key()
                 if current_key == previous_key:
                     stable += 1
                 else:

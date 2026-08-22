@@ -121,6 +121,248 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual(result.failure_code, "placement_not_verified")
         self.assertTrue(result.retryable)
 
+    def test_final_cleanup_is_optional_after_complete_remix_content(self):
+        report = verified_report("remix_only")
+        report.cleanup_verified = False
+        report.evidence.update(
+            {
+                "finalCleanupOptional": True,
+                "finalRemixContentComplete": True,
+            }
+        )
+
+        result = evaluate_workflow_report(report, mode="remix_only", require_identity=False)
+
+        self.assertTrue(result.passed)
+        self.assertTrue(result.evidence["cleanupAcceptedByPolicy"])
+        self.assertFalse(result.evidence["cleanupVerified"])
+
+    def test_remix_cleanup_policy_accepts_two_known_residual_icons(self):
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.remix_cleanup_max_residual_icons = 2
+        player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
+            timestamp=1.0,
+            characters_count=2,
+            putted_count=2,
+            polos=("0", "1", "1"),
+        )
+
+        evidence = player._remix_cleanup_policy_evidence(
+            cleanup_attempted=True,
+            final_remix=False,
+        )
+
+        self.assertTrue(evidence["policyAccepted"])
+        self.assertFalse(evidence["emptyVerified"])
+        self.assertEqual(evidence["residualCount"], 2)
+
+    def test_remix_cleanup_policy_rejects_excessive_or_unknown_residual(self):
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.remix_cleanup_max_residual_icons = 2
+        player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
+            timestamp=1.0,
+            characters_count=3,
+            putted_count=3,
+            polos=("1", "1", "1"),
+        )
+
+        excessive = player._remix_cleanup_policy_evidence(cleanup_attempted=True)
+        self.assertFalse(excessive["policyAccepted"])
+        self.assertEqual(excessive["reason"], "residual_exceeds_tolerance")
+
+        player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
+            timestamp=1.0,
+            polos=("0", "null"),
+        )
+        unknown = player._remix_cleanup_policy_evidence(cleanup_attempted=True)
+        self.assertFalse(unknown["policyAccepted"])
+        self.assertEqual(unknown["reason"], "cleanup_signal_unknown")
+
+    def test_remix_skips_occupied_slot_and_accepts_two_residual_icons(self):
+        import contextlib
+        import io
+        import threading
+        from unittest.mock import patch
+
+        from placement_verifier import OperationResult, OperationStatus, PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}, {"index": 1}],
+                "slots": [{"index": 0}, {"index": 1}],
+            }
+        }
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player.obs_controller = None
+        player.RETURN_MODE_REMIX = "remix"
+        player.verifier_accept_aggregate_progress = True
+        player.remix_cleanup_max_residual_icons = 2
+        player._workflow_placement_transactions = []
+        player._active_remix_final_cleanup_optional = False
+        player.set_return_mode_explicit = lambda *args, **kwargs: None
+        player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
+            timestamp=1.0,
+            characters_count=2,
+            putted_count=2,
+            polos=("1", "1"),
+        )
+
+        drag_calls = []
+
+        def fake_drag(icon, target_slot, *args, **kwargs):
+            drag_calls.append(target_slot["index"])
+            if target_slot["index"] == 0:
+                return OperationResult(
+                    OperationStatus.ALREADY_PLACED,
+                    direction="place",
+                    message="target_already_occupied",
+                )
+            return OperationResult(
+                OperationStatus.VERIFIED,
+                direction="place",
+                details={
+                    "targetSpecific": True,
+                    "beforeCharactersCount": 1,
+                    "afterCharactersCount": 2,
+                },
+            )
+
+        player.corrected_drag_and_drop = fake_drag
+        player.smart_batch_return_all_slots_with_mode = lambda **kwargs: (
+            0,
+            2,
+            ["slot_0_return_failed", "slot_1_return_failed"],
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()), patch(
+            "sprunki_game_player.time.sleep", return_value=None
+        ):
+            success = player.play_complete_remix_corrected(
+                {"name": "Residual fixture", "icons": [0, 1]},
+                listen_duration=0,
+            )
+
+        self.assertTrue(success)
+        self.assertEqual(drag_calls, [0, 1])
+        self.assertEqual(
+            player._last_remix_cleanup_outcome["skippedCount"],
+            1,
+        )
+        self.assertEqual(
+            player._last_remix_cleanup_outcome["residualCount"],
+            2,
+        )
+        self.assertEqual(len(player._workflow_placement_transactions), 1)
+
+    def test_final_remix_success_does_not_require_cleanup_success(self):
+        import contextlib
+        import io
+        import threading
+        from unittest.mock import patch
+
+        from placement_verifier import OperationResult, OperationStatus, PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}],
+                "slots": [{"index": 0}],
+            }
+        }
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player.obs_controller = None
+        player.RETURN_MODE_REMIX = "remix"
+        player.verifier_accept_aggregate_progress = True
+        player.remix_cleanup_max_residual_icons = 2
+        player._workflow_placement_transactions = []
+        player._active_remix_final_cleanup_optional = True
+        player.set_return_mode_explicit = lambda *args, **kwargs: None
+        player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
+            timestamp=1.0,
+            characters_count=6,
+            putted_count=6,
+            polos=("1", "1", "1", "1", "1", "1"),
+        )
+        player.corrected_drag_and_drop = lambda *args, **kwargs: OperationResult(
+            OperationStatus.VERIFIED,
+            direction="place",
+            details={
+                "targetSpecific": True,
+                "beforeCharactersCount": 0,
+                "afterCharactersCount": 1,
+            },
+        )
+        player.smart_batch_return_all_slots_with_mode = lambda **kwargs: (
+            0,
+            1,
+            ["final_cleanup_failed"],
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()), patch(
+            "sprunki_game_player.time.sleep", return_value=None
+        ):
+            success = player.play_complete_remix_corrected(
+                {"name": "Final fixture", "icons": [0]},
+                listen_duration=0,
+            )
+
+        self.assertTrue(success)
+        self.assertTrue(player._last_remix_cleanup_outcome["policyAccepted"])
+        self.assertFalse(player._last_remix_cleanup_outcome["emptyVerified"])
+        self.assertEqual(player._last_remix_cleanup_outcome["residualCount"], 6)
+
+    def test_last_remix_marks_final_cleanup_as_optional_without_new_status(self):
+        import contextlib
+        import io
+        import threading
+        from unittest.mock import patch
+
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}, {"index": 1}],
+                "slots": [{"index": 0}, {"index": 1}],
+            }
+        }
+        player.remix_library = [
+            {"name": "First", "icons": [0], "pattern": "first"},
+            {"name": "Last", "icons": [1], "pattern": "last"},
+        ]
+        player.remix_max_attempts = 1
+        player.remix_retry_delay_seconds = 0
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player.obs_controller = None
+        player._workflow_placement_transactions = []
+        final_flags = []
+
+        def fake_play(remix, mode, listen_duration, progress_callback):
+            final_flags.append(player._active_remix_final_cleanup_optional)
+            return True
+
+        player.play_complete_remix_corrected = fake_play
+        with contextlib.redirect_stdout(io.StringIO()), patch(
+            "sprunki_game_player.time.sleep", return_value=None
+        ):
+            result = player.play_all_remixes_corrected(final_cleanup_optional=True)
+
+        self.assertEqual(final_flags, [False, True])
+        self.assertEqual(result.succeeded, 2)
+        self.assertIsNone(result.failure_code)
+
     def test_claimed_zero_to_zero_transaction_is_rejected(self):
         report = verified_report()
         report.evidence["placementTransactions"] = [
@@ -386,6 +628,181 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertTrue(mixed_checks["polos"]["clean"])
         self.assertTrue(clean_verified)
         self.assertTrue(all(check["clean"] for check in clean_checks.values()))
+
+    def test_nonzero_empty_board_baseline_can_never_make_board_clean(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.empty_board_baseline = {"characters": None, "putted": None}
+
+        player._remember_empty_board_baseline(1, 1)
+
+        self.assertEqual(player.empty_board_baseline, {"characters": None, "putted": None})
+        self.assertFalse(player._is_board_count_clean(0, 1))
+
+    def test_final_empty_evaluation_rejects_residual_polos_or_characters(self):
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        residual_polos = PlacementSnapshot(
+            1.0,
+            characters_count=0,
+            putted_count=0,
+            polos=("0", "1"),
+            characters=("0", "0"),
+        )
+        residual_characters = PlacementSnapshot(
+            1.0,
+            characters_count=0,
+            putted_count=0,
+            polos=("0", "0"),
+            characters=("0", "1"),
+        )
+        clean = PlacementSnapshot(
+            1.0,
+            characters_count=0,
+            putted_count=0,
+            polos=("0", "0"),
+            characters=("0", "0"),
+        )
+
+        self.assertFalse(SprunkiGamePlayer._evaluate_empty_snapshot(residual_polos)[0])
+        self.assertFalse(SprunkiGamePlayer._evaluate_empty_snapshot(residual_characters)[0])
+        self.assertTrue(SprunkiGamePlayer._evaluate_empty_snapshot(clean)[0])
+
+    def test_final_validation_uses_stable_all_signal_empty_gate(self):
+        import threading
+
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.stop_event = threading.Event()
+        player.verifier_final_snapshot_timeout_ms = 500
+        player.verifier_final_stable_samples = 2
+        player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
+            1.0,
+            characters_count=0,
+            putted_count=0,
+            polos=("0", "1"),
+            characters=("0", "0"),
+        )
+
+        complete, issues, _recommendations = player.validate_workflow_completion()
+
+        self.assertFalse(complete)
+        self.assertTrue(any("polos" in issue for issue in issues))
+
+    def test_threshold_failure_with_clean_retry_path_is_retryable(self):
+        report = verified_report()
+        report.normal_remixes_played = 0
+        report.normal_remixes_total = 2
+        report.evidence["normalRemixRetryable"] = True
+
+        result = evaluate_workflow_report(report, require_identity=False)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.failure_code, "remix_threshold_not_met")
+        self.assertTrue(result.retryable)
+
+    def test_later_valid_transaction_overrides_stale_first_report_snapshot(self):
+        report = verified_report()
+        report.placement_before = 0
+        report.placement_after = 0
+        report.placement_verified = True
+        report.evidence["placementTransactions"] = [
+            {
+                "status": "VERIFIED",
+                "targetVerified": True,
+                "before": 0,
+                "after": 0,
+            },
+            {
+                "status": "VERIFIED",
+                "targetVerified": False,
+                "softVerified": True,
+                "before": 0,
+                "after": 1,
+            },
+        ]
+
+        result = evaluate_workflow_report(report, require_identity=False)
+
+        self.assertTrue(result.passed)
+
+    def test_cleanup_guard_allows_one_controlled_retry_after_failure(self):
+        import threading
+
+        from placement_verifier import OperationStatus
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {"layout": {"slots": [{"index": 0}]}}
+        player._reset_cleanup_guard()
+        player.stop_event = threading.Event()
+        calls = []
+
+        def fake_cleanup(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return 0, 1, ["cleanup_incomplete"]
+            return 1, 1, []
+
+        player.smart_batch_return_all_slots_with_mode = fake_cleanup
+
+        first = player._run_cleanup_once()
+        second = player._run_cleanup_once()
+
+        self.assertEqual(first.status, OperationStatus.FAILED)
+        self.assertEqual(second.status, OperationStatus.VERIFIED)
+        self.assertEqual(len(calls), 2)
+
+    def test_whole_remix_retry_reuses_cleanup_already_run_by_attempt(self):
+        import threading
+
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}],
+                "slots": [{"index": 0}],
+            }
+        }
+        player.remix_max_attempts = 2
+        player.remix_retry_delay_seconds = 0
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player._workflow_placement_transactions = []
+        player.validate_workflow_completion = lambda: (True, [], [])
+        cleanup_calls = []
+        player.smart_batch_return_all_slots_with_mode = lambda **kwargs: (
+            cleanup_calls.append(kwargs) or (0, 1, ["must_not_run"])
+        )
+        play_calls = []
+
+        def fake_play(*args, **kwargs):
+            play_calls.append(True)
+            if len(play_calls) == 1:
+                player._last_remix_cleanup_outcome = {
+                    "transactionStart": 0,
+                    "successCount": 1,
+                    "totalAttempted": 1,
+                    "errors": [],
+                }
+                return False
+            return True
+
+        player.play_complete_remix_corrected = fake_play
+
+        success, attempts = player._play_remix_with_retry(
+            {"name": "Reuse cleanup", "icons": [0]}
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(len(play_calls), 2)
+        self.assertEqual(cleanup_calls, [])
+        self.assertEqual(attempts[0]["cleanup"]["cleanupSource"], "attempt_cleanup_reused")
 
     def test_both_requires_both_phase_reports(self):
         report = verified_report("both")

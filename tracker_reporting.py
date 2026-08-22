@@ -525,6 +525,14 @@ def build_tracker_diagnostic_report(
     placement_before = report.get("placement_before")
     placement_after = report.get("placement_after")
     placement_transactions = report.get("evidence", {}).get("placementTransactions", []) if isinstance(report.get("evidence"), dict) else []
+    report_evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    final_cleanup_optional = bool(report_evidence.get("finalCleanupOptional", False))
+    final_content_complete = bool(
+        report_evidence.get("finalRemixContentComplete", False)
+    )
+    cleanup_accepted_by_policy = bool(
+        final_cleanup_optional and final_content_complete
+    )
     placement_status = (
         PASS
         if report.get("placement_verified") is True and placement_before != placement_after
@@ -532,7 +540,13 @@ def build_tracker_diagnostic_report(
         if workflow_report or failure_code == "placement_not_verified"
         else NOT_STARTED
     )
-    cleanup_status = PASS if report.get("cleanup_verified") is True else FAIL if workflow_report else NOT_STARTED
+    cleanup_status = (
+        PASS
+        if report.get("cleanup_verified") is True or cleanup_accepted_by_policy
+        else FAIL
+        if workflow_report
+        else NOT_STARTED
+    )
     identity_status = str(
         getattr(item, "recorded_identity_status", None)
         or report.get("identity_status")
@@ -645,6 +659,9 @@ def build_tracker_diagnostic_report(
             evidence={
                 "reason": "cleanup_not_verified" if cleanup_status != PASS else None,
                 "cleanup_verified": report.get("cleanup_verified"),
+                "accepted_by_policy": cleanup_accepted_by_policy,
+                "final_cleanup_optional": final_cleanup_optional,
+                "final_content_complete": final_content_complete,
             },
         ),
         _check(
@@ -850,6 +867,8 @@ def build_tracker_diagnostic_report(
             "cleanup": {
                 "status": cleanup_status,
                 "verified": report.get("cleanup_verified"),
+                "accepted_by_policy": cleanup_accepted_by_policy,
+                "final_cleanup_optional": final_cleanup_optional,
             },
             "identity": {
                 "status": identity_phase_status,
