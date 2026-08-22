@@ -26,7 +26,7 @@ import gc
 import weakref
 import logging
 import ctypes
-from typing import List, Optional, Dict, Any, TYPE_CHECKING
+from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from sprunki_obs_controller import SprunkiController
 from dataclasses import replace
@@ -844,6 +844,12 @@ class SprunkiGamePlayer:
                 self.fullscreen_wait = self.game_config.get('fullscreen_wait', 8)
                 self.max_pagedown_attempts = self.game_config.get('max_pagedown_attempts', 5)
                 self.intro_skip_clicks = self.game_config.get('intro_skip_clicks', 10)
+                self.remix_max_attempts = max(
+                    1, int(self.game_config.get('remix_max_attempts', 2))
+                )
+                self.remix_retry_delay_seconds = max(
+                    0.0, float(self.game_config.get('remix_retry_delay_seconds', 1.0))
+                )
                 
                 # Load verification settings
                 self.load_verification_config()
@@ -869,6 +875,8 @@ class SprunkiGamePlayer:
                 self.fullscreen_wait = 8
                 self.max_pagedown_attempts = 5
                 self.intro_skip_clicks = 10
+                self.remix_max_attempts = 2
+                self.remix_retry_delay_seconds = 1.0
                 
                 # Set default verification settings
                 self.page_verification_enabled = True
@@ -11263,6 +11271,230 @@ class SprunkiGamePlayer:
             print(f"â Œ Error in enhanced remix {remix_data.get('name', 'Unknown')}: {e}")
             return False
 
+    def _remix_stop_requested(self) -> bool:
+        """Return whether a remix retry would violate the active stop request."""
+        stop_event = getattr(self, "stop_event", None)
+        return bool(getattr(self, "should_stop", False)) or bool(
+            stop_event is not None and stop_event.is_set()
+        )
+
+    def _remix_retry_settings(self) -> Tuple[int, float]:
+        """Read bounded whole-remix retry settings with safe defaults."""
+        try:
+            max_attempts = max(1, int(getattr(self, "remix_max_attempts", 2)))
+        except (TypeError, ValueError):
+            max_attempts = 2
+        try:
+            retry_delay = max(
+                0.0, float(getattr(self, "remix_retry_delay_seconds", 1.0))
+            )
+        except (TypeError, ValueError):
+            retry_delay = 1.0
+        return max_attempts, retry_delay
+
+    def _remix_input_is_retryable(self, remix_data: Any) -> Tuple[bool, str]:
+        """Reject malformed remix definitions before spending retry budget."""
+        if not isinstance(remix_data, dict):
+            return False, "remix_definition_not_an_object"
+        remix_icons = remix_data.get("icons")
+        if not isinstance(remix_icons, list) or not remix_icons:
+            return False, "remix_has_no_icons"
+
+        layout = self.config.get("layout", {}) if isinstance(self.config, dict) else {}
+        icons = layout.get("icons", []) if isinstance(layout, dict) else []
+        slots = layout.get("slots", []) if isinstance(layout, dict) else []
+        if not isinstance(icons, list) or not isinstance(slots, list):
+            return False, "remix_layout_unavailable"
+        if len(remix_icons) > len(slots):
+            return False, "remix_requires_more_slots_than_available"
+        if any(
+            not isinstance(icon_index, int) or icon_index < 0 or icon_index >= len(icons)
+            for icon_index in remix_icons
+        ):
+            return False, "remix_contains_invalid_icon_index"
+        return True, "valid_remix_definition"
+
+    def _annotate_remix_transactions(
+        self,
+        transaction_start: int,
+        remix_name: str,
+        attempt: int,
+        *,
+        completed: bool,
+        cleanup_verified: Optional[bool] = None,
+    ) -> int:
+        """Attach retry identity to placement evidence without discarding it."""
+        transactions = self._workflow_placement_transactions[transaction_start:]
+        for transaction in transactions:
+            transaction["remixName"] = remix_name
+            transaction["remixAttempt"] = attempt
+            transaction["remixCompleted"] = bool(completed)
+            if cleanup_verified is not None:
+                transaction["cleanupVerified"] = bool(cleanup_verified)
+        return len(transactions)
+
+    def _cleanup_partial_remix_for_retry(
+        self,
+        remix_data: Dict[str, Any],
+        attempt: int,
+        transaction_start: int,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Clean and verify a partial remix before another attempt is allowed."""
+        remix_name = str(remix_data.get("name", "Unknown Remix"))
+        context = {
+            "workflow": "remix_retry_cleanup",
+            "remix_name": remix_name,
+            "remix_attempt": attempt,
+        }
+        errors: List[str] = []
+        success_count = 0
+        total_attempted = 0
+        validation_complete = False
+        validation_issues: List[str] = []
+
+        print(
+            f"🧹 Cleaning partial remix before retry: {remix_name} "
+            f"(attempt {attempt})"
+        )
+        try:
+            success_count, total_attempted, errors = (
+                self.smart_batch_return_all_slots_with_mode(
+                    use_cdp=False,
+                    context=context,
+                    obs_controller=self.obs_controller,
+                )
+            )
+            validation = self.validate_workflow_completion()
+            if isinstance(validation, tuple):
+                validation_complete = bool(validation[0])
+                validation_issues = list(validation[1] or [])
+            else:
+                validation_complete = bool(validation)
+        except Exception as error:
+            errors = [f"cleanup_exception:{error}"]
+
+        batch_complete = not errors and (
+            total_attempted == 0 or success_count == total_attempted
+        )
+        cleanup_verified = bool(batch_complete and validation_complete)
+        placed_count = self._annotate_remix_transactions(
+            transaction_start,
+            remix_name,
+            attempt,
+            completed=False,
+            cleanup_verified=cleanup_verified,
+        )
+        details = {
+            "remixName": remix_name,
+            "attempt": attempt,
+            "placedTransactions": placed_count,
+            "successCount": success_count,
+            "totalAttempted": total_attempted,
+            "errors": list(errors),
+            "validationComplete": validation_complete,
+            "validationIssues": validation_issues,
+            "cleanupVerified": cleanup_verified,
+        }
+        if cleanup_verified:
+            print(
+                f"✅ Partial remix cleanup verified: {remix_name} "
+                f"({placed_count} placed transaction(s) cleared)"
+            )
+        else:
+            print(
+                f"🛑 Partial remix cleanup NOT verified: {remix_name}; "
+                "retry is blocked"
+            )
+        return cleanup_verified, details
+
+    def _play_remix_with_retry(
+        self,
+        remix_data: Dict[str, Any],
+        mode: str = "Normal",
+        listen_duration: int = 15,
+        progress_callback=None,
+    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Run one complete remix with cleanup-gated whole-remix retries."""
+        remix_name = str(remix_data.get("name", "Unknown Remix"))
+        max_attempts, retry_delay = self._remix_retry_settings()
+        input_valid, input_reason = self._remix_input_is_retryable(remix_data)
+        attempt_details: List[Dict[str, Any]] = []
+
+        for attempt in range(1, max_attempts + 1):
+            if self._remix_stop_requested():
+                attempt_details.append(
+                    {
+                        "remixName": remix_name,
+                        "attempt": attempt,
+                        "success": False,
+                        "retryable": False,
+                        "reason": "stop_requested",
+                    }
+                )
+                return False, attempt_details
+
+            transaction_start = len(self._workflow_placement_transactions)
+            started_at = time.monotonic()
+            if not input_valid:
+                success = False
+            else:
+                try:
+                    success = bool(
+                        self.play_complete_remix_corrected(
+                            remix_data,
+                            mode,
+                            listen_duration,
+                            progress_callback,
+                        )
+                    )
+                except Exception as error:
+                    print(f"⚠️ Remix attempt raised an error: {error}")
+                    success = False
+
+            placed_count = self._annotate_remix_transactions(
+                transaction_start,
+                remix_name,
+                attempt,
+                completed=success,
+            )
+            detail = {
+                "remixName": remix_name,
+                "attempt": attempt,
+                "success": success,
+                "retryable": input_valid,
+                "reason": input_reason if not input_valid else None,
+                "placedTransactions": placed_count,
+                "durationSeconds": round(time.monotonic() - started_at, 3),
+            }
+
+            if success:
+                detail["cleanupVerified"] = True
+                attempt_details.append(detail)
+                return True, attempt_details
+
+            cleanup_verified, cleanup_detail = self._cleanup_partial_remix_for_retry(
+                remix_data,
+                attempt,
+                transaction_start,
+            )
+            detail["cleanup"] = cleanup_detail
+            detail["cleanupVerified"] = cleanup_verified
+            attempt_details.append(detail)
+
+            if not cleanup_verified or not input_valid:
+                return False, attempt_details
+            if attempt >= max_attempts:
+                return False, attempt_details
+
+            print(
+                f"🔁 Retrying complete remix: {remix_name} "
+                f"({attempt + 1}/{max_attempts})"
+            )
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+
+        return False, attempt_details
+
     def execute_full_showcase_workflow_corrected(self, progress_callback=None) -> WorkflowReport:
         """
         ENHANCED: Execute full workflow with verification, resilience, and detailed reporting.
@@ -11359,6 +11591,7 @@ class SprunkiGamePlayer:
                 remix_result = self.play_all_remixes_corrected("Normal", progress_callback=progress_callback)
                 report.normal_remixes_played = remix_result.succeeded
                 report.normal_remixes_total = remix_result.attempted
+                report.evidence["normalRemixResult"] = remix_result.as_dict()
                 if remix_result.succeeded < remix_result.attempted:
                     is_normal_phase_perfect = False
                     report.issues.append(
@@ -11408,6 +11641,7 @@ class SprunkiGamePlayer:
                         remix_result = self.play_all_remixes_corrected("Horror", progress_callback=progress_callback)
                         report.horror_remixes_played = remix_result.succeeded
                         report.horror_remixes_total = remix_result.attempted
+                        report.evidence["horrorRemixResult"] = remix_result.as_dict()
                         if remix_result.succeeded < remix_result.attempted:
                             is_horror_phase_perfect = False
                             report.issues.append(
@@ -11526,6 +11760,21 @@ class SprunkiGamePlayer:
                         message="Final board validation failed.",
                     )
                 )
+
+            # The first gate evaluation happens before this final cleanup so
+            # a partial remix cannot poison the report with a stale cleanup
+            # failure. Re-evaluate only that specific stale code; preserve
+            # independent failures such as remix thresholds, runtime entry,
+            # and explicit horror-phase failures.
+            if (
+                cleanup_ok
+                and final_validation[0]
+                and not self.should_stop
+                and not self.stop_event.is_set()
+                and report.failure_code == "placement_not_verified"
+            ):
+                evaluate_workflow_report(report, mode="master", require_identity=False)
+                report.evidence["qualityGateReevaluatedAfterFinalCleanup"] = True
             if report.quality_gate is None:
                 report.apply_quality_gate(
                     QualityGateResult.failure(
@@ -11728,6 +11977,8 @@ class SprunkiGamePlayer:
             success_count = 0
             processed_count = 0
             consecutive_failures = 0
+            total_retry_attempts = 0
+            attempt_details: List[Dict[str, Any]] = []
             REMIX_FAILURE_THRESHOLD = 2 # Ngưỡng: 2 remix thất bại liên tiếp
 
             for remix_index, remix in enumerate(self.remix_library):
@@ -11741,12 +11992,38 @@ class SprunkiGamePlayer:
                 if progress_callback:
                     progress_callback(f"{emoji} Remix {remix_index + 1}/{total_count}: {remix['name']}")
                 
-                if self.play_complete_remix_corrected(remix, mode, listen_duration, progress_callback):
+                remix_success, remix_attempt_details = self._play_remix_with_retry(
+                    remix,
+                    mode,
+                    listen_duration,
+                    progress_callback,
+                )
+                total_retry_attempts += max(len(remix_attempt_details) - 1, 0)
+                attempt_details.append(
+                    {
+                        "remixName": remix.get("name", "Unknown Remix"),
+                        "attempts": remix_attempt_details,
+                        "completed": remix_success,
+                    }
+                )
+
+                if remix_success:
                     success_count += 1
                     consecutive_failures = 0
                 else:
-                    print(f"⚠️ Failed to play remix: {remix['name']}, continuing...")
                     consecutive_failures += 1
+
+                    last_attempt = remix_attempt_details[-1] if remix_attempt_details else {}
+                    if last_attempt.get("cleanupVerified") is False:
+                        print(
+                            f"🛑 Failed to play remix: {remix['name']}; "
+                            "cleanup is unverified, stopping remix session."
+                        )
+                        raise WorkflowIncompatibleError(
+                            f"Remix cleanup was not verified after {remix['name']}; "
+                            "refusing to start another remix on a dirty or unknown board."
+                        )
+                    print(f"⚠️ Failed to play remix: {remix['name']}, continuing...")
 
                 # [REFINED] Kích hoạt ngắt mạch cho remix bằng cách ném Exception
                 if consecutive_failures >= REMIX_FAILURE_THRESHOLD:
@@ -11765,6 +12042,8 @@ class SprunkiGamePlayer:
                 succeeded=success_count,
                 failed=max(processed_count - success_count, 0),
                 skipped=max(total_count - processed_count, 0),
+                retry_attempts=total_retry_attempts,
+                attempt_details=attempt_details,
                 failure_code=(
                     "workflow_stopped"
                     if self.should_stop or self.stop_event.is_set()
@@ -11780,6 +12059,12 @@ class SprunkiGamePlayer:
                 succeeded=success_count if "success_count" in locals() else 0,
                 failed=max(processed - (success_count if "success_count" in locals() else 0), 0),
                 skipped=max(total_count - processed, 0),
+                retry_attempts=(
+                    total_retry_attempts if "total_retry_attempts" in locals() else 0
+                ),
+                attempt_details=(
+                    attempt_details if "attempt_details" in locals() else []
+                ),
                 failure_code=(
                     "workflow_stopped"
                     if self.should_stop or self.stop_event.is_set()
@@ -12210,8 +12495,14 @@ class SprunkiGamePlayer:
         return self.showcase_all_icons_corrected(mode, skip_icon_19, listen_duration, progress_callback)
     
     def play_complete_remix(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
-        """Redirect to enhanced version"""
-        return self.play_complete_remix_corrected(remix_data, mode, listen_duration, progress_callback)
+        """Run one complete remix with the bounded retry/cleanup policy."""
+        success, _attempt_details = self._play_remix_with_retry(
+            remix_data,
+            mode,
+            listen_duration,
+            progress_callback,
+        )
+        return success
     
     def execute_full_showcase_workflow(self, progress_callback=None):
         """Redirect to enhanced version"""

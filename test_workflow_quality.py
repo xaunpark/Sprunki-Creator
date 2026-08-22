@@ -269,6 +269,120 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(player.execute_remix_only_workflow_corrected())
         self.assertEqual(player.last_workflow_report.failure_code, "empty_remix")
 
+    def test_whole_remix_retry_cleans_partial_board_before_replay(self):
+        import contextlib
+        import io
+        import threading
+
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}, {"index": 1}],
+                "slots": [{"index": 0}, {"index": 1}],
+            }
+        }
+        player.remix_library = [
+            {"name": "Retry fixture", "icons": [0, 1], "pattern": "fixture"}
+        ]
+        player.remix_max_attempts = 2
+        player.remix_retry_delay_seconds = 0
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player.obs_controller = None
+        player._workflow_placement_transactions = []
+
+        play_calls = []
+        cleanup_calls = []
+
+        def fake_play(remix, mode, listen_duration, progress_callback):
+            play_calls.append(len(cleanup_calls))
+            if len(play_calls) == 1:
+                player._workflow_placement_transactions.append(
+                    {
+                        "status": "VERIFIED",
+                        "targetVerified": True,
+                        "cleanupVerified": False,
+                    }
+                )
+                return False
+            return True
+
+        def fake_cleanup(**kwargs):
+            cleanup_calls.append(kwargs["context"])
+            return 1, 1, []
+
+        player.play_complete_remix_corrected = fake_play
+        player.smart_batch_return_all_slots_with_mode = fake_cleanup
+        player.validate_workflow_completion = lambda: (True, [], [])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = player.play_all_remixes_corrected()
+
+        self.assertEqual(play_calls, [0, 1])
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertEqual(result.attempted, 1)
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.retry_attempts, 1)
+        self.assertEqual(len(result.attempt_details), 1)
+        self.assertEqual(len(result.attempt_details[0]["attempts"]), 2)
+        self.assertTrue(
+            player._workflow_placement_transactions[0]["cleanupVerified"]
+        )
+
+    def test_remix_retry_stops_when_partial_cleanup_is_not_verified(self):
+        import contextlib
+        import io
+        import threading
+
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}],
+                "slots": [{"index": 0}],
+            }
+        }
+        player.remix_library = [
+            {"name": "Dirty-board fixture", "icons": [0], "pattern": "fixture"},
+            {"name": "Must-not-start", "icons": [0], "pattern": "fixture"},
+        ]
+        player.remix_max_attempts = 2
+        player.remix_retry_delay_seconds = 0
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player.obs_controller = None
+        player._workflow_placement_transactions = []
+
+        play_calls = []
+
+        def fake_play(remix, mode, listen_duration, progress_callback):
+            play_calls.append(remix["name"])
+            return False
+
+        player.play_complete_remix_corrected = fake_play
+        player.smart_batch_return_all_slots_with_mode = lambda **kwargs: (
+            0,
+            1,
+            ["cleanup_failed"],
+        )
+        player.validate_workflow_completion = lambda: (
+            False,
+            ["Characters count = 1"],
+            ["Run cleanup"],
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = player.play_all_remixes_corrected()
+
+        self.assertEqual(play_calls, ["Dirty-board fixture"])
+        self.assertEqual(result.attempted, 1)
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.failure_code, "remix_threshold_not_met")
+
     def test_creator_job_entrypoint_returns_false_when_final_gate_fails(self):
         import contextlib
         import io

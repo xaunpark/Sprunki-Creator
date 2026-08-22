@@ -147,6 +147,8 @@ class RemixResult:
     skipped: int = 0
     failure_code: Optional[str] = None
     quality_pass: Optional[bool] = None
+    retry_attempts: int = 0
+    attempt_details: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def success_ratio(self) -> float:

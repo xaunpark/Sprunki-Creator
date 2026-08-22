@@ -55,6 +55,8 @@
     "fullscreen_wait": 8,
     "intro_skip_clicks": 10,
     "run_button_max_retries": 3,
+    "remix_max_attempts": 2,
+    "remix_retry_delay_seconds": 1.0,
     "enhanced_verification": true
   },
   "page_verification": {
