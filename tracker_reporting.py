@@ -22,6 +22,8 @@ from workflow_quality import normalize_production_mode
 
 
 SCHEMA_VERSION = "sprunki.tracker.report.v1"
+MAX_LOG_EXCERPT_BYTES = 60 * 1024
+MAX_ERROR_LOG_BYTES = 16 * 1024
 PASS = "PASS"
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
@@ -215,6 +217,24 @@ def _redact_text(text: str) -> tuple[str, list[str]]:
     return redacted, redactions
 
 
+def truncate_utf8_text(text: Any, max_bytes: int) -> str:
+    """Keep the tail of text without splitting a UTF-8 code point.
+
+    Tracker limits the serialized request in bytes rather than Python
+    characters.  Log lines can contain Vietnamese/emoji, so a character
+    slice is not a reliable byte limit.
+    """
+
+    value = "" if text is None else str(text)
+    limit = max(0, int(max_bytes))
+    if limit == 0:
+        return ""
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return value
+    return encoded[-limit:].decode("utf-8", errors="ignore")
+
+
 def _hash_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -264,39 +284,182 @@ def file_reference(
     return result
 
 
+def _relative_log_path(path: Optional[str]) -> Optional[str]:
+    """Return the Tracker-relative job-log path, never an absolute path."""
+
+    if not path:
+        return None
+    normalized = os.path.normpath(str(path))
+    parts = list(Path(normalized).parts)
+    lowered = [str(part).lower() for part in parts]
+    for index in range(len(parts) - 1):
+        if lowered[index:index + 2] == ["logs", "video_jobs"]:
+            return "/".join(str(part) for part in parts[index:])
+    return os.path.basename(normalized) or None
+
+
+def _log_file_reference(path: Optional[str]) -> Dict[str, Any]:
+    """Build a log reference safe for transport to Tracker.
+
+    The Creator keeps the absolute path locally for its own file access, but
+    the wire contract only exposes a relative filename and integrity metadata.
+    """
+
+    local = file_reference(path, kind="job_log")
+    filename = local.get("filename")
+    safe = {
+        "kind": "job_log",
+        "file_name": filename,
+        "filename": filename,
+        "relative_path": _relative_log_path(path),
+        "exists": bool(local.get("exists")),
+        "readable": bool(local.get("readable")),
+        "size_bytes": int(local.get("size_bytes") or 0),
+        "sha256": local.get("sha256"),
+        "access_mode": "local_reference_only",
+        "tracker_can_access_log_directory": False,
+        "download_url": None,
+    }
+    if local.get("error"):
+        safe["error"] = truncate_utf8_text(local.get("error"), 512)
+    return safe
+
+
+def compact_log_snapshot(
+    snapshot: Optional[Dict[str, Any]],
+    *,
+    excerpt_bytes: int = MAX_LOG_EXCERPT_BYTES,
+) -> Dict[str, Any]:
+    """Normalize a log snapshot to the bounded Tracker wire representation."""
+
+    source = json_safe(snapshot) if isinstance(snapshot, dict) else {}
+    reference = source.get("full_log_ref")
+    if not isinstance(reference, dict):
+        reference = {}
+
+    filename = (
+        source.get("file_name")
+        or source.get("filename")
+        or reference.get("file_name")
+        or reference.get("filename")
+    )
+    relative_path = source.get("relative_path") or reference.get("relative_path")
+    if not relative_path and reference.get("path"):
+        relative_path = _relative_log_path(reference.get("path"))
+    if not filename and relative_path:
+        filename = os.path.basename(str(relative_path))
+
+    redacted_excerpt, excerpt_redactions = _redact_text(
+        str(source.get("excerpt", ""))
+    )
+    excerpt = truncate_utf8_text(redacted_excerpt, excerpt_bytes)
+    size_bytes = source.get("size_bytes")
+    if size_bytes is None:
+        size_bytes = reference.get("size_bytes", 0)
+    try:
+        size_bytes = max(0, int(size_bytes or 0))
+    except (TypeError, ValueError):
+        size_bytes = 0
+
+    line_count = source.get("line_count", 0)
+    try:
+        line_count = max(0, int(line_count or 0))
+    except (TypeError, ValueError):
+        line_count = 0
+
+    sha256 = source.get("sha256") or reference.get("sha256")
+    safe_reference = {
+        "kind": "job_log",
+        "file_name": filename,
+        "filename": filename,
+        "relative_path": relative_path,
+        "exists": bool(source.get("exists", reference.get("exists", False))),
+        "readable": bool(source.get("readable", reference.get("readable", False))),
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+        "access_mode": source.get("access_mode") or reference.get("access_mode") or "local_reference_only",
+        "tracker_can_access_log_directory": bool(
+            source.get(
+                "tracker_can_access_log_directory",
+                reference.get("tracker_can_access_log_directory", False),
+            )
+        ),
+        "download_url": None,
+    }
+
+    redactions = source.get("redactions", [])
+    if not isinstance(redactions, list):
+        redactions = []
+    return {
+        "upload_status": source.get("upload_status") or "local_reference_only",
+        "excerpt": excerpt,
+        "truncated": bool(source.get("truncated", False))
+        or len(str(source.get("excerpt", "")).encode("utf-8", errors="replace"))
+        > len(excerpt.encode("utf-8", errors="replace")),
+        "line_count": line_count,
+        "file_name": filename,
+        "relative_path": relative_path,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+        "tracker_can_access_log_directory": safe_reference[
+            "tracker_can_access_log_directory"
+        ],
+        "read_error": truncate_utf8_text(source.get("read_error"), 512)
+        if source.get("read_error")
+        else None,
+        "redactions": [
+            truncate_utf8_text(entry, 128)
+            for entry in (list(redactions) + list(excerpt_redactions))[:32]
+        ],
+        "full_log_ref": safe_reference,
+    }
+
+
 def build_log_snapshot(
     log_path: Optional[str],
     *,
-    excerpt_chars: int = 12000,
+    excerpt_chars: Optional[int] = None,
+    excerpt_bytes: int = MAX_LOG_EXCERPT_BYTES,
 ) -> Dict[str, Any]:
     """Return a redacted tail plus a reference to the complete local log."""
 
-    reference = file_reference(log_path, kind="job_log")
+    reference = _log_file_reference(log_path)
     snapshot: Dict[str, Any] = {
         "upload_status": "local_reference_only" if reference["exists"] else "missing",
         "full_log_ref": reference,
         "excerpt": "",
         "truncated": False,
         "line_count": 0,
+        "file_name": reference.get("file_name"),
+        "relative_path": reference.get("relative_path"),
+        "size_bytes": reference.get("size_bytes", 0),
+        "sha256": reference.get("sha256"),
         "redactions": [],
     }
     if not reference["exists"]:
         return snapshot
 
     try:
-        with open(reference["path"], "rb") as handle:
+        # ``reference`` is the transport-safe form and intentionally omits
+        # the absolute local path.  Use the caller's path only for local I/O.
+        with open(os.path.abspath(str(log_path)), "rb") as handle:
             raw = handle.read()
         text = raw.decode("utf-8", errors="replace")
         snapshot["line_count"] = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         redacted, redactions = _redact_text(text)
-        excerpt = redacted[-max(1, int(excerpt_chars)) :]
+        limit = int(excerpt_bytes)
+        if excerpt_chars is not None:
+            # Preserve the historical test/helper API.  Explicit
+            # ``excerpt_chars`` is treated as a conservative byte limit.
+            limit = int(excerpt_chars)
+        excerpt = truncate_utf8_text(redacted, max(1, limit))
         snapshot["excerpt"] = excerpt
         snapshot["truncated"] = len(redacted) > len(excerpt)
         snapshot["redactions"] = redactions
     except OSError as exc:
         snapshot["upload_status"] = "read_failed"
         snapshot["read_error"] = str(exc)
-    return snapshot
+    return compact_log_snapshot(snapshot, excerpt_bytes=excerpt_bytes if excerpt_chars is None else int(excerpt_chars))
 
 
 def _report_dict(workflow_report: Any) -> Dict[str, Any]:
@@ -761,12 +924,17 @@ def build_tracker_diagnostic_report(
     if log_snapshot is None:
         log_snapshot = {
             "upload_status": "not_available",
-            "full_log_ref": file_reference(None, kind="job_log"),
+            "full_log_ref": _log_file_reference(None),
             "excerpt": "",
             "truncated": False,
             "line_count": 0,
+            "file_name": None,
+            "relative_path": None,
+            "size_bytes": 0,
+            "sha256": None,
             "redactions": [],
         }
+    log_snapshot = compact_log_snapshot(log_snapshot)
 
     input_snapshot = json_safe(item_json)
     diagnostic = {
@@ -896,7 +1064,6 @@ def build_tracker_diagnostic_report(
             "video_files": json_safe(output_files_payload or {}),
         },
         "logs": json_safe(log_snapshot),
-        "workflow_report": report,
         "tracker_ui": {
             "badge": "COMPLETED" if final_status == "completed" and gate_passed else "FAILED",
             "display_title": headline,

@@ -4,6 +4,7 @@ Replaces tkinter GUI with API-based job polling
 """
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -34,14 +35,44 @@ from workflow_quality import (
     validate_playable_layout,
 )
 from tracker_reporting import (
+    MAX_ERROR_LOG_BYTES,
+    MAX_LOG_EXCERPT_BYTES,
     SCHEMA_VERSION as TRACKER_REPORT_SCHEMA_VERSION,
     build_log_snapshot,
     build_tracker_diagnostic_report,
+    compact_log_snapshot,
+    json_safe,
+    truncate_utf8_text,
 )
 
 # --- CONFIG: Thư mục chứa file JSON thủ công ---
 MANUAL_JSON_DIR = "manual_jsons"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+TERMINAL_MAX_REQUEST_BYTES = 1_800_000
+CALLBACK_MAX_RETRIES = 3
+CALLBACK_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+_TRANSPORT_FORBIDDEN_KEYS = frozenset(
+    {
+        "fulllog",
+        "rawlog",
+        "content",
+        "stdout",
+        "stderr",
+        "traceback",
+        "workflowreport",
+    }
+)
+_TRANSPORT_PATH_KEYS = frozenset(
+    {
+        "path",
+        "absolutepath",
+        "localpath",
+        "filepath",
+        "outputpath",
+        "directory",
+        "outputdirectory",
+    }
+)
 
 
 class _TeeStream:
@@ -138,6 +169,9 @@ class JobLogCapture:
                 self.log_file.write(
                     f"\n===== Job {self.queue_id} log ended at {datetime.now().isoformat(timespec='seconds')} =====\n"
                 )
+                self.log_file.flush()
+            if self.file_handler:
+                self.file_handler.flush()
         except Exception:
             pass
         finally:
@@ -313,10 +347,535 @@ class TrackerAPIClient:
 
     @staticmethod
     def _log_callback_failure(callback_name: str, response) -> None:
-        body = getattr(response, "text", "")
+        error_code, message = TrackerAPIClient._response_error(response)
         print(
             f"⚠️ {callback_name} callback failed: HTTP {getattr(response, 'status_code', 'unknown')}"
-            f" - response body: {body}"
+            f" error_code={error_code} message={message}"
+        )
+
+    @staticmethod
+    def _payload_size_bytes(payload: Dict[str, Any]) -> int:
+        """Return the UTF-8 JSON size used for callback size diagnostics."""
+
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return len(encoded)
+
+    @staticmethod
+    def _normalise_transport_key(key: Any) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+    @classmethod
+    def _strip_forbidden_transport_fields(cls, value: Any) -> Any:
+        """Remove fields that can accidentally carry an unbounded log."""
+
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, entry in value.items():
+                if cls._normalise_transport_key(key) in _TRANSPORT_FORBIDDEN_KEYS:
+                    continue
+                cleaned[str(key)] = cls._strip_forbidden_transport_fields(entry)
+            return cleaned
+        if isinstance(value, list):
+            return [cls._strip_forbidden_transport_fields(entry) for entry in value]
+        return value
+
+    @classmethod
+    def _strip_absolute_transport_paths(cls, value: Any) -> Any:
+        """Remove local absolute paths from callback JSON."""
+
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, entry in value.items():
+                normalized_key = cls._normalise_transport_key(key)
+                if normalized_key in _TRANSPORT_PATH_KEYS and isinstance(entry, str):
+                    is_windows_absolute = bool(re.match(r"^[A-Za-z]:[\\/]", entry))
+                    is_unc = entry.startswith(("\\\\", "//"))
+                    if os.path.isabs(entry) or is_windows_absolute or is_unc:
+                        entry = os.path.basename(entry)
+                cleaned[str(key)] = cls._strip_absolute_transport_paths(entry)
+            return cleaned
+        if isinstance(value, list):
+            return [cls._strip_absolute_transport_paths(entry) for entry in value]
+        return value
+
+    @staticmethod
+    def _compact_reference(reference: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Keep file identity metadata without transmitting a local path."""
+
+        if not isinstance(reference, dict):
+            return reference
+        safe = json_safe(reference)
+        filename = safe.get("file_name") or safe.get("filename")
+        relative_path = safe.get("relative_path")
+        if not relative_path and safe.get("path"):
+            relative_path = os.path.basename(str(safe.get("path")))
+        return {
+            "kind": safe.get("kind"),
+            "file_name": filename,
+            "filename": filename,
+            "relative_path": relative_path,
+            "exists": bool(safe.get("exists", False)),
+            "readable": bool(safe.get("readable", False)),
+            "size_bytes": int(safe.get("size_bytes") or 0),
+            "sha256": safe.get("sha256"),
+            "access_mode": safe.get("access_mode") or "local_reference_only",
+            "download_url": safe.get("download_url"),
+        }
+
+    @classmethod
+    def _compact_diagnostic_report(
+        cls,
+        diagnostic_report: Optional[Dict[str, Any]],
+        *,
+        aggressive: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Build the bounded terminal diagnostic without dropping core sections."""
+
+        if not isinstance(diagnostic_report, dict):
+            return diagnostic_report
+
+        compact = cls._strip_forbidden_transport_fields(json_safe(diagnostic_report))
+        if not isinstance(compact, dict):
+            compact = {}
+
+        # These are duplicate, potentially very large snapshots.  The
+        # required structured evidence remains in mod/phases/quality_gate.
+        mod = compact.get("mod")
+        if isinstance(mod, dict):
+            mod.pop("input_snapshot", None)
+        outputs = compact.get("outputs")
+        if isinstance(outputs, dict):
+            outputs.pop("manifest_snapshot", None)
+        logs = compact_log_snapshot(
+            compact.get("logs") if isinstance(compact.get("logs"), dict) else {},
+            excerpt_bytes=48 * 1024 if aggressive else MAX_LOG_EXCERPT_BYTES,
+        )
+        compact["logs"] = logs
+
+        for required_section in (
+            "mod",
+            "summary",
+            "timing",
+            "phases",
+            "quality_gate",
+            "outputs",
+            "logs",
+        ):
+            if not isinstance(compact.get(required_section), dict):
+                compact[required_section] = {}
+        return compact
+
+    @classmethod
+    def _compact_terminal_payload(
+        cls,
+        payload: Dict[str, Any],
+        *,
+        aggressive: bool = False,
+    ) -> Dict[str, Any]:
+        """Compact one terminal/status payload while preserving its identity."""
+
+        compact = cls._strip_forbidden_transport_fields(json_safe(payload))
+        if not isinstance(compact, dict):
+            compact = {}
+
+        diagnostic = cls._compact_diagnostic_report(
+            compact.get("diagnostic_report"),
+            aggressive=aggressive,
+        )
+        if isinstance(diagnostic, dict):
+            # The outer callback identity is authoritative and must match the
+            # copy inside diagnostic_report on every retry/replay.
+            diagnostic["schema_version"] = TRACKER_REPORT_SCHEMA_VERSION
+            diagnostic["report_id"] = compact.get("report_id")
+            diagnostic["attempt_nonce"] = compact.get("attempt_nonce")
+            diagnostic["status"] = compact.get("status")
+            compact["diagnostic_report"] = diagnostic
+
+        if "error_log" in compact:
+            compact["error_log"] = cls._redact_callback_message(
+                truncate_utf8_text(compact.get("error_log"), MAX_ERROR_LOG_BYTES)
+            )
+        if isinstance(compact.get("details"), (dict, list)):
+            compact["details"] = cls._strip_forbidden_transport_fields(
+                compact["details"]
+            )
+        if isinstance(compact.get("video_files"), (dict, list)):
+            compact["video_files"] = cls._strip_forbidden_transport_fields(
+                compact["video_files"]
+            )
+        if isinstance(compact.get("manifest_ref"), dict):
+            compact["manifest_ref"] = cls._compact_reference(compact["manifest_ref"])
+
+        # A top-level log_ref is optional transport convenience.  Keep only
+        # metadata there; the bounded excerpt lives in diagnostic_report.logs.
+        if isinstance(compact.get("log_ref"), dict):
+            top_log_ref = compact_log_snapshot(compact["log_ref"], excerpt_bytes=0)
+            top_log_ref.pop("excerpt", None)
+            compact["log_ref"] = top_log_ref
+
+        # Never send the full legacy workflow report in a terminal callback.
+        compact.pop("workflow_report", None)
+        return cls._strip_absolute_transport_paths(compact)
+
+    def _tracker_outbox_directory(self) -> str:
+        configured = getattr(self, "tracker_outbox_directory", None)
+        if not configured:
+            config = getattr(self, "config", None)
+            getter = getattr(config, "get", None)
+            if callable(getter):
+                try:
+                    configured = getter(
+                        "logging.tracker_outbox_directory",
+                        os.path.join("logs", "video_jobs", "tracker_outbox"),
+                    )
+                except Exception:
+                    configured = None
+        configured = configured or os.path.join(
+            PROJECT_DIR, "logs", "video_jobs", "tracker_outbox"
+        )
+        if not os.path.isabs(str(configured)):
+            configured = os.path.join(PROJECT_DIR, str(configured))
+        return os.path.abspath(str(configured))
+
+    def _tracker_outbox_path(self, queue_id: int) -> str:
+        return os.path.join(
+            self._tracker_outbox_directory(), f"job-{int(queue_id)}-terminal.json"
+        )
+
+    def _tracker_terminal_archive_path(self, queue_id: int) -> str:
+        """Return the durable compact report path used for later replay."""
+
+        archive_directory = os.path.join(self._tracker_outbox_directory(), "archive")
+        return os.path.join(
+            archive_directory, f"job-{int(queue_id)}-terminal.json"
+        )
+
+    def _save_terminal_outbox(self, queue_id: int, payload: Dict[str, Any]) -> Optional[str]:
+        """Persist only the compact resendable payload, never the full log."""
+
+        path = self._tracker_outbox_path(queue_id)
+        temporary_path = f"{path}.tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(temporary_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            return path
+        except Exception as exc:
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+            print(f"[Tracker] Could not persist terminal outbox for queue {queue_id}: {exc}")
+            return None
+
+    def _save_terminal_archive(self, queue_id: int, payload: Dict[str, Any]) -> Optional[str]:
+        """Keep a compact terminal report even after a successful callback."""
+
+        path = self._tracker_terminal_archive_path(queue_id)
+        temporary_path = f"{path}.tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(temporary_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            return path
+        except Exception as exc:
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+            print(f"[Tracker] Could not archive terminal report for queue {queue_id}: {exc}")
+            return None
+
+    def _remove_terminal_outbox(self, queue_id: int) -> None:
+        try:
+            path = self._tracker_outbox_path(queue_id)
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError as exc:
+            print(f"[Tracker] Could not remove terminal outbox for queue {queue_id}: {exc}")
+
+    def _load_terminal_outbox(self, queue_id: int) -> Optional[Dict[str, Any]]:
+        path = self._tracker_outbox_path(queue_id)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return payload if isinstance(payload, dict) else None
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            print(f"[Tracker] Could not load terminal outbox for queue {queue_id}: {exc}")
+            return None
+
+    def _load_terminal_replay(self, queue_id: int) -> Optional[Dict[str, Any]]:
+        """Load pending outbox first, then a retained compact terminal report."""
+
+        pending = self._load_terminal_outbox(queue_id)
+        if pending is not None:
+            return pending
+        path = self._tracker_terminal_archive_path(queue_id)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return payload if isinstance(payload, dict) else None
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            print(f"[Tracker] Could not load archived terminal report for queue {queue_id}: {exc}")
+            return None
+
+    @staticmethod
+    def _response_error(response) -> Tuple[str, str]:
+        status_code = getattr(response, "status_code", "unknown")
+        body = getattr(response, "text", "") or ""
+        data = None
+        try:
+            data = response.json()
+        except Exception:
+            try:
+                data = json.loads(body)
+            except Exception:
+                data = None
+        if isinstance(data, dict):
+            error_code = data.get("error_code") or data.get("code") or f"http_{status_code}"
+            message = data.get("message") or data.get("error") or ""
+        else:
+            error_code = f"http_{status_code}"
+            message = body
+        return str(error_code), TrackerAPIClient._redact_callback_message(message)
+
+    @staticmethod
+    def _redact_callback_message(message: Any) -> str:
+        safe_message = re.sub(
+            r"(?i)(token|secret|password|authorization|api[_-]?key)(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            str(message),
+        )
+        return truncate_utf8_text(safe_message, 512)
+
+    @staticmethod
+    def _retryable_http_status(status_code: Any) -> bool:
+        try:
+            value = int(status_code)
+        except (TypeError, ValueError):
+            return False
+        return value in {408, 413, 425, 429} or 500 <= value <= 599
+
+    def _record_callback_metrics(
+        self,
+        *,
+        queue_id: int,
+        endpoint: str,
+        status_code: Any,
+        request_bytes: int,
+        retry_count: int,
+        error_code: Optional[str],
+        original_request_bytes: Optional[int] = None,
+    ) -> None:
+        self.last_callback_metrics = {
+            "queue_id": queue_id,
+            "endpoint": endpoint,
+            "http_status": status_code,
+            "request_bytes": int(request_bytes),
+            "retry_count": int(retry_count),
+            "error_code": error_code,
+            "original_request_bytes": original_request_bytes,
+        }
+
+    def _send_callback_with_retry(
+        self,
+        *,
+        queue_id: int,
+        method: str,
+        endpoint: str,
+        payload: Dict[str, Any],
+        final: bool,
+        original_request_bytes: Optional[int] = None,
+    ) -> bool:
+        """Send a callback with bounded retries and durable terminal replay."""
+
+        current_payload = payload
+        retry_count = 0
+        compacted_after_413 = False
+        outbox_saved = False
+        sleep_fn = getattr(self, "_sleep", time.sleep)
+        max_retries = int(getattr(self, "callback_max_retries", CALLBACK_MAX_RETRIES))
+        retry_delays = tuple(
+            getattr(self, "callback_retry_delays", CALLBACK_RETRY_DELAYS_SECONDS)
+        )
+        if final:
+            self._save_terminal_archive(queue_id, current_payload)
+            outbox_saved = self._save_terminal_outbox(queue_id, current_payload) is not None
+
+        while True:
+            request_bytes = self._payload_size_bytes(current_payload)
+            url = f"{self.tracker_url}{endpoint}"
+            print(
+                f"[Tracker] Sending callback: queue_id={queue_id} endpoint={endpoint} "
+                f"request_bytes={request_bytes} retry_count={retry_count}"
+            )
+            try:
+                if method.upper() == "PUT":
+                    response = self.session.put(
+                        url, json=current_payload, timeout=self.timeout
+                    )
+                else:
+                    response = self.session.post(
+                        url, json=current_payload, timeout=self.timeout
+                    )
+            except Exception as exc:
+                error_code = "network_error"
+                message = self._redact_callback_message(str(exc))
+                self._record_callback_metrics(
+                    queue_id=queue_id,
+                    endpoint=endpoint,
+                    status_code="network_error",
+                    request_bytes=request_bytes,
+                    retry_count=retry_count,
+                    error_code=error_code,
+                    original_request_bytes=original_request_bytes,
+                )
+                print(
+                    f"[Tracker] Callback failed: queue_id={queue_id} endpoint={endpoint} "
+                    f"HTTP network_error request_bytes={request_bytes} "
+                    f"retry_count={retry_count} error_code={error_code} message={message}"
+                )
+                if retry_count < max_retries:
+                    delay = retry_delays[min(retry_count, len(retry_delays) - 1)]
+                    sleep_fn(delay)
+                    retry_count += 1
+                    continue
+                if final and not outbox_saved:
+                    self._save_terminal_outbox(queue_id, current_payload)
+                return False
+
+            status_code = getattr(response, "status_code", None)
+            if isinstance(status_code, int) and 200 <= status_code < 300:
+                self._record_callback_metrics(
+                    queue_id=queue_id,
+                    endpoint=endpoint,
+                    status_code=status_code,
+                    request_bytes=request_bytes,
+                    retry_count=retry_count,
+                    error_code=None,
+                    original_request_bytes=original_request_bytes,
+                )
+                print(
+                    f"[Tracker] Callback accepted: queue_id={queue_id} endpoint={endpoint} "
+                    f"HTTP {status_code} request_bytes={request_bytes} retry_count={retry_count}"
+                )
+                if final:
+                    self._remove_terminal_outbox(queue_id)
+                return True
+
+            error_code, message = self._response_error(response)
+            try:
+                numeric_status = int(status_code)
+            except (TypeError, ValueError):
+                numeric_status = 0
+            self._record_callback_metrics(
+                queue_id=queue_id,
+                endpoint=endpoint,
+                status_code=status_code,
+                request_bytes=request_bytes,
+                retry_count=retry_count,
+                error_code=error_code,
+                original_request_bytes=original_request_bytes,
+            )
+            print(
+                f"[Tracker] Callback failed: queue_id={queue_id} endpoint={endpoint} "
+                f"HTTP {status_code} request_bytes={request_bytes} "
+                f"retry_count={retry_count} error_code={error_code} message={message}"
+            )
+
+            if (
+                final
+                and numeric_status == 413
+                and not compacted_after_413
+            ):
+                current_payload = self._compact_terminal_payload(
+                    current_payload, aggressive=True
+                )
+                compacted_after_413 = True
+                # Replace the pending resend artifact with the payload that
+                # will actually be retried; it must never retain a larger
+                # pre-413 representation.
+                self._save_terminal_archive(queue_id, current_payload)
+                outbox_saved = self._save_terminal_outbox(
+                    queue_id, current_payload
+                ) is not None
+
+            if self._retryable_http_status(status_code) and retry_count < max_retries:
+                delay = retry_delays[min(retry_count, len(retry_delays) - 1)]
+                sleep_fn(delay)
+                retry_count += 1
+                continue
+
+            if final and not outbox_saved:
+                self._save_terminal_outbox(queue_id, current_payload)
+            return False
+
+    def resend_terminal_callback(
+        self,
+        queue_id: int,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Replay a compact terminal callback from the durable outbox.
+
+        This intentionally sends the stored sequence/identity verbatim.  It
+        does not reserve a new sequence, so a retry after a lost HTTP response
+        remains idempotent for Tracker.  The default target is job 3118 when
+        the caller invokes ``resend_terminal_callback(3118)``.
+        """
+
+        replay = payload or self._load_terminal_replay(queue_id)
+        if not isinstance(replay, dict):
+            print(f"[Tracker] No terminal callback outbox found for queue {queue_id}")
+            return False
+        if replay.get("final") is not True:
+            print(f"[Tracker] Terminal outbox for queue {queue_id} is not marked final")
+            return False
+        required = ("status", "schema_version", "report_id", "attempt_nonce", "sequence", "diagnostic_report")
+        if any(key not in replay for key in required):
+            print(f"[Tracker] Terminal outbox for queue {queue_id} is missing required fields")
+            return False
+        compact = self._compact_terminal_payload(replay, aggressive=True)
+        compact["final"] = True
+        # Keep the exact stored sequence and immutable callback identity.
+        compact["sequence"] = replay["sequence"]
+        compact["report_id"] = replay["report_id"]
+        compact["attempt_nonce"] = replay["attempt_nonce"]
+        compact["diagnostic_report"]["report_id"] = replay["report_id"]
+        compact["diagnostic_report"]["attempt_nonce"] = replay["attempt_nonce"]
+        self._ensure_attempt(
+            queue_id,
+            report_id=str(replay["report_id"]),
+            attempt_nonce=str(replay["attempt_nonce"]),
+        )
+        try:
+            sequence = int(replay["sequence"])
+            state = self._active_attempts[queue_id]
+            state["next_sequence"] = max(int(state.get("next_sequence", 0)), sequence + 1)
+        except (KeyError, TypeError, ValueError):
+            pass
+        return self._send_callback_with_retry(
+            queue_id=queue_id,
+            method="PUT",
+            endpoint=f"/api/queue/status/{queue_id}",
+            payload=compact,
+            final=True,
+            original_request_bytes=self._payload_size_bytes(replay),
         )
     
     def register_service(self) -> bool:
@@ -420,14 +979,12 @@ class TrackerAPIClient:
             if final and isinstance(normalized_diagnostic, dict):
                 normalized_diagnostic["status"] = status
             effective_sequence = self._reserve_callback_sequence(queue_id, sequence)
-            payload = {
+            raw_payload = {
                 'status': status,
                 'details': details,
                 'video_files': video_files,
                 'error_log': error_log,
-                'workflow_report': workflow_report
-            }
-            payload.update({
+                'workflow_report': workflow_report,
                 'schema_version': TRACKER_REPORT_SCHEMA_VERSION,
                 'diagnostic_report': normalized_diagnostic,
                 'manifest_ref': manifest_ref,
@@ -438,21 +995,26 @@ class TrackerAPIClient:
                 'worker_id': worker_id or getattr(self, 'service_name', 'creator'),
                 'final': bool(final),
                 'sequence': effective_sequence,
-            })
-            
-            response = self.session.put(
-                f"{self.tracker_url}/api/queue/status/{queue_id}", 
-                json=payload,
-                timeout=self.timeout
+            }
+            original_request_bytes = self._payload_size_bytes(json_safe(raw_payload))
+            payload = self._compact_terminal_payload(
+                raw_payload,
+                aggressive=original_request_bytes > TERMINAL_MAX_REQUEST_BYTES,
             )
-            
-            if response.status_code == 200:
-                print(f"📊 Updated job {queue_id} status: {status}")
-                return True
-            else:
-                self._log_callback_failure("Status", response)
-                return False
-                
+            compact_request_bytes = self._payload_size_bytes(payload)
+            if compact_request_bytes > TERMINAL_MAX_REQUEST_BYTES:
+                payload = self._compact_terminal_payload(payload, aggressive=True)
+            result = self._send_callback_with_retry(
+                queue_id=queue_id,
+                method="PUT",
+                endpoint=f"/api/queue/status/{queue_id}",
+                payload=payload,
+                final=bool(final),
+                original_request_bytes=original_request_bytes,
+            )
+            if result:
+                print(f"[Tracker] Updated job {queue_id} status: {status}")
+            return result
         except Exception as e:
             print(f"❌ Status update error: {e}")
             return False
@@ -470,7 +1032,7 @@ class TrackerAPIClient:
             effective_report_id = state["report_id"]
             effective_attempt_nonce = state["attempt_nonce"]
             effective_sequence = self._reserve_callback_sequence(queue_id, sequence)
-            payload = {
+            raw_payload = {
                 'stage': stage,
                 'substep': substep,
                 'progress_percent': progress_percent,
@@ -484,22 +1046,25 @@ class TrackerAPIClient:
                 'sequence': effective_sequence,
                 'final': bool(final),
             }
-            
-            response = self.session.post(
-                f"{self.tracker_url}/api/queue/progress/{queue_id}",
-                json=payload,
-                timeout=self.timeout
+            original_request_bytes = self._payload_size_bytes(json_safe(raw_payload))
+            payload = self._strip_forbidden_transport_fields(json_safe(raw_payload))
+            if isinstance(payload.get("error_details"), str):
+                payload["error_details"] = truncate_utf8_text(
+                    payload["error_details"], MAX_ERROR_LOG_BYTES
+                )
+            result = self._send_callback_with_retry(
+                queue_id=queue_id,
+                method="POST",
+                endpoint=f"/api/queue/progress/{queue_id}",
+                payload=payload,
+                final=False,
+                original_request_bytes=original_request_bytes,
             )
-            
-            if response.status_code == 200:
+            if result:
                 # Optional: Only log important milestones to reduce noise
                 if status in ['completed', 'failed'] or progress_percent in [0.0, 25.0, 50.0, 75.0, 100.0]:
-                    print(f"📊 Progress {queue_id}: {stage}/{substep} -> {progress_percent}% ({status})")
-                return True
-            else:
-                self._log_callback_failure("Progress", response)
-                return False
-            
+                    print(f"[Tracker] Progress {queue_id}: {stage}/{substep} -> {progress_percent}% ({status})")
+            return result
         except Exception as e:
             print(f"⚠️ Progress update error: {e}")
             return False
@@ -922,6 +1487,7 @@ class CreatorService:
         item = None
         job_successful = False
         final_success = False
+        terminal_callback_ok = True
         start_time = time.monotonic()
         terminal_error = None
         # These two identifiers are immutable for the lifetime of this queue
@@ -1143,7 +1709,7 @@ class CreatorService:
                     terminal_status=final_status,
                     terminal_error=terminal_error,
                 )
-                self.api_client.update_job_status(
+                terminal_callback_ok = bool(self.api_client.update_job_status(
                     queue_id,
                     status=final_status,
                     details={
@@ -1158,7 +1724,6 @@ class CreatorService:
                         or diagnostic_report["summary"].get("root_cause")
                         or None
                     ),
-                    workflow_report=diagnostic_report.get("workflow_report"),
                     diagnostic_report=diagnostic_report,
                     manifest_ref=diagnostic_report["outputs"].get("manifest_ref"),
                     log_ref=diagnostic_report["logs"],
@@ -1166,7 +1731,13 @@ class CreatorService:
                     attempt_nonce=attempt_nonce,
                     final=True,
                     sequence=None,
-                )
+                ))
+                if not terminal_callback_ok:
+                    self.logger.error(
+                        "❌ Tracker terminal callback not accepted for queue %s; "
+                        "compact payload remains in outbox for replay.",
+                        queue_id,
+                    )
             else:
                 final_status = "failed"
                 final_success = False
@@ -1180,7 +1751,7 @@ class CreatorService:
                     terminal_status=final_status,
                     terminal_error=terminal_error or "Job ended before a ProcessingItem was created.",
                 )
-                self.api_client.update_job_status(
+                terminal_callback_ok = bool(self.api_client.update_job_status(
                     queue_id,
                     status=final_status,
                     details={
@@ -1190,7 +1761,6 @@ class CreatorService:
                         "report_id": report_id,
                     },
                     error_log=diagnostic_report["summary"].get("root_cause"),
-                    workflow_report=diagnostic_report.get("workflow_report"),
                     diagnostic_report=diagnostic_report,
                     manifest_ref=diagnostic_report["outputs"].get("manifest_ref"),
                     log_ref=diagnostic_report["logs"],
@@ -1198,17 +1768,30 @@ class CreatorService:
                     attempt_nonce=attempt_nonce,
                     final=True,
                     sequence=None,
-                )
+                ))
+                if not terminal_callback_ok:
+                    self.logger.error(
+                        "❌ Tracker terminal callback not accepted for queue %s; "
+                        "compact payload remains in outbox for replay.",
+                        queue_id,
+                    )
 
             unbind_report = getattr(self.api_client, "unbind_job_report", None)
             if callable(unbind_report):
                 unbind_report(queue_id)
+
+            # A local workflow result is not a delivered terminal result.  Do
+            # not let the Creator loop print COMPLETED while Tracker still
+            # needs the compact outbox replay.
+            if not terminal_callback_ok:
+                final_success = False
 
             duration = time.monotonic() - start_time
             self.performance_analyzer.record_job_completion(queue_id, final_success, {
                 "report_id": report_id,
                 "attempt_nonce": attempt_nonce,
                 "duration_seconds": duration,
+                "terminal_callback_ok": terminal_callback_ok,
             })
         # The orchestration result must agree with the status sent to the
         # tracker.  A workflow return value alone is not sufficient: the

@@ -346,6 +346,8 @@ class TrackerReportingTests(unittest.TestCase):
 
         self.assertTrue(snapshot["full_log_ref"]["exists"])
         self.assertTrue(snapshot["full_log_ref"]["sha256"])
+        self.assertNotIn("path", snapshot["full_log_ref"])
+        self.assertEqual(snapshot["file_name"], "job-1.log")
         self.assertTrue(snapshot["truncated"])
         self.assertNotIn("top-secret", snapshot["excerpt"])
         self.assertTrue(snapshot["redactions"])
