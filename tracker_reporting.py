@@ -119,6 +119,11 @@ _FAILURE_CONTEXT = {
         "Workflow bị dừng trước khi hoàn tất.",
         "Kiểm tra stop reason và phase cuối cùng đã chạy.",
     ),
+    "watchdog_timeout": (
+        "workflow",
+        "Workflow vượt idle/hard watchdog timeout.",
+        "Kiểm tra phase cuối, heartbeat và trạng thái Chrome/OBS trước khi retry.",
+    ),
     "unsupported_production_mode": (
         "mode",
         "Production mode không được Creator hỗ trợ.",
@@ -601,6 +606,50 @@ def _manifest_reference(manifest_data: Optional[Dict[str, Any]], manifest_path: 
     return file_reference(path, kind="manifest")
 
 
+def _attempt_output_references(item: Any, final_status: str) -> Dict[str, Any]:
+    """Return bounded, basename-only references for every workflow attempt."""
+
+    attempts = getattr(item, "attempt_outputs", None) if item is not None else None
+    if not isinstance(attempts, dict):
+        return {}
+    current_attempt = int(getattr(item, "workflow_attempt", 1) or 1)
+    output_attempts = []
+    for raw_attempt in sorted(attempts, key=lambda value: int(value)):
+        try:
+            attempt_number = int(raw_attempt)
+        except (TypeError, ValueError):
+            continue
+        files = []
+        for raw_path in list(attempts.get(raw_attempt) or [])[:32]:
+            normalized = os.path.abspath(str(raw_path)) if raw_path else ""
+            file_info = {
+                "file_name": os.path.basename(normalized) if normalized else None,
+                "exists": False,
+                "size_bytes": 0,
+            }
+            try:
+                if normalized and os.path.isfile(normalized):
+                    file_info["exists"] = True
+                    file_info["size_bytes"] = int(os.path.getsize(normalized))
+            except OSError:
+                pass
+            files.append(file_info)
+        output_attempts.append(
+            {
+                "attempt": attempt_number,
+                "published": bool(
+                    final_status == "completed" and attempt_number == current_attempt
+                ),
+                "file_count": len(list(attempts.get(raw_attempt) or [])),
+                "files": files,
+            }
+        )
+    return {
+        "current_attempt": current_attempt,
+        "attempts": output_attempts,
+    }
+
+
 def build_tracker_diagnostic_report(
     job: Optional[Dict[str, Any]],
     item: Any,
@@ -682,6 +731,11 @@ def build_tracker_diagnostic_report(
         if failure_code in {"recorded_identity_missing", "recorded_identity_needs_review"}
         else gate.get("retryable", report.get("retryable", False))
     )
+    watchdog_evidence = getattr(item, "watchdog_evidence", None)
+    if not isinstance(watchdog_evidence, dict):
+        watchdog_evidence = {}
+    if failure_code == "watchdog_timeout" and final_status != "completed":
+        retryable = True
 
     phase_reports = report.get("phase_reports") if isinstance(report.get("phase_reports"), dict) else {}
     runtime_status = _phase_status_from_report(report, runtime=True)
@@ -935,6 +989,7 @@ def build_tracker_diagnostic_report(
             "redactions": [],
         }
     log_snapshot = compact_log_snapshot(log_snapshot)
+    attempt_output_refs = _attempt_output_references(item, final_status)
 
     input_snapshot = json_safe(item_json)
     diagnostic = {
@@ -984,6 +1039,8 @@ def build_tracker_diagnostic_report(
             "root_cause": root_cause,
             "next_action": next_action,
             "confidence": confidence,
+            "watchdog": json_safe(watchdog_evidence),
+            "attempt_output_references": attempt_output_refs,
         },
         "timing": {
             "started_at": start_time.isoformat() if isinstance(start_time, datetime) else None,
@@ -992,6 +1049,8 @@ def build_tracker_diagnostic_report(
         },
         "phases": {
             "statuses": phase_statuses,
+            "watchdog": json_safe(watchdog_evidence),
+            "attempt_output_references": attempt_output_refs,
             "json_generation": {
                 "status": phase_statuses["json_generation"],
                 "failure_code": failure_code if phase_statuses["json_generation"] == FAIL else None,
@@ -1062,6 +1121,7 @@ def build_tracker_diagnostic_report(
             "manifest_ref": manifest_ref,
             "manifest_snapshot": json_safe(_strip_artifact_quality_fields(manifest_data)) if manifest_data else None,
             "video_files": json_safe(output_files_payload or {}),
+            "attempt_output_references": attempt_output_refs,
         },
         "logs": json_safe(log_snapshot),
         "tracker_ui": {

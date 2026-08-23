@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from config_manager import initialize_config, get_config
+from watchdog_state import attempt_scoped_filename
 
 # Import required modules
 try:
@@ -79,6 +80,10 @@ class ProcessingItem:
     end_time: Optional[datetime] = None
     project_slug: Optional[str] = None
     failure_code: Optional[str] = None
+    workflow_attempt: int = 1
+    attempt_outputs: Dict[int, List[str]] = field(default_factory=dict)
+    attempt_started_wall_times: Dict[int, float] = field(default_factory=dict)
+    watchdog_evidence: Dict[str, Any] = field(default_factory=dict)
     
     json_generation_status: str = "not_started" # "success", "failure", "skipped"
     master_mode_status: str = "not_started"     # "success", "failure", "skipped"
@@ -146,11 +151,16 @@ class ProcessingConfig:
 class SafeOperationManager:
     """Quản lý operations với automatic cleanup"""
     
-    def __init__(self, game_player, obs_controller, logger):
+    def __init__(self, game_player, obs_controller, logger, attempt_index=1):
         self.game_player = game_player
         self.obs_controller = obs_controller
         self.logger = logger
+        self.attempt_index = max(1, int(attempt_index or 1))
         self.active_slots = []  # Track slots có icons
+
+    def _attempt_filename(self, filename):
+        """Keep first-attempt names compatible; suffix later retries."""
+        return attempt_scoped_filename(filename, self.attempt_index)
 
     def _record_placement(self, icon_index, target_slot, result):
         status = getattr(getattr(result, "status", None), "value", None)
@@ -201,6 +211,9 @@ class SafeOperationManager:
                 return False, None, "Failed to drag icon"
 
             transaction = self._record_placement(icon.get("index"), target_slot, drag_success)
+            self.game_player._touch_watchdog_progress(
+                "showcase", "drag_verified", icon_index=icon.get("index")
+            )
             
             icon_placed = True
             self.active_slots.append(target_slot)
@@ -208,6 +221,7 @@ class SafeOperationManager:
             self.logger.info(f"✅ Slot {target_slot.get('index', 'unknown')} added to active_slots for cleanup tracking")
             
             # STEP 2: OBS filename setup
+            filename = self._attempt_filename(filename)
             self.logger.info(f"🎬 Setting up OBS filename: {filename}")
             if not self.obs_controller.force_obs_filename(filename):
                 raise Exception("OBS filename setup failed")
@@ -235,6 +249,9 @@ class SafeOperationManager:
                 raise Exception("Failed to stop recording properly")
             
             recording_started = False  # Recording stopped successfully
+            self.game_player._touch_watchdog_progress(
+                "recording", "stopped", output_path_present=bool(output_path)
+            )
             self.logger.info(f"✅ Recording completed: {output_path}")
             
             return True, output_path, None
@@ -282,6 +299,10 @@ class SafeOperationManager:
                     raise Exception(f"Failed to drag icon {icon_index} to slot {slot_position}")
 
                 transactions.append(self._record_placement(icon_index, target_slot, drag_success))
+                self.game_player._touch_watchdog_progress(
+                    "remix", "drag_verified", icon_index=icon_index,
+                    slot_index=target_slot.get("index")
+                )
                 
                 icons_placed.append(target_slot)
                 self.active_slots.append(target_slot)
@@ -292,6 +313,7 @@ class SafeOperationManager:
                 raise Exception("Remix produced no verified placements")
             
             # STEP 2: OBS setup
+            filename = self._attempt_filename(filename)
             self.logger.info(f"🎬 Setting up OBS for remix: {filename}")
             if not self.obs_controller.force_obs_filename(filename):
                 raise Exception("OBS filename setup failed")
@@ -318,6 +340,9 @@ class SafeOperationManager:
                 raise Exception("Failed to stop remix recording")
             
             recording_started = False
+            self.game_player._touch_watchdog_progress(
+                "recording", "stopped", output_path_present=bool(output_path)
+            )
             self.logger.info(f"✅ Remix recording completed: {output_path}")
             
             return True, output_path, None
@@ -476,6 +501,13 @@ class UnifiedProcessingManager:
     def __init__(self, master_controller):
         self.master_controller = master_controller
         self.stop_event = threading.Event() # <-- TẠO MỘT CỜ MẶC ĐỊNH
+        self.workflow_stop_event = self.stop_event
+        self.cleanup_abort_event = threading.Event()
+        self._workflow_event_before_cleanup = None
+        self._should_stop_before_cleanup = False
+        self._game_should_stop_before_cleanup = False
+        self.workflow_attempt_index = 1
+        self.watchdog_progress_callback = None
         self.queue: List[ProcessingItem] = []
         self.config: Optional[ProcessingConfig] = None
         self.current_item_index: int = 0
@@ -496,12 +528,60 @@ class UnifiedProcessingManager:
         
         self.setup_logging()
 
-    def set_stop_event(self, stop_event: threading.Event):
+    def _propagate_stop_event(self, stop_event: threading.Event):
         self.stop_event = stop_event
         if hasattr(self.json_generator, 'game_player'):
             self.json_generator.game_player.stop_event = stop_event
         if hasattr(self.master_controller, 'game_player') and self.master_controller.game_player:
             self.master_controller.game_player.stop_event = stop_event
+
+    def set_stop_event(self, stop_event: threading.Event):
+        """Set the workflow stop event used by normal production actions."""
+        self.workflow_stop_event = stop_event
+        self._propagate_stop_event(stop_event)
+
+    def enter_cleanup_mode(self, cleanup_abort_event: threading.Event):
+        """Allow bounded cleanup without clearing workflow cancellation."""
+        self._workflow_event_before_cleanup = self.workflow_stop_event
+        self._should_stop_before_cleanup = bool(self.should_stop)
+        self._game_should_stop_before_cleanup = bool(
+            getattr(getattr(self.master_controller, "game_player", None), "should_stop", False)
+        )
+        self.cleanup_abort_event = cleanup_abort_event
+        # ``should_stop`` is the legacy boolean used by long-running workflow
+        # loops.  Temporarily clear it while cleanup has its own abort event;
+        # the workflow event itself remains set and is restored afterwards.
+        self.should_stop = False
+        if getattr(self.master_controller, "game_player", None):
+            self.master_controller.game_player.should_stop = False
+        self._propagate_stop_event(cleanup_abort_event)
+
+    def exit_cleanup_mode(self):
+        """Restore the original workflow event after cleanup finishes."""
+        workflow_event = self._workflow_event_before_cleanup or self.workflow_stop_event
+        should_stop = getattr(self, "_should_stop_before_cleanup", False)
+        game_should_stop = getattr(self, "_game_should_stop_before_cleanup", False)
+        self._workflow_event_before_cleanup = None
+        self._propagate_stop_event(workflow_event)
+        self.workflow_stop_event = workflow_event
+        self.should_stop = bool(should_stop)
+        if getattr(self.master_controller, "game_player", None):
+            self.master_controller.game_player.should_stop = bool(game_should_stop)
+
+    def set_workflow_attempt(self, attempt_index: int):
+        self.workflow_attempt_index = max(1, int(attempt_index or 1))
+
+    def attempt_filename(self, filename: str) -> str:
+        """Return an output filename isolated from a watchdog retry."""
+        return attempt_scoped_filename(filename, self.workflow_attempt_index)
+
+    def set_watchdog_progress_callback(self, callback):
+        self.watchdog_progress_callback = callback
+
+    def touch_watchdog_progress(self, phase, substep=None, metadata=None):
+        callback = self.watchdog_progress_callback
+        if callable(callback):
+            callback(phase, substep, metadata or {})
 
     def setup_logging(self):
         """Setup logging"""
@@ -1360,7 +1440,21 @@ class UnifiedProcessingManager:
         failure_evidence.setdefault("layoutSlots", report.layout_slots)
 
         existing_gate = report.quality_gate
-        if existing_gate is None or existing_gate.passed:
+        if failure_code == "watchdog_timeout":
+            # The workflow often records ``workflow_stopped`` while it is
+            # unwinding.  Watchdog timeout is the terminal operational cause
+            # and must remain visible to Tracker, with its retryability.
+            gate = report.apply_quality_gate(
+                QualityGateResult.failure(
+                    failure_code,
+                    status=status,
+                    retryable=True if retryable is None else retryable,
+                    coverage=report.coverage,
+                    evidence=failure_evidence,
+                    message=message or failure_code,
+                )
+            )
+        elif existing_gate is None or existing_gate.passed:
             gate = report.apply_quality_gate(
                 QualityGateResult.failure(
                     failure_code,
@@ -1994,7 +2088,9 @@ class UnifiedProcessingManager:
         browser_opened = False
         
         try:
-            master_filename = f"{getattr(item, 'project_slug', 'default_project')}-showcase.mp4"
+            master_filename = self.attempt_filename(
+                f"{getattr(item, 'project_slug', 'default_project')}-showcase.mp4"
+            )
             self.logger.info(f"Executing master workflow for {item.display_name}")
             
             # Steps 1-4: Setup OBS, Game Environment, and Start Recording (no change)
@@ -2046,6 +2142,9 @@ class UnifiedProcessingManager:
                 raise Exception("Failed to stop recording or no output file generated")
             
             item.output_files.append(output_path)
+            self.touch_watchdog_progress(
+                "recording", "stopped", {"output_path_present": bool(output_path)}
+            )
             self.logger.info(f"✅ Master video saved: {output_path}")
             item.master_mode_status = "success"
             return True
@@ -2168,7 +2267,10 @@ class UnifiedProcessingManager:
                     raise Exception(f"Could not find slot at center index {center_slot_index}")
 
                 safe_ops = SafeOperationManager(
-                    self.master_controller.game_player, self.master_controller.obs_controller, self.logger
+                    self.master_controller.game_player,
+                    self.master_controller.obs_controller,
+                    self.logger,
+                    attempt_index=getattr(self, "workflow_attempt_index", 1),
                 )
                 
                 output_files = []

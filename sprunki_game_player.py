@@ -192,6 +192,7 @@ class SprunkiGamePlayer:
         
         # [MODIFIED] Lưu lại cờ dừng, tạo mới nếu không được cung cấp
         self.stop_event = stop_event or threading.Event()
+        self.watchdog_progress_callback = None
 
         # Load configuration from config.json (like json_generator.py)
         self.load_config()
@@ -567,6 +568,19 @@ class SprunkiGamePlayer:
         )
         self._active_operation_context = context
         return context
+
+    def _touch_watchdog_progress(
+        self,
+        phase: str,
+        substep: Optional[str] = None,
+        **metadata,
+    ) -> None:
+        callback = getattr(self, "watchdog_progress_callback", None)
+        if callable(callback):
+            try:
+                callback(phase, substep, metadata)
+            except Exception as exc:
+                self.logger.debug("Watchdog progress callback ignored: %s", exc)
 
     def _cleanup_input_budget(self):
         """Reserve enough input budget for one complete cleanup attempt.
@@ -11345,6 +11359,12 @@ class SprunkiGamePlayer:
                     obs_controller.log_event_timestamp("icon_showcase_failed", f"Drag failed for icon {icon_index}", {"stage": "drag"})
                 return False
 
+            self._touch_watchdog_progress(
+                "showcase",
+                "icon_drag_verified",
+                icon_index=icon_index,
+            )
+
             after_state = self.get_comprehensive_slot_state() if (self.characters_available or self.putted_chars_available) else None
             after_count = self._get_board_progress_count(after_state)
             transition_details = dict(getattr(drag_success, "details", {}) or {})
@@ -11466,6 +11486,11 @@ class SprunkiGamePlayer:
             time.sleep(0.1)
             
             print(f"COMPLETED ENHANCED SHOWCASE: {mode} icon {icon_index + 1}")
+            self._touch_watchdog_progress(
+                "showcase",
+                "icon_completed",
+                icon_index=icon_index,
+            )
             return True
             
         except Exception as e:
@@ -12125,6 +12150,12 @@ class SprunkiGamePlayer:
             emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             
             print(f"\n{emoji} STARTING ENHANCED REMIX: {remix_name}")
+            self._touch_watchdog_progress(
+                "remix",
+                "started",
+                remix_name=remix_name,
+                icon_count=len(remix_icons),
+            )
             
             # === BƯỚC 1: Lấy obs_controller và tạo context ===
             obs_controller = self.obs_controller
@@ -12212,6 +12243,13 @@ class SprunkiGamePlayer:
                         "transitionEvidence": transition_details,
                     }
                 )
+                self._touch_watchdog_progress(
+                    "remix",
+                    "drag_verified",
+                    remix_name=remix_name,
+                    icon_index=icon_index,
+                    slot_index=target_slot.get("index"),
+                )
                 time.sleep(0.3)
 
                 if self.stop_event.is_set(): return False
@@ -12251,6 +12289,13 @@ class SprunkiGamePlayer:
                     {"mode": mode}
                 )
 
+            self._touch_watchdog_progress(
+                "remix",
+                "playback_completed",
+                remix_name=remix_name,
+                placed_count=placed_count,
+            )
+
             # Phase 3: Smart batch return
             print("ðŸ”„ PHASE 3: Smart batch returning with mode detection...")
             if progress_callback:
@@ -12267,6 +12312,7 @@ class SprunkiGamePlayer:
                     context=remix_metadata, # Truyền context
                     obs_controller=obs_controller # Truyền controller tường minh
                 )
+
             except Exception as cleanup_error:
                 # The final remix no longer needs cleanup to be a content
                 # prerequisite.  Preserve the exception as evidence and let
@@ -12359,6 +12405,12 @@ class SprunkiGamePlayer:
             }
             
             if cleanup_policy.get("policyAccepted"):
+                self._touch_watchdog_progress(
+                    "remix",
+                    "cleanup_completed",
+                    remix_name=remix_name,
+                    residual_count=cleanup_policy.get("residualCount"),
+                )
                 residual_count = cleanup_policy.get("residualCount")
                 if cleanup_policy.get("emptyVerified"):
                     print(

@@ -31,6 +31,7 @@ class SprunkiController:
         self.recording_area = None
         self.current_project_folder = None
         self.current_filename = None
+        self.last_stopped_output_path = None
         
         # Performance tracking
         self.operation_start_time = None
@@ -1194,6 +1195,7 @@ class SprunkiController:
                 # BẮT ĐẦU THEO DÕI TIMESTAMP
                 self.is_currently_recording = True
                 self.recording_start_time = time.monotonic()
+                self.last_stopped_output_path = None
                 self.event_timestamps = [] # Reset cho video mới
                 self.recording_areas = {}
                 self.recording_area = None
@@ -1228,6 +1230,8 @@ class SprunkiController:
             print("⚠️ OBS không đang recording")
             self.is_currently_recording = False
             self.recording_start_time = None
+            if current_path:
+                self.last_stopped_output_path = current_path
             self.log_performance("Recording Stop", True)
             return True, current_path
         
@@ -1264,6 +1268,8 @@ class SprunkiController:
                     self._save_timestamps_to_file(output_path)
                     self.is_currently_recording = False
                     self.recording_start_time = None
+                    if output_path:
+                        self.last_stopped_output_path = output_path
 
                     if output_path:
                         print(f"📁 Video saved: {output_path}")
@@ -1331,6 +1337,8 @@ class SprunkiController:
         final_status, final_path = self.get_recording_status()
         if not final_status:
             print("✅ Recording appears to have stopped anyway")
+            if final_path:
+                self.last_stopped_output_path = final_path
             self.log_performance("Recording Stop", True)
             return True, final_path
         

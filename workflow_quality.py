@@ -666,6 +666,12 @@ def failure_is_retryable(
 
     if not code:
         return False
+    if code == "watchdog_timeout":
+        evidence = evidence or {}
+        return str(evidence.get("reason", "")).lower() not in {
+            "service_cancelled",
+            "manual_cancellation",
+        }
     if code == "placement_not_verified":
         return bool((evidence or {}).get("cleanupRetryable", False))
     if code == "remix_threshold_not_met":

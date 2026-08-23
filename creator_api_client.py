@@ -44,6 +44,7 @@ from tracker_reporting import (
     json_safe,
     truncate_utf8_text,
 )
+from watchdog_state import WatchdogState, load_watchdog_settings
 
 # --- CONFIG: Thư mục chứa file JSON thủ công ---
 MANUAL_JSON_DIR = "manual_jsons"
@@ -673,6 +674,7 @@ class TrackerAPIClient:
             "placement",
             "cleanup",
             "identity",
+            "attempt_output_references",
         ):
             if key not in phases_source:
                 continue
@@ -765,6 +767,10 @@ class TrackerAPIClient:
             outputs["video_files"] = cls._bound_transport_value(
                 outputs_source.get("video_files"), aggressive=True
             )
+        if "attempt_output_references" in outputs_source:
+            outputs["attempt_output_references"] = cls._bound_transport_value(
+                outputs_source.get("attempt_output_references"), aggressive=True
+            )
 
         logs = compact_log_snapshot(
             source.get("logs") if isinstance(source.get("logs"), dict) else {},
@@ -841,7 +847,15 @@ class TrackerAPIClient:
         # and validate a terminal event.  The full log remains on disk and is
         # referenced by the compact logs section.
         minimal_diagnostic = compact["diagnostic_report"]
-        minimal_diagnostic["outputs"] = {"video_files": {}}
+        minimal_attempt_refs = (
+            minimal_diagnostic.get("outputs", {}).get("attempt_output_references", {})
+            if isinstance(minimal_diagnostic.get("outputs"), dict)
+            else {}
+        )
+        minimal_diagnostic["outputs"] = {
+            "video_files": {},
+            "attempt_output_references": minimal_attempt_refs,
+        }
         minimal_diagnostic["attempts"] = []
         minimal_diagnostic["logs"] = compact_log_snapshot(
             minimal_diagnostic.get("logs"), excerpt_bytes=8 * 1024
@@ -1502,6 +1516,9 @@ class CreatorService:
         self.current_job = None
         self._watchdog_failures = {}
         self._watchdog_failures_lock = threading.Lock()
+        self._watchdog_states = {}
+        self._watchdog_states_lock = threading.RLock()
+        self.watchdog_settings = load_watchdog_settings(self.config_manager.get)
         
         self.game_player = None
         self.obs_controller = None
@@ -1608,6 +1625,9 @@ class CreatorService:
             
             # Khởi tạo GamePlayer VÀ TRUYỀN CỜ DỪNG CỦA JOB VÀO
             self.game_player = SprunkiGamePlayer(stop_event=job_stop_event)
+            self.game_player.watchdog_progress_callback = (
+                self._watchdog_progress_callback
+            )
             self.game_player.config = config_data
             
             current_url = config_data.get('currentUrl', '').lower()
@@ -1676,6 +1696,14 @@ class CreatorService:
         print("🛑 Stopping Creator Service...")
         self.running = False
         self.service_stop_event.set()
+        # Manual service cancellation is the one path that is allowed to
+        # abort both production and cleanup.  A watchdog timeout uses a
+        # separate cleanup event and never clears the workflow stop signal.
+        try:
+            self.processing_manager.stop_event.set()
+            self.processing_manager.cleanup_abort_event.set()
+        except Exception:
+            pass
 
         # 🆕 PHASE 4: Stop performance monitoring
         self.performance_analyzer.stop_monitoring()
@@ -1769,85 +1797,740 @@ class CreatorService:
         # Log khi vòng lặp kết thúc
         print("❤️ Heartbeat loop has finished.")
 
-    def _job_watchdog(self, queue_id, job_start_time, job_stop_event: threading.Event):
-        """
-        [REVISED] Watchdog thread to monitor job execution time.
-        Uses a job-specific stop event.
-        """
-        job_timeout_minutes = self.config_manager.get('processing.job_timeout_minutes', 60)
-        job_timeout_seconds = job_timeout_minutes * 60
-        
-        # wait() sẽ trả về False nếu timeout, True nếu event được set.
-        # Điều này cho phép chúng ta thoát sớm nếu job hoàn thành trước khi timeout.
-        job_finished_before_timeout = job_stop_event.wait(timeout=job_timeout_seconds)
+    def _ensure_watchdog_runtime(self) -> None:
+        """Initialize watchdog fields for legacy/test-created service objects."""
 
-        # Nếu vòng lặp kết thúc vì timeout (wait() trả về False) VÀ service chưa bị dừng
-        if not job_finished_before_timeout and not self.service_stop_event.is_set():
-            error_msg = f"Job timed out after {job_timeout_minutes} minutes."
-            self.logger.error(f"🚨 [WATCHDOG] Job {queue_id} timed out!")
-            
-            # Kích hoạt cờ dừng của JOB này
-            job_stop_event.set()
+        if not hasattr(self, "watchdog_settings"):
+            config_manager = getattr(self, "config_manager", None)
+            getter = getattr(config_manager, "get", None)
+            if not callable(getter):
+                getter = lambda key, default=None: default
+            self.watchdog_settings = load_watchdog_settings(getter)
+        if not hasattr(self, "service_stop_event"):
+            self.service_stop_event = threading.Event()
+        if not hasattr(self, "logger"):
+            self.logger = logging.getLogger(self.__class__.__name__)
+        if not hasattr(self, "_watchdog_states"):
+            self._watchdog_states = {}
+        if not hasattr(self, "_watchdog_states_lock"):
+            self._watchdog_states_lock = threading.RLock()
 
-            # Do not send a terminal status from the watchdog thread.  The
-            # finalizer owns the only terminal report and will attach the
-            # workflow/manifest/log evidence collected by the job.
-            failure = {
-                "failure_code": "runtime_verification_unknown",
-                "message": f"WATCHDOG: {error_msg}",
-                "evidence": {
-                    "watchdog": True,
-                    "timeout_minutes": job_timeout_minutes,
-                },
-                "status": "UNKNOWN",
-                "retryable": True,
-            }
-            with self._watchdog_failures_lock:
-                self._watchdog_failures[queue_id] = failure
-            self.api_client.update_job_progress(
-                queue_id,
-                "watchdog",
-                "timeout",
-                0.0,
-                "failed",
-                metadata={**failure, "final": False},
-                error_details=failure["message"],
-                final=False,
+    def _register_watchdog_state(self, queue_id: int, state: WatchdogState) -> None:
+        if not hasattr(self, "_watchdog_states"):
+            self._watchdog_states = {}
+        if not hasattr(self, "_watchdog_states_lock"):
+            self._watchdog_states_lock = threading.RLock()
+        with self._watchdog_states_lock:
+            self._watchdog_states[queue_id] = state
+
+    def _get_watchdog_state(self, queue_id: int) -> Optional[WatchdogState]:
+        states = getattr(self, "_watchdog_states", None)
+        if not isinstance(states, dict):
+            return None
+        lock = getattr(self, "_watchdog_states_lock", None)
+        if lock is None:
+            return states.get(queue_id)
+        with lock:
+            state = states.get(queue_id)
+        return state
+
+    def _remove_watchdog_state(self, queue_id: int) -> None:
+        states = getattr(self, "_watchdog_states", None)
+        if not isinstance(states, dict):
+            return
+        lock = getattr(self, "_watchdog_states_lock", None)
+        if lock is None:
+            states.pop(queue_id, None)
+            return
+        with lock:
+            states.pop(queue_id, None)
+
+    def _touch_watchdog(
+        self,
+        queue_id: int,
+        phase: str,
+        substep: Optional[str] = None,
+        **metadata: Any,
+    ) -> None:
+        state = self._get_watchdog_state(queue_id)
+        if state is not None:
+            state.touch(phase, substep, **metadata)
+
+    def _watchdog_progress_callback(
+        self,
+        phase: str,
+        substep: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        queue_id = getattr(self, "_active_watchdog_queue_id", None)
+        if queue_id is not None:
+            self._touch_watchdog(queue_id, phase, substep, **(metadata or {}))
+
+    def _job_watchdog(
+        self,
+        state: WatchdogState,
+        workflow_stop_event: threading.Event,
+    ) -> None:
+        """Monitor hard and idle deadlines without sending terminal status."""
+
+        queue_id = state.queue_id
+        while not state.finished_event.is_set():
+            if self.service_stop_event.is_set():
+                self.logger.info(
+                    "🐶 Watchdog for job %s: service is stopping. Exiting.",
+                    queue_id,
+                )
+                return
+
+            snapshot = state.snapshot()
+            reason = None
+            if snapshot["remaining_seconds"] <= 0:
+                reason = "hard_timeout"
+            elif snapshot["last_progress_age_seconds"] >= state.idle_timeout_seconds:
+                reason = "idle_timeout"
+
+            if reason:
+                event = state.mark_timeout(reason)
+                if event is not None:
+                    workflow_stop_event.set()
+                    # A number of legacy workflow loops still consult the
+                    # boolean flag in addition to the shared Event.  Set it
+                    # for the production stop, then cleanup will temporarily
+                    # clear it while using its independent abort Event.
+                    self.processing_manager.should_stop = True
+                    if getattr(self, "game_player", None):
+                        self.game_player.should_stop = True
+                    self.logger.error(
+                        "🚨 [WATCHDOG] Job %s %s at %.1fs; phase=%s/%s",
+                        queue_id,
+                        reason,
+                        event.get("elapsed_seconds", 0.0),
+                        event.get("phase"),
+                        event.get("substep"),
+                    )
+                return
+
+            wait_seconds = min(
+                1.0,
+                max(
+                    0.05,
+                    min(
+                        snapshot["remaining_seconds"],
+                        state.idle_timeout_seconds
+                        - snapshot["last_progress_age_seconds"],
+                    ),
+                ),
             )
-        elif job_finished_before_timeout:
-             self.logger.info(f"🐶 Watchdog for job {queue_id}: Job finished normally. Exiting.")
-        elif self.service_stop_event.is_set():
-             self.logger.info(f"🐶 Watchdog for job {queue_id}: Service is stopping. Exiting.")
+            state.finished_event.wait(timeout=wait_seconds)
+
+    def _watchdog_failure_from_event(
+        self,
+        event: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not event:
+            return None
+        reason = event.get("reason", "watchdog_timeout")
+        message = (
+            f"WATCHDOG: {reason} after "
+            f"{float(event.get('elapsed_seconds', 0.0)):.1f} seconds."
+        )
+        return {
+            "failure_code": "watchdog_timeout",
+            "message": message,
+            "evidence": {
+                "watchdog": True,
+                **event,
+            },
+            "status": "UNKNOWN",
+            "retryable": reason != "service_cancelled",
+        }
 
     def _take_watchdog_failure(self, queue_id: int) -> Optional[Dict[str, Any]]:
-        """Consume a watchdog failure so it is included in the final report."""
-        failures = getattr(self, "_watchdog_failures", None)
-        if not isinstance(failures, dict):
+        """Consume the current watchdog event exactly once."""
+        state = self._get_watchdog_state(queue_id)
+        if state is None:
             return None
-        lock = getattr(self, "_watchdog_failures_lock", None)
-        if lock is not None:
-            with lock:
-                return failures.pop(queue_id, None)
-        return failures.pop(queue_id, None)
+        return self._watchdog_failure_from_event(state.take_timeout())
+
+    def _set_workflow_stop_event(self, stop_event: threading.Event) -> None:
+        """Propagate the workflow event, with compatibility for test adapters."""
+
+        manager = getattr(self, "processing_manager", None)
+        setter = getattr(manager, "set_stop_event", None)
+        if callable(setter):
+            setter(stop_event)
+            return
+        if manager is not None:
+            manager.stop_event = stop_event
+            manager.workflow_stop_event = stop_event
+        player = getattr(self, "game_player", None)
+        if player is not None:
+            player.stop_event = stop_event
+
+    def _set_watchdog_progress_callback(self) -> None:
+        manager = getattr(self, "processing_manager", None)
+        setter = getattr(manager, "set_watchdog_progress_callback", None)
+        if callable(setter):
+            setter(self._watchdog_progress_callback)
+
+    def _set_workflow_attempt(self, attempt: int) -> None:
+        manager = getattr(self, "processing_manager", None)
+        setter = getattr(manager, "set_workflow_attempt", None)
+        if callable(setter):
+            setter(attempt)
+        elif manager is not None:
+            manager.workflow_attempt_index = max(1, int(attempt or 1))
+
+    def _enter_cleanup_mode(self, cleanup_abort_event: threading.Event) -> None:
+        """Use the manager's independent cleanup event when available."""
+
+        manager = getattr(self, "processing_manager", None)
+        enter = getattr(manager, "enter_cleanup_mode", None)
+        if callable(enter):
+            enter(cleanup_abort_event)
+            return
+        if manager is not None:
+            manager._creator_fallback_workflow_event = getattr(
+                manager, "workflow_stop_event", getattr(manager, "stop_event", None)
+            )
+            manager.stop_event = cleanup_abort_event
+            manager.workflow_stop_event = manager._creator_fallback_workflow_event
+            manager.should_stop = False
+        player = getattr(self, "game_player", None)
+        if player is not None:
+            player.stop_event = cleanup_abort_event
+            player.should_stop = False
+
+    def _exit_cleanup_mode(self) -> None:
+        manager = getattr(self, "processing_manager", None)
+        exit_cleanup = getattr(manager, "exit_cleanup_mode", None)
+        if callable(exit_cleanup):
+            exit_cleanup()
+            return
+        workflow_event = getattr(manager, "_creator_fallback_workflow_event", None)
+        if manager is not None and workflow_event is not None:
+            manager.stop_event = workflow_event
+            manager.workflow_stop_event = workflow_event
+            manager.should_stop = workflow_event.is_set()
+            manager._creator_fallback_workflow_event = None
+        player = getattr(self, "game_player", None)
+        if player is not None and workflow_event is not None:
+            player.stop_event = workflow_event
+            player.should_stop = workflow_event.is_set()
+
+    def _start_job_watchdog(
+        self,
+        state: WatchdogState,
+        workflow_stop_event: threading.Event,
+    ) -> threading.Thread:
+        thread = threading.Thread(
+            target=self._job_watchdog,
+            args=(state, workflow_stop_event),
+            daemon=True,
+            name=f"creator-watchdog-{state.queue_id}",
+        )
+        thread.start()
+        return thread
+
+    @staticmethod
+    def _append_unique_output(item: Any, output_path: Optional[str]) -> bool:
+        if not output_path:
+            return False
+        try:
+            normalized = os.path.abspath(str(output_path))
+            if not os.path.isfile(normalized) or os.path.getsize(normalized) <= 0:
+                return False
+        except (OSError, TypeError, ValueError):
+            return False
+        if normalized not in getattr(item, "output_files", []):
+            item.output_files.append(normalized)
+            return True
+        return False
+
+    def _collect_attempt_outputs(
+        self,
+        item: Any,
+        attempt: int,
+        *,
+        attempt_started_wall_time: Optional[float] = None,
+    ) -> list:
+        """Collect stopped OBS output and recent video artifacts for an attempt."""
+        collected = []
+        controller = getattr(self, "obs_controller", None)
+        last_output = getattr(controller, "last_stopped_output_path", None)
+        if self._append_unique_output(item, last_output):
+            collected.append(os.path.abspath(str(last_output)))
+
+        project_folder = getattr(controller, "current_project_folder", None)
+        if project_folder and os.path.isdir(project_folder):
+            cutoff = (attempt_started_wall_time or time.time()) - 15.0
+            try:
+                candidates = []
+                for entry in os.scandir(project_folder):
+                    if not entry.is_file():
+                        continue
+                    name = entry.name.lower()
+                    if not name.endswith((".mkv", ".mp4", ".webm")):
+                        continue
+                    try:
+                        stat = entry.stat()
+                    except OSError:
+                        continue
+                    if stat.st_size <= 0 or stat.st_mtime < cutoff:
+                        continue
+                    candidates.append((stat.st_mtime, entry.path))
+                for _, candidate in sorted(candidates):
+                    if self._append_unique_output(item, candidate):
+                        collected.append(os.path.abspath(candidate))
+            except OSError as exc:
+                self.logger.warning(
+                    "⚠️ Could not scan output folder for queue %s attempt %s: %s",
+                    getattr(item, "project_slug", "unknown"),
+                    attempt,
+                    exc,
+                )
+
+        if not isinstance(getattr(item, "attempt_outputs", None), dict):
+            item.attempt_outputs = {}
+        attempt_references = item.attempt_outputs.setdefault(int(attempt), [])
+        # A successful operation records its path immediately, while an
+        # emergency OBS stop may only expose it through the controller. Keep
+        # both sources in the bounded per-attempt diagnostic reference.
+        for path in list(getattr(item, "output_files", []) or []):
+            try:
+                normalized = os.path.abspath(str(path))
+                if os.path.isfile(normalized) and os.path.getsize(normalized) > 0:
+                    if normalized not in attempt_references:
+                        attempt_references.append(normalized)
+            except (OSError, TypeError, ValueError):
+                continue
+        if collected:
+            for path in collected:
+                if path not in attempt_references:
+                    attempt_references.append(path)
+        return collected
+
+    def _reset_item_for_watchdog_retry(self, item: Any, attempt: int) -> None:
+        """Reset only per-workflow result state; retain source JSON and identity."""
+        item.workflow_attempt = int(attempt)
+        item.status = "processing"
+        item.error_message = None
+        item.failure_code = None
+        item.output_files = []
+        item.start_time = datetime.now()
+        item.end_time = None
+        item.master_mode_status = "not_started"
+        item.individual_mode_status = "not_started"
+        item.workflow_report = None
+        item.recording_area = None
+        item.recorded_identity_status = "not_started"
+        item.recorded_identity_reason = None
+        item.recorded_identity_retryable = False
+        item.recorded_identity_files = []
+        self._manual_json_failure = None
+        self.processing_manager.should_stop = False
+        if getattr(self, "game_player", None):
+            self.game_player.should_stop = False
+            self.game_player.is_playing = False
+
+    def _send_watchdog_recovery_progress(
+        self,
+        queue_id: int,
+        event: Dict[str, Any],
+        *,
+        retrying: bool,
+        cleanup: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        cleanup_metadata = dict(cleanup or {})
+        if isinstance(cleanup_metadata.get("output_files"), list):
+            cleanup_metadata["output_files"] = [
+                os.path.basename(str(path))
+                for path in cleanup_metadata["output_files"][:32]
+            ]
+        metadata = {
+            "final": False,
+            "watchdog": event,
+            "retrying": bool(retrying),
+            "cleanup": cleanup_metadata,
+        }
+        self.api_client.update_job_progress(
+            queue_id,
+            "watchdog",
+            "watchdog_recovery",
+            0.0,
+            "active",
+            metadata=metadata,
+            error_details=None,
+            final=False,
+        )
+
+    @staticmethod
+    def _run_bounded_cleanup_call(
+        operation: Callable[[], Any],
+        cleanup_abort_event: threading.Event,
+        deadline: float,
+    ) -> Tuple[bool, Any, Optional[BaseException]]:
+        """Run one cleanup operation without extending the grace budget."""
+
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            cleanup_abort_event.set()
+            return False, None, TimeoutError("cleanup_grace_expired")
+
+        holder: Dict[str, Any] = {}
+
+        def invoke() -> None:
+            try:
+                holder["value"] = operation()
+            except BaseException as exc:  # preserve operation failures for evidence
+                holder["error"] = exc
+
+        worker = threading.Thread(
+            target=invoke,
+            name="creator-watchdog-cleanup-call",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=remaining)
+        if worker.is_alive():
+            cleanup_abort_event.set()
+            return False, None, TimeoutError("cleanup_grace_expired")
+        if "error" in holder:
+            return True, None, holder["error"]
+        return True, holder.get("value"), None
+
+    def _run_watchdog_cleanup(
+        self,
+        queue_id: int,
+        item: Any,
+        attempt: int,
+        cleanup_abort_event: threading.Event,
+    ) -> Dict[str, Any]:
+        """Stop recording, recover the board, close runtime components, and bound cleanup."""
+        started = time.monotonic()
+        deadline = started + float(self.watchdog_settings["cleanup_grace_seconds"])
+        result: Dict[str, Any] = {
+            "status": "started",
+            "attempt": attempt,
+            "started_at_monotonic": started,
+            "deadline_seconds": self.watchdog_settings["cleanup_grace_seconds"],
+            "output_files": [],
+        }
+
+        def expired() -> bool:
+            if self.service_stop_event.is_set() or time.monotonic() >= deadline:
+                cleanup_abort_event.set()
+                result["status"] = "cleanup_incomplete"
+                result["reason"] = (
+                    "service_stop" if self.service_stop_event.is_set()
+                    else "cleanup_grace_expired"
+                )
+                return True
+            return False
+
+        self._enter_cleanup_mode(cleanup_abort_event)
+        try:
+            controller = getattr(self, "obs_controller", None)
+            if controller and not expired():
+                completed, stop_result, stop_error = self._run_bounded_cleanup_call(
+                    controller.stop_recording,
+                    cleanup_abort_event,
+                    deadline,
+                )
+                if not completed:
+                    result["status"] = "cleanup_incomplete"
+                    result["reason"] = "recording_stop_grace_expired"
+                    return result
+                try:
+                    if stop_error:
+                        raise stop_error
+                    stop_success, output_path = stop_result
+                    if output_path:
+                        self._append_unique_output(item, output_path)
+                    result["recording_stop"] = {
+                        "success": bool(stop_success),
+                        "output_path_present": bool(output_path),
+                    }
+                    if not stop_success:
+                        result["status"] = "failed"
+                        result["reason"] = "recording_stop_failed"
+                except Exception as exc:
+                    result["recording_stop"] = {"success": False, "error": str(exc)}
+                    result["status"] = "failed"
+                    result["reason"] = "recording_stop_failed"
+
+            self._collect_attempt_outputs(
+                item,
+                attempt,
+                attempt_started_wall_time=time.time() - max(0.0, time.monotonic() - started),
+            )
+            if expired():
+                return result
+
+            player = getattr(self, "game_player", None)
+            if player and hasattr(player, "_run_cleanup_once") and not expired():
+                if hasattr(player, "_reset_cleanup_guard"):
+                    player._reset_cleanup_guard()
+                completed, cleanup_operation, cleanup_error = self._run_bounded_cleanup_call(
+                    lambda: player._run_cleanup_once(
+                        use_cdp=False,
+                        context={
+                            "workflow": "watchdog_recovery",
+                            "queue_id": queue_id,
+                            "attempt": attempt,
+                        },
+                        obs_controller=controller,
+                        force_retry=True,
+                    ),
+                    cleanup_abort_event,
+                    deadline,
+                )
+                if not completed:
+                    result["status"] = "cleanup_incomplete"
+                    result["reason"] = "board_cleanup_grace_expired"
+                    return result
+                try:
+                    if cleanup_error:
+                        raise cleanup_error
+                    cleanup_status = getattr(
+                        getattr(cleanup_operation, "status", None),
+                        "value",
+                        str(getattr(cleanup_operation, "status", "unknown")),
+                    )
+                    result["board_cleanup"] = {
+                        "status": cleanup_status,
+                        "message": getattr(cleanup_operation, "message", ""),
+                    }
+                    if cleanup_status not in {"VERIFIED", "ALREADY_EMPTY"}:
+                        result["status"] = "failed"
+                        result["reason"] = "board_cleanup_not_verified"
+                except Exception as exc:
+                    result["board_cleanup"] = {"status": "failed", "error": str(exc)}
+                    result["status"] = "failed"
+                    result["reason"] = "board_cleanup_failed"
+
+            if controller and not expired():
+                completed, obs_cleanup, cleanup_error = self._run_bounded_cleanup_call(
+                    controller.comprehensive_obs_cleanup,
+                    cleanup_abort_event,
+                    deadline,
+                )
+                if not completed:
+                    result["status"] = "cleanup_incomplete"
+                    result["reason"] = "obs_cleanup_grace_expired"
+                    return result
+                try:
+                    if cleanup_error:
+                        raise cleanup_error
+                    result["obs_cleanup"] = bool(obs_cleanup)
+                    if not result["obs_cleanup"]:
+                        result["status"] = "failed"
+                        result["reason"] = "obs_cleanup_failed"
+                except Exception as exc:
+                    result["obs_cleanup"] = False
+                    result["obs_cleanup_error"] = str(exc)
+                    result["status"] = "failed"
+                    result["reason"] = "obs_cleanup_failed"
+
+            if player and not expired():
+                completed, browser_cleanup, cleanup_error = self._run_bounded_cleanup_call(
+                    player.close_game_window,
+                    cleanup_abort_event,
+                    deadline,
+                )
+                if not completed:
+                    result["status"] = "cleanup_incomplete"
+                    result["reason"] = "browser_cleanup_grace_expired"
+                    return result
+                try:
+                    if cleanup_error:
+                        raise cleanup_error
+                    result["browser_cleanup"] = bool(browser_cleanup)
+                    if not result["browser_cleanup"]:
+                        result["status"] = "failed"
+                        result["reason"] = "browser_cleanup_failed"
+                except Exception as exc:
+                    result["browser_cleanup"] = False
+                    result["browser_cleanup_error"] = str(exc)
+                    result["status"] = "failed"
+                    result["reason"] = "browser_cleanup_failed"
+
+            if result.get("status") == "started":
+                if expired():
+                    return result
+                result["status"] = "completed"
+        finally:
+            self._exit_cleanup_mode()
+            result["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            if result.get("status") == "started":
+                result["status"] = "completed"
+        result["output_files"] = list(item.attempt_outputs.get(int(attempt), []))
+        return result
+
+    def _run_workflow_with_watchdog(
+        self,
+        item: Any,
+        queue_id: int,
+        state: WatchdogState,
+        *,
+        initial_workflow_stop_event: Optional[threading.Event] = None,
+        initial_watcher_thread: Optional[threading.Thread] = None,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[threading.Thread]]:
+        """Run a bounded workflow and at most one early-idle full retry."""
+        attempt = 1
+        watcher_thread = None
+        final_timeout = None
+        self._active_watchdog_queue_id = queue_id
+        self._set_watchdog_progress_callback()
+
+        if not isinstance(getattr(item, "attempt_started_wall_times", None), dict):
+            item.attempt_started_wall_times = {}
+        if not isinstance(getattr(item, "watchdog_evidence", None), dict):
+            item.watchdog_evidence = {}
+
+        while True:
+            is_initial_attempt = attempt == 1 and initial_workflow_stop_event is not None
+            workflow_stop_event = (
+                initial_workflow_stop_event
+                if is_initial_attempt
+                else threading.Event()
+            )
+            cleanup_abort_event = threading.Event()
+            self._set_workflow_stop_event(workflow_stop_event)
+            self.processing_manager.cleanup_abort_event = cleanup_abort_event
+            self._set_workflow_attempt(attempt)
+            self._touch_watchdog(queue_id, "workflow", "attempt_start", attempt=attempt)
+            attempt_started_wall_time = time.time()
+            item.attempt_started_wall_times[int(attempt)] = attempt_started_wall_time
+            if is_initial_attempt and initial_watcher_thread is not None:
+                watcher_thread = initial_watcher_thread
+            else:
+                watcher_thread = self._start_job_watchdog(state, workflow_stop_event)
+
+            job_successful = self._process_with_smart_retry(item, queue_id)
+            timeout_event = state.take_timeout()
+            # Close the small race where the workflow returns at/after the
+            # hard deadline before the monitor thread gets scheduled.
+            if timeout_event is None and state.snapshot()["remaining_seconds"] <= 0:
+                timeout_event = state.mark_timeout("hard_timeout")
+                if timeout_event is None:
+                    timeout_event = state.take_timeout()
+            if timeout_event is None:
+                state.touch("workflow", "returned", success=bool(job_successful))
+                return bool(job_successful), final_timeout, watcher_thread
+
+            final_timeout = timeout_event
+            failure = self._watchdog_failure_from_event(timeout_event) or {}
+            item.watchdog_evidence.setdefault("timeouts", []).append(timeout_event)
+            self._send_watchdog_recovery_progress(
+                queue_id,
+                timeout_event,
+                retrying=False,
+            )
+            self._collect_attempt_outputs(
+                item,
+                attempt,
+                attempt_started_wall_time=attempt_started_wall_time,
+            )
+            cleanup = self._run_watchdog_cleanup(
+                queue_id,
+                item,
+                attempt,
+                cleanup_abort_event,
+            )
+            item.watchdog_evidence.setdefault("cleanup", []).append(cleanup)
+            failure["evidence"] = {
+                **(failure.get("evidence") or {}),
+                "cleanup": cleanup,
+            }
+
+            can_retry = (
+                timeout_event.get("reason") == "idle_timeout"
+                and attempt <= int(self.watchdog_settings["max_full_retries"])
+                and state.can_retry(self.watchdog_settings["retry_min_remaining_seconds"])
+                and cleanup.get("status") == "completed"
+                and not self.service_stop_event.is_set()
+            )
+            item.watchdog_evidence.setdefault("retry_decisions", []).append(
+                {
+                    "attempt": attempt,
+                    "timeout_reason": timeout_event.get("reason"),
+                    "decision": "retry" if can_retry else "terminal",
+                    "max_full_retries": int(self.watchdog_settings["max_full_retries"]),
+                    "remaining_seconds": state.remaining_seconds(),
+                    "minimum_remaining_seconds": self.watchdog_settings[
+                        "retry_min_remaining_seconds"
+                    ],
+                    "cleanup_status": cleanup.get("status"),
+                    "cleanup_grace_seconds": self.watchdog_settings[
+                        "cleanup_grace_seconds"
+                    ],
+                }
+            )
+            if not can_retry:
+                item.failure_code = "watchdog_timeout"
+                item.error_message = failure.get("message")
+                return False, failure, watcher_thread
+
+            attempt += 1
+            item.watchdog_evidence.setdefault("retries", []).append(
+                {
+                    "from_attempt": attempt - 1,
+                    "to_attempt": attempt,
+                    "reason": timeout_event.get("reason"),
+                    "remaining_seconds": state.remaining_seconds(),
+                }
+            )
+            self._reset_item_for_watchdog_retry(item, attempt)
+            if not state.begin_retry(attempt):
+                item.failure_code = "watchdog_timeout"
+                item.error_message = "Watchdog retry could not start within the hard deadline."
+                return False, failure, watcher_thread
+            self._send_watchdog_recovery_progress(
+                queue_id,
+                timeout_event,
+                retrying=True,
+                cleanup=cleanup,
+            )
+            final_timeout = None
 
     def _process_job(self, job: Dict) -> bool:
         """
         [REVISED & WATCHDOG ENABLED] Orchestrates job processing with a job-specific stop event.
         """
         queue_id = job['id']
+        self._ensure_watchdog_runtime()
+        start_time = time.monotonic()
+        attempt_started_wall_time = time.time()
         job_log_capture = self._create_job_log_capture(queue_id)
         job_log_capture.start()
         item = None
         job_successful = False
         final_success = False
         terminal_callback_ok = True
-        start_time = time.monotonic()
         terminal_error = None
         # These two identifiers are immutable for the lifetime of this queue
         # attempt.  Tracker does not provide attempt_nonce in /queue/next.
         report_id = str(uuid.uuid4())
         attempt_nonce = str(uuid.uuid4())
         attempt_bound = False
+
+        # The hard deadline starts at queue-job orchestration time.  Tracker
+        # binding is part of that budget and must not postpone the watchdog.
+        watchdog_state = WatchdogState(
+            queue_id,
+            hard_timeout_seconds=self.watchdog_settings["hard_timeout_seconds"],
+            idle_timeout_seconds=self.watchdog_settings["idle_timeout_seconds"],
+        )
+        self._register_watchdog_state(queue_id, watchdog_state)
+        job_stop_event = threading.Event()
+        initial_watchdog_thread = self._start_job_watchdog(
+            watchdog_state,
+            job_stop_event,
+        )
+        watchdog_thread = initial_watchdog_thread
+        watchdog_failure = None
+
         bind_report = getattr(self.api_client, "bind_job_report", None)
         if callable(bind_report):
             try:
@@ -1856,9 +2539,6 @@ class CreatorService:
                 # Keep test doubles/older local adapters callable while the
                 # real Tracker client always receives both identifiers.
                 bind_report(queue_id, report_id)
-        
-        # 1. TẠO CỜ DỪNG RIÊNG CHO JOB NÀY
-        job_stop_event = threading.Event()
         
         try:
             # Bind the attempt before doing any work.  Processing is allowed
@@ -1885,17 +2565,17 @@ class CreatorService:
                 )
                 return False
 
-            # 2. Truyền cờ stop của job xuống các tầng dưới
-            self.processing_manager.stop_event = job_stop_event
-
-            # 3. Bắt đầu Watchdog and truyền cờ stop của job vào
-            watchdog_thread = threading.Thread(
-                target=self._job_watchdog,
-                args=(queue_id, start_time, job_stop_event),
-                daemon=True
+            # The initial watchdog was started before binding so the deadline
+            # covers the whole queue attempt, not only gameplay.
+            watchdog_thread = initial_watchdog_thread
+            self._set_workflow_stop_event(job_stop_event)
+            self._set_watchdog_progress_callback()
+            self.logger.info(
+                "🐶 Watchdog started for job %s: hard=%.1fs idle=%.1fs",
+                queue_id,
+                watchdog_state.hard_timeout_seconds,
+                watchdog_state.idle_timeout_seconds,
             )
-            watchdog_thread.start()
-            self.logger.info(f"🐶 Watchdog started for job {queue_id}.")
             
             item = self._convert_job_to_processing_item(job)
             if getattr(item, "start_time", None) is None:
@@ -1918,8 +2598,20 @@ class CreatorService:
 
             self.performance_analyzer.record_job_start(queue_id, job)
 
-            # 4. Thực thi workflow. Nó sẽ tự dừng nếu job_stop_event được set (bởi watchdog hoặc lỗi)
-            job_successful = self._process_with_smart_retry(item, queue_id)
+            # The workflow cooperatively stops when the watchdog sets the
+            # attempt-specific event.  An early idle timeout gets one fresh
+            # workflow attempt within the same hard deadline.
+            job_successful, watchdog_failure, watchdog_thread = (
+                self._run_workflow_with_watchdog(
+                    item,
+                    queue_id,
+                    watchdog_state,
+                    initial_workflow_stop_event=job_stop_event,
+                    initial_watcher_thread=initial_watchdog_thread,
+                )
+            )
+            if watchdog_failure:
+                terminal_error = watchdog_failure.get("message") or terminal_error
 
         except Exception as e:
             error_msg = f"Critical job processing error: {str(e)}"
@@ -1939,10 +2631,21 @@ class CreatorService:
                 self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
         
         finally:
-            # 5. BÁO HIỆU CHO WATCHDOG DỪNG LẠI vì job đã xong (dù thành công hay thất bại)
+            # Stop the monitor before finalization.  Cleanup has its own
+            # bounded abort event and must not clear workflow cancellation.
             job_stop_event.set()
+            # The current attempt may use a fresh event after watchdog
+            # recovery; stop the manager's active workflow event as well.
+            try:
+                self.processing_manager.stop_event.set()
+            except Exception:
+                pass
+            watchdog_state.mark_finished()
+            if watchdog_thread is not None:
+                watchdog_thread.join(timeout=2.0)
 
-            watchdog_failure = self._take_watchdog_failure(queue_id)
+            if watchdog_failure is None:
+                watchdog_failure = self._take_watchdog_failure(queue_id)
             if watchdog_failure:
                 terminal_error = watchdog_failure.get("message") or terminal_error
                 if item:
@@ -1960,6 +2663,23 @@ class CreatorService:
             workflow_report_obj = getattr(item, "workflow_report", None) if item else None
 
             if item:
+                # Recover paths from an emergency OBS stop before generating
+                # the manifest.  This is intentionally attempt-scoped so a
+                # retry never republishes files from attempt 1.
+                current_attempt = int(getattr(item, "workflow_attempt", 1) or 1)
+                current_attempt_started = getattr(
+                    item, "attempt_started_wall_times", {}
+                ).get(current_attempt, attempt_started_wall_time)
+                self._collect_attempt_outputs(
+                    item,
+                    current_attempt,
+                    attempt_started_wall_time=current_attempt_started,
+                )
+                if not job_successful:
+                    # Failed/partial attempt artifacts remain on disk and in
+                    # the bounded attempt reference, but are never treated
+                    # as publishable manifest/video outputs.
+                    item.output_files = []
                 if workflow_report_obj is None:
                     self.processing_manager._record_quality_failure(
                         item,
@@ -1976,12 +2696,23 @@ class CreatorService:
                 # an item looking successful merely because an older phase
                 # had a passing gate.
                 if not job_successful and item.status != "failed":
+                    preserved_watchdog_failure = bool(
+                        watchdog_failure
+                        and getattr(item, "failure_code", None) == "watchdog_timeout"
+                    )
                     self.processing_manager._record_quality_failure(
                         item,
                         getattr(item, "failure_code", None) or "workflow_stopped",
                         getattr(item, "error_message", None) or "Workflow returned failure before finalization.",
-                        evidence={"jobSuccessful": False},
-                        retryable=False,
+                        evidence={
+                            "jobSuccessful": False,
+                            "watchdog": preserved_watchdog_failure,
+                        },
+                        retryable=(
+                            bool(watchdog_failure.get("retryable", True))
+                            if preserved_watchdog_failure
+                            else False
+                        ),
                     )
                     workflow_report_obj = getattr(item, "workflow_report", None)
 
@@ -2012,15 +2743,36 @@ class CreatorService:
                     )
 
             # Dọn dẹp các component của job hiện tại trước khi chụp log cuối.
-            try:
-                if hasattr(self, 'obs_controller') and self.obs_controller:
-                    self.obs_controller.comprehensive_obs_cleanup()
-                if hasattr(self, 'game_player') and self.game_player:
-                    self.game_player.close_game_window()
-            except Exception as cleanup_error:
-                self.logger.error(f"Error during post-job cleanup for {queue_id}: {cleanup_error}")
-            finally:
-                job_log_capture.stop()
+            final_cleanup_abort_event = threading.Event()
+            watchdog_cleanup_attempted = bool(
+                watchdog_failure
+                and isinstance(getattr(item, "watchdog_evidence", None), dict)
+                and any(
+                    isinstance(entry, dict)
+                    for entry in item.watchdog_evidence.get("cleanup", [])
+                )
+            )
+            if not watchdog_cleanup_attempted:
+                self._enter_cleanup_mode(final_cleanup_abort_event)
+                try:
+                    if hasattr(self, 'obs_controller') and self.obs_controller:
+                        self.obs_controller.comprehensive_obs_cleanup()
+                    if hasattr(self, 'game_player') and self.game_player:
+                        self.game_player.close_game_window()
+                except Exception as cleanup_error:
+                    self.logger.error(f"Error during post-job cleanup for {queue_id}: {cleanup_error}")
+                finally:
+                    self._exit_cleanup_mode()
+            else:
+                self.logger.info(
+                    "✅ Watchdog recovery cleanup was already attempted for queue %s; "
+                    "skipping unbounded duplicate physical cleanup (status=%s).",
+                    queue_id,
+                    item.watchdog_evidence.get("cleanup", [{}])[-1].get("status")
+                    if item and item.watchdog_evidence.get("cleanup")
+                    else "unknown",
+                )
+            job_log_capture.stop()
 
             # The final status is calculated only after all evidence-producing
             # steps above have had a chance to record their own failures.
@@ -2037,6 +2789,7 @@ class CreatorService:
                     "duration_seconds": duration,
                     "attempt_bound": False,
                 })
+                self._remove_watchdog_state(queue_id)
                 return False
 
             if item:
@@ -2047,6 +2800,10 @@ class CreatorService:
                 )
                 final_status = "completed" if job_successful and quality_passed and item.status != "failed" else "failed"
                 final_success = final_status == "completed"
+                if final_status != "completed":
+                    # Failed attempts remain on disk for diagnostics, but are
+                    # never published as Tracker video_files.
+                    video_files_payload = self._organize_output_files([])
                 self.logger.info(f"Finalizing job {queue_id} with status: {final_status.upper()}")
 
                 diagnostic_report = build_tracker_diagnostic_report(
@@ -2146,6 +2903,7 @@ class CreatorService:
                 "duration_seconds": duration,
                 "terminal_callback_ok": terminal_callback_ok,
             })
+            self._remove_watchdog_state(queue_id)
         # The orchestration result must agree with the status sent to the
         # tracker.  A workflow return value alone is not sufficient: the
         # shared quality gate is the final authority.
@@ -2264,6 +3022,7 @@ class CreatorService:
                 
                 if not success:
                     return False
+                self._touch_watchdog(queue_id, "json_generation", "completed")
             
             # --- Step 2: Video Processing ---
             success = self._execute_with_retry(
@@ -2325,6 +3084,13 @@ class CreatorService:
             })
         
         for step_attempt in range(1, max_step_retries + 1):
+            # A watchdog/manual stop must prevent the smart step retry layer
+            # from starting a fresh drag/showcase/remix after production has
+            # been cancelled.  Cleanup uses a separate event and does not
+            # enter this function.
+            if getattr(getattr(self, "processing_manager", None), "stop_event", None) is not None \
+                    and self.processing_manager.stop_event.is_set():
+                return False
             attempt_started_at = datetime.now()
             try:
                 print(f"🔧 {operation_name} - Step attempt {step_attempt}/{max_step_retries}")
@@ -2389,6 +3155,10 @@ class CreatorService:
                     
                     # Prepare context with attempt number
                     retry_context = {**(context or {}), 'operation': operation_name, 'attempt': step_attempt}
+
+                    if getattr(getattr(self, "processing_manager", None), "stop_event", None) is not None \
+                            and self.processing_manager.stop_event.is_set():
+                        return False
                     
                     # Use smart retry logic
                     retry_decision = self.retry_manager.should_retry(queue_id, error_msg, retry_context)
@@ -2517,6 +3287,9 @@ class CreatorService:
                     return False
                 
                 # Prepare context with attempt number and exception flag
+                if getattr(getattr(self, "processing_manager", None), "stop_event", None) is not None \
+                        and self.processing_manager.stop_event.is_set():
+                    return False
                 retry_context = {
                     **(context or {}), 
                     'operation': operation_name, 
@@ -2723,6 +3496,7 @@ class CreatorService:
                     queue_id, 'initialization', 'starting', 0.0, 'active',
                     metadata={'item_mode': item.mode, 'project_slug': item.project_slug}
                 )
+                self._touch_watchdog(queue_id, "initialization", "starting")
                 self.performance_analyzer.record_job_progress(queue_id, 'initialization', 0.0)
                 
                 self.logger.info(f"🎥 Processing video for item: {item.project_slug} (Mode: {item.mode})")
@@ -2731,6 +3505,7 @@ class CreatorService:
                 self.api_client.update_job_progress(
                     queue_id, 'initialization', 'components', 10.0, 'active'
                 )
+                self._touch_watchdog(queue_id, "initialization", "components")
                 
                 # === BẮT ĐẦU SỬA ĐỔI ===
                 # Lấy cờ stop của job hiện tại từ processing_manager
@@ -2764,6 +3539,7 @@ class CreatorService:
                     if test_ws:
                         self.logger.info("✅ OBS connection test successful")
                         self.api_client.update_job_progress(queue_id, 'initialization', 'obs_test', 40.0, 'completed')
+                        self._touch_watchdog(queue_id, "initialization", "obs_ready")
                         test_ws.close()
                     else:
                         error_details = "OBS connection test failed before video processing."
@@ -2785,6 +3561,7 @@ class CreatorService:
                 self.api_client.update_job_progress(
                     queue_id, 'video_processing', 'starting', 50.0, 'active'
                 )
+                self._touch_watchdog(queue_id, "video_processing", "starting")
 
                 success = self._process_with_progress_callbacks(item, queue_id)
                 
@@ -2877,6 +3654,7 @@ class CreatorService:
                         'quality_gate_only': True,
                     },
                 )
+                self._touch_watchdog(queue_id, "completion", "workflow_completed")
                 return True
                         
             except Exception as e:
@@ -2942,6 +3720,7 @@ class CreatorService:
                 return False
             
             if mode == "master":
+                self._touch_watchdog(queue_id, "video_processing", "master_mode")
                 self.api_client.update_job_progress(
                     queue_id, 'video_processing', 'master_mode', 60.0, 'active'
                 )
@@ -2952,6 +3731,7 @@ class CreatorService:
                 success = self.processing_manager._process_master_mode(item)
                 
             elif mode == "individual":
+                self._touch_watchdog(queue_id, "video_processing", "individual_mode")
                 self.api_client.update_job_progress(
                     queue_id, 'video_processing', 'individual_mode', 60.0, 'active'
                 )
@@ -2962,6 +3742,7 @@ class CreatorService:
                 success = self.processing_manager._process_individual_mode(item)
                 
             elif mode == "both":
+                self._touch_watchdog(queue_id, "video_processing", "both_mode")
                 # Master phase
                 self.api_client.update_job_progress(
                     queue_id, 'video_processing', 'both_master_phase', 60.0, 'active'

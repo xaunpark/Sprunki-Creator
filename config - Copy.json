@@ -179,6 +179,11 @@
     "max_retries": 2,
     "auto_skip_on_error": true,
     "pause_between_items": 60,
+    "job_timeout_minutes": 60,
+    "watchdog_idle_timeout_seconds": 240,
+    "watchdog_cleanup_grace_seconds": 120,
+    "watchdog_max_full_retries": 1,
+    "watchdog_retry_min_remaining_seconds": 900,
     "parallel_processing": false,
     "create_summary_report": true,
     "cleanup_temp_files": true
@@ -194,6 +199,9 @@
   "logging": {
     "enabled": true,
     "directory": "logs",
+    "enable_job_log_capture": true,
+    "job_log_directory": "logs/video_jobs",
+    "tracker_outbox_directory": "logs/video_jobs/tracker_outbox",
     "max_file_size_mb": 10,
     "backup_count": 5,
     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
