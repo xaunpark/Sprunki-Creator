@@ -187,6 +187,65 @@ class TrackerCallbackDeliveryTests(unittest.TestCase):
             self.assertEqual(client.last_callback_metrics["retry_count"], 1)
             self.assertFalse(os.path.exists(client._tracker_outbox_path(3118)))
 
+    def test_large_nested_evidence_is_bounded_before_terminal_send(self):
+        with tempfile.TemporaryDirectory() as outbox:
+            session = FakeSession([FakeResponse(202, {"accepted": True})])
+            client = make_client(session, outbox)
+            report = diagnostic()
+            huge_transaction = {
+                "status": "VERIFIED",
+                "targetVerified": True,
+                "before": 1,
+                "after": 2,
+                "transitionEvidence": {
+                    "debug_trace": "x" * 12000,
+                    "screenshots": ["y" * 8000] * 4,
+                },
+            }
+            huge_transactions = [huge_transaction.copy() for _ in range(500)]
+            report["phases"]["phase_reports"] = {
+                "master": {
+                    "was_successful": True,
+                    "evidence": {
+                        "placementTransactions": huge_transactions,
+                        "nested_snapshot": {"payload": "z" * 2_000_000},
+                    },
+                }
+            }
+            report["quality_gate"]["evidence"] = {
+                "placementTransactions": huge_transactions,
+                "retryAttempts": huge_transactions,
+            }
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = client.update_job_status(
+                    3118,
+                    "completed",
+                    diagnostic_report=report,
+                    report_id="report-3118",
+                    attempt_nonce="nonce-3118",
+                    sequence=10,
+                    final=True,
+                )
+
+            self.assertTrue(result)
+            payload = session.calls[-1][2]
+            encoded = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+            self.assertLessEqual(len(encoded), TERMINAL_MAX_REQUEST_BYTES)
+            self.assertEqual(payload["sequence"], 10)
+            self.assertEqual(payload["report_id"], "report-3118")
+            self.assertEqual(payload["attempt_nonce"], "nonce-3118")
+            for section in (
+                "mod",
+                "summary",
+                "timing",
+                "phases",
+                "quality_gate",
+                "outputs",
+                "logs",
+            ):
+                self.assertIsInstance(payload["diagnostic_report"].get(section), dict)
+
     def test_network_error_retries_1_2_4_and_accepts_any_2xx(self):
         with tempfile.TemporaryDirectory() as outbox:
             session = FakeSession(

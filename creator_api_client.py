@@ -49,6 +49,7 @@ from tracker_reporting import (
 MANUAL_JSON_DIR = "manual_jsons"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 TERMINAL_MAX_REQUEST_BYTES = 1_800_000
+TERMINAL_413_TARGET_BYTES = 1_200_000
 CALLBACK_MAX_RETRIES = 3
 CALLBACK_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 _TRANSPORT_FORBIDDEN_KEYS = frozenset(
@@ -402,6 +403,78 @@ class TrackerAPIClient:
             return [cls._strip_absolute_transport_paths(entry) for entry in value]
         return value
 
+    @classmethod
+    def _bound_transport_value(
+        cls,
+        value: Any,
+        *,
+        aggressive: bool = False,
+        depth: int = 0,
+    ) -> Any:
+        """Bound arbitrary nested evidence before it reaches the wire.
+
+        The diagnostic builder deliberately keeps useful structured evidence,
+        but workflow evidence is extensible and can contain large arrays such
+        as placement transactions or phase snapshots.  Removing only fields
+        named ``full_log``/``stdout`` is therefore not a sufficient size
+        guarantee.  This helper keeps the shape and the first/last entries of
+        collections while bounding strings, dictionaries, and lists.
+        """
+
+        string_limit = 2 * 1024 if aggressive else 8 * 1024
+        list_limit = 24 if aggressive else 64
+        dict_limit = 64 if aggressive else 128
+
+        if isinstance(value, str):
+            return truncate_utf8_text(value, string_limit)
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if depth >= 8:
+            if isinstance(value, dict):
+                return {"_truncated": True, "field_count": len(value)}
+            if isinstance(value, (list, tuple, set)):
+                return {"_truncated": True, "item_count": len(value)}
+            return str(value)
+        if isinstance(value, dict):
+            items = list(value.items())
+            if len(items) > dict_limit:
+                priority = {
+                    "schema_version", "report_id", "attempt_nonce", "status",
+                    "name", "required", "passed", "failure_code", "retryable",
+                    "before", "after", "delta", "verified", "reason", "message",
+                    "source_url", "project_slug", "file_name", "filename",
+                    "relative_path", "size_bytes", "sha256",
+                }
+                prioritized = [
+                    item for item in items
+                    if cls._normalise_transport_key(item[0]) in {
+                        cls._normalise_transport_key(key) for key in priority
+                    }
+                ]
+                remainder = [item for item in items if item not in prioritized]
+                keep_count = max(1, dict_limit - 1)
+                items = (prioritized + remainder)[:keep_count]
+                items.append(("_truncated_fields", len(value) - keep_count))
+            return {
+                str(key): cls._bound_transport_value(
+                    entry, aggressive=aggressive, depth=depth + 1
+                )
+                for key, entry in items
+            }
+        if isinstance(value, (list, tuple, set)):
+            entries = list(value)
+            if len(entries) > list_limit:
+                head_count = max(1, list_limit // 2)
+                tail_count = list_limit - head_count
+                entries = entries[:head_count] + entries[-tail_count:]
+            return [
+                cls._bound_transport_value(
+                    entry, aggressive=aggressive, depth=depth + 1
+                )
+                for entry in entries
+            ]
+        return truncate_utf8_text(str(value), string_limit)
+
     @staticmethod
     def _compact_reference(reference: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Keep file identity metadata without transmitting a local path."""
@@ -454,6 +527,11 @@ class TrackerAPIClient:
             compact.get("logs") if isinstance(compact.get("logs"), dict) else {},
             excerpt_bytes=48 * 1024 if aggressive else MAX_LOG_EXCERPT_BYTES,
         )
+        # Bound every other nested evidence branch as well.  The log excerpt
+        # is handled separately so it can retain the contract's 48--64 KiB
+        # allowance instead of being reduced to the generic string limit.
+        compact.pop("logs", None)
+        compact = cls._bound_transport_value(compact, aggressive=aggressive)
         compact["logs"] = logs
 
         for required_section in (
@@ -500,12 +578,14 @@ class TrackerAPIClient:
                 truncate_utf8_text(compact.get("error_log"), MAX_ERROR_LOG_BYTES)
             )
         if isinstance(compact.get("details"), (dict, list)):
-            compact["details"] = cls._strip_forbidden_transport_fields(
-                compact["details"]
+            compact["details"] = cls._bound_transport_value(
+                cls._strip_forbidden_transport_fields(compact["details"]),
+                aggressive=aggressive,
             )
         if isinstance(compact.get("video_files"), (dict, list)):
-            compact["video_files"] = cls._strip_forbidden_transport_fields(
-                compact["video_files"]
+            compact["video_files"] = cls._bound_transport_value(
+                cls._strip_forbidden_transport_fields(compact["video_files"]),
+                aggressive=aggressive,
             )
         if isinstance(compact.get("manifest_ref"), dict):
             compact["manifest_ref"] = cls._compact_reference(compact["manifest_ref"])
@@ -520,6 +600,264 @@ class TrackerAPIClient:
         # Never send the full legacy workflow report in a terminal callback.
         compact.pop("workflow_report", None)
         return cls._strip_absolute_transport_paths(compact)
+
+    @classmethod
+    def _compact_evidence_summary(cls, evidence: Any) -> Dict[str, Any]:
+        """Keep scalar evidence and bounded samples of large collections."""
+
+        if not isinstance(evidence, dict):
+            return {}
+        compact: Dict[str, Any] = {}
+        for key, value in evidence.items():
+            normalized_key = cls._normalise_transport_key(key)
+            if normalized_key in _TRANSPORT_FORBIDDEN_KEYS:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                entries = list(value)
+                if len(entries) > 8:
+                    compact[f"{key}Count"] = len(entries)
+                    entries = entries[:4] + entries[-4:]
+                compact[str(key)] = cls._bound_transport_value(
+                    entries, aggressive=True
+                )
+            else:
+                compact[str(key)] = cls._bound_transport_value(
+                    value, aggressive=True
+                )
+        return compact
+
+    @classmethod
+    def _minimal_diagnostic_report(
+        cls,
+        diagnostic_report: Optional[Dict[str, Any]],
+        *,
+        log_excerpt_bytes: int = 48 * 1024,
+    ) -> Dict[str, Any]:
+        """Build a small, contract-complete diagnostic as a last resort.
+
+        This path is used only when the normal bounded report is still above
+        the Tracker limit.  It keeps the required sections and the scalar
+        quality/phase evidence, while removing duplicate snapshots and large
+        transaction/detail arrays.
+        """
+
+        source = diagnostic_report if isinstance(diagnostic_report, dict) else {}
+        mod_source = source.get("mod") if isinstance(source.get("mod"), dict) else {}
+        layout_source = mod_source.get("layout") if isinstance(mod_source.get("layout"), dict) else {}
+        mod = {
+            key: cls._bound_transport_value(mod_source.get(key), aggressive=True)
+            for key in (
+                "source_url",
+                "domain",
+                "project_slug",
+                "page_title",
+                "coverage",
+                "game_settings",
+            )
+            if key in mod_source
+        }
+        mod["layout"] = {
+            key: cls._bound_transport_value(layout_source.get(key), aggressive=True)
+            for key in ("icon_count", "slot_count", "recording_area")
+            if key in layout_source
+        }
+
+        phases_source = source.get("phases") if isinstance(source.get("phases"), dict) else {}
+        phases: Dict[str, Any] = {}
+        for key in (
+            "statuses",
+            "json_generation",
+            "runtime_entry",
+            "normal_gameplay",
+            "horror",
+            "placement",
+            "cleanup",
+            "identity",
+        ):
+            if key not in phases_source:
+                continue
+            value = phases_source.get(key)
+            if key in {"placement", "cleanup"} and isinstance(value, dict):
+                value = {
+                    field: value.get(field)
+                    for field in (
+                        "status",
+                        "before",
+                        "after",
+                        "delta",
+                        "verified",
+                        "accepted_by_policy",
+                        "final_cleanup_optional",
+                    )
+                    if field in value
+                }
+            phases[key] = cls._bound_transport_value(value, aggressive=True)
+
+        phase_reports_source = phases_source.get("phase_reports")
+        if isinstance(phase_reports_source, dict):
+            phase_reports: Dict[str, Any] = {}
+            for phase_name, phase in phase_reports_source.items():
+                if not isinstance(phase, dict):
+                    continue
+                phase_reports[str(phase_name)] = {
+                    field: cls._bound_transport_value(phase.get(field), aggressive=True)
+                    for field in (
+                        "mode",
+                        "was_successful",
+                        "failure_code",
+                        "retryable",
+                        "message",
+                        "normal_icons_showcased",
+                        "normal_icons_total",
+                        "normal_remixes_played",
+                        "normal_remixes_total",
+                    )
+                    if field in phase
+                }
+            phases["phase_reports"] = phase_reports
+
+        gate_source = source.get("quality_gate") if isinstance(source.get("quality_gate"), dict) else {}
+        gate: Dict[str, Any] = {
+            key: cls._bound_transport_value(gate_source.get(key), aggressive=True)
+            for key in (
+                "passed",
+                "status",
+                "failure_code",
+                "retryable",
+                "coverage",
+                "failed_checks",
+            )
+            if key in gate_source
+        }
+        checks = gate_source.get("checks")
+        if isinstance(checks, list):
+            compact_checks = []
+            for check in checks[:64]:
+                if not isinstance(check, dict):
+                    continue
+                compact_checks.append(
+                    {
+                        key: cls._bound_transport_value(check.get(key), aggressive=True)
+                        for key in (
+                            "name",
+                            "status",
+                            "required",
+                            "passed",
+                            "accepted_by_policy",
+                            "failure_code",
+                        )
+                        if key in check
+                    }
+                    | {
+                        "evidence": cls._compact_evidence_summary(
+                            check.get("evidence")
+                        )
+                    }
+                )
+            gate["checks"] = compact_checks
+        gate["evidence"] = cls._compact_evidence_summary(gate_source.get("evidence"))
+
+        outputs_source = source.get("outputs") if isinstance(source.get("outputs"), dict) else {}
+        outputs: Dict[str, Any] = {}
+        if isinstance(outputs_source.get("manifest_ref"), dict):
+            outputs["manifest_ref"] = cls._compact_reference(outputs_source["manifest_ref"])
+        if "video_files" in outputs_source:
+            outputs["video_files"] = cls._bound_transport_value(
+                outputs_source.get("video_files"), aggressive=True
+            )
+
+        logs = compact_log_snapshot(
+            source.get("logs") if isinstance(source.get("logs"), dict) else {},
+            excerpt_bytes=max(0, int(log_excerpt_bytes)),
+        )
+        result = {
+            "schema_version": source.get("schema_version", TRACKER_REPORT_SCHEMA_VERSION),
+            "report_id": source.get("report_id"),
+            "attempt_nonce": source.get("attempt_nonce"),
+            "generated_at": cls._bound_transport_value(source.get("generated_at"), aggressive=True),
+            "status": source.get("status"),
+            "job": cls._bound_transport_value(source.get("job") or {}, aggressive=True),
+            "mod": mod,
+            "summary": cls._bound_transport_value(source.get("summary") or {}, aggressive=True),
+            "timing": cls._bound_transport_value(source.get("timing") or {}, aggressive=True),
+            "phases": phases,
+            "quality_gate": gate,
+            "attempts": cls._bound_transport_value(source.get("attempts") or [], aggressive=True),
+            "outputs": outputs,
+            "logs": logs,
+            "tracker_ui": cls._bound_transport_value(source.get("tracker_ui") or {}, aggressive=True),
+        }
+        for required_section in (
+            "mod",
+            "summary",
+            "timing",
+            "phases",
+            "quality_gate",
+            "outputs",
+            "logs",
+        ):
+            if not isinstance(result.get(required_section), dict):
+                result[required_section] = {}
+        return cls._strip_absolute_transport_paths(result)
+
+    @classmethod
+    def _fit_terminal_payload_to_limit(
+        cls,
+        payload: Dict[str, Any],
+        *,
+        max_bytes: int = TERMINAL_MAX_REQUEST_BYTES,
+    ) -> Dict[str, Any]:
+        """Return a terminal payload that is safely below Tracker's limit."""
+
+        compact = cls._compact_terminal_payload(payload, aggressive=True)
+        if cls._payload_size_bytes(compact) <= max_bytes:
+            return compact
+
+        # These fields are useful during ordinary progress reporting but are
+        # optional for a terminal contract.  Remove them before reducing the
+        # required diagnostic sections.
+        for key in (
+            "details",
+            "video_files",
+            "error_log",
+            "manifest_ref",
+            "log_ref",
+            "stage",
+            "worker_id",
+        ):
+            compact.pop(key, None)
+            if cls._payload_size_bytes(compact) <= max_bytes:
+                return compact
+
+        diagnostic = compact.get("diagnostic_report")
+        compact["diagnostic_report"] = cls._minimal_diagnostic_report(
+            diagnostic,
+            log_excerpt_bytes=min(48 * 1024, max(8 * 1024, max_bytes // 16)),
+        )
+        if cls._payload_size_bytes(compact) <= max_bytes:
+            return compact
+
+        # Last bounded fallback: retain only the fields Tracker uses to bind
+        # and validate a terminal event.  The full log remains on disk and is
+        # referenced by the compact logs section.
+        minimal_diagnostic = compact["diagnostic_report"]
+        minimal_diagnostic["outputs"] = {"video_files": {}}
+        minimal_diagnostic["attempts"] = []
+        minimal_diagnostic["logs"] = compact_log_snapshot(
+            minimal_diagnostic.get("logs"), excerpt_bytes=8 * 1024
+        )
+        minimal_diagnostic["logs"]["excerpt"] = truncate_utf8_text(
+            minimal_diagnostic["logs"].get("excerpt"), 8 * 1024
+        )
+        return {
+            "status": compact.get("status"),
+            "schema_version": TRACKER_REPORT_SCHEMA_VERSION,
+            "report_id": compact.get("report_id"),
+            "attempt_nonce": compact.get("attempt_nonce"),
+            "sequence": compact.get("sequence"),
+            "final": True,
+            "diagnostic_report": minimal_diagnostic,
+        }
 
     def _tracker_outbox_directory(self) -> str:
         configured = getattr(self, "tracker_outbox_directory", None)
@@ -705,7 +1043,11 @@ class TrackerAPIClient:
     ) -> bool:
         """Send a callback with bounded retries and durable terminal replay."""
 
-        current_payload = payload
+        current_payload = (
+            self._fit_terminal_payload_to_limit(payload)
+            if final
+            else self._compact_terminal_payload(payload, aggressive=False)
+        )
         retry_count = 0
         compacted_after_413 = False
         outbox_saved = False
@@ -804,10 +1146,21 @@ class TrackerAPIClient:
                 and numeric_status == 413
                 and not compacted_after_413
             ):
-                current_payload = self._compact_terminal_payload(
-                    current_payload, aggressive=True
+                before_compact_bytes = request_bytes
+                current_payload = self._fit_terminal_payload_to_limit(
+                    current_payload,
+                    max_bytes=min(
+                        TERMINAL_MAX_REQUEST_BYTES,
+                        TERMINAL_413_TARGET_BYTES,
+                    ),
                 )
                 compacted_after_413 = True
+                compacted_bytes = self._payload_size_bytes(current_payload)
+                print(
+                    f"[Tracker] HTTP 413 compacted terminal payload: "
+                    f"queue_id={queue_id} before_bytes={before_compact_bytes} "
+                    f"after_bytes={compacted_bytes}"
+                )
                 # Replace the pending resend artifact with the payload that
                 # will actually be retried; it must never retain a larger
                 # pre-413 representation.
@@ -997,13 +1350,13 @@ class TrackerAPIClient:
                 'sequence': effective_sequence,
             }
             original_request_bytes = self._payload_size_bytes(json_safe(raw_payload))
-            payload = self._compact_terminal_payload(
-                raw_payload,
-                aggressive=original_request_bytes > TERMINAL_MAX_REQUEST_BYTES,
-            )
-            compact_request_bytes = self._payload_size_bytes(payload)
-            if compact_request_bytes > TERMINAL_MAX_REQUEST_BYTES:
-                payload = self._compact_terminal_payload(payload, aggressive=True)
+            if final:
+                payload = self._fit_terminal_payload_to_limit(raw_payload)
+            else:
+                payload = self._compact_terminal_payload(
+                    raw_payload,
+                    aggressive=original_request_bytes > TERMINAL_MAX_REQUEST_BYTES,
+                )
             result = self._send_callback_with_retry(
                 queue_id=queue_id,
                 method="PUT",
