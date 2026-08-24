@@ -1,0 +1,208 @@
+{
+  "version": 2,
+  "sourceUrl": "https://www.cocrea.world/@SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas",
+  "canonicalUrl": "https://www.cocrea.world/@SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas",
+  "urlKey": "SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "coordinateSpace": "screen_1920x1080_with_menu",
+  "prepareActions": [
+    {
+      "type": "click",
+      "x": 1305,
+      "y": 758,
+      "delayMs": 4000,
+      "pressDurationMs": 110
+    },
+    {
+      "type": "click",
+      "x": 980,
+      "y": 818,
+      "delayMs": 1282,
+      "pressDurationMs": 78
+    }
+  ],
+  "prepareTiming": {
+    "endDelayMs": 2328,
+    "durationMs": 7610
+  },
+  "layout": {
+    "icons": [
+      {
+        "index": 0,
+        "label": "n-1",
+        "x": 480,
+        "y": 782
+      },
+      {
+        "index": 1,
+        "label": "n-2",
+        "x": 591,
+        "y": 789
+      },
+      {
+        "index": 2,
+        "label": "n-3",
+        "x": 715,
+        "y": 793
+      },
+      {
+        "index": 3,
+        "label": "n-4",
+        "x": 825,
+        "y": 790
+      },
+      {
+        "index": 4,
+        "label": "n-5",
+        "x": 939,
+        "y": 789
+      },
+      {
+        "index": 5,
+        "label": "n-6",
+        "x": 1051,
+        "y": 792
+      },
+      {
+        "index": 6,
+        "label": "n-7",
+        "x": 1174,
+        "y": 787
+      },
+      {
+        "index": 7,
+        "label": "n-8",
+        "x": 1283,
+        "y": 787
+      },
+      {
+        "index": 8,
+        "label": "n-9",
+        "x": 1400,
+        "y": 791
+      },
+      {
+        "index": 9,
+        "label": "n-10",
+        "x": 1524,
+        "y": 792
+      },
+      {
+        "index": 10,
+        "label": "n-11",
+        "x": 484,
+        "y": 936
+      },
+      {
+        "index": 11,
+        "label": "n-12",
+        "x": 599,
+        "y": 939
+      },
+      {
+        "index": 12,
+        "label": "n-13",
+        "x": 723,
+        "y": 939
+      },
+      {
+        "index": 13,
+        "label": "n-14",
+        "x": 833,
+        "y": 931
+      },
+      {
+        "index": 14,
+        "label": "n-15",
+        "x": 943,
+        "y": 933
+      },
+      {
+        "index": 15,
+        "label": "n-16",
+        "x": 1068,
+        "y": 935
+      },
+      {
+        "index": 16,
+        "label": "n-17",
+        "x": 1184,
+        "y": 934
+      },
+      {
+        "index": 17,
+        "label": "n-18",
+        "x": 1288,
+        "y": 936
+      },
+      {
+        "index": 18,
+        "label": "n-19",
+        "x": 1408,
+        "y": 932
+      },
+      {
+        "index": 19,
+        "label": "n-20",
+        "x": 1522,
+        "y": 936
+      }
+    ],
+    "slots": [
+      {
+        "index": 0,
+        "x": 254,
+        "y": 537
+      },
+      {
+        "index": 1,
+        "x": 439,
+        "y": 519
+      },
+      {
+        "index": 2,
+        "x": 625,
+        "y": 513
+      },
+      {
+        "index": 3,
+        "x": 816,
+        "y": 537
+      },
+      {
+        "index": 4,
+        "x": 939,
+        "y": 493
+      },
+      {
+        "index": 5,
+        "x": 1170,
+        "y": 392
+      },
+      {
+        "index": 6,
+        "x": 1379,
+        "y": 524
+      },
+      {
+        "index": 7,
+        "x": 1564,
+        "y": 532
+      },
+      {
+        "index": 8,
+        "x": 1751,
+        "y": 535
+      }
+    ]
+  },
+  "settings": {
+    "gameControlType": "unknown"
+  },
+  "notes": "",
+  "createdAt": "2026-08-24T15:20:20.764346Z",
+  "updatedAt": "2026-08-24T15:20:20.764346Z"
+}
