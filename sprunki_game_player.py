@@ -12839,7 +12839,10 @@ class SprunkiGamePlayer:
                     final_cleanup_optional=not has_horror,
                 )
                 report.normal_remixes_played = remix_result.succeeded
-                report.normal_remixes_total = remix_result.attempted
+                # ``attempted`` counts only remixes reached before a stop;
+                # include skipped library entries so a watchdog partial report
+                # preserves the real denominator (for example, 3/4).
+                report.normal_remixes_total = remix_result.expected
                 report.evidence["normalRemixResult"] = remix_result.as_dict()
                 report.evidence["normalRemixRetryable"] = self._remix_result_allows_workflow_retry(
                     remix_result
@@ -13660,7 +13663,7 @@ class SprunkiGamePlayer:
                 final_cleanup_optional=True,
             )
             report.normal_remixes_played = remix_result.succeeded
-            report.normal_remixes_total = remix_result.attempted
+            report.normal_remixes_total = remix_result.expected
             report.evidence["remixResult"] = remix_result.as_dict()
             report.evidence["workflowRetryable"] = self._remix_result_allows_workflow_retry(
                 remix_result

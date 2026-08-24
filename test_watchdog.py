@@ -247,6 +247,57 @@ class WatchdogTests(unittest.TestCase):
             any(args[2] == "watchdog_recovery" for args, _ in service.api_client.progress)
         )
 
+    def test_idle_timeout_partial_acceptance_keeps_recorded_video_and_clears_transient_failure(self):
+        from creator_api_client import CreatorService
+
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, "job-105.mkv")
+            with open(output_path, "wb") as handle:
+                handle.write(b"recorded-video")
+
+            report = WorkflowReport(
+                mode="master",
+                runtime_state=PASS,
+                runtime_verified=True,
+                layout_icons=20,
+                layout_slots=4,
+                placement_before=0,
+                placement_after=1,
+                placement_verified=True,
+                cleanup_verified=False,
+                normal_icons_showcased=20,
+                normal_icons_total=20,
+                normal_remixes_played=2,
+                normal_remixes_total=4,
+            )
+            report.apply_quality_gate(
+                QualityGateResult.failure("workflow_stopped", retryable=False)
+            )
+            item = SimpleNamespace(
+                output_files=[output_path],
+                workflow_report=report,
+                watchdog_evidence={},
+                status="failed",
+                failure_code="watchdog_timeout",
+                error_message="watchdog stopped remix 4",
+                master_mode_status="failure",
+            )
+            service = CreatorService.__new__(CreatorService)
+
+            accepted = service._accept_idle_timeout_partial_success(
+                item,
+                {"reason": "idle_timeout"},
+                {"status": "failed"},
+            )
+
+            self.assertTrue(accepted)
+            self.assertTrue(report.quality_gate.passed)
+            self.assertEqual(item.status, "processing")
+            self.assertIsNone(item.failure_code)
+            self.assertIsNone(item.error_message)
+            self.assertEqual(item.master_mode_status, "success")
+            self.assertEqual(item.output_files, [output_path])
+
     def test_retry_output_names_are_distinct(self):
         self.assertEqual(attempt_scoped_filename("remix-1.mp4", 1), "remix-1.mp4")
         self.assertEqual(

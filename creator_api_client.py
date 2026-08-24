@@ -30,6 +30,7 @@ from file_validator import FileQualityValidator
 from manual_profile_manager import suggested_profile_path_for_url, url_key_from_url
 from workflow_quality import (
     CREATOR_PRODUCTION_MODES,
+    evaluate_idle_timeout_partial_success,
     failure_is_retryable,
     normalize_production_mode,
     validate_playable_layout,
@@ -2367,6 +2368,96 @@ class CreatorService:
         result["output_files"] = list(item.attempt_outputs.get(int(attempt), []))
         return result
 
+    @staticmethod
+    def _has_recorded_video_output(
+        item: Any,
+        cleanup: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Require a real, non-empty video artifact for idle-timeout success."""
+
+        candidates = list(getattr(item, "output_files", []) or [])
+        cleanup = cleanup if isinstance(cleanup, dict) else {}
+        candidates.extend(cleanup.get("output_files", []) or [])
+        video_extensions = {".mkv", ".mp4", ".webm", ".mov", ".avi"}
+        seen = set()
+        for candidate in candidates:
+            try:
+                path = os.path.abspath(str(candidate))
+                if path in seen or os.path.splitext(path)[1].lower() not in video_extensions:
+                    continue
+                seen.add(path)
+                if os.path.isfile(path) and os.path.getsize(path) > 0:
+                    return True
+            except (OSError, TypeError, ValueError):
+                continue
+        return False
+
+    def _accept_idle_timeout_partial_success(
+        self,
+        item: Any,
+        timeout_event: Dict[str, Any],
+        cleanup: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Promote a productive idle timeout after bounded cleanup.
+
+        This method is called only after the watchdog has stopped new workflow
+        actions and attempted its bounded cleanup.  It never handles manual
+        cancellation or the hard deadline, and it does not accept a report
+        merely because a file exists: the shared quality helper still requires
+        the core runtime, placement, icon, and remix evidence.
+        """
+
+        report = getattr(item, "workflow_report", None)
+        if report is None:
+            return False
+
+        timeout_reason = timeout_event.get("reason") if isinstance(timeout_event, dict) else None
+        output_recorded = self._has_recorded_video_output(item, cleanup)
+        cleanup_status = (
+            cleanup.get("status")
+            if isinstance(cleanup, dict)
+            else None
+        )
+        gate = evaluate_idle_timeout_partial_success(
+            report,
+            timeout_reason=timeout_reason,
+            output_recorded=output_recorded,
+            cleanup_status=cleanup_status,
+        )
+        if gate is None:
+            return False
+
+        watchdog_report_evidence = report.evidence.get("watchdog")
+        if not isinstance(watchdog_report_evidence, dict):
+            watchdog_report_evidence = {}
+            report.evidence["watchdog"] = watchdog_report_evidence
+        watchdog_report_evidence["partialAcceptance"] = {
+            "reason": "idle_timeout",
+            "outputRecorded": output_recorded,
+            "cleanupStatus": cleanup_status,
+            "cleanupNonBlocking": True,
+        }
+        watchdog_evidence = getattr(item, "watchdog_evidence", None)
+        if isinstance(watchdog_evidence, dict):
+            watchdog_evidence["partial_acceptance"] = {
+                "status": "accepted",
+                "reason": "idle_timeout",
+                "output_recorded": output_recorded,
+                "cleanup_status": cleanup_status,
+                "completed_remixes": report.normal_remixes_played,
+                "attempted_remixes": report.normal_remixes_total,
+            }
+
+        # _process_with_smart_retry may have recorded workflow_stopped while
+        # unwinding.  Clear that transient failure so finalization can publish
+        # the accepted report and its current-attempt video artifact.
+        item.status = "processing"
+        item.failure_code = None
+        item.error_message = None
+        if hasattr(item, "master_mode_status"):
+            item.master_mode_status = "success"
+        return True
+
     def _run_workflow_with_watchdog(
         self,
         item: Any,
@@ -2443,6 +2534,31 @@ class CreatorService:
                 **(failure.get("evidence") or {}),
                 "cleanup": cleanup,
             }
+
+            # A productive idle timeout is a terminal content decision, not a
+            # reason to launch another full workflow.  The bounded cleanup has
+            # already stopped recording and attempted board/runtime recovery;
+            # if the report passes the normal Master icon/remix thresholds and
+            # has a real video, accept it.  Hard timeout and manual
+            # cancellation never enter this branch because the shared helper
+            # only accepts the exact ``idle_timeout`` reason.
+            if self._accept_idle_timeout_partial_success(item, timeout_event, cleanup):
+                item.watchdog_evidence.setdefault("retry_decisions", []).append(
+                    {
+                        "attempt": attempt,
+                        "timeout_reason": timeout_event.get("reason"),
+                        "decision": "accept_partial_success",
+                        "remaining_seconds": state.remaining_seconds(),
+                        "cleanup_status": cleanup.get("status"),
+                    }
+                )
+                self._send_watchdog_recovery_progress(
+                    queue_id,
+                    timeout_event,
+                    retrying=False,
+                    cleanup=cleanup,
+                )
+                return True, None, watcher_thread
 
             can_retry = (
                 timeout_event.get("reason") == "idle_timeout"
@@ -2745,8 +2861,7 @@ class CreatorService:
             # Dọn dẹp các component của job hiện tại trước khi chụp log cuối.
             final_cleanup_abort_event = threading.Event()
             watchdog_cleanup_attempted = bool(
-                watchdog_failure
-                and isinstance(getattr(item, "watchdog_evidence", None), dict)
+                isinstance(getattr(item, "watchdog_evidence", None), dict)
                 and any(
                     isinstance(entry, dict)
                     for entry in item.watchdog_evidence.get("cleanup", [])

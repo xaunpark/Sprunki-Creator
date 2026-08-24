@@ -6,6 +6,7 @@ from workflow_quality import (
     QualityGateResult,
     RemixResult,
     WorkflowReport,
+    evaluate_idle_timeout_partial_success,
     evaluate_workflow_report,
     failure_is_retryable,
     validate_playable_layout,
@@ -56,6 +57,11 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual((succeeded, attempted), (0, 0))
         self.assertFalse(result.meets(0.5))
 
+    def test_remix_expected_total_includes_entries_skipped_after_watchdog_stop(self):
+        result = RemixResult(attempted=3, succeeded=3, skipped=1)
+        self.assertEqual(result.expected, 4)
+        self.assertEqual(result.as_dict()["expected"], 4)
+
     def test_icon_showcase_exception_preserves_completed_icon_count(self):
         import threading
 
@@ -92,6 +98,81 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.coverage["normal"], "verified")
         self.assertEqual(result.coverage["horror"], "not_checked_by_policy")
+
+    def test_idle_timeout_reuses_normal_master_ratio_thresholds(self):
+        report = WorkflowReport(
+            mode="master",
+            runtime_state=PASS,
+            runtime_verified=True,
+            layout_icons=20,
+            layout_slots=4,
+            placement_before=0,
+            placement_after=1,
+            placement_verified=True,
+            cleanup_verified=False,
+            normal_icons_showcased=20,
+            normal_icons_total=20,
+            # Master success currently accepts >=50% remix completion; this
+            # deliberately uses 2/4 to prove watchdog recovery has no hidden
+            # hardcoded "3/4" minimum.
+            normal_remixes_played=2,
+            normal_remixes_total=4,
+        )
+
+        result = evaluate_idle_timeout_partial_success(
+            report,
+            timeout_reason="idle_timeout",
+            output_recorded=True,
+            cleanup_status="failed",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.passed)
+        self.assertTrue(result.evidence["cleanupNonBlocking"])
+        self.assertTrue(result.evidence["cleanupAcceptedByPolicy"])
+        self.assertFalse(result.evidence["cleanupVerified"])
+        self.assertEqual(result.evidence["normalRemixesCompleted"], 2)
+        self.assertTrue(result.evidence["qualityGateReused"])
+
+    def test_idle_timeout_partial_success_is_never_used_for_hard_or_manual_stop(self):
+        report = verified_report()
+        report.normal_remixes_played = 3
+        report.normal_remixes_total = 4
+
+        for reason in ("hard_timeout", "manual_cancellation", "service_cancelled"):
+            with self.subTest(reason=reason):
+                result = evaluate_idle_timeout_partial_success(
+                    report,
+                    timeout_reason=reason,
+                    output_recorded=True,
+                )
+                self.assertIsNone(result)
+
+    def test_idle_timeout_partial_success_requires_a_recorded_video(self):
+        report = verified_report()
+        report.normal_remixes_played = 2
+        report.normal_remixes_total = 4
+
+        result = evaluate_idle_timeout_partial_success(
+            report,
+            timeout_reason="idle_timeout",
+            output_recorded=False,
+        )
+
+        self.assertIsNone(result)
+
+    def test_idle_timeout_partial_success_rejects_ratio_below_normal_master_gate(self):
+        report = verified_report()
+        report.normal_remixes_played = 1
+        report.normal_remixes_total = 4
+
+        result = evaluate_idle_timeout_partial_success(
+            report,
+            timeout_reason="idle_timeout",
+            output_recorded=True,
+        )
+
+        self.assertIsNone(result)
 
     def test_zero_to_zero_without_placement_is_rejected(self):
         report = verified_report()

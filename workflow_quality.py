@@ -31,7 +31,6 @@ NON_RETRYABLE_FAILURE_CODES = frozenset(
     }
 )
 
-
 # Tracker may use ``normal`` as its canonical database value while the
 # Creator-facing queue contract uses ``master`` for the same full-showcase
 # workflow.  Keep the translation in one pure helper so claim, retry,
@@ -154,6 +153,12 @@ class RemixResult:
     def success_ratio(self) -> float:
         return self.succeeded / self.attempted if self.attempted > 0 else 0.0
 
+    @property
+    def expected(self) -> int:
+        """Return attempted plus intentionally unprocessed remixes."""
+
+        return max(0, int(self.attempted or 0)) + max(0, int(self.skipped or 0))
+
     def meets(self, threshold: float, *, require_non_zero: bool = True) -> bool:
         if require_non_zero and self.attempted <= 0:
             return False
@@ -162,6 +167,7 @@ class RemixResult:
     def as_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
         payload["success_ratio"] = self.success_ratio
+        payload["expected"] = self.expected
         return payload
 
     def __iter__(self):
@@ -650,6 +656,88 @@ def evaluate_workflow_report(
             message="Workflow passed the shared quality gate.",
         )
     )
+
+
+def evaluate_idle_timeout_partial_success(
+    report: WorkflowReport,
+    *,
+    timeout_reason: Optional[str],
+    output_recorded: bool,
+    cleanup_status: Optional[str] = None,
+) -> Optional[QualityGateResult]:
+    """Return a controlled pass for a productive idle-timeout workflow.
+
+    This is intentionally an opt-in exception to the normal workflow result:
+    only an ``idle_timeout`` may use it, a real video artifact must exist, and
+    the core gameplay evidence must already pass the same shared quality gate
+    used by a normal completed Master workflow.  Manual cancellation and the
+    hard deadline return ``None`` and therefore remain failures.
+
+    Final cleanup is recorded as evidence but is deliberately non-blocking in
+    this branch because the workflow has no further gameplay operation to
+    perform after the bounded watchdog cleanup.
+    """
+
+    reason = str(timeout_reason or "").strip().lower()
+    if reason != "idle_timeout" or not bool(output_recorded):
+        return None
+
+    # Reuse the normal Master quality gate instead of maintaining a second
+    # hardcoded ratio/count policy for watchdog recovery.  The only temporary
+    # override is the already-approved final-cleanup exception; all layout,
+    # runtime, placement, icon-ratio, and remix-ratio checks remain identical
+    # to a normal success decision.
+    evidence = report.evidence
+    previous_cleanup_flags = {
+        "finalCleanupOptional": evidence.get("finalCleanupOptional"),
+        "finalRemixContentComplete": evidence.get("finalRemixContentComplete"),
+    }
+    evidence["finalCleanupOptional"] = True
+    evidence["finalRemixContentComplete"] = True
+    result = evaluate_workflow_report(report, mode="master", require_identity=False)
+    if not result.passed:
+        for key, previous in previous_cleanup_flags.items():
+            if previous is None:
+                evidence.pop(key, None)
+            else:
+                evidence[key] = previous
+        return None
+
+    completed = int(report.normal_remixes_played or 0)
+    attempted = int(report.normal_remixes_total or 0)
+    showcased = int(report.normal_icons_showcased or 0)
+    icon_total = int(report.normal_icons_total or 0)
+    icon_ratio = showcased / icon_total if icon_total > 0 else 0.0
+    remix_ratio = completed / attempted if attempted > 0 else 0.0
+
+    partial_evidence = {
+        "idleTimeoutPartialSuccess": True,
+        "workflowCompleteForPolicy": True,
+        "watchdogReason": "idle_timeout",
+        "outputRecorded": True,
+        "normalRemixesCompleted": completed,
+        "normalRemixesAttempted": attempted,
+        "normalRemixRatio": round(remix_ratio, 4),
+        "normalIconsShowcased": showcased,
+        "normalIconsTotal": icon_total,
+        "normalIconRatio": round(icon_ratio, 4),
+        "qualityGateReused": "evaluate_workflow_report",
+        # These flags also let the downstream diagnostic contract report
+        # cleanup as accepted policy instead of turning a completed recording
+        # back into FAILED solely because the final board was not empty.
+        "finalCleanupOptional": True,
+        "finalRemixContentComplete": True,
+        "cleanupAcceptedByPolicy": True,
+        "cleanupNonBlocking": True,
+        "cleanupVerified": bool(report.cleanup_verified),
+        "cleanupStatus": cleanup_status,
+    }
+    result.evidence.update(partial_evidence)
+    result.message = (
+        "Idle timeout occurred after the normal Master quality thresholds "
+        "were met; bounded final cleanup is non-blocking by policy."
+    )
+    return report.apply_quality_gate(result)
 
 
 def failure_is_retryable(

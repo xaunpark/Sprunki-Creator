@@ -12,7 +12,12 @@ from tracker_reporting import (
     build_log_snapshot,
     build_tracker_diagnostic_report,
 )
-from workflow_quality import PASS, QualityGateResult, WorkflowReport
+from workflow_quality import (
+    PASS,
+    QualityGateResult,
+    WorkflowReport,
+    evaluate_idle_timeout_partial_success,
+)
 
 
 def passing_report() -> WorkflowReport:
@@ -48,6 +53,61 @@ def passing_report() -> WorkflowReport:
 
 
 class TrackerReportingTests(unittest.TestCase):
+    def test_idle_timeout_partial_acceptance_remains_completed_in_tracker_report(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/idle-partial",
+            project_slug="idle-partial",
+            mode="master",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/idle-partial",
+                "layout": {
+                    "icons": [{"index": 0}],
+                    "slots": [{"index": 0}],
+                },
+            },
+            failure_code=None,
+            error_message=None,
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=datetime(2026, 8, 20, 10, 0, 3),
+            output_files=["job-3040.mkv"],
+            recorded_identity_status="not_started",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+        report = passing_report()
+        report.cleanup_verified = False
+        report.normal_remixes_played = 2
+        report.normal_remixes_total = 4
+        accepted = evaluate_idle_timeout_partial_success(
+            report,
+            timeout_reason="idle_timeout",
+            output_recorded=True,
+            cleanup_status="cleanup_incomplete",
+        )
+
+        self.assertIsNotNone(accepted)
+        diagnostic = build_tracker_diagnostic_report(
+            {"id": 3040, "production_mode": "master"},
+            item,
+            report,
+            terminal_status="completed",
+        )
+
+        self.assertEqual(diagnostic["status"], "completed")
+        self.assertTrue(diagnostic["quality_gate"]["passed"])
+        cleanup_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "cleanup"
+        )
+        remix_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "normal_remixes"
+        )
+        self.assertEqual(cleanup_check["status"], "PASS")
+        self.assertEqual(remix_check["evidence"]["succeeded"], 2)
+        self.assertEqual(remix_check["evidence"]["total"], 4)
+
     def test_final_cleanup_policy_is_reported_as_pass_without_new_status(self):
         item = SimpleNamespace(
             source_url="https://cocrea.world/@author/final-cleanup",
