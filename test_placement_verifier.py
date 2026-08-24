@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock
 
 from manual_prepare_timeline import (
     MAX_PREPARE_ACTIONS,
@@ -17,6 +18,7 @@ from placement_verifier import (
     promote_aggregate_transition,
     wait_for_stable_snapshot,
 )
+from sprunki_game_player import SprunkiGamePlayer
 
 
 def _snapshot(sequence, timestamp, **values):
@@ -430,6 +432,113 @@ class PlacementVerifierTests(unittest.TestCase):
         )
         self.assertEqual(executed, [1])
         self.assertEqual(sleeps, [0.01, 0.03])
+
+
+class ReturnActionPolicyTests(unittest.TestCase):
+    @staticmethod
+    def _player():
+        player = object.__new__(SprunkiGamePlayer)
+        player._operation_counter = 0
+        player._active_operation_context = None
+        player.verifier_max_read_failures = 5
+        player.config = {"layout": {"slots": [{"index": 0}]}}
+        player.carpet_bombing_config = {"max_sets": 1}
+        player.verifier_targeted_cleanup_recovery_rounds = 1
+        player.verifier_targeted_cleanup_backend_fallback = False
+        player._max_session_recoveries = 2
+        player._session_recovery_count = 0
+        player.obs_controller = None
+        player._cleanup_input_budget = lambda: 4
+        player._cleanup_deadline_seconds = lambda: 30.0
+        return player
+
+    @staticmethod
+    def _state(sequence, count, polos, characters):
+        return {
+            "sequence": sequence,
+            "timestamp": float(sequence),
+            "characters_count": count,
+            "putted_characters": count,
+            "polos_array": polos,
+            "characters_array": characters,
+        }
+
+    def test_empty_precondition_does_not_skip_return_click(self):
+        player = self._player()
+        baseline = self._state(1, 1, ["0"], ["1"])
+        after_click = self._state(2, 0, ["0"], ["0"])
+        player._capture_stable_placement_snapshot = Mock(
+            side_effect=[baseline, after_click]
+        )
+        player._execute_precision_return_click = Mock(
+            return_value=OperationResult(OperationStatus.FAILED, message="no_transition")
+        )
+        player._execute_carpet_bombing_return = Mock()
+
+        result = player.corrected_return_icon({"index": 0, "x": 10, "y": 20}, use_cdp=False)
+
+        self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
+        self.assertEqual(player._execute_precision_return_click.call_count, 1)
+        player._execute_carpet_bombing_return.assert_not_called()
+
+    def test_occupied_post_action_state_advances_to_next_return_method(self):
+        player = self._player()
+        baseline = self._state(1, 1, ["0"], ["1"])
+        after_precision = self._state(2, 1, ["1"], ["1"])
+        after_carpet = self._state(3, 1, ["1"], ["1"])
+        after_restart = self._state(4, 0, ["0"], ["0"])
+        player._capture_stable_placement_snapshot = Mock(
+            side_effect=[baseline, after_precision, after_carpet, after_restart]
+        )
+        player._execute_precision_return_click = Mock(
+            return_value=OperationResult(OperationStatus.FAILED, message="no_transition")
+        )
+        player._execute_carpet_bombing_return = Mock(
+            return_value=OperationResult(OperationStatus.FAILED, message="carpet_no_progress")
+        )
+        player.restart_game_to_initial_state = Mock(
+            return_value=OperationResult(OperationStatus.RECOVERED, message="restarted")
+        )
+
+        result = player.corrected_return_icon({"index": 0, "x": 10, "y": 20}, use_cdp=False)
+
+        self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
+        self.assertEqual(player._execute_precision_return_click.call_count, 1)
+        self.assertEqual(player._execute_carpet_bombing_return.call_count, 1)
+        player.restart_game_to_initial_state.assert_called_once()
+
+    def test_stale_empty_polos_with_nonzero_counts_does_not_finish(self):
+        player = self._player()
+        # This mirrors the problematic mod: Polos says the target is empty,
+        # while the aggregate counters still prove one icon remains.
+        baseline = {
+            "sequence": 1,
+            "timestamp": 1.0,
+            "characters_count": 1,
+            "putted_characters": 1,
+            "polos_array": ["0"],
+        }
+        after_precision = dict(baseline, sequence=2, timestamp=2.0)
+        after_carpet = dict(baseline, sequence=3, timestamp=3.0)
+        after_restart = self._state(4, 0, ["0"], ["0"])
+        player._capture_stable_placement_snapshot = Mock(
+            side_effect=[baseline, after_precision, after_carpet, after_restart]
+        )
+        player._execute_precision_return_click = Mock(
+            return_value=OperationResult(OperationStatus.FAILED, message="no_transition")
+        )
+        player._execute_carpet_bombing_return = Mock(
+            return_value=OperationResult(OperationStatus.FAILED, message="carpet_no_progress")
+        )
+        player.restart_game_to_initial_state = Mock(
+            return_value=OperationResult(OperationStatus.RECOVERED, message="restarted")
+        )
+
+        result = player.corrected_return_icon({"index": 0, "x": 10, "y": 20}, use_cdp=False)
+
+        self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
+        self.assertEqual(player._execute_precision_return_click.call_count, 1)
+        self.assertEqual(player._execute_carpet_bombing_return.call_count, 1)
 
 
 if __name__ == "__main__":

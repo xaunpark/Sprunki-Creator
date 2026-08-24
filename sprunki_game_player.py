@@ -669,6 +669,178 @@ class SprunkiGamePlayer:
             recovery_attempts=context.recovery_attempts if context else 0,
         )
 
+    @staticmethod
+    def _bounded_return_vector(values, limit: int = 64):
+        """Return a small, JSON-safe copy of a placement vector for diagnostics."""
+        if values is None:
+            return None
+        try:
+            return [str(value) for value in list(values)[:limit]]
+        except Exception:
+            return ["<unreadable>"]
+
+    def _return_state_evidence(self, state, target_slot_index: int):
+        """Build bounded evidence for every pre/post return-state observation."""
+        snapshot = PlacementSnapshot.from_mapping(state)
+        if snapshot is None:
+            return {
+                "readable": False,
+                "targetSlot": target_slot_index,
+            }
+
+        def _target_value(values):
+            if values is None:
+                return None
+            try:
+                if 0 <= target_slot_index < len(values):
+                    return str(values[target_slot_index])
+            except Exception:
+                return "<unreadable>"
+            return None
+
+        try:
+            precondition = classify_precondition(
+                snapshot,
+                "return",
+                target_slot_index,
+            )
+            precondition_value = precondition.value
+        except Exception:
+            precondition_value = None
+
+        return {
+            "readable": True,
+            "targetSlot": target_slot_index,
+            "charactersCount": snapshot.characters_count,
+            "puttedCount": snapshot.putted_count,
+            "polos": self._bounded_return_vector(snapshot.polos),
+            "characters": self._bounded_return_vector(snapshot.characters),
+            "targetPolos": _target_value(snapshot.polos),
+            "targetCharacters": _target_value(snapshot.characters),
+            "targetOccupancy": self._return_target_occupancy(snapshot, target_slot_index),
+            "targetPrecondition": precondition_value,
+            "sequence": snapshot.sequence,
+            "timestamp": snapshot.timestamp,
+        }
+
+    def _log_return_state(self, stage: str, state, target_slot_index: int):
+        """Log the state surrounding a physical return action, without large payloads."""
+        evidence = self._return_state_evidence(state, target_slot_index)
+        print(
+            "RETURN STATE [{}]: {}".format(
+                stage,
+                json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+            )
+        )
+
+        obs_controller = getattr(self, "obs_controller", None)
+        if obs_controller is not None:
+            try:
+                obs_controller.log_event_timestamp(
+                    "return_state_observed",
+                    "{} target_slot={}".format(stage, target_slot_index),
+                    evidence,
+                )
+            except Exception as log_error:
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.debug("Unable to persist return state evidence: %s", log_error)
+        return evidence
+
+    @staticmethod
+    def _return_target_occupancy(snapshot, target_slot_index: int):
+        """Classify all available target-specific signals without shortcuts."""
+        snapshot = PlacementSnapshot.from_mapping(snapshot)
+        if snapshot is None:
+            return None
+
+        observations = []
+        empty_tokens = {"", "0", "false"}
+        unknown_tokens = {"none", "null"}
+        for values in (snapshot.polos, snapshot.characters):
+            if values is None or not 0 <= target_slot_index < len(values):
+                continue
+            token = str(values[target_slot_index]).strip().lower()
+            if token in unknown_tokens:
+                continue
+            observations.append("empty" if token in empty_tokens else "occupied")
+
+        if any(value == "occupied" for value in observations):
+            return "occupied"
+        if observations and all(value == "empty" for value in observations):
+            return "empty"
+        return None
+
+    @staticmethod
+    def _return_observed_count(snapshot):
+        snapshot = PlacementSnapshot.from_mapping(snapshot)
+        if snapshot is None:
+            return None
+        values = [
+            value
+            for value in (snapshot.characters_count, snapshot.putted_count)
+            if value is not None
+        ]
+        return min(values) if values else None
+
+    def _return_state_is_empty(
+        self,
+        state,
+        target_slot_index: int,
+        before_state=None,
+    ) -> bool:
+        """Verify target emptiness from post-action evidence.
+
+        A precondition classifier is intentionally not enough here.  In the
+        affected mods Polos can report zero for a visibly occupied slot while
+        Characters/Putted still report one.  When the same empty target signal
+        survives a click with no target-specific or aggregate change, keep the
+        return operation alive and try the next physical method.
+        """
+        snapshot = PlacementSnapshot.from_mapping(state)
+        if snapshot is None:
+            return False
+
+        try:
+            if self._is_board_state_clean(snapshot):
+                return True
+        except Exception:
+            pass
+
+        if self._return_target_occupancy(snapshot, target_slot_index) != "empty":
+            return False
+
+        if before_state is None:
+            return True
+        before = PlacementSnapshot.from_mapping(before_state)
+        if before is None:
+            return True
+
+        before_target = self._return_target_occupancy(before, target_slot_index)
+        if before_target == "occupied":
+            return True
+        if before_target is None:
+            return True
+
+        before_count = self._return_observed_count(before)
+        after_count = self._return_observed_count(snapshot)
+        if before_count is not None and after_count is not None and after_count < before_count:
+            return True
+
+        # The target was already reported empty and no reliable signal moved
+        # after the physical action.  Do not let that stale precondition end
+        # the return chain.
+        return False
+
+    @staticmethod
+    def _return_result_proves_completion(result) -> bool:
+        """Accept only target-specific or post-action empty evidence as return success."""
+        if result is None:
+            return False
+        if result.status == OperationStatus.ALREADY_EMPTY:
+            return True
+        return result.status == OperationStatus.VERIFIED and result.target_verified
+
     def _register_scoped_physical_input(self) -> bool:
         """Account for recovery-only inputs issued by legacy intro helpers."""
         context = getattr(self, "_physical_input_context", None)
@@ -5742,6 +5914,11 @@ class SprunkiGamePlayer:
                                 "targeted_cleanup_baseline_unknown",
                                 details={"attempts": attempts},
                             )
+                        self._log_return_state(
+                            "targeted_before_click",
+                            before_snapshot,
+                            slot_index,
+                        )
 
                         result = self._execute_precision_return_click(
                             candidate_slot,
@@ -5786,6 +5963,11 @@ class SprunkiGamePlayer:
                                 "targeted_cleanup_post_state_unknown",
                                 details={"attempts": attempts},
                             )
+                        self._log_return_state(
+                            "targeted_after_click",
+                            after_state,
+                            slot_index,
+                        )
                         if self._is_board_state_clean(after_state):
                             return self._operation_result(
                                 context,
@@ -6863,9 +7045,11 @@ class SprunkiGamePlayer:
                 if current_count is None:
                     print("   ⚠️ Cannot read board progress; stopping carpet bombing")
                     return False
-                if self._is_board_state_clean(current_state):
-                    print(f"âœ… COMPLETE! All clear before set {set_num}")
-                    return True
+
+                # This snapshot is taken before the next physical return
+                # set.  It is diagnostic/count evidence only; a stale Polos
+                # zero must not suppress the next click set.  Completion is
+                # checked after the set below.
                 
                 print(f"   ðŸ“Š Icons remaining: {current_count}")
                 
@@ -7249,7 +7433,10 @@ class SprunkiGamePlayer:
                     print(f"   ðŸ“‹ Target-specific active slots: {active_slots}")
                     return active_slots
                 if polos:
-                    return []
+                    print(
+                        "   ⚠️ Polos reports no active slot; retaining aggregate "
+                        "fallback because a stale zero must not suppress return input"
+                    )
             
             print(f"   ðŸ“Š Characters count: {characters_count}")
             
@@ -7333,8 +7520,10 @@ class SprunkiGamePlayer:
                 
                 if not needs_return:
                     if reason == "already_empty":
-                        print(f"âœ… Slot {slot_index} already empty - skipping")
-                        success_count += 1
+                        print(
+                            f"⚠️ Slot {slot_index} pre-flight reports empty; "
+                            "still sending action-first return"
+                        )
                     else:
                         error_msg = f"Slot {slot_index}: Cannot verify if return needed ({reason})"
                         print(f"âš ï¸ {error_msg}")
@@ -7343,7 +7532,6 @@ class SprunkiGamePlayer:
                         # the next slot; stop this batch and let the caller
                         # decide whether to recover the entire game.
                         break
-                    continue
 
                 try:
                     result = self.corrected_return_icon(target_slot, use_cdp)
@@ -10894,11 +11082,16 @@ class SprunkiGamePlayer:
                 )
             context.set_baseline(baseline)
 
+            # This is diagnostic only.  A pre-action snapshot must never
+            # suppress the physical return input: the snapshot may be stale,
+            # may describe the wrong slot, or may be based on an aggregate
+            # fallback.  The target is checked again only after an action.
+            self._log_return_state("before_click", baseline, target_slot_index)
             precondition = classify_precondition(baseline, "return", target_slot_index)
             if precondition == OperationStatus.ALREADY_EMPTY:
-                return self._finish_operation(
-                    context,
-                    self._operation_result(context, OperationStatus.ALREADY_EMPTY, "target_already_empty"),
+                print(
+                    "   RETURN PRECONDITION reported empty; sending the click "
+                    "before making any success decision."
                 )
 
             # PHASE 1: one precision click
@@ -10909,7 +11102,7 @@ class SprunkiGamePlayer:
                 operation_context=context,
                 before_snapshot=baseline,
             )
-            if precision_result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_EMPTY}:
+            if self._return_result_proves_completion(precision_result):
                 print("ðŸŽ‰ PHASE 1 SUCCESS!")
                 if obs_controller:
                     obs_controller.log_event_timestamp(
@@ -10924,52 +11117,48 @@ class SprunkiGamePlayer:
                     )
                 return self._finish_operation(context, precision_result)
 
-            if precision_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
-                print(f"   🛑 Precision result is {precision_result.status.value}; no blind carpet retry")
+            if precision_result.status == OperationStatus.STOPPED:
+                print(f"   🛑 Precision result is {precision_result.status.value}; stopping return")
                 return self._finish_operation(context, precision_result)
 
-            # PHASE 2: bounded carpet bombing.  It is only allowed after the
-            # precision click produced a known no-change result.
-            print(f"\nðŸ’¥ PHASE 2: CARPET BOMBING")
+            # Always inspect the board after the precision action.  An
+            # aggregate-only VERIFIED result is not enough to finish a
+            # target-specific return, but it must not cause an early failure.
             current_state = self._capture_stable_placement_snapshot(
                 timeout_ms=500,
                 context=context,
             )
+            self._log_return_state("after_precision_click", current_state, target_slot_index)
             if current_state is None:
                 result = self._operation_result(context, OperationStatus.UNKNOWN, "post_precision_state_unknown")
                 return self._finish_operation(context, result)
-            if classify_precondition(current_state, "return", target_slot_index) == OperationStatus.ALREADY_EMPTY:
-                result = self._operation_result(context, OperationStatus.ALREADY_EMPTY, "target_cleared_after_precision")
-                return self._finish_operation(context, result)
-            post_precision_evaluation = evaluate_transition(
-                baseline,
-                current_state,
-                "return",
-                target_slot_index,
-            )
-            if post_precision_evaluation.status == OperationStatus.VERIFIED:
+            if self._return_state_is_empty(current_state, target_slot_index, baseline):
                 result = self._operation_result(
                     context,
-                    OperationStatus.UNKNOWN,
-                    "precision_changed_state_without_target_proof",
-                    evidence=post_precision_evaluation.evidence,
+                    OperationStatus.ALREADY_EMPTY,
+                    "target_cleared_after_precision",
                     details={
-                        **post_precision_evaluation.details,
-                        "targetSpecific": post_precision_evaluation.target_specific,
-                        "aggregateFallback": post_precision_evaluation.aggregate_fallback,
+                        "precision": precision_result.as_dict(),
+                        "postActionState": self._return_state_evidence(current_state, target_slot_index),
                     },
                 )
                 return self._finish_operation(context, result)
-            if post_precision_evaluation.status == OperationStatus.UNKNOWN:
-                result = self._operation_result(context, OperationStatus.UNKNOWN, "post_precision_transition_unknown")
-                return self._finish_operation(context, result)
 
+            print(
+                "   RETURN POST-ACTION CHECK: target is still occupied; "
+                "continuing with the next return method."
+            )
+
+            # PHASE 2: bounded carpet bombing.  It is reached only after the
+            # precision click was sent and its post-action state still shows
+            # the target as occupied.
+            print(f"\nðŸ’¥ PHASE 2: CARPET BOMBING")
             carpet_result = self._execute_carpet_bombing_return(
                 use_cdp,
                 operation_context=context,
                 before_snapshot=baseline,
             )
-            if carpet_result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_EMPTY}:
+            if self._return_result_proves_completion(carpet_result):
                 print("ðŸŽ‰ PHASE 2 SUCCESS!")
                 if obs_controller:
                     obs_controller.log_event_timestamp(
@@ -10985,7 +11174,33 @@ class SprunkiGamePlayer:
                     )
                 return self._finish_operation(context, carpet_result)
 
-            if carpet_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+            if carpet_result.status == OperationStatus.STOPPED:
+                return self._finish_operation(context, carpet_result)
+
+            post_carpet_state = self._capture_stable_placement_snapshot(
+                timeout_ms=500,
+                context=context,
+            )
+            self._log_return_state("after_carpet_return", post_carpet_state, target_slot_index)
+            if post_carpet_state is not None and self._return_state_is_empty(
+                post_carpet_state,
+                target_slot_index,
+                current_state,
+            ):
+                result = self._operation_result(
+                    context,
+                    OperationStatus.ALREADY_EMPTY,
+                    "target_cleared_after_carpet",
+                    details={
+                        "carpet": carpet_result.as_dict(),
+                        "postActionState": self._return_state_evidence(
+                            post_carpet_state,
+                            target_slot_index,
+                        ),
+                    },
+                )
+                return self._finish_operation(context, result)
+            if post_carpet_state is None and carpet_result.status == OperationStatus.UNKNOWN:
                 return self._finish_operation(context, carpet_result)
 
             # PHASE 3: one recovery, then terminate this operation.  The old
@@ -11021,7 +11236,21 @@ class SprunkiGamePlayer:
                     },
                 )
 
-            if recovery_result.status == OperationStatus.RECOVERED:
+            recovery_state = self._capture_stable_placement_snapshot(
+                timeout_ms=500,
+                context=context,
+            )
+            self._log_return_state("after_restart_recovery", recovery_state, target_slot_index)
+
+            if (
+                recovery_result.status == OperationStatus.RECOVERED
+                and recovery_state is not None
+                and self._return_state_is_empty(
+                    recovery_state,
+                    target_slot_index,
+                    post_carpet_state,
+                )
+            ):
                 result = self._operation_result(
                     context,
                     OperationStatus.ALREADY_EMPTY,
@@ -11029,14 +11258,28 @@ class SprunkiGamePlayer:
                     details={
                         "recovery": recovery_result.as_dict(),
                         "boardEmptyVerified": True,
+                        "postActionState": self._return_state_evidence(
+                            recovery_state,
+                            target_slot_index,
+                        ),
                     },
                 )
             else:
                 result = self._operation_result(
                     context,
-                    recovery_result.status,
+                    (
+                        OperationStatus.UNKNOWN
+                        if recovery_result.status == OperationStatus.RECOVERED
+                        else recovery_result.status
+                    ),
                     "return_not_verified_after_recovery",
-                    details={"recovery": recovery_result.as_dict()},
+                    details={
+                        "recovery": recovery_result.as_dict(),
+                        "postActionState": self._return_state_evidence(
+                            recovery_state,
+                            target_slot_index,
+                        ),
+                    },
                 )
             return self._finish_operation(context, result)
 
@@ -11221,8 +11464,11 @@ class SprunkiGamePlayer:
                 )
                 return result
 
-            precondition = classify_precondition(after_snapshot, "return", context.target_slot)
-            if precondition == OperationStatus.ALREADY_EMPTY:
+            if self._return_state_is_empty(
+                after_snapshot,
+                context.target_slot,
+                before_snapshot,
+            ):
                 return self._operation_result(
                     context,
                     OperationStatus.ALREADY_EMPTY,
@@ -13527,32 +13773,25 @@ class SprunkiGamePlayer:
             if progress_callback:
                 progress_callback("ðŸ”„ Returning horror trigger icon for showcase...")
             
-            # Check current state before return.  No emergency click loop is
-            # allowed after corrected_return_icon has already exhausted its
-            # own bounded chain.
+            # Observe for diagnostics only.  The return coordinator owns the
+            # action-first policy; this caller must not bypass it based on a
+            # potentially stale precondition snapshot.
             before_snapshot = self._capture_stable_placement_snapshot(timeout_ms=1000)
             if before_snapshot is None:
                 print("   🛑 Horror return precondition is UNKNOWN")
                 return False
-            precondition = classify_precondition(before_snapshot, "return", center_slot_index)
-            if precondition == OperationStatus.ALREADY_EMPTY:
-                return_success = OperationResult(
-                    OperationStatus.ALREADY_EMPTY,
-                    direction="return",
-                    message="horror_target_already_empty",
+            self._log_return_state("horror_before_click", before_snapshot, center_slot_index)
+            print(f"   ðŸŽ¯ Sending return through the action-first coordinator...")
+            return_success = self.corrected_return_icon(target_slot, use_cdp)
+            if return_success.status not in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }:
+                print(
+                    f"   🛑 Horror return stopped at {return_success.status.value}: "
+                    f"{return_success.message}"
                 )
-            else:
-                print(f"   ðŸŽ¯ Slot occupied or aggregate fallback; returning icon 19...")
-                return_success = self.corrected_return_icon(target_slot, use_cdp)
-                if return_success.status not in {
-                    OperationStatus.VERIFIED,
-                    OperationStatus.ALREADY_EMPTY,
-                }:
-                    print(
-                        f"   🛑 Horror return stopped at {return_success.status.value}: "
-                        f"{return_success.message}"
-                    )
-                    return False
+                return False
 
             # Đánh dấu KẾT THÚC chuỗi sự kiện trigger SAU KHI đã trả icon về
             if self.obs_controller:
