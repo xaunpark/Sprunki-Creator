@@ -186,6 +186,20 @@ class DragOperationStats:
         """
 
 class SprunkiGamePlayer:
+    REMOVE_BUTTON_OFFSETS = (
+        (0, 0),
+        (-5, 0),
+        (5, 0),
+        (0, -5),
+        (0, 5),
+        (-8, -8),
+        (8, -8),
+        (-8, 8),
+        (8, 8),
+    )
+    REMOVE_BUTTON_MAX_ATTEMPTS = len(REMOVE_BUTTON_OFFSETS)
+    REMOVE_BUTTON_SCHEMA_VERSION = 1
+
     def __init__(self, stop_event=None): # [MODIFIED] Nhận stop_event
         # [NEW] Initialize logger for this class
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -615,7 +629,8 @@ class SprunkiGamePlayer:
             self, "verifier_targeted_cleanup_backend_fallback", True
         ) else 0
         targeted_inputs = slot_count * recovery_rounds * (9 + center_transport_fallback)
-        cleanup_inputs = max(120, carpet_inputs + targeted_inputs)
+        remove_button_inputs = slot_count * self.REMOVE_BUTTON_MAX_ATTEMPTS
+        cleanup_inputs = max(120, carpet_inputs + targeted_inputs + remove_button_inputs)
         return MAX_PREPARE_ACTIONS + cleanup_inputs + 8
 
     @staticmethod
@@ -840,6 +855,438 @@ class SprunkiGamePlayer:
         if result.status == OperationStatus.ALREADY_EMPTY:
             return True
         return result.status == OperationStatus.VERIFIED and result.target_verified
+
+    def _remove_controls_config(self):
+        """Return validated Remove metadata from the loaded JSON config."""
+        try:
+            layout = (self.config or {}).get("layout", {}) or {}
+            controls = layout.get("returnControls") or {}
+            remove = controls.get("remove") or {}
+            if not isinstance(remove, dict) or remove.get("enabled") is not True:
+                return None
+            if (
+                remove.get("targetName") != "Mute Buttons"
+                or remove.get("costumeName") != "Remove"
+            ):
+                return None
+            if remove.get("coordinateSystem") != "reference-screen-1920x1080":
+                return None
+            reference = remove.get("referenceScreen") or {}
+            if float(reference.get("width", 0)) != 1920 or float(reference.get("height", 0)) != 1080:
+                return None
+            if float(controls.get("schemaVersion", 0)) != self.REMOVE_BUTTON_SCHEMA_VERSION:
+                return None
+            return remove
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+    def _remove_button_click_candidates(self, target_slot):
+        """Build bounded, bounds-safe canonical click candidates for one slot."""
+        remove_config = self._remove_controls_config()
+        if remove_config is None or not isinstance(target_slot, dict):
+            return []
+
+        button = target_slot.get("removeButton") or {}
+        if not isinstance(button, dict) or button.get("resolved") is not True:
+            return []
+
+        try:
+            center_x = float(button["clickX"])
+            center_y = float(button["clickY"])
+            bounds = button.get("bounds") or {}
+            left = float(bounds["left"])
+            top = float(bounds["top"])
+            width = float(bounds["width"])
+            height = float(bounds["height"])
+            right = float(bounds.get("right", left + width))
+            bottom = float(bounds.get("bottom", top + height))
+            if not all(math.isfinite(value) for value in (
+                center_x, center_y, left, top, width, height, right, bottom
+            )) or width <= 0 or height <= 0:
+                return []
+            if not (
+                0 <= left <= right <= 1920
+                and 0 <= top <= bottom <= 1080
+                and right > left
+                and bottom > top
+                and left <= center_x <= right
+                and top <= center_y <= bottom
+            ):
+                return []
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return []
+
+        safe_jitter = button.get("safeJitterPx", 8)
+        try:
+            safe_jitter = max(0.0, min(10.0, float(safe_jitter)))
+        except (TypeError, ValueError, OverflowError):
+            safe_jitter = 8.0
+
+        configured_offsets = remove_config.get("clickOffsets")
+        offsets = configured_offsets if isinstance(configured_offsets, list) else self.REMOVE_BUTTON_OFFSETS
+        try:
+            configured_max_attempts = int(
+                remove_config.get("maxAttempts", self.REMOVE_BUTTON_MAX_ATTEMPTS)
+            )
+            if configured_max_attempts <= 0:
+                return []
+            max_attempts = min(
+                self.REMOVE_BUTTON_MAX_ATTEMPTS,
+                configured_max_attempts,
+                len(offsets),
+            )
+        except (TypeError, ValueError, OverflowError):
+            max_attempts = self.REMOVE_BUTTON_MAX_ATTEMPTS
+
+        candidates = []
+        seen = set()
+        for offset in offsets[:max_attempts]:
+            if not isinstance(offset, (list, tuple)) or len(offset) < 2:
+                continue
+            try:
+                offset_x = float(offset[0])
+                offset_y = float(offset[1])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not all(math.isfinite(value) for value in (offset_x, offset_y)):
+                continue
+            if max(abs(offset_x), abs(offset_y)) > safe_jitter:
+                continue
+
+            click_x = int(round(center_x + offset_x))
+            click_y = int(round(center_y + offset_y))
+            # Keep jitter inside the captured Remove renderer bounds.  This is
+            # what prevents an offset from crossing into Mute/Solo/another slot.
+            if not (left <= click_x <= right and top <= click_y <= bottom):
+                continue
+            key = (click_x, click_y)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({
+                "x": click_x,
+                "y": click_y,
+                "offsetX": int(round(offset_x)),
+                "offsetY": int(round(offset_y)),
+            })
+        return candidates
+
+    def _try_remove_button_return(
+        self,
+        target_slot,
+        use_cdp,
+        operation_context=None,
+        before_snapshot=None,
+        target_slot_index=None,
+    ):
+        """Try the captured Remove control once per bounded jitter point.
+
+        This helper never closes the shared operation context.  The caller can
+        therefore continue with the existing precision/carpet/recovery chain
+        when Remove is unavailable, inconclusive, or unsuccessful.
+        """
+        context = operation_context or getattr(self, "_active_operation_context", None)
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="return",
+                message="remove_button_missing_operation_context",
+            )
+
+        if target_slot_index is None:
+            try:
+                target_slot_index = int(target_slot.get("index", context.target_slot))
+            except (AttributeError, TypeError, ValueError):
+                target_slot_index = context.target_slot
+        if target_slot_index is None or int(target_slot_index) < 0:
+            return self._operation_result(context, OperationStatus.FAILED, "remove_button_invalid_target_slot")
+        target_slot_index = int(target_slot_index)
+
+        candidates = self._remove_button_click_candidates(target_slot)
+        if not candidates:
+            return self._operation_result(
+                context,
+                OperationStatus.FAILED,
+                "remove_button_unavailable",
+                details={"attempts": [], "fallback": "legacy_return"},
+            )
+
+        baseline = PlacementSnapshot.from_mapping(before_snapshot)
+        if baseline is None:
+            baseline = self._capture_stable_placement_snapshot(timeout_ms=1000, context=context)
+        if baseline is None:
+            return self._operation_result(
+                context,
+                OperationStatus.UNKNOWN,
+                "remove_button_baseline_unknown",
+                details={"attempts": [], "fallback": "legacy_return"},
+            )
+
+        occupancy = self._return_target_occupancy(baseline, target_slot_index)
+        if occupancy == "empty":
+            # A few mods expose a stale Polos zero while the aggregate board
+            # still contains icons and do not expose a Characters target
+            # array.  Treat that single signal as inconclusive; otherwise a
+            # valid Remove coordinate could be skipped for an occupied slot.
+            polos_only_empty = (
+                baseline.polos is not None
+                and baseline.characters is None
+                and 0 <= target_slot_index < len(baseline.polos)
+                and str(baseline.polos[target_slot_index]).strip().lower() in {"0", "false"}
+            )
+            if polos_only_empty and (self._return_observed_count(baseline) or 0) > 0:
+                return self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "remove_button_precondition_unknown",
+                    details={"attempts": [], "fallback": "legacy_return"},
+                )
+            return self._operation_result(
+                context,
+                OperationStatus.ALREADY_EMPTY,
+                "remove_button_target_already_empty",
+                details={"attempts": [], "targetSpecific": True},
+            )
+        if occupancy is None:
+            # A stale/unknown target must not trigger a blind click at a saved
+            # coordinate.  The caller will use the established fallback path.
+            return self._operation_result(
+                context,
+                OperationStatus.UNKNOWN,
+                "remove_button_precondition_unknown",
+                details={"attempts": [], "fallback": "legacy_return"},
+            )
+
+        attempts = []
+        current_baseline = baseline
+        verify_timeout_ms = max(
+            250,
+            int(getattr(self, "remove_button_verify_timeout_ms", 1000)),
+        )
+
+        for attempt_index, candidate in enumerate(candidates, 1):
+            if not context.can_send_input(stop_requested=self.stop_event.is_set()):
+                return self._operation_result(
+                    context,
+                    OperationStatus.FAILED,
+                    "remove_button_input_budget_exhausted",
+                    details={"attempts": attempts, "fallback": "legacy_return"},
+                )
+
+            print(
+                "   REMOVE-FIRST: "
+                f"slot={target_slot_index} attempt={attempt_index}/{len(candidates)} "
+                f"click=({candidate['x']},{candidate['y']}) "
+                f"offset=({candidate['offsetX']},{candidate['offsetY']})"
+            )
+            candidate_slot = dict(target_slot)
+            candidate_slot["x"] = candidate["x"]
+            candidate_slot["y"] = candidate["y"]
+            result = self._execute_precision_return_click(
+                candidate_slot,
+                use_cdp,
+                operation_context=context,
+                before_snapshot=current_baseline,
+                target_slot_index=target_slot_index,
+                timeout_ms=verify_timeout_ms,
+            )
+            attempt = {
+                "attempt": attempt_index,
+                "x": candidate["x"],
+                "y": candidate["y"],
+                "referenceX": candidate["x"],
+                "referenceY": candidate["y"],
+                "runtimeX": candidate["x"],
+                "runtimeY": candidate["y"],
+                "coordinateSystem": "reference-screen-1920x1080",
+                "useCdp": bool(use_cdp),
+                "offsetX": candidate["offsetX"],
+                "offsetY": candidate["offsetY"],
+                "status": result.status.value,
+                "message": result.message,
+                "targetVerified": result.target_verified,
+            }
+            attempts.append(attempt)
+
+            if self._return_result_proves_completion(result):
+                details = dict(result.details or {})
+                details.update({
+                    "removeFirst": True,
+                    "removeButtonAttempts": attempts,
+                    "targetSpecific": True,
+                })
+                return self._operation_result(
+                    context,
+                    result.status,
+                    "remove_button_return_verified",
+                    evidence=result.evidence,
+                    details=details,
+                    reads=context.read_count,
+                )
+            if result.status == OperationStatus.STOPPED:
+                return self._operation_result(
+                    context,
+                    result.status,
+                    "remove_button_stop_requested",
+                    details={"attempts": attempts},
+                )
+            if result.status == OperationStatus.UNKNOWN:
+                # Unknown state means we cannot safely decide whether another
+                # jitter click is still aimed at the occupied target.
+                return self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "remove_button_verification_unknown",
+                    details={"attempts": attempts, "fallback": "legacy_return"},
+                )
+
+            after = self._capture_stable_placement_snapshot(
+                timeout_ms=verify_timeout_ms,
+                context=context,
+            )
+            if after is None:
+                return self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "remove_button_post_click_state_unknown",
+                    details={"attempts": attempts, "fallback": "legacy_return"},
+                )
+            if self._return_state_is_empty(after, target_slot_index, current_baseline):
+                return self._operation_result(
+                    context,
+                    OperationStatus.ALREADY_EMPTY,
+                    "remove_button_target_cleared",
+                    evidence=("target_slot_empty_after_remove",),
+                    details={
+                        "removeFirst": True,
+                        "removeButtonAttempts": attempts,
+                        "targetSpecific": True,
+                    },
+                    reads=context.read_count,
+                )
+            if self._return_target_occupancy(after, target_slot_index) is None:
+                return self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "remove_button_target_state_unknown",
+                    details={"attempts": attempts, "fallback": "legacy_return"},
+                )
+            current_baseline = after
+
+        return self._operation_result(
+            context,
+            OperationStatus.FAILED,
+            "remove_button_attempts_exhausted",
+            details={"attempts": attempts, "fallback": "legacy_return"},
+        )
+
+    def _try_remove_buttons_for_occupied_slots(
+        self,
+        sorted_slots,
+        use_cdp=False,
+        operation_context=None,
+        initial_state=None,
+    ):
+        """Run Remove-first for known occupied remix slots before carpet bombing."""
+        context = operation_context or getattr(self, "_active_operation_context", None)
+        if context is None:
+            return {
+                "status": OperationStatus.UNKNOWN,
+                "attempts": [],
+                "reason": "remove_batch_missing_operation_context",
+            }
+
+        state = initial_state if initial_state is not None else self._read_comprehensive_state(context)
+        occupied_slots = self._occupied_slot_indices_from_state(state)
+        if occupied_slots is None:
+            return {
+                "status": OperationStatus.UNKNOWN,
+                "attempts": [],
+                "reason": "remove_batch_occupied_slots_unknown",
+            }
+        if not occupied_slots:
+            return {
+                "status": OperationStatus.FAILED,
+                "attempts": [],
+                "reason": "remove_batch_no_occupied_slots",
+            }
+
+        slots_by_index = {}
+        normalized_slots = []
+        for position, slot in enumerate(sorted_slots or []):
+            try:
+                index = int(slot.get("index", position))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            normalized_slots.append((index, slot))
+            slots_by_index.setdefault(index, slot)
+        normalized_slots.sort(key=lambda item: item[0])
+        for position, (_index, slot) in enumerate(normalized_slots):
+            slots_by_index.setdefault(position, slot)
+
+        attempts = []
+        successful_slots = []
+        skipped_slots = []
+        for slot_index in occupied_slots:
+            target_slot = slots_by_index.get(slot_index)
+            if not target_slot:
+                skipped_slots.append({"slot": slot_index, "reason": "missing_config"})
+                continue
+            baseline = self._capture_stable_placement_snapshot(
+                timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
+                context=context,
+                stable_samples=1,
+            )
+            if baseline is None:
+                return {
+                    "status": OperationStatus.UNKNOWN,
+                    "attempts": attempts,
+                    "successfulSlots": successful_slots,
+                    "skippedSlots": skipped_slots,
+                    "reason": "remove_batch_baseline_unknown",
+                }
+            result = self._try_remove_button_return(
+                target_slot,
+                use_cdp,
+                operation_context=context,
+                before_snapshot=baseline,
+                target_slot_index=slot_index,
+            )
+            result_attempts = (result.details or {}).get("removeButtonAttempts")
+            if result_attempts is None:
+                result_attempts = (result.details or {}).get("attempts", [])
+            attempts.extend(
+                {"slot": slot_index, **attempt}
+                for attempt in result_attempts
+                if isinstance(attempt, dict)
+            )
+            if self._return_result_proves_completion(result):
+                successful_slots.append(slot_index)
+                continue
+            if result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+                return {
+                    "status": result.status,
+                    "attempts": attempts,
+                    "successfulSlots": successful_slots,
+                    "skippedSlots": skipped_slots,
+                    "reason": result.message,
+                }
+            skipped_slots.append({"slot": slot_index, "reason": result.message})
+
+        final_state = self._read_comprehensive_state(context)
+        if final_state and self._is_board_state_clean(final_state):
+            status = OperationStatus.VERIFIED
+            reason = "remove_batch_verified"
+        else:
+            status = OperationStatus.FAILED
+            reason = "remove_batch_partial_or_unresolved"
+        return {
+            "status": status,
+            "attempts": attempts,
+            "successfulSlots": successful_slots,
+            "skippedSlots": skipped_slots,
+            "reason": reason,
+        }
 
     def _register_scoped_physical_input(self) -> bool:
         """Account for recovery-only inputs issued by legacy intro helpers."""
@@ -5722,9 +6169,12 @@ class SprunkiGamePlayer:
 
     def _occupied_slot_indices_from_state(self, state):
         """Return occupied slot indices only when the Polos signal is reliable."""
-        if not isinstance(state, dict):
+        if isinstance(state, PlacementSnapshot):
+            polos = state.polos
+        elif isinstance(state, dict):
+            polos = state.get("polos_array")
+        else:
             return None
-        polos = state.get("polos_array")
         if not isinstance(polos, (list, tuple)):
             return None
 
@@ -6102,14 +6552,78 @@ class SprunkiGamePlayer:
             # Sort slots by index for sequential processing
             sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
             print(f"   ðŸŽ¯ Will process {len(sorted_slots)} slots sequentially")
-            
-            # Execute progressive carpet bombing sets
-            success = self.execute_sequential_carpet_bombing_sets(
+
+            # PHASE 0: use the captured Remove control for each occupied slot
+            # before the existing batch carpet bombing.  The same operation
+            # context owns all inputs, so this remains strictly bounded.
+            print("\nREMOVE-FIRST PREPASS FOR REMIX")
+            remove_batch = self._try_remove_buttons_for_occupied_slots(
                 sorted_slots,
-                initial_count,
-                use_cdp,
+                use_cdp=use_cdp,
                 operation_context=context,
+                initial_state=initial_snapshot,
             )
+            remove_batch_details = {
+                "removeFirst": True,
+                "removeBatch": remove_batch,
+            }
+            if remove_batch.get("status") == OperationStatus.VERIFIED:
+                print("   Remove-first prepass cleared the remix board")
+                return finish(
+                    OperationStatus.VERIFIED,
+                    "cleanup_verified_after_remove_buttons",
+                    details={
+                        "initialCount": initial_count,
+                        **remove_batch_details,
+                    },
+                )
+            if remove_batch.get("status") == OperationStatus.STOPPED:
+                return finish(
+                    OperationStatus.STOPPED,
+                    "cleanup_stop_requested_during_remove_buttons",
+                    details=remove_batch_details,
+                )
+            print(
+                "   Remove-first prepass incomplete; "
+                "continuing with existing carpet bombing fallback."
+            )
+
+            # Keep successfully returned slots out of the fallback input.  A
+            # Remove click is already a completed return operation for that
+            # slot; sending carpet clicks over it again can hit a neighboring
+            # control after the menu has disappeared.
+            successful_remove_slots = {
+                int(index)
+                for index in (remove_batch.get("successfulSlots") or [])
+                if str(index).lstrip("-").isdigit()
+            }
+            remaining_slots = [
+                slot for position, slot in enumerate(sorted_slots)
+                if (
+                    int(slot.get("index", position))
+                    if isinstance(slot, dict) and str(slot.get("index", position)).lstrip("-").isdigit()
+                    else position
+                ) not in successful_remove_slots
+            ]
+            print(
+                f"   Fallback slots remaining after Remove-first: "
+                f"{len(remaining_slots)}/{len(sorted_slots)}"
+            )
+
+            # Execute progressive carpet bombing sets only when there are
+            # unresolved configured slots left.  If Remove handled every
+            # configured slot but an extra signal remains, skip an empty
+            # carpet input and let the existing targeted/recovery path decide.
+            success = False
+            if remaining_slots:
+                success = self.execute_sequential_carpet_bombing_sets(
+                    remaining_slots,
+                    initial_count,
+                    use_cdp,
+                    operation_context=context,
+                )
+            else:
+                print("   No unresolved slots remain; skipping empty carpet fallback")
             final_snapshot = self._capture_stable_placement_snapshot(
                 timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
                 context=context,
@@ -6123,7 +6637,10 @@ class SprunkiGamePlayer:
                 return finish(
                     OperationStatus.VERIFIED,
                     "cleanup_verified",
-                    details={"initialCount": initial_count},
+                    details={
+                        "initialCount": initial_count,
+                        **remove_batch_details,
+                    },
                 )
             if self.stop_event.is_set():
                 return finish(OperationStatus.STOPPED, "cleanup_stop_requested")
@@ -6145,6 +6662,7 @@ class SprunkiGamePlayer:
                     details={
                         "initialCount": initial_count,
                         "carpetProgress": bool(success),
+                        **remove_batch_details,
                         "targetedRecovery": targeted_result.as_dict(),
                     },
                 )
@@ -6167,6 +6685,7 @@ class SprunkiGamePlayer:
                 details={
                     "initialCount": initial_count,
                     "carpetProgress": bool(success),
+                    **remove_batch_details,
                     "targetedRecovery": targeted_result.as_dict(),
                 },
             )
@@ -11090,9 +11609,44 @@ class SprunkiGamePlayer:
             precondition = classify_precondition(baseline, "return", target_slot_index)
             if precondition == OperationStatus.ALREADY_EMPTY:
                 print(
-                    "   RETURN PRECONDITION reported empty; sending the click "
-                    "before making any success decision."
+                    "   RETURN PRECONDITION reported empty; Remove-first will "
+                    "recheck target-specific occupancy before sending input."
                 )
+
+            # PHASE 0: captured Remove control.  This is intentionally before
+            # the legacy precision click and is bounded by the same context.
+            print("\nPHASE 0: REMOVE BUTTON FIRST")
+            remove_result = self._try_remove_button_return(
+                target_slot,
+                use_cdp,
+                operation_context=context,
+                before_snapshot=baseline,
+                target_slot_index=target_slot_index,
+            )
+            if self._return_result_proves_completion(remove_result):
+                print("REMOVE-FIRST SUCCESS!")
+                if obs_controller:
+                    obs_controller.log_event_timestamp(
+                        "return_completed_successfully",
+                        f"Return successful (Remove button) for slot {target_slot_index}",
+                        {
+                            "slot_index": target_slot_index,
+                            "return_phase": 0,
+                            "status": remove_result.status.value,
+                            "removeButtonAttempts": (remove_result.details or {}).get(
+                                "removeButtonAttempts",
+                                (remove_result.details or {}).get("attempts", []),
+                            ),
+                            "operationId": context.operation_id,
+                        },
+                    )
+                return self._finish_operation(context, remove_result)
+            if remove_result.status == OperationStatus.STOPPED:
+                return self._finish_operation(context, remove_result)
+            print(
+                "   REMOVE-FIRST did not prove target return; "
+                "continuing with legacy return chain."
+            )
 
             # PHASE 1: one precision click
             print(f"\nðŸŽ¯ PHASE 1: PRECISION CLICK")

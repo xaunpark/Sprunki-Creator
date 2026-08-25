@@ -42,6 +42,8 @@ output/
 temp/
 
 # Generated inspection / smoke-test artifacts
+panel_scan_result.json
+test_artifacts/
 light_run_inspect_recording_area_tests/
 light_runtime_inspect_tests/
 project_centered_recording_area_tests/

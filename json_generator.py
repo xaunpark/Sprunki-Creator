@@ -1,7 +1,8 @@
-# json_generator.py (v11.0 - HYBRID - Phase Comparison + Screenshot Fallback)
+# json_generator.py (v11.1 - HYBRID - Remove-first return controls)
 # UPGRADED: Phase value comparison as primary method with visual fallback
 
 import json
+import copy
 import time
 import os
 import subprocess
@@ -47,7 +48,7 @@ except ImportError:
 
 class SprunkiJSONGenerator:
     """
-    HYBRID Sprunki JSON Generator (v11.0 - Phase Comparison + Screenshot Fallback)
+    HYBRID Sprunki JSON Generator (v11.1 - Remove-first return controls)
     Process:
         1. Get comprehensive state data + coordinates
         2. Drag icon 19 to slot 3  
@@ -433,6 +434,226 @@ class SprunkiJSONGenerator:
                             const pixelY = canvasCenterY - (logicY * scale);
                             return { x: Math.round(pixelX), y: Math.round(pixelY) };
                         };
+
+                        // Capture the per-slot Remove control from renderer bounds.
+                        // target.x/y is used only for matching; the click point is the
+                        // center of the rendered Remove costume so costume registration
+                        // offsets cannot move the click away from the actual X button.
+                        function captureRemoveControls(allTargets, renderer, poloSlots) {
+                            const selector = {
+                                targetName: 'Mute Buttons',
+                                costumeName: 'Remove'
+                            };
+                            const offsets = [
+                                [0, 0], [-5, 0], [5, 0], [0, -5], [0, 5],
+                                [-8, -8], [8, -8], [-8, 8], [8, 8]
+                            ];
+
+                            const toPixelPoint = (logicX, logicY) => {
+                                const point = toPixelWithMenu(logicX, logicY);
+                                return point.x === null || point.y === null ? null : point;
+                            };
+
+                            const boundsToPixels = (rawBounds) => {
+                                if (!rawBounds) return null;
+                                const left = Number(rawBounds.left);
+                                const right = Number(rawBounds.right);
+                                const top = Number(rawBounds.top);
+                                const bottom = Number(rawBounds.bottom);
+                                if (![left, right, top, bottom].every(Number.isFinite)) return null;
+                                const first = toPixelPoint(left, top);
+                                const second = toPixelPoint(right, bottom);
+                                if (!first || !second) return null;
+                                const x = Math.min(first.x, second.x);
+                                const y = Math.min(first.y, second.y);
+                                const width = Math.abs(second.x - first.x);
+                                const height = Math.abs(second.y - first.y);
+                                if (!(width > 0 && height > 0)) return null;
+                                return {
+                                    left: Math.round(x),
+                                    top: Math.round(y),
+                                    width: Math.round(width),
+                                    height: Math.round(height),
+                                    right: Math.round(x + width),
+                                    bottom: Math.round(y + height),
+                                    centerX: x + (width / 2),
+                                    centerY: y + (height / 2),
+                                    raw: { left, right, top, bottom }
+                                };
+                            };
+
+                            const readBounds = (target) => {
+                                const drawableId = target.drawableID ?? target._drawableID;
+                                const rawCandidates = [];
+                                // Prefer renderer bounds: target logical position
+                                // and costume registration are not click geometry.
+                                if (renderer && drawableId !== undefined && drawableId !== null) {
+                                    for (const name of ['getBounds', 'getBoundsForDrawable']) {
+                                        try {
+                                            if (typeof renderer[name] === 'function') {
+                                                rawCandidates.push({
+                                                    source: `renderer.${name}`,
+                                                    bounds: renderer[name](drawableId)
+                                                });
+                                            }
+                                        } catch (e) {}
+                                    }
+                                }
+                                // Keep target.getBounds as a compatibility
+                                // fallback for runtimes that expose no renderer
+                                // bounds API.  It is still validated and never
+                                // used as target.x/y click geometry.
+                                try {
+                                    if (typeof target.getBounds === 'function') {
+                                        rawCandidates.push({
+                                            source: 'target.getBounds',
+                                            bounds: target.getBounds()
+                                        });
+                                    }
+                                } catch (e) {}
+                                for (const candidate of rawCandidates) {
+                                    const pixelBounds = boundsToPixels(candidate.bounds);
+                                    if (pixelBounds) {
+                                        return { ...pixelBounds, source: candidate.source };
+                                    }
+                                }
+                                return null;
+                            };
+
+                            const removeCandidates = allTargets
+                                .filter(target => {
+                                    const spriteName = target.sprite?.name || '';
+                                    const costume = target.sprite?.costumes?.[target.currentCostume];
+                                    return spriteName === selector.targetName
+                                        && costume?.name === selector.costumeName
+                                        && Boolean(target.visible)
+                                        && Number(target.size ?? 1) > 0;
+                                })
+                                .map((target, runtimeIndex) => {
+                                    const bounds = readBounds(target);
+                                    const logicPoint = toPixelPoint(target.x, target.y);
+                                    if (!bounds || !logicPoint) return null;
+                                    return {
+                                        runtimeIndex,
+                                        logicX: Number(target.x),
+                                        logicY: Number(target.y),
+                                        pixelX: logicPoint.x,
+                                        pixelY: logicPoint.y,
+                                        bounds,
+                                        targetName: selector.targetName,
+                                        costumeName: selector.costumeName
+                                    };
+                                })
+                                .filter(Boolean)
+                                .sort((a, b) => a.pixelX - b.pixelX || a.pixelY - b.pixelY);
+
+                            const slotRows = poloSlots
+                                .map((slot, originalOrder) => {
+                                    const point = toPixelPoint(slot.x, slot.y);
+                                    return point ? {
+                                        originalOrder,
+                                        logicX: Number(slot.x),
+                                        logicY: Number(slot.y),
+                                        pixelX: point.x,
+                                        pixelY: point.y,
+                                        originalSprite: slot.spriteName
+                                    } : null;
+                                })
+                                .filter(Boolean)
+                                .sort((a, b) => a.pixelX - b.pixelX || a.pixelY - b.pixelY);
+
+                            const spacing = slotRows.length > 1
+                                ? slotRows.slice(1).map((slot, index) => Math.abs(slot.pixelX - slotRows[index].pixelX))
+                                    .filter(value => Number.isFinite(value) && value > 0)
+                                    .sort((a, b) => a - b)[Math.floor(slotRows.length / 2) - 1] || 0
+                                : 0;
+                            const maxMatchDistance = Math.max(35, Math.min(120, spacing > 0 ? spacing * 0.45 : 80));
+                            const countMismatch = removeCandidates.length !== slotRows.length;
+                            const usedCandidates = new Set();
+
+                            const slots = slotRows.map((slot, index) => {
+                                const available = removeCandidates
+                                    .map((candidate, candidateIndex) => ({ candidate, candidateIndex }))
+                                    .filter(item => !usedCandidates.has(item.candidateIndex))
+                                    .sort((a, b) => {
+                                        const distanceA = Math.abs(a.candidate.pixelX - slot.pixelX);
+                                        const distanceB = Math.abs(b.candidate.pixelX - slot.pixelX);
+                                        return distanceA - distanceB || a.candidate.pixelY - b.candidate.pixelY;
+                                    });
+                                const nearest = available[0];
+                                const second = available[1];
+                                const distance = nearest ? Math.abs(nearest.candidate.pixelX - slot.pixelX) : Infinity;
+                                const secondDistance = second ? Math.abs(second.candidate.pixelX - slot.pixelX) : Infinity;
+                                const ambiguous = Boolean(nearest && second && Math.abs(secondDistance - distance) < 3);
+                                let removeButton = {
+                                    clickX: null,
+                                    clickY: null,
+                                    logicX: null,
+                                    logicY: null,
+                                    bounds: null,
+                                    safeJitterPx: null,
+                                    resolved: false,
+                                    mappingMethod: 'nearest-x'
+                                };
+
+                                if (!countMismatch && nearest && !ambiguous && distance <= maxMatchDistance) {
+                                    usedCandidates.add(nearest.candidateIndex);
+                                    const candidate = nearest.candidate;
+                                    const minDimension = Math.min(candidate.bounds.width, candidate.bounds.height);
+                                    const safeJitterPx = Math.max(1, Math.min(8, Math.floor(minDimension * 0.4)));
+                                    removeButton = {
+                                        clickX: Math.round(candidate.bounds.centerX),
+                                        clickY: Math.round(candidate.bounds.centerY),
+                                        logicX: candidate.logicX,
+                                        logicY: candidate.logicY,
+                                        bounds: {
+                                            left: candidate.bounds.left,
+                                            top: candidate.bounds.top,
+                                            width: candidate.bounds.width,
+                                            height: candidate.bounds.height,
+                                            right: candidate.bounds.right,
+                                            bottom: candidate.bounds.bottom
+                                        },
+                                        safeJitterPx,
+                                        resolved: true,
+                                        mappingMethod: 'nearest-x',
+                                        mappingDistancePx: Math.round(distance),
+                                        boundsSource: candidate.bounds.source
+                                    };
+                                }
+
+                                return {
+                                    x: Math.round(slot.pixelX),
+                                    y: Math.round(slot.pixelY),
+                                    logicX: slot.logicX,
+                                    logicY: slot.logicY,
+                                    index,
+                                    originalSprite: slot.originalSprite,
+                                    removeButton
+                                };
+                            });
+
+                            const unresolvedSlotIndices = slots
+                                .filter(slot => !slot.removeButton?.resolved)
+                                .map(slot => slot.index);
+                            return {
+                                slots,
+                                schemaVersion: 1,
+                                remove: {
+                                    enabled: !countMismatch && removeCandidates.length > 0 && slots.length > 0,
+                                    targetName: selector.targetName,
+                                    costumeName: selector.costumeName,
+                                    coordinateSystem: 'reference-screen-1920x1080',
+                                    referenceScreen: { width: 1920, height: 1080 },
+                                    maxAttempts: offsets.length,
+                                    clickOffsets: offsets
+                                },
+                                unresolvedSlotIndices,
+                                countMismatch,
+                                capturedCandidateCount: removeCandidates.length,
+                                capturedAt: new Date().toISOString()
+                            };
+                        }
                         
                         async function getCustomPageTitle() {
                             const selectors = ['.style_editableBox__OXulT[data-value]', 'h1.style_title__2vo4r', 'h4.style_editableBox__OXulT', '.style_content__J_Rrs'];
@@ -649,17 +870,29 @@ class SprunkiJSONGenerator:
                         // Convert to pixel coordinates first
                         const slotsWithCoords = poloSprites.map(s => {
                             const coords = toPixelWithMenu(s.x, s.y);
-                            return { ...coords, originalSprite: s.sprite.name };
+                            return {
+                                ...coords,
+                                logicX: s.x,
+                                logicY: s.y,
+                                spriteName: s.sprite.name
+                            };
                         });
                         
                         // Sort by X coordinate (left to right) and reassign index
                         slotsWithCoords.sort((a, b) => a.x - b.x);
-                        const slots = slotsWithCoords.map((slot, i) => ({ 
-                            x: slot.x, 
-                            y: slot.y, 
-                            index: i,
-                            originalSprite: slot.originalSprite
+                        const poloSlotInputs = slotsWithCoords.map(slot => ({
+                            x: slot.logicX,
+                            y: slot.logicY,
+                            spriteName: slot.spriteName
                         }));
+                        const removeCapture = captureRemoveControls(
+                            allTargets,
+                            vm.runtime.renderer || vm.renderer || null,
+                            poloSlotInputs
+                        );
+                        const slots = removeCapture.slots || [];
+                        const returnControls = { ...removeCapture };
+                        delete returnControls.slots;
                         // =====================================================
                         // END: FIXED slots sorting
                         // =====================================================
@@ -751,7 +984,8 @@ class SprunkiJSONGenerator:
                                 icons: icons, 
                                 slots: slots, 
                                 bonus: [], 
-                                skipIntroButton: skipIntroButton
+                                skipIntroButton: skipIntroButton,
+                                returnControls: returnControls
                             },
                             iconIdentityEvidence: iconIdentityEvidence
                         };
@@ -1603,11 +1837,69 @@ class SprunkiJSONGenerator:
             "pageTitle": runtime_meta.get("pageTitle", "Unknown"),
             "currentUrl": runtime_meta.get("currentUrl") or manual_profile.get("canonicalUrl") or manual_profile.get("sourceUrl"),
             "layout": {
-                "icons": manual_layout.get("icons") or [],
-                "slots": manual_layout.get("slots") or [],
-                "bonus": manual_layout.get("bonus") or [],
+                "icons": copy.deepcopy(manual_layout.get("icons") or []),
+                "slots": copy.deepcopy(manual_layout.get("slots") or []),
+                "bonus": copy.deepcopy(manual_layout.get("bonus") or []),
+                **({"returnControls": copy.deepcopy(manual_layout.get("returnControls"))} if isinstance(manual_layout.get("returnControls"), dict) else {}),
             }
         }
+
+    @staticmethod
+    def _merge_live_return_controls_into_manual_layout(manual_state, live_state):
+        """Enrich a manual layout with live Remove coordinates without mutating the profile.
+
+        Manual profiles remain the source of truth for icons/slots and prepare
+        actions.  The live VM is only used to add optional return-control
+        metadata captured after the manual prepare sequence has completed.
+        """
+        if not isinstance(manual_state, dict) or not isinstance(live_state, dict):
+            return manual_state
+
+        manual_layout = manual_state.setdefault("layout", {})
+        live_layout = live_state.get("layout") or {}
+        live_slots = live_layout.get("slots") or []
+        live_controls = live_layout.get("returnControls")
+        if isinstance(live_controls, dict):
+            manual_layout["returnControls"] = live_controls
+
+        if not isinstance(live_slots, list):
+            return manual_state
+
+        live_by_index = {
+            int(slot.get("index")): slot
+            for slot in live_slots
+            if isinstance(slot, dict) and str(slot.get("index", "")).lstrip("-").isdigit()
+        }
+        manual_slots = manual_layout.get("slots") or []
+        if not isinstance(manual_slots, list):
+            return manual_state
+
+        for position, manual_slot in enumerate(manual_slots):
+            if not isinstance(manual_slot, dict):
+                continue
+            candidate = None
+            raw_index = manual_slot.get("index", position)
+            try:
+                candidate = live_by_index.get(int(raw_index))
+            except (TypeError, ValueError):
+                candidate = None
+            if candidate is None and position < len(live_slots):
+                candidate = live_slots[position]
+            if not isinstance(candidate, dict):
+                continue
+            remove_button = candidate.get("removeButton")
+            if isinstance(remove_button, dict):
+                manual_slot["removeButton"] = remove_button
+
+        unresolved = [
+            slot.get("index", index)
+            for index, slot in enumerate(manual_slots)
+            if isinstance(slot, dict)
+            and not (slot.get("removeButton") or {}).get("resolved", False)
+        ]
+        if isinstance(manual_layout.get("returnControls"), dict):
+            manual_layout["returnControls"]["unresolvedSlotIndices"] = unresolved
+        return manual_state
 
     def _detect_game_control_type(self, ws, manual_profile=None):
         game_control_type = "click_drag"
@@ -2006,6 +2298,24 @@ class SprunkiJSONGenerator:
                     layout_state = None
                     if manual_profile:
                         layout_state = self._build_manual_layout_state(ws, manual_profile)
+                        # Capture the same live VM layout used by the automatic
+                        # path, then merge only the optional Remove metadata.
+                        # Manual icons/slots and prepare actions remain intact.
+                        live_response = self._send_cdp_command(ws, {
+                            "method": "Runtime.evaluate",
+                            "params": {
+                                "expression": self.js_full_layout,
+                                "awaitPromise": True,
+                                "returnByValue": True
+                            }
+                        })
+                        if live_response and "result" in live_response:
+                            live_value = live_response.get("result", {}).get("result", {}).get("value")
+                            if isinstance(live_value, dict) and "error" not in live_value:
+                                layout_state = self._merge_live_return_controls_into_manual_layout(
+                                    layout_state,
+                                    live_value,
+                                )
                     else:
                         response = self._send_cdp_command(ws, {
                             "method": "Runtime.evaluate", 
@@ -2033,7 +2343,7 @@ class SprunkiJSONGenerator:
                 # Generate Final JSON
                 page_title = layout_state.get('pageTitle', 'Unknown')
                 final_json = {
-                    "version": "11.0-simplified-complete-logic", 
+                    "version": "11.1-remove-first-return",
                     "created": datetime.now().isoformat(),
                     "currentUrl": layout_state.get('currentUrl'), 
                     "pageTitle": page_title,
