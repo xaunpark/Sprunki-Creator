@@ -74,7 +74,6 @@ class PlacementSnapshot:
     sequence: int = 0
     characters_count: Optional[int] = None
     putted_count: Optional[int] = None
-    polos: Optional[Tuple[str, ...]] = None
     characters: Optional[Tuple[str, ...]] = None
     button_enable_list: Optional[Tuple[str, ...]] = None
     read_error: Optional[str] = None
@@ -96,7 +95,6 @@ class PlacementSnapshot:
 
         sequence = _optional_int(value.get("sequence", value.get("snapshotSequence"))) or 0
         characters = value.get("characters_array", value.get("charactersArray", value.get("characters")))
-        polos = value.get("polos_array", value.get("polos", value.get("Polos")))
         buttons = value.get(
             "button_enable_list",
             value.get(
@@ -124,7 +122,6 @@ class PlacementSnapshot:
             sequence=sequence,
             characters_count=characters_count,
             putted_count=putted_count,
-            polos=_optional_tuple(polos),
             characters=_optional_tuple(characters),
             button_enable_list=_optional_tuple(buttons),
             read_error=str(value.get("read_error")) if value.get("read_error") else None,
@@ -137,7 +134,6 @@ class PlacementSnapshot:
             for signal in (
                 self.characters_count,
                 self.putted_count,
-                self.polos,
                 self.characters,
                 self.button_enable_list,
             )
@@ -148,7 +144,6 @@ class PlacementSnapshot:
         return (
             self.characters_count,
             self.putted_count,
-            self.polos,
             self.characters,
             self.button_enable_list,
             self.read_error,
@@ -165,7 +160,6 @@ class PlacementSnapshot:
         return (
             self.characters_count,
             self.putted_count,
-            self.polos,
             self.characters,
             self.read_error,
         )
@@ -463,8 +457,9 @@ def evaluate_transition(
 ) -> TransitionEvaluation:
     """Evaluate one before/after pair without issuing input.
 
-    Priority is target-specific Polos, target-specific button enable state,
-    Putted count, then Characters count as an aggregate fallback.  The
+    Priority is target-specific button enable state, target-specific
+    Characters identity, Putted count, then Characters count as an aggregate
+    fallback.  The
     fallback is deliberately marked so callers cannot learn a slot coordinate
     from it.
     """
@@ -496,8 +491,6 @@ def evaluate_transition(
         "targetSlot": target_slot,
     }
 
-    if _target_changed(before_snapshot.polos, after_snapshot.polos, target_slot, delta):
-        target_evidence.append("polos_target")
     if _target_changed(
         before_snapshot.button_enable_list,
         after_snapshot.button_enable_list,
@@ -685,36 +678,21 @@ def classify_precondition(
     if current is None or target_slot is None:
         return None
     normalized_direction = str(direction).lower()
-    if current.polos is not None:
-        if target_slot < 0 or target_slot >= len(current.polos):
-            return None
-        value = _token(current.polos[target_slot])
-        if normalized_direction in {"place", "drag", "put"} and value == "1":
-            return OperationStatus.ALREADY_PLACED
-        if normalized_direction in {"return", "remove", "take"} and value == "0":
-            return OperationStatus.ALREADY_EMPTY
+    # Return is deliberately never short-circuited by a pre-action read.
+    # The caller must send the first physical return action and verify the
+    # resulting state afterwards.  Aggregate counters cannot identify a slot,
+    # and an absent/stale target array must not suppress Remove/precision.
+    if normalized_direction in {"return", "remove", "take"}:
+        return None
 
-    # Some mods expose the slot occupancy/identity only through Characters.
-    # Use it as a target-specific precondition when Polos is unavailable or
-    # inconclusive; never infer an empty target from a missing (None) value.
-    polos_inconclusive = True
-    if current.polos is not None and 0 <= target_slot < len(current.polos):
-        polos_inconclusive = _token(current.polos[target_slot]) not in {"0", "1"}
-    if current.characters is not None and polos_inconclusive:
+    # Placement keeps the historical Characters identity hint.  It is only a
+    # placement precondition; return never uses it to skip input.
+    if current.characters is not None:
         if target_slot < 0 or target_slot >= len(current.characters):
             return None
         value = current.characters[target_slot]
         if normalized_direction in {"place", "drag", "put"} and not _is_empty_token(value):
             return OperationStatus.ALREADY_PLACED
-        if normalized_direction in {"return", "remove", "take"} and _is_empty_token(value):
-            return OperationStatus.ALREADY_EMPTY
-
-    if normalized_direction in {"return", "remove", "take"} and current.polos is None:
-        # With no Polos array, a known zero aggregate is the only safe
-        # idempotent precondition available.  It is intentionally not used for
-        # placement because an aggregate count cannot identify a free target.
-        if current.putted_count == 0 or current.characters_count == 0:
-            return OperationStatus.ALREADY_EMPTY
     return None
 
 

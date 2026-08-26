@@ -228,7 +228,6 @@ class WorkflowQualityTests(unittest.TestCase):
             timestamp=1.0,
             characters_count=2,
             putted_count=2,
-            polos=("0", "1", "1"),
         )
 
         evidence = player._remix_cleanup_policy_evidence(
@@ -250,7 +249,6 @@ class WorkflowQualityTests(unittest.TestCase):
             timestamp=1.0,
             characters_count=3,
             putted_count=3,
-            polos=("1", "1", "1"),
         )
 
         excessive = player._remix_cleanup_policy_evidence(cleanup_attempted=True)
@@ -259,7 +257,7 @@ class WorkflowQualityTests(unittest.TestCase):
 
         player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
             timestamp=1.0,
-            polos=("0", "null"),
+            characters=("0", "null"),
         )
         unknown = player._remix_cleanup_policy_evidence(cleanup_attempted=True)
         self.assertFalse(unknown["policyAccepted"])
@@ -294,7 +292,7 @@ class WorkflowQualityTests(unittest.TestCase):
             timestamp=1.0,
             characters_count=2,
             putted_count=2,
-            polos=("1", "1"),
+            characters=("1", "1"),
         )
 
         drag_calls = []
@@ -373,7 +371,6 @@ class WorkflowQualityTests(unittest.TestCase):
             timestamp=1.0,
             characters_count=6,
             putted_count=6,
-            polos=("1", "1", "1", "1", "1", "1"),
         )
         player.corrected_drag_and_drop = lambda *args, **kwargs: OperationResult(
             OperationStatus.VERIFIED,
@@ -544,7 +541,7 @@ class WorkflowQualityTests(unittest.TestCase):
             )
         )
 
-    def test_targeted_cleanup_recovery_re_scans_occupied_polos_slot(self):
+    def test_targeted_cleanup_recovery_uses_configured_slot_after_count_progress(self):
         import threading
 
         from placement_verifier import OperationContext, OperationResult, OperationStatus
@@ -569,7 +566,6 @@ class WorkflowQualityTests(unittest.TestCase):
         state = {
             "characters_count": 1,
             "putted_characters": 1,
-            "polos_array": ["0", "0", "0", "1"],
         }
         calls = []
 
@@ -588,7 +584,6 @@ class WorkflowQualityTests(unittest.TestCase):
                 {
                     "characters_count": 0,
                     "putted_characters": 0,
-                    "polos_array": ["0", "0", "0", "0"],
                 }
             )
             return OperationResult(OperationStatus.VERIFIED, direction="cleanup")
@@ -605,7 +600,7 @@ class WorkflowQualityTests(unittest.TestCase):
 
         self.assertEqual(result.status, OperationStatus.VERIFIED)
         self.assertEqual(calls[0]["slot"], 3)
-        self.assertEqual(state["polos_array"][3], "0")
+        self.assertEqual(state["characters_count"], 0)
 
     def test_cleanup_aggregate_progress_still_requires_empty_board(self):
         import threading
@@ -629,10 +624,15 @@ class WorkflowQualityTests(unittest.TestCase):
             message="targeted_cleanup_incomplete",
         )
         player.execute_sequential_carpet_bombing_sets = lambda *args, **kwargs: True
+        player.get_comprehensive_slot_state = lambda: {
+            "characters_count": 2,
+            "putted_characters": 2,
+        }
         snapshots = iter(
             [
                 PlacementSnapshot(1.0, characters_count=2, putted_count=2),
-                PlacementSnapshot(2.0, characters_count=1, putted_count=1),
+                PlacementSnapshot(2.0, characters_count=2, putted_count=2),
+                PlacementSnapshot(3.0, characters_count=1, putted_count=1),
             ]
         )
         player._capture_stable_placement_snapshot = lambda **kwargs: next(snapshots)
@@ -688,13 +688,11 @@ class WorkflowQualityTests(unittest.TestCase):
             timestamp=1.0,
             characters_count=1,
             putted_count=0,
-            polos=("0", "0", "0", "0"),
         )
         clean_state = PlacementSnapshot(
             timestamp=1.0,
             characters_count=0,
             putted_count=0,
-            polos=("0", "0", "0", "0"),
         )
 
         mixed_verified, mixed_checks = SprunkiGamePlayer._evaluate_restart_state(
@@ -706,7 +704,6 @@ class WorkflowQualityTests(unittest.TestCase):
 
         self.assertFalse(mixed_verified)
         self.assertFalse(mixed_checks["counters"]["clean"])
-        self.assertTrue(mixed_checks["polos"]["clean"])
         self.assertTrue(clean_verified)
         self.assertTrue(all(check["clean"] for check in clean_checks.values()))
 
@@ -721,34 +718,31 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual(player.empty_board_baseline, {"characters": None, "putted": None})
         self.assertFalse(player._is_board_count_clean(0, 1))
 
-    def test_final_empty_evaluation_rejects_residual_polos_or_characters(self):
+    def test_final_empty_evaluation_rejects_residual_character_array_entries(self):
         from placement_verifier import PlacementSnapshot
         from sprunki_game_player import SprunkiGamePlayer
 
-        residual_polos = PlacementSnapshot(
-            1.0,
-            characters_count=0,
-            putted_count=0,
-            polos=("0", "1"),
-            characters=("0", "0"),
-        )
         residual_characters = PlacementSnapshot(
             1.0,
             characters_count=0,
             putted_count=0,
-            polos=("0", "0"),
+            characters=("0", "0"),
+        )
+        residual_identity = PlacementSnapshot(
+            1.0,
+            characters_count=0,
+            putted_count=0,
             characters=("0", "1"),
         )
         clean = PlacementSnapshot(
             1.0,
             characters_count=0,
             putted_count=0,
-            polos=("0", "0"),
             characters=("0", "0"),
         )
 
-        self.assertFalse(SprunkiGamePlayer._evaluate_empty_snapshot(residual_polos)[0])
-        self.assertFalse(SprunkiGamePlayer._evaluate_empty_snapshot(residual_characters)[0])
+        self.assertTrue(SprunkiGamePlayer._evaluate_empty_snapshot(residual_characters)[0])
+        self.assertFalse(SprunkiGamePlayer._evaluate_empty_snapshot(residual_identity)[0])
         self.assertTrue(SprunkiGamePlayer._evaluate_empty_snapshot(clean)[0])
 
     def test_final_validation_uses_stable_all_signal_empty_gate(self):
@@ -765,14 +759,13 @@ class WorkflowQualityTests(unittest.TestCase):
             1.0,
             characters_count=0,
             putted_count=0,
-            polos=("0", "1"),
-            characters=("0", "0"),
+            characters=("0", "1"),
         )
 
         complete, issues, _recommendations = player.validate_workflow_completion()
 
         self.assertFalse(complete)
-        self.assertTrue(any("polos" in issue for issue in issues))
+        self.assertTrue(any("characters_array" in issue for issue in issues))
 
     def test_threshold_failure_with_clean_retry_path_is_retryable(self):
         report = verified_report()

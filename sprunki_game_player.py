@@ -713,27 +713,13 @@ class SprunkiGamePlayer:
                 return "<unreadable>"
             return None
 
-        try:
-            precondition = classify_precondition(
-                snapshot,
-                "return",
-                target_slot_index,
-            )
-            precondition_value = precondition.value
-        except Exception:
-            precondition_value = None
-
         return {
             "readable": True,
             "targetSlot": target_slot_index,
             "charactersCount": snapshot.characters_count,
             "puttedCount": snapshot.putted_count,
-            "polos": self._bounded_return_vector(snapshot.polos),
             "characters": self._bounded_return_vector(snapshot.characters),
-            "targetPolos": _target_value(snapshot.polos),
             "targetCharacters": _target_value(snapshot.characters),
-            "targetOccupancy": self._return_target_occupancy(snapshot, target_slot_index),
-            "targetPrecondition": precondition_value,
             "sequence": snapshot.sequence,
             "timestamp": snapshot.timestamp,
         }
@@ -763,30 +749,6 @@ class SprunkiGamePlayer:
         return evidence
 
     @staticmethod
-    def _return_target_occupancy(snapshot, target_slot_index: int):
-        """Classify all available target-specific signals without shortcuts."""
-        snapshot = PlacementSnapshot.from_mapping(snapshot)
-        if snapshot is None:
-            return None
-
-        observations = []
-        empty_tokens = {"", "0", "false"}
-        unknown_tokens = {"none", "null"}
-        for values in (snapshot.polos, snapshot.characters):
-            if values is None or not 0 <= target_slot_index < len(values):
-                continue
-            token = str(values[target_slot_index]).strip().lower()
-            if token in unknown_tokens:
-                continue
-            observations.append("empty" if token in empty_tokens else "occupied")
-
-        if any(value == "occupied" for value in observations):
-            return "occupied"
-        if observations and all(value == "empty" for value in observations):
-            return "empty"
-        return None
-
-    @staticmethod
     def _return_observed_count(snapshot):
         snapshot = PlacementSnapshot.from_mapping(snapshot)
         if snapshot is None:
@@ -804,13 +766,11 @@ class SprunkiGamePlayer:
         target_slot_index: int,
         before_state=None,
     ) -> bool:
-        """Verify target emptiness from post-action evidence.
+        """Verify a return only from a snapshot captured after an action.
 
-        A precondition classifier is intentionally not enough here.  In the
-        affected mods Polos can report zero for a visibly occupied slot while
-        Characters/Putted still report one.  When the same empty target signal
-        survives a click with no target-specific or aggregate change, keep the
-        return operation alive and try the next physical method.
+        No target occupancy array is trusted as a pre-action gate.  A clean
+        post-action board, a target-specific transition, or a strict aggregate
+        decrement is enough to prove progress for the current return chain.
         """
         snapshot = PlacementSnapshot.from_mapping(state)
         if snapshot is None:
@@ -822,19 +782,20 @@ class SprunkiGamePlayer:
         except Exception:
             pass
 
-        if self._return_target_occupancy(snapshot, target_slot_index) != "empty":
-            return False
-
         if before_state is None:
-            return True
+            return False
         before = PlacementSnapshot.from_mapping(before_state)
         if before is None:
-            return True
+            return False
 
-        before_target = self._return_target_occupancy(before, target_slot_index)
-        if before_target == "occupied":
-            return True
-        if before_target is None:
+        evaluation = evaluate_transition(
+            before,
+            snapshot,
+            "return",
+            target_slot_index,
+            allow_aggregate_fallback=True,
+        )
+        if evaluation.status == OperationStatus.VERIFIED:
             return True
 
         before_count = self._return_observed_count(before)
@@ -842,9 +803,6 @@ class SprunkiGamePlayer:
         if before_count is not None and after_count is not None and after_count < before_count:
             return True
 
-        # The target was already reported empty and no reliable signal moved
-        # after the physical action.  Do not let that stale precondition end
-        # the return chain.
         return False
 
     @staticmethod
@@ -1015,48 +973,18 @@ class SprunkiGamePlayer:
         if baseline is None:
             baseline = self._capture_stable_placement_snapshot(timeout_ms=1000, context=context)
         if baseline is None:
-            return self._operation_result(
-                context,
-                OperationStatus.UNKNOWN,
-                "remove_button_baseline_unknown",
-                details={"attempts": [], "fallback": "legacy_return"},
+            # A missing baseline must not suppress a valid Remove action.  The
+            # action primitive can still send the click and the explicit
+            # post-action read below can prove a clean board.  If that read is
+            # inconclusive, the caller will move to the bounded legacy path.
+            print(
+                "   ⚠️ Remove-first baseline is UNKNOWN; "
+                "sending the first Remove action before verification"
             )
 
-        occupancy = self._return_target_occupancy(baseline, target_slot_index)
-        if occupancy == "empty":
-            # A few mods expose a stale Polos zero while the aggregate board
-            # still contains icons and do not expose a Characters target
-            # array.  Treat that single signal as inconclusive; otherwise a
-            # valid Remove coordinate could be skipped for an occupied slot.
-            polos_only_empty = (
-                baseline.polos is not None
-                and baseline.characters is None
-                and 0 <= target_slot_index < len(baseline.polos)
-                and str(baseline.polos[target_slot_index]).strip().lower() in {"0", "false"}
-            )
-            if polos_only_empty and (self._return_observed_count(baseline) or 0) > 0:
-                return self._operation_result(
-                    context,
-                    OperationStatus.UNKNOWN,
-                    "remove_button_precondition_unknown",
-                    details={"attempts": [], "fallback": "legacy_return"},
-                )
-            return self._operation_result(
-                context,
-                OperationStatus.ALREADY_EMPTY,
-                "remove_button_target_already_empty",
-                details={"attempts": [], "targetSpecific": True},
-            )
-        if occupancy is None:
-            # A stale/unknown target must not trigger a blind click at a saved
-            # coordinate.  The caller will use the established fallback path.
-            return self._operation_result(
-                context,
-                OperationStatus.UNKNOWN,
-                "remove_button_precondition_unknown",
-                details={"attempts": [], "fallback": "legacy_return"},
-            )
-
+        # The baseline is comparison data only.  It must never decide that a
+        # return is already complete: every valid Remove coordinate gets a
+        # physical action first, followed by a post-action verification.
         attempts = []
         current_baseline = baseline
         verify_timeout_ms = max(
@@ -1106,14 +1034,79 @@ class SprunkiGamePlayer:
                 "message": result.message,
                 "targetVerified": result.target_verified,
             }
+
+            if result.status == OperationStatus.STOPPED:
+                attempts.append(attempt)
+                return self._operation_result(
+                    context,
+                    result.status,
+                    "remove_button_stop_requested",
+                    details={"attempts": attempts},
+                )
+
+            # ``_execute_precision_return_click`` already observes the state
+            # during its bounded wait.  Read one explicit stable post-action
+            # snapshot as the helper's authoritative verify step.
+            after = self._capture_stable_placement_snapshot(
+                timeout_ms=verify_timeout_ms,
+                context=context,
+            )
+            post_action_board_clean = False
+            if after is not None:
+                try:
+                    post_action_board_clean = self._is_board_state_clean(after)
+                except Exception:
+                    post_action_board_clean = False
+            post_action_verified = (
+                after is not None
+                and self._return_state_is_empty(
+                    after,
+                    target_slot_index,
+                    current_baseline,
+                )
+            )
+            attempt["postVerify"] = (
+                "unknown"
+                if after is None
+                else "success"
+                if post_action_verified
+                else "not_cleared"
+            )
+            attempt["postActionBoardClean"] = post_action_board_clean
             attempts.append(attempt)
 
-            if self._return_result_proves_completion(result):
+            if post_action_verified:
+                details = dict(result.details or {})
+                target_specific = bool(result.target_verified)
+                details.update({
+                    "removeFirst": True,
+                    "removeButtonAttempts": attempts,
+                    "targetSpecific": target_specific,
+                    "postActionBoardClean": post_action_board_clean,
+                    "actionFirstVerifiedAfter": True,
+                })
+                return self._operation_result(
+                    context,
+                    OperationStatus.ALREADY_EMPTY,
+                    "remove_button_target_cleared",
+                    evidence=result.evidence or ("post_action_return_progress",),
+                    details=details,
+                    reads=context.read_count,
+                )
+
+            # A target-specific verifier result is itself a post-action
+            # verification only when the additional stable read is
+            # unavailable.  When a readable post-action state contradicts
+            # it, keep that explicit state authoritative and continue with
+            # the bounded fallback sequence.
+            if after is None and self._return_result_proves_completion(result):
                 details = dict(result.details or {})
                 details.update({
                     "removeFirst": True,
                     "removeButtonAttempts": attempts,
-                    "targetSpecific": True,
+                    "targetSpecific": bool(result.target_verified),
+                    "postActionBoardClean": post_action_board_clean,
+                    "actionFirstVerifiedAfter": True,
                 })
                 return self._operation_result(
                     context,
@@ -1123,55 +1116,24 @@ class SprunkiGamePlayer:
                     details=details,
                     reads=context.read_count,
                 )
-            if result.status == OperationStatus.STOPPED:
-                return self._operation_result(
-                    context,
-                    result.status,
-                    "remove_button_stop_requested",
-                    details={"attempts": attempts},
-                )
-            if result.status == OperationStatus.UNKNOWN:
-                # Unknown state means we cannot safely decide whether another
-                # jitter click is still aimed at the occupied target.
-                return self._operation_result(
-                    context,
-                    OperationStatus.UNKNOWN,
-                    "remove_button_verification_unknown",
-                    details={"attempts": attempts, "fallback": "legacy_return"},
-                )
 
-            after = self._capture_stable_placement_snapshot(
-                timeout_ms=verify_timeout_ms,
-                context=context,
-            )
             if after is None:
                 return self._operation_result(
                     context,
                     OperationStatus.UNKNOWN,
-                    "remove_button_post_click_state_unknown",
-                    details={"attempts": attempts, "fallback": "legacy_return"},
-                )
-            if self._return_state_is_empty(after, target_slot_index, current_baseline):
-                return self._operation_result(
-                    context,
-                    OperationStatus.ALREADY_EMPTY,
-                    "remove_button_target_cleared",
-                    evidence=("target_slot_empty_after_remove",),
+                    "remove_button_post_verify_unknown",
                     details={
-                        "removeFirst": True,
-                        "removeButtonAttempts": attempts,
-                        "targetSpecific": True,
+                        "attempts": attempts,
+                        "fallback": "legacy_return",
                     },
                     reads=context.read_count,
                 )
-            if self._return_target_occupancy(after, target_slot_index) is None:
-                return self._operation_result(
-                    context,
-                    OperationStatus.UNKNOWN,
-                    "remove_button_target_state_unknown",
-                    details={"attempts": attempts, "fallback": "legacy_return"},
-                )
-            current_baseline = after
+
+            if after is not None:
+                current_baseline = after
+            # A readable, unsuccessful post-action state allows the next
+            # bounded jitter action.  UNKNOWN stops this Remove burst above;
+            # the caller then owns the legacy fallback decision.
 
         return self._operation_result(
             context,
@@ -1186,8 +1148,15 @@ class SprunkiGamePlayer:
         use_cdp=False,
         operation_context=None,
         initial_state=None,
+        candidate_slot_indices=None,
     ):
-        """Run Remove-first for known occupied remix slots before carpet bombing."""
+        """Run bounded Remove-first actions for the current remix slot set.
+
+        There is intentionally no runtime occupancy-array filter here.  The
+        current operation already knows the configured/attempted slot set;
+        each selected slot receives its Remove action before any fallback
+        action, and the board is verified afterwards.
+        """
         context = operation_context or getattr(self, "_active_operation_context", None)
         if context is None:
             return {
@@ -1196,20 +1165,9 @@ class SprunkiGamePlayer:
                 "reason": "remove_batch_missing_operation_context",
             }
 
-        state = initial_state if initial_state is not None else self._read_comprehensive_state(context)
-        occupied_slots = self._occupied_slot_indices_from_state(state)
-        if occupied_slots is None:
-            return {
-                "status": OperationStatus.UNKNOWN,
-                "attempts": [],
-                "reason": "remove_batch_occupied_slots_unknown",
-            }
-        if not occupied_slots:
-            return {
-                "status": OperationStatus.FAILED,
-                "attempts": [],
-                "reason": "remove_batch_no_occupied_slots",
-            }
+        # ``initial_state`` is comparison/diagnostic data only.  It must not
+        # gate the first Remove action: a stale or unavailable occupancy read
+        # is exactly the case this action-first path is meant to tolerate.
 
         slots_by_index = {}
         normalized_slots = []
@@ -1224,27 +1182,47 @@ class SprunkiGamePlayer:
         for position, (_index, slot) in enumerate(normalized_slots):
             slots_by_index.setdefault(position, slot)
 
+        if candidate_slot_indices is None:
+            slot_indices = [index for index, _slot in normalized_slots]
+        else:
+            slot_indices = []
+            for value in candidate_slot_indices:
+                try:
+                    index = int(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if index not in slot_indices:
+                    slot_indices.append(index)
+        if not slot_indices:
+            return {
+                "status": OperationStatus.FAILED,
+                "attempts": [],
+                "reason": "remove_batch_slots_unavailable",
+            }
+
         attempts = []
         successful_slots = []
         skipped_slots = []
-        for slot_index in occupied_slots:
+        provided_baseline = PlacementSnapshot.from_mapping(initial_state)
+        for slot_index in slot_indices:
             target_slot = slots_by_index.get(slot_index)
             if not target_slot:
                 skipped_slots.append({"slot": slot_index, "reason": "missing_config"})
                 continue
-            baseline = self._capture_stable_placement_snapshot(
-                timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
-                context=context,
-                stable_samples=1,
-            )
+            if provided_baseline is not None:
+                baseline = provided_baseline
+                provided_baseline = None
+            else:
+                baseline = self._capture_stable_placement_snapshot(
+                    timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
+                    context=context,
+                    stable_samples=1,
+                )
             if baseline is None:
-                return {
-                    "status": OperationStatus.UNKNOWN,
-                    "attempts": attempts,
-                    "successfulSlots": successful_slots,
-                    "skippedSlots": skipped_slots,
-                    "reason": "remove_batch_baseline_unknown",
-                }
+                print(
+                    f"   ⚠️ Remove-first baseline UNKNOWN for slot {slot_index}; "
+                    "the helper will still send a bounded action"
+                )
             result = self._try_remove_button_return(
                 target_slot,
                 use_cdp,
@@ -1261,7 +1239,28 @@ class SprunkiGamePlayer:
                 if isinstance(attempt, dict)
             )
             if self._return_result_proves_completion(result):
-                successful_slots.append(slot_index)
+                # Aggregate progress proves that some return happened, but it
+                # cannot identify which remix slot was cleared.  Keep such a
+                # slot in the legacy fallback set unless the verifier gave
+                # target-specific evidence or the whole board is now clean.
+                result_details = result.details or {}
+                target_specific = bool(result_details.get("targetSpecific"))
+                board_clean = bool(result_details.get("postActionBoardClean"))
+                if target_specific or board_clean:
+                    successful_slots.append(slot_index)
+                    if board_clean:
+                        return {
+                            "status": OperationStatus.VERIFIED,
+                            "attempts": attempts,
+                            "successfulSlots": successful_slots,
+                            "skippedSlots": skipped_slots,
+                            "reason": "remove_batch_verified_after_action",
+                        }
+                else:
+                    skipped_slots.append({
+                        "slot": slot_index,
+                        "reason": "aggregate_return_progress_only",
+                    })
                 continue
             if result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
                 return {
@@ -1274,7 +1273,7 @@ class SprunkiGamePlayer:
             skipped_slots.append({"slot": slot_index, "reason": result.message})
 
         final_state = self._read_comprehensive_state(context)
-        if final_state and self._is_board_state_clean(final_state):
+        if attempts and final_state and self._is_board_state_clean(final_state):
             status = OperationStatus.VERIFIED
             reason = "remove_batch_verified"
         else:
@@ -5482,11 +5481,11 @@ class SprunkiGamePlayer:
 
                 // BATCH FUNCTION 4: Atomic placement snapshot.  Unlike the
                 // legacy helpers this scans every runtime target, so sprites
-                // that own Polos or button state are not silently ignored.
+                // that own placement counters or button state are not silently
+                // ignored.
                 const placementAliases = {
                     characters: ['characters'],
                     putted: ['putted characters', 'putted character'],
-                    polos: ['polos'],
                     buttons: ['set of buttons enable list', 'set of buttons enabled list']
                 };
                 const normalizeName = value => String(value || '').trim().toLowerCase().replace(/\\s+/g, ' ');
@@ -5526,10 +5525,8 @@ class SprunkiGamePlayer:
                     try {
                         const charactersEntry = findPlacementEntry(placementAliases.characters);
                         const puttedEntry = findPlacementEntry(placementAliases.putted, true);
-                        const polosEntry = findPlacementEntry(placementAliases.polos);
                         const buttonsEntry = findPlacementEntry(placementAliases.buttons);
                         const characters = copyValue(charactersEntry);
-                        const polos = copyValue(polosEntry);
                         const buttonEnableList = copyValue(buttonsEntry);
                         const puttedRaw = copyValue(puttedEntry);
                         const putted = Array.isArray(puttedRaw) ? countOnes(puttedRaw) : puttedRaw;
@@ -5539,12 +5536,10 @@ class SprunkiGamePlayer:
                             characters: Array.isArray(characters) ? characters : null,
                             charactersCount: Array.isArray(characters) ? countOnes(characters) : null,
                             puttedCharacters: putted,
-                            polos: Array.isArray(polos) ? polos : null,
                             buttonEnableList: Array.isArray(buttonEnableList) ? buttonEnableList : null,
                             available: {
                                 characters: !!charactersEntry,
                                 putted: !!puttedEntry,
-                                polos: !!polosEntry,
                                 buttons: !!buttonsEntry
                             }
                         };
@@ -6167,25 +6162,29 @@ class SprunkiGamePlayer:
         # Use current method for individual operations
         return self.corrected_return_icon(target_slot, use_cdp)
 
-    def _occupied_slot_indices_from_state(self, state):
-        """Return occupied slot indices only when the Polos signal is reliable."""
-        if isinstance(state, PlacementSnapshot):
-            polos = state.polos
-        elif isinstance(state, dict):
-            polos = state.get("polos_array")
-        else:
-            return None
-        if not isinstance(polos, (list, tuple)):
-            return None
+    def _configured_return_slot_indices(self, slots=None):
+        """Return configured slot indices without inferring occupancy.
 
-        normalized = [str(value).strip().lower() for value in polos]
-        if any(value not in {"0", "1", "true", "false"} for value in normalized):
-            return None
-        return [
-            index
-            for index, value in enumerate(normalized)
-            if value in {"1", "true"}
-        ]
+        Runtime placement arrays are intentionally not used to choose return
+        targets.  A return operation therefore works from the stable JSON
+        layout (or an explicitly supplied subset) and lets the post-action
+        verifier decide whether the action changed the board.
+        """
+        if slots is None:
+            layout = (self.config or {}).get("layout", {}) or {}
+            slots = layout.get("slots", [])
+        if not isinstance(slots, (list, tuple)):
+            return []
+
+        indices = []
+        for position, slot in enumerate(slots):
+            try:
+                index = int(slot.get("index", position))
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if index not in indices:
+                indices.append(index)
+        return indices
 
     def _targeted_cleanup_coordinate_candidates(self, target_slot, round_num=1):
         """Generate a small deterministic coordinate fallback for one slot."""
@@ -6228,8 +6227,8 @@ class SprunkiGamePlayer:
         """Retry only the slots still occupied after carpet bombing.
 
         This is deliberately narrower than a second blind carpet-bombing pass:
-        it re-reads ``Polos``, targets each known occupied slot, and accepts a
-        cleanup result only after the whole board is verified empty.
+        it re-reads the configured slot coordinates and accepts a cleanup
+        result only after the whole board is verified empty.
         """
         context = operation_context or getattr(self, "_active_operation_context", None)
         if context is None:
@@ -6279,51 +6278,34 @@ class SprunkiGamePlayer:
                     details={"attempts": attempts, "round": round_num},
                 )
 
-            occupied_slots = self._occupied_slot_indices_from_state(state)
-            if occupied_slots is None:
-                # Do not guess a slot from aggregate counters.  Return FAILED
-                # rather than UNKNOWN so the caller can use the bounded Re-Run
-                # recovery, which itself verifies the fresh board state.
+            candidate_slots = self._configured_return_slot_indices()
+            if not candidate_slots:
                 return self._operation_result(
                     context,
                     OperationStatus.FAILED,
-                    "targeted_cleanup_slots_unknown",
-                    details={"attempts": attempts},
-                )
-            if not occupied_slots:
-                # Polos says empty while the aggregate counters above still
-                # say occupied.  Preserve the hard empty-board gate and let
-                # the bounded Re-Run recovery reconcile the inconsistent
-                # signals instead of promoting Polos alone to success.
-                return self._operation_result(
-                    context,
-                    OperationStatus.FAILED,
-                    "targeted_cleanup_state_inconsistent",
+                    "targeted_cleanup_slots_unavailable",
                     details={"attempts": attempts, "round": round_num},
                 )
 
             configured_slots = (self.config or {}).get("layout", {}).get("slots", [])
             normalized_slots = []
-            for slot in configured_slots:
+            for position, slot in enumerate(configured_slots):
                 try:
-                    normalized_slots.append((int(slot.get("index")), slot))
-                except (AttributeError, TypeError, ValueError):
+                    normalized_slots.append((int(slot.get("index", position)), slot))
+                except (AttributeError, TypeError, ValueError, OverflowError):
                     continue
             normalized_slots.sort(key=lambda item: item[0])
-            # Prefer an exact configured index.  Also add a positional
-            # fallback because Polos is an array on mods whose JSON uses
-            # one-based or sparse slot identifiers.
             slots_by_index = dict(normalized_slots)
             for position, (_config_index, slot) in enumerate(normalized_slots):
                 slots_by_index.setdefault(position, slot)
 
             print(
                 f"   🎯 Targeted cleanup round {round_num}/{max_rounds}; "
-                f"occupied slots: {occupied_slots}"
+                f"candidate slots: {candidate_slots}"
             )
             progressed = False
 
-            for slot_index in occupied_slots:
+            for slot_index in candidate_slots:
                 target_slot = slots_by_index.get(slot_index)
                 if not target_slot:
                     attempts.append({"slot": slot_index, "status": "missing_config"})
@@ -6394,10 +6376,7 @@ class SprunkiGamePlayer:
                         }
                         attempts.append(attempt)
 
-                        if result.status in {
-                            OperationStatus.UNKNOWN,
-                            OperationStatus.STOPPED,
-                        }:
+                        if result.status == OperationStatus.STOPPED:
                             return self._operation_result(
                                 context,
                                 result.status,
@@ -6407,12 +6386,11 @@ class SprunkiGamePlayer:
 
                         after_state = self.get_comprehensive_slot_state()
                         if not after_state:
-                            return self._operation_result(
-                                context,
-                                OperationStatus.UNKNOWN,
-                                "targeted_cleanup_post_state_unknown",
-                                details={"attempts": attempts},
-                            )
+                            # The action was sent, but its verify read is
+                            # unavailable.  Keep this bounded recovery chain
+                            # moving to the next action instead of treating a
+                            # pre/post UNKNOWN as permission to skip input.
+                            continue
                         self._log_return_state(
                             "targeted_after_click",
                             after_state,
@@ -6426,19 +6404,15 @@ class SprunkiGamePlayer:
                                 details={"attempts": attempts, "round": round_num},
                             )
 
-                        after_occupied = self._occupied_slot_indices_from_state(after_state)
                         before_count = self._get_board_progress_count(before_state)
                         after_count = self._get_board_progress_count(after_state)
-                        slot_cleared = (
-                            after_occupied is not None
-                            and slot_index not in after_occupied
-                        )
                         aggregate_progress = (
                             before_count is not None
                             and after_count is not None
                             and after_count < before_count
                         )
-                        if slot_cleared or aggregate_progress:
+                        target_progress = bool(result.target_verified)
+                        if aggregate_progress or target_progress:
                             progressed = True
                             break
 
@@ -6446,9 +6420,8 @@ class SprunkiGamePlayer:
                         break
 
                 if progressed:
-                    # Re-scan immediately.  The click may have cleared a
-                    # different slot, so the next operation must use fresh
-                    # Polos evidence rather than the old queue.
+                    # Re-scan immediately after any verified/progressive
+                    # action so the next operation uses fresh state.
                     break
 
             if not progressed:
@@ -6473,7 +6446,7 @@ class SprunkiGamePlayer:
             "targeted_cleanup_incomplete",
             details={
                 "attempts": attempts,
-                "occupiedSlots": self._occupied_slot_indices_from_state(final_state),
+                "candidateSlots": candidate_slots,
             },
         )
 
@@ -6529,15 +6502,27 @@ class SprunkiGamePlayer:
                 if initial_snapshot is not None
                 else None
             )
-            if initial_snapshot is None or initial_count is None:
-                print("   🛑 Initial board state is UNKNOWN; refusing cleanup input")
-                return finish(OperationStatus.UNKNOWN, "cleanup_initial_state_unknown")
-            if self._is_board_state_clean(initial_snapshot):
-                print("   âœ… Already clean")
-                return finish(OperationStatus.ALREADY_EMPTY, "cleanup_already_empty")
-            context.set_baseline(initial_snapshot)
-            
-            print(f"   ðŸ“Š Icons to clear: {initial_count}")
+            if initial_snapshot is None:
+                print(
+                    "   ⚠️ Initial board state is UNKNOWN; "
+                    "Remove-first will still be attempted before fallback"
+                )
+            elif initial_count is None:
+                print(
+                    "   ⚠️ Initial board count is UNKNOWN; "
+                    "Remove-first will still be attempted before fallback"
+                )
+            else:
+                context.set_baseline(initial_snapshot)
+
+            # A clean-looking pre-action snapshot is diagnostic only.  The
+            # cleanup operation still sends its first bounded physical action
+            # (Remove when configured, otherwise the legacy fallback) before
+            # accepting the post-action state.
+            if initial_snapshot is not None and self._is_board_state_clean(initial_snapshot):
+                print("   ⚠️ Initial snapshot is clean; action-first cleanup still continues")
+
+            print(f"   ðŸ“Š Icons to clear: {initial_count if initial_count is not None else 'UNKNOWN'}")
             
             # Get ALL slots from config
             if not self.config:
@@ -6553,9 +6538,10 @@ class SprunkiGamePlayer:
             sorted_slots = sorted(all_slots, key=lambda s: s.get('index', 0))
             print(f"   ðŸŽ¯ Will process {len(sorted_slots)} slots sequentially")
 
-            # PHASE 0: use the captured Remove control for each occupied slot
-            # before the existing batch carpet bombing.  The same operation
-            # context owns all inputs, so this remains strictly bounded.
+            # PHASE 0: use the captured Remove control for each configured
+            # candidate slot before the existing batch carpet bombing.  The
+            # post-action verifier—not a pre-read—decides whether a candidate
+            # actually needed a return.
             print("\nREMOVE-FIRST PREPASS FOR REMIX")
             remove_batch = self._try_remove_buttons_for_occupied_slots(
                 sorted_slots,
@@ -6615,7 +6601,7 @@ class SprunkiGamePlayer:
             # configured slot but an extra signal remains, skip an empty
             # carpet input and let the existing targeted/recovery path decide.
             success = False
-            if remaining_slots:
+            if remaining_slots and initial_count is not None:
                 success = self.execute_sequential_carpet_bombing_sets(
                     remaining_slots,
                     initial_count,
@@ -6623,7 +6609,10 @@ class SprunkiGamePlayer:
                     operation_context=context,
                 )
             else:
-                print("   No unresolved slots remain; skipping empty carpet fallback")
+                print(
+                    "   No unresolved slots remain or board count is UNKNOWN; "
+                    "skipping carpet fallback"
+                )
             final_snapshot = self._capture_stable_placement_snapshot(
                 timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
                 context=context,
@@ -6646,8 +6635,8 @@ class SprunkiGamePlayer:
                 return finish(OperationStatus.STOPPED, "cleanup_stop_requested")
 
             # Aggregate progress is useful evidence, but it is not cleanup
-            # success.  Re-scan Polos and target only the slots still occupied
-            # before allowing the caller to use the bounded Re-Run recovery.
+            # success.  Re-scan the configured slot coordinates before
+            # allowing the caller to use the bounded Re-Run recovery.
             targeted_result = self._targeted_cleanup_recovery(
                 use_cdp=use_cdp,
                 operation_context=context,
@@ -7566,9 +7555,9 @@ class SprunkiGamePlayer:
                     return False
 
                 # This snapshot is taken before the next physical return
-                # set.  It is diagnostic/count evidence only; a stale Polos
-                # zero must not suppress the next click set.  Completion is
-                # checked after the set below.
+                # set.  It is diagnostic/count evidence only; a stale or
+                # incomplete counter must not suppress the next click set.
+                # Completion is checked after the set below.
                 
                 print(f"   ðŸ“Š Icons remaining: {current_count}")
                 
@@ -7797,7 +7786,7 @@ class SprunkiGamePlayer:
         """
         ðŸ“Š Get one atomic placement snapshot for verification.
 
-        The batch path reads Characters, Putted characters, Polos and the
+        The batch path reads Characters, Putted characters and the
         button-enable list in one Runtime.evaluate call.  The individual
         fallback exposes the counters only; it never invents missing arrays.
         """
@@ -7824,7 +7813,6 @@ class SprunkiGamePlayer:
                     state = {
                         "characters_count": characters_count,
                         "putted_characters": putted_count,
-                        "polos_array": list(snapshot.polos) if snapshot.polos is not None else None,
                         "characters_array": list(snapshot.characters) if snapshot.characters is not None else None,
                         "button_enable_list": (
                             list(snapshot.button_enable_list)
@@ -7837,7 +7825,6 @@ class SprunkiGamePlayer:
                         "ðŸ“Š Atomic placement state captured: "
                         f"Characters={state['characters_count']}, "
                         f"Putted={state['putted_characters']}, "
-                        f"Polos={'yes' if state['polos_array'] is not None else 'no'}, "
                         f"Buttons={'yes' if state['button_enable_list'] is not None else 'no'}"
                     )
                     return state
@@ -7849,7 +7836,6 @@ class SprunkiGamePlayer:
             return {
                 "characters_count": characters_count,
                 "putted_characters": putted_count,
-                "polos_array": None,
                 "characters_array": None,
                 "button_enable_list": None,
                 "timestamp": time.time(),
@@ -7896,89 +7882,48 @@ class SprunkiGamePlayer:
         FIXED: None safety checks
         """
         try:
-            print(f"\nðŸ” PRE-FLIGHT CHECK: Slot {target_slot_index}")
+            print(f"\nðŸ” RETURN STATE CHECK (diagnostic only): Slot {target_slot_index}")
             
             state = self.get_comprehensive_slot_state()
             if not state:
-                return False, None, "unknown"
-
-            polos = state.get("polos_array")
-            if isinstance(polos, list) and 0 <= target_slot_index < len(polos):
-                value = str(polos[target_slot_index])
-                if value == "0":
-                    return False, state, "already_empty"
-                if value == "1":
-                    return True, state, "target_occupied"
-                return False, state, "unknown_target_state"
+                # A failed pre-read is not permission to suppress the return
+                # action.  The operation itself will perform the first
+                # bounded action and then verify its post-action state.
+                return True, None, "action_first_state_unknown"
 
             characters_count = state.get("characters_count")
             putted_count = state.get("putted_characters")
             available_counts = [value for value in (characters_count, putted_count) if value is not None]
             if not available_counts:
-                return False, state, "unknown"
-            if self._is_board_count_clean(characters_count, putted_count):
-                return False, state, "already_empty"
-            return True, state, "aggregate_fallback"
+                return True, state, "action_first_state_without_count"
+            return True, state, "action_first_required"
                 
         except Exception as e:
-            print(f"âŒ Pre-flight check error: {e}")
-            return False, None, f"error: {e}"
+            print(f"âŒ Return state check error: {e}")
+            # Even an unexpected diagnostic failure must not suppress the
+            # first physical return action.  The caller will verify the
+            # state after that action or enter its bounded fallback chain.
+            return True, None, f"action_first_state_error: {e}"
 
     def get_active_slots_queue(self):
         """
         ðŸ“‹ NEW: Get smart-ordered queue - UPDATED for Characters Array
-        FIXED: Dá»±a vÃ o Characters count thay vÃ¬ Polos array
+        FIXED: Use configured slots instead of inferring slot occupancy
         Returns: list of slot indices (simplified for Characters Array system)
         """
         try:
             print(f"\nðŸ“‹ BUILDING SMART RETURN QUEUE")
             print("-" * 40)
             
-            state = self.get_comprehensive_slot_state()
-            if not state:
-                print("âš ï¸ Cannot get slot state, using fallback")
-                return []
-            
-            characters_count = state.get('characters_count')
-            putted_count = state.get('putted_characters')
-
-            polos = state.get("polos_array")
-            if isinstance(polos, list):
-                active_slots = [
-                    index for index, value in enumerate(polos)
-                    if str(value) == "1"
-                ]
-                if active_slots:
-                    print(f"   ðŸ“‹ Target-specific active slots: {active_slots}")
-                    return active_slots
-                if polos:
-                    print(
-                        "   ⚠️ Polos reports no active slot; retaining aggregate "
-                        "fallback because a stale zero must not suppress return input"
-                    )
-            
-            print(f"   ðŸ“Š Characters count: {characters_count}")
-            
-            if characters_count is None and putted_count is None:
-                print("âš ï¸ Active slot queue is UNKNOWN; no physical cleanup guesses allowed")
+            slot_indices = self._configured_return_slot_indices()
+            if not slot_indices:
+                print("âš ï¸ No configured slots available for action-first cleanup")
                 return []
 
-            if self._is_board_count_clean(characters_count, putted_count):
-                print(f"   âœ… No characters to return")
-                return []
-            
-            # For Characters Array system, we don't know specific slot indices
-            # Just return a simple range based on typical slot usage
-            aggregate_count = characters_count if characters_count is not None else putted_count
-            if aggregate_count is not None and aggregate_count > 0:
-                # Return slots in reverse order (high â†’ low) for safety
-                active_slots_estimated = list(range(min(aggregate_count, 7) - 1, -1, -1))
-                print(f"   ðŸ“‹ Estimated active slots: {active_slots_estimated}")
-                print(f"   ðŸ’¡ Reason: aggregate fallback; target-specific state unavailable")
-                return active_slots_estimated
-            
-            return []
-            
+            print(f"   ðŸ“‹ Configured return slots: {slot_indices}")
+            print("   ðŸ’¡ Occupancy is intentionally verified after each action")
+            return slot_indices
+
         except Exception as e:
             print(f"âŒ Error building return queue: {e}")
             return []
@@ -8005,7 +7950,7 @@ class SprunkiGamePlayer:
             # Get active slots queue
             active_slot_indices = self.get_active_slots_queue()
             if not active_slot_indices:
-                print("âœ… No active slots found - all slots already empty")
+                print("⚠️ No configured return slots available")
                 return 0, 0, []
             
             print(f"ðŸŽ¯ Will process {len(active_slot_indices)} active slots")
@@ -8015,7 +7960,15 @@ class SprunkiGamePlayer:
             error_log = []
             recovery_attempts = 0
             
-            # Process each slot in smart order
+            slot_map = {}
+            for position, slot in enumerate(all_slots):
+                try:
+                    slot_map.setdefault(int(slot.get("index", position)), slot)
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    continue
+                slot_map.setdefault(position, slot)
+
+            # Process each configured slot in stable order.
             for slot_index in active_slot_indices:
                 if self.stop_event.is_set():
                     error_log.append(f"Slot {slot_index}: Emergency stop requested")
@@ -8025,32 +7978,21 @@ class SprunkiGamePlayer:
                 print(f"ðŸŽ¯ PROCESSING SLOT {slot_index} ({success_count + 1}/{len(active_slot_indices)})")
                 print(f"{'='*50}")
                 
-                # Validate slot index
-                if slot_index >= len(all_slots):
-                    error_msg = f"Slot {slot_index}: Invalid slot index (max: {len(all_slots)-1})"
+                target_slot = slot_map.get(slot_index)
+                if target_slot is None:
+                    error_msg = f"Slot {slot_index}: Missing slot configuration"
                     print(f"âŒ {error_msg}")
                     error_log.append(error_msg)
                     continue
-                
-                target_slot = all_slots[slot_index]
                 
                 # Pre-return state validation
                 needs_return, current_state, reason = self.check_slot_needs_return(slot_index)
                 
                 if not needs_return:
-                    if reason == "already_empty":
-                        print(
-                            f"⚠️ Slot {slot_index} pre-flight reports empty; "
-                            "still sending action-first return"
-                        )
-                    else:
-                        error_msg = f"Slot {slot_index}: Cannot verify if return needed ({reason})"
-                        print(f"âš ï¸ {error_msg}")
-                        error_log.append(error_msg)
-                        # An unknown target must not trigger a guessed click on
-                        # the next slot; stop this batch and let the caller
-                        # decide whether to recover the entire game.
-                        break
+                    error_msg = f"Slot {slot_index}: Cannot read return state ({reason})"
+                    print(f"âš ï¸ {error_msg}")
+                    error_log.append(error_msg)
+                    break
 
                 try:
                     result = self.corrected_return_icon(target_slot, use_cdp)
@@ -8101,7 +8043,6 @@ class SprunkiGamePlayer:
             
             # Get final state for validation
             final_state = self.get_comprehensive_slot_state()
-            final_polos = final_state.get('polos_array') if final_state else None
             final_putted = final_state.get('putted_characters') if final_state else None
             
             print(f"âœ… Successfully returned: {success_count}/{len(active_slot_indices)} slots")
@@ -8111,10 +8052,6 @@ class SprunkiGamePlayer:
             if final_state:
                 print(f"ðŸ“Š Final state:")
                 print(f"   Putted characters: {final_putted}")
-                if final_polos:
-                    print(f"   Polos array: {final_polos}")
-                    remaining_active = sum(1 for x in final_polos if x == "1")
-                    print(f"   Remaining active slots: {remaining_active}")
             
             if error_log:
                 print(f"ðŸ“‹ Error summary:")
@@ -8225,7 +8162,7 @@ class SprunkiGamePlayer:
             print("="*50)
 
             # A single read immediately after cleanup can observe a transient
-            # counter/Polos mismatch.  Require a short stable sample window,
+            # counter mismatch.  Require a short stable sample window,
             # but keep the final empty-board predicate strict.
             final_snapshot = self._capture_stable_placement_snapshot(
                 timeout_ms=getattr(self, "verifier_final_snapshot_timeout_ms", 2500),
@@ -8264,7 +8201,7 @@ class SprunkiGamePlayer:
                     print(f"   - {rec}")
             else:
                 print("ðŸŽ‰ Characters Array validation passed!")
-                print("   âœ… Counters/Polos/Characters signals are consistently empty")
+                print("   âœ… Counters/Characters signals are consistently empty")
             
             return is_complete, issues, recommendations
             
@@ -9850,7 +9787,6 @@ class SprunkiGamePlayer:
             signal_counts[name] = normalized
 
         for name, values in (
-            ("polos", snapshot.polos),
             ("characters_array", snapshot.characters),
         ):
             count = self._occupancy_count_from_signal(values)
@@ -9941,7 +9877,6 @@ class SprunkiGamePlayer:
                 checks[name] = {"clean": normalized == 0, "value": normalized}
 
         for name, values in (
-            ("polos", snapshot.polos),
             ("characters_array", snapshot.characters),
         ):
             if values is None:
@@ -10806,9 +10741,8 @@ class SprunkiGamePlayer:
             # Re-Run is only a physical recovery action; it is not proof that
             # every runtime signal was reset.  Require all signals that are
             # available in the fresh snapshot to agree before accepting the
-            # recovery.  The previous ``polos_clean or counters_clean`` gate
-            # could accept a visually empty board while Characters/Putted
-            # still reported an occupied slot (or the reverse).
+            # recovery.  The final gate requires all available counter/array
+            # signals to agree before accepting the fresh board state.
             restart_verified, signal_checks = self._evaluate_restart_state(post_state)
             if not restart_verified:
                 print(
@@ -11594,24 +11528,19 @@ class SprunkiGamePlayer:
                 timeout_ms=1000,
                 context=context,
             )
-            if baseline is None:
-                return self._finish_operation(
-                    context,
-                    self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable"),
+            if baseline is not None:
+                context.set_baseline(baseline)
+            else:
+                print(
+                    "   ⚠️ Return baseline is UNKNOWN; "
+                    "the action-first return chain will still send input"
                 )
-            context.set_baseline(baseline)
 
             # This is diagnostic only.  A pre-action snapshot must never
             # suppress the physical return input: the snapshot may be stale,
             # may describe the wrong slot, or may be based on an aggregate
             # fallback.  The target is checked again only after an action.
             self._log_return_state("before_click", baseline, target_slot_index)
-            precondition = classify_precondition(baseline, "return", target_slot_index)
-            if precondition == OperationStatus.ALREADY_EMPTY:
-                print(
-                    "   RETURN PRECONDITION reported empty; Remove-first will "
-                    "recheck target-specific occupancy before sending input."
-                )
 
             # PHASE 0: captured Remove control.  This is intentionally before
             # the legacy precision click and is bounded by the same context.
@@ -11860,11 +11789,12 @@ class SprunkiGamePlayer:
             context = operation_context or getattr(self, "_active_operation_context", None)
             if context is None:
                 return OperationResult(OperationStatus.UNKNOWN, direction="return", message="missing_operation_context")
+            before_snapshot = PlacementSnapshot.from_mapping(before_snapshot)
             if before_snapshot is None:
                 before_snapshot = self._capture_stable_placement_snapshot(timeout_ms=1000, context=context)
-            if before_snapshot is None:
-                return self._operation_result(context, OperationStatus.UNKNOWN, "baseline_unavailable")
-            context.set_baseline(before_snapshot)
+            baseline_available = before_snapshot is not None
+            if baseline_available:
+                context.set_baseline(before_snapshot)
             observed_target_slot = (
                 context.target_slot
                 if target_slot_index is None
@@ -11882,6 +11812,19 @@ class SprunkiGamePlayer:
             )
             if not executed:
                 return self._operation_result(context, OperationStatus.FAILED, "precision_click_execution_failed")
+
+            if not baseline_available:
+                # The physical action has already been sent.  The caller's
+                # explicit post-action snapshot is the only safe verifier
+                # when no before-state exists; do not report success from the
+                # missing-baseline condition itself.
+                return self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "return_action_sent_baseline_unavailable",
+                    details={"actionSent": True, "actionFirst": True},
+                    reads=context.read_count,
+                )
 
             observed_result = observe_until_verified(
                 before_snapshot,
@@ -12027,7 +11970,7 @@ class SprunkiGamePlayer:
                     context,
                     OperationStatus.ALREADY_EMPTY,
                     "target_empty_after_bounded_carpet",
-                    evidence=("polos_target",),
+                    evidence=("post_action_return_progress",),
                     details={"targetSpecific": True},
                 )
             if not success:
@@ -12425,10 +12368,9 @@ class SprunkiGamePlayer:
             if baseline is None:
                 result = self._operation_result(context, OperationStatus.UNKNOWN, "cleanup_state_unknown")
                 return self._finish_operation(context, result)
-            if self._is_board_state_clean(baseline):
-                result = self._operation_result(context, OperationStatus.ALREADY_EMPTY, "cleanup_already_empty")
-                return self._finish_operation(context, result)
             context.set_baseline(baseline)
+            if self._is_board_state_clean(baseline):
+                print("   ⚠️ Fast cleanup baseline is clean; action-first fallback still runs")
 
             slots = sorted(
                 (self.config or {}).get("layout", {}).get("slots", []),
@@ -14332,9 +14274,12 @@ class SprunkiGamePlayer:
             # potentially stale precondition snapshot.
             before_snapshot = self._capture_stable_placement_snapshot(timeout_ms=1000)
             if before_snapshot is None:
-                print("   🛑 Horror return precondition is UNKNOWN")
-                return False
-            self._log_return_state("horror_before_click", before_snapshot, center_slot_index)
+                print(
+                    "   ⚠️ Horror return pre-action state is UNKNOWN; "
+                    "the action-first coordinator will decide safely"
+                )
+            else:
+                self._log_return_state("horror_before_click", before_snapshot, center_slot_index)
             print(f"   ðŸŽ¯ Sending return through the action-first coordinator...")
             return_success = self.corrected_return_icon(target_slot, use_cdp)
             if return_success.status not in {
@@ -14763,7 +14708,7 @@ class SprunkiGamePlayer:
         ðŸŽ¯ Count-Based Verification: Count "1" values in array = number of icons on slots
         âš¡ Stable Across Mods: Works reliably on all game modifications
         ðŸŽ® High Performance: Direct VM access with optimized JavaScript functions
-        ðŸ“Š Accurate State: No dependency on unreliable Putted Characters or Polos Array
+        ðŸ“Š Accurate State: Uses aggregate placement counters and available UI state
         ðŸ”„ Real-Time Updates: Instant detection of drag/return operations"""
         
         Label(verification_frame, text=verification_text, justify="left",
@@ -15374,7 +15319,7 @@ class SprunkiGamePlayer:
     def get_enhanced_workflow_summary(self):
             """
             ðŸ“Š NEW: Get comprehensive workflow summary with smart features
-            FIXED: Distinguish between Polos (icon placement) and Enabled (UI state)
+            FIXED: Distinguish placement counters from button UI state
             """
             try:
                 stats = self.drag_stats
@@ -15394,7 +15339,7 @@ class SprunkiGamePlayer:
     â€¢ Average coordinate retries: {sum(stats.coordinate_retries) / len(stats.coordinate_retries) if stats.coordinate_retries else 0:.1f}/5
 
     ðŸ›¡ï¸ SMART FEATURES ACTIVE:
-    â€¢ âœ… Polos array tracking (PRIMARY)
+    â€¢ âœ… Aggregate placement counter tracking
     â€¢ âœ… Cross-contamination prevention  
     â€¢ âœ… Pre-flight slot checking
     â€¢ âœ… Smart batch return sequencing
@@ -15405,14 +15350,10 @@ class SprunkiGamePlayer:
 
                 if current_state:
                     putted = current_state.get('putted_characters', 'N/A')
-                    polos = current_state.get('polos_array', [])
-                    enabled = current_state.get('enabled_list', [])
+                    enabled = current_state.get('button_enable_list', [])
                     
                     summary += f"""
     â€¢ Putted characters: {putted}
-    â€¢ Active slots (Polos): {sum(1 for x in polos if x == "1") if polos else 'N/A'}
-    â€¢ PRIMARY consistency: {'âœ… Good' if current_state.get('putted_polos_match', True) else 'âš ï¸ Issue'}
-    â€¢ Polos array: {polos if len(str(polos)) < 50 else f'{len(polos)} slots'}
     â€¢ Enabled List: {enabled if len(str(enabled)) < 50 else f'{len(enabled)} slots'} (UI state)"""
                 else:
                     summary += "\nâ€¢ âš ï¸ Current state unavailable"
@@ -15424,8 +15365,8 @@ class SprunkiGamePlayer:
     â€¢ WebSocket connection: {'âœ… Ready' if self._get_websocket_url() else 'âŒ Failed'}
     â€¢ Configuration: {'âœ… Loaded' if hasattr(self, 'config') and self.config else 'âŒ Missing'}
 
-    â„¹ï¸ ARRAY UNDERSTANDING:
-    â€¢ Polos Array = Icon placement state (PRIMARY for verification)
+    â„¹ï¸ STATE UNDERSTANDING:
+    â€¢ Aggregate counters = placement progress evidence
     â€¢ Enabled List = UI availability state (informational only)
 
     {'='*60}

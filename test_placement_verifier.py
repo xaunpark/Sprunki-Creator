@@ -11,6 +11,7 @@ from placement_verifier import (
     OperationContext,
     OperationResult,
     OperationStatus,
+    PlacementSnapshot,
     classify_precondition,
     evaluate_transition,
     is_progress_verified,
@@ -41,28 +42,28 @@ class FakeClock:
 
 
 class PlacementVerifierTests(unittest.TestCase):
-    def test_target_specific_polos_transition_is_verified(self):
+    def test_aggregate_transition_is_used_without_slot_occupancy_array(self):
         before = _snapshot(
             1,
             1,
             characters_count=0,
             putted_characters=0,
-            polos_array=["0"],
         )
         after = _snapshot(
             2,
             2,
             characters_count=1,
             putted_characters=1,
-            polos_array=["1"],
         )
 
         evaluation = evaluate_transition(before, after, "place", 0)
+        snapshot = PlacementSnapshot.from_mapping(before)
 
         self.assertEqual(evaluation.status, OperationStatus.VERIFIED)
-        self.assertTrue(evaluation.target_specific)
-        self.assertIn("polos_target", evaluation.evidence)
-        self.assertFalse(evaluation.aggregate_fallback)
+        self.assertFalse(evaluation.target_specific)
+        self.assertIn("putted_characters", evaluation.evidence)
+        self.assertTrue(evaluation.aggregate_fallback)
+        self.assertIsNone(snapshot.characters)
 
     def test_wrong_slot_is_not_marked_as_target_success(self):
         before = _snapshot(
@@ -70,14 +71,12 @@ class PlacementVerifierTests(unittest.TestCase):
             1,
             characters_count=0,
             putted_characters=0,
-            polos_array=["0", "0"],
         )
         after = _snapshot(
             2,
             2,
             characters_count=1,
             putted_characters=1,
-            polos_array=["0", "1"],
         )
 
         evaluation = evaluate_transition(before, after, "place", 0)
@@ -195,18 +194,15 @@ class PlacementVerifierTests(unittest.TestCase):
         self.assertFalse(context.can_send_input((101, 0, 102, 1)))
 
     def test_precondition_statuses_prevent_redundant_input(self):
-        placed = _snapshot(1, 1, polos_array=["1"])
-        empty = _snapshot(2, 2, polos_array=["0"])
-        unknown = _snapshot(3, 3, polos_array=[None])
+        placed = _snapshot(1, 1, characters_array=["n-1"])
+        empty = _snapshot(2, 2, putted_characters=0)
+        unknown = _snapshot(3, 3)
 
         self.assertEqual(
             classify_precondition(placed, "place", 0),
             OperationStatus.ALREADY_PLACED,
         )
-        self.assertEqual(
-            classify_precondition(empty, "return", 0),
-            OperationStatus.ALREADY_EMPTY,
-        )
+        self.assertIsNone(classify_precondition(empty, "return", 0))
         self.assertIsNone(classify_precondition(unknown, "return", 0))
 
         self.assertEqual(
@@ -221,10 +217,10 @@ class PlacementVerifierTests(unittest.TestCase):
     def test_stable_baseline_requires_two_semantically_equal_samples(self):
         clock = FakeClock()
         snapshots = iter([
-            _snapshot(1, 1, polos_array=["0"]),
-            _snapshot(2, 2, polos_array=["1"]),
-            _snapshot(3, 3, polos_array=["0"]),
-            _snapshot(4, 4, polos_array=["0"]),
+            _snapshot(1, 1, putted_characters=0),
+            _snapshot(2, 2, putted_characters=1),
+            _snapshot(3, 3, putted_characters=0),
+            _snapshot(4, 4, putted_characters=0),
         ])
         baseline = wait_for_stable_snapshot(
             lambda: next(snapshots),
@@ -234,13 +230,13 @@ class PlacementVerifierTests(unittest.TestCase):
             sleep_fn=clock.sleep,
         )
         self.assertIsNotNone(baseline)
-        self.assertEqual(baseline.polos, ("0",))
+        self.assertEqual(baseline.putted_count, 0)
 
     def test_stability_ignores_flapping_ui_button_list(self):
         clock = FakeClock()
         snapshots = iter([
-            _snapshot(1, 1, polos_array=["0"], button_enable_list=["0"]),
-            _snapshot(2, 2, polos_array=["0"], button_enable_list=["1"]),
+            _snapshot(1, 1, putted_characters=0, button_enable_list=["0"]),
+            _snapshot(2, 2, putted_characters=0, button_enable_list=["1"]),
         ])
 
         stable = wait_for_stable_snapshot(
@@ -252,7 +248,7 @@ class PlacementVerifierTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(stable)
-        self.assertEqual(stable.polos, ("0",))
+        self.assertEqual(stable.putted_count, 0)
 
     def test_no_transition_times_out_without_another_attempt(self):
         clock = FakeClock()
@@ -272,10 +268,10 @@ class PlacementVerifierTests(unittest.TestCase):
 
     def test_transition_seen_but_not_stable_is_unknown(self):
         clock = FakeClock()
-        baseline = _snapshot(1, 1, polos_array=["0"], putted_characters=0)
+        baseline = _snapshot(1, 1, putted_characters=0)
         reads = iter([
-            _snapshot(2, 2, polos_array=["1"], putted_characters=1),
-            _snapshot(3, 3, polos_array=["0"], putted_characters=0),
+            _snapshot(2, 2, putted_characters=1),
+            _snapshot(3, 3, putted_characters=0),
         ])
         result = observe_until_verified(
             baseline,
@@ -453,20 +449,19 @@ class ReturnActionPolicyTests(unittest.TestCase):
         return player
 
     @staticmethod
-    def _state(sequence, count, polos, characters):
+    def _state(sequence, count, characters):
         return {
             "sequence": sequence,
             "timestamp": float(sequence),
             "characters_count": count,
             "putted_characters": count,
-            "polos_array": polos,
             "characters_array": characters,
         }
 
     def test_empty_precondition_does_not_skip_return_click(self):
         player = self._player()
-        baseline = self._state(1, 1, ["0"], ["1"])
-        after_click = self._state(2, 0, ["0"], ["0"])
+        baseline = self._state(1, 1, ["1"])
+        after_click = self._state(2, 0, ["0"])
         player._capture_stable_placement_snapshot = Mock(
             side_effect=[baseline, after_click]
         )
@@ -481,12 +476,33 @@ class ReturnActionPolicyTests(unittest.TestCase):
         self.assertEqual(player._execute_precision_return_click.call_count, 1)
         player._execute_carpet_bombing_return.assert_not_called()
 
+    def test_unknown_pre_read_does_not_remove_slot_from_return_queue(self):
+        player = self._player()
+        player.get_comprehensive_slot_state = Mock(return_value=None)
+
+        needs_return, state, reason = player.check_slot_needs_return(0)
+
+        self.assertTrue(needs_return)
+        self.assertIsNone(state)
+        self.assertEqual(reason, "action_first_state_unknown")
+        self.assertEqual(player.get_active_slots_queue(), [0])
+
+    def test_pre_read_exception_does_not_suppress_return_action(self):
+        player = self._player()
+        player.get_comprehensive_slot_state = Mock(side_effect=RuntimeError("reader failed"))
+
+        needs_return, state, reason = player.check_slot_needs_return(0)
+
+        self.assertTrue(needs_return)
+        self.assertIsNone(state)
+        self.assertTrue(reason.startswith("action_first_state_error:"))
+
     def test_occupied_post_action_state_advances_to_next_return_method(self):
         player = self._player()
-        baseline = self._state(1, 1, ["0"], ["1"])
-        after_precision = self._state(2, 1, ["1"], ["1"])
-        after_carpet = self._state(3, 1, ["1"], ["1"])
-        after_restart = self._state(4, 0, ["0"], ["0"])
+        baseline = self._state(1, 1, ["1"])
+        after_precision = self._state(2, 1, ["1"])
+        after_carpet = self._state(3, 1, ["1"])
+        after_restart = self._state(4, 0, ["0"])
         player._capture_stable_placement_snapshot = Mock(
             side_effect=[baseline, after_precision, after_carpet, after_restart]
         )
@@ -507,20 +523,19 @@ class ReturnActionPolicyTests(unittest.TestCase):
         self.assertEqual(player._execute_carpet_bombing_return.call_count, 1)
         player.restart_game_to_initial_state.assert_called_once()
 
-    def test_stale_empty_polos_with_nonzero_counts_does_not_finish(self):
+    def test_nonzero_counts_do_not_finish_until_post_action_state_is_empty(self):
         player = self._player()
-        # This mirrors the problematic mod: Polos says the target is empty,
-        # while the aggregate counters still prove one icon remains.
+        # Aggregate counters still prove one icon remains before and after
+        # the first two return methods.
         baseline = {
             "sequence": 1,
             "timestamp": 1.0,
             "characters_count": 1,
             "putted_characters": 1,
-            "polos_array": ["0"],
         }
         after_precision = dict(baseline, sequence=2, timestamp=2.0)
         after_carpet = dict(baseline, sequence=3, timestamp=3.0)
-        after_restart = self._state(4, 0, ["0"], ["0"])
+        after_restart = self._state(4, 0, ["0"])
         player._capture_stable_placement_snapshot = Mock(
             side_effect=[baseline, after_precision, after_carpet, after_restart]
         )
