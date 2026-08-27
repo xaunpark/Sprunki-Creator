@@ -265,6 +265,46 @@ def _known_int(value: Any) -> Optional[int]:
         return None
 
 
+def _polos_transition_proves_progress(transaction: Any) -> bool:
+    """Validate a strict aggregate Polos transition from transaction evidence.
+
+    The changed position is intentionally never interpreted as a layout slot.
+    This helper only accepts the metadata emitted by the shared verifier for a
+    one-bit, one-icon transition with matching array lengths.
+    """
+
+    if not isinstance(transaction, dict):
+        return False
+    evidence = transaction.get("transitionEvidence") or {}
+    if not isinstance(evidence, dict):
+        return False
+    transition = evidence.get("polosTransition")
+    if transition not in {"single_place", "single_return"}:
+        return False
+    if evidence.get("polosSignalValid") is not True:
+        return False
+
+    before_length = _known_int(evidence.get("beforePolosLength"))
+    after_length = _known_int(evidence.get("afterPolosLength"))
+    # A strict aggregate transition is only valid when both snapshots expose
+    # the same array shape.  Do not reconstruct this proof from counts alone;
+    # that would allow an incomplete/legacy payload to masquerade as a
+    # one-icon Polos transition.
+    if before_length is None or after_length is None or before_length != after_length:
+        return False
+
+    changed_indices = evidence.get("polosChangedIndices")
+    if not isinstance(changed_indices, (list, tuple)) or len(changed_indices) != 1:
+        return False
+
+    before = _known_int(evidence.get("beforePolosOccupiedCount"))
+    after = _known_int(evidence.get("afterPolosOccupiedCount"))
+    if before is None or after is None:
+        return False
+    expected_delta = 1 if transition == "single_place" else -1
+    return after - before == expected_delta
+
+
 def placement_transaction_proves_progress(transaction: Any) -> bool:
     """Return whether a strong or soft transaction proves a state change.
 
@@ -284,18 +324,74 @@ def placement_transaction_proves_progress(transaction: Any) -> bool:
     ):
         return False
 
+    # Polos is valid only as the strict aggregate evidence captured by the
+    # shared verifier.  Never accept a raw semantic Polos-array difference,
+    # an arbitrary count delta, or its changed index as slot proof.
+    if _polos_transition_proves_progress(transaction):
+        return True
+
+    evidence = transaction.get("transitionEvidence") or {}
+    if isinstance(evidence, dict) and transaction.get("targetVerified") is not True:
+        # If a soft transaction carries Polos-array evidence, a generic
+        # before/after counter must not silently turn an ambiguous raw-array
+        # difference into progress.  Keep legacy counter-only transactions
+        # compatible, and allow the branch below to use an explicit
+        # Characters/Putted aggregate change.
+        aggregate_signals = {
+            str(signal).strip().lower()
+            for signal in (evidence.get("aggregateSignals") or [])
+        }
+        non_polos_aggregate = bool(
+            aggregate_signals.intersection(
+                {"characters", "characters_count", "putted", "putted_characters"}
+            )
+        )
+        before_counts = (
+            _known_int(evidence.get("beforeCharactersCount")),
+            _known_int(evidence.get("beforePuttedCount")),
+        )
+        after_counts = (
+            _known_int(evidence.get("afterCharactersCount")),
+            _known_int(evidence.get("afterPuttedCount")),
+        )
+        non_polos_count_changed = any(
+            before_value is not None
+            and after_value is not None
+            and before_value != after_value
+            for before_value, after_value in zip(before_counts, after_counts)
+        )
+        semantic_before = evidence.get("before")
+        semantic_after = evidence.get("after")
+        raw_polos_changed = False
+        if (
+            isinstance(semantic_before, (list, tuple))
+            and isinstance(semantic_after, (list, tuple))
+            and len(semantic_before) > 2
+            and len(semantic_after) > 2
+        ):
+            raw_polos_changed = semantic_before[2] != semantic_after[2]
+        has_polos_evidence = "polosTransition" in evidence or raw_polos_changed
+        if has_polos_evidence and not (non_polos_aggregate or non_polos_count_changed):
+            return False
+
     before = _known_int(transaction.get("before"))
     after = _known_int(transaction.get("after"))
     if before is not None and after is not None:
         return before != after
 
-    evidence = transaction.get("transitionEvidence") or {}
     if isinstance(evidence, dict):
+        # A semantic-key difference is useful for a target-specific result
+        # (for example Characters/button identity), but a soft result must be
+        # backed by an explicit aggregate counter/Polos transition below.
         semantic_before = evidence.get("before")
         semantic_after = evidence.get("after")
-        if semantic_before is not None and semantic_after is not None:
-            if semantic_before != semantic_after:
-                return True
+        if (
+            transaction.get("targetVerified") is True
+            and semantic_before is not None
+            and semantic_after is not None
+            and semantic_before != semantic_after
+        ):
+            return True
         before_values = (
             _known_int(evidence.get("beforeCharactersCount")),
             _known_int(evidence.get("beforePuttedCount")),
@@ -437,26 +533,10 @@ def evaluate_workflow_report(
 
     transactions = report.evidence.get("placementTransactions")
     if isinstance(transactions, list) and transactions:
-        transition_proven = False
-        for transaction in transactions:
-            if not placement_transaction_proves_progress(transaction):
-                continue
-            before = transaction.get("before")
-            after = transaction.get("after")
-            if before is not None and after is not None:
-                if before != after:
-                    transition_proven = True
-                    break
-                continue
-            evidence = transaction.get("transitionEvidence") or {}
-            semantic_before = evidence.get("before")
-            semantic_after = evidence.get("after")
-            if semantic_before is not None and semantic_after is not None and semantic_before != semantic_after:
-                transition_proven = True
-                break
-            if placement_transaction_proves_progress(transaction):
-                transition_proven = True
-                break
+        transition_proven = any(
+            placement_transaction_proves_progress(transaction)
+            for transaction in transactions
+        )
         if not transition_proven:
             return report.apply_quality_gate(
                 QualityGateResult.failure(

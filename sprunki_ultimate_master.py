@@ -25,12 +25,14 @@ try:
     from sprunki_game_player import SprunkiGamePlayer
     from sprunki_obs_controller import SprunkiController
     from json_generator import SprunkiJSONGenerator
+    from placement_verifier import is_progress_verified
     from workflow_quality import (
         CREATOR_PRODUCTION_MODES,
         QualityGateResult,
         WorkflowReport,
         evaluate_workflow_report,
         normalize_production_mode,
+        placement_transaction_proves_progress,
         validate_playable_layout,
     )
 except ImportError as e:
@@ -164,11 +166,17 @@ class SafeOperationManager:
 
     def _record_placement(self, icon_index, target_slot, result):
         status = getattr(getattr(result, "status", None), "value", None)
-        if status != "VERIFIED" or not getattr(result, "target_verified", False):
+        if status != "VERIFIED" or not is_progress_verified(result, allow_soft=True):
             return None
         transition_details = dict(getattr(result, "details", {}) or {})
         transition_details["verificationEvidence"] = list(
             getattr(result, "evidence", ()) or ()
+        )
+        target_verified = bool(getattr(result, "target_verified", False))
+        soft_verified = bool(
+            transition_details.get("softVerified")
+            or transition_details.get("aggregateFallback")
+            or not target_verified
         )
         transaction = {
             "iconIndex": icon_index,
@@ -176,19 +184,41 @@ class SafeOperationManager:
             "before": self.game_player._transition_count_from_details(transition_details, "before"),
             "after": self.game_player._transition_count_from_details(transition_details, "after"),
             "status": "VERIFIED",
-            "targetVerified": True,
+            "targetVerified": target_verified,
+            "softVerified": soft_verified,
+            "verificationConfidence": (
+                "strong" if target_verified else "soft"
+            ),
             "cleanupVerified": False,
+            "cleanupVerificationScope": "target" if target_verified else "unknown",
             "operationId": getattr(result, "operation_id", None),
             "transitionEvidence": transition_details,
         }
         self.game_player._workflow_placement_transactions.append(transaction)
         return transaction
 
-    def _mark_cleanup(self, slot_index, verified):
+    def _mark_cleanup(self, slot_index, verified, scope="target"):
         for transaction in reversed(self.game_player._workflow_placement_transactions):
             if transaction.get("slotIndex") == slot_index and not transaction.get("cleanupVerified"):
                 transaction["cleanupVerified"] = bool(verified)
+                transaction["cleanupVerificationScope"] = scope
+                if scope != "target":
+                    transaction["cleanupAccepted"] = bool(verified)
                 return
+
+    def _mark_board_cleanup(self):
+        """Mark the whole transaction ledger clean after board-level proof."""
+        for transaction in self.game_player._workflow_placement_transactions:
+            if (
+                transaction.get("status") != "VERIFIED"
+                or not placement_transaction_proves_progress(transaction)
+            ):
+                continue
+            transaction["cleanupVerified"] = True
+            transaction["cleanupVerificationScope"] = "board"
+            transaction["cleanupAccepted"] = True
+        # A board-level empty result invalidates every per-slot queue entry.
+        self.active_slots.clear()
         
     def safe_single_icon_operation(self, icon, target_slot, filename, recording_duration=14):
         """
@@ -206,7 +236,7 @@ class SafeOperationManager:
             
             if not drag_success or not (
                 getattr(getattr(drag_success, "status", None), "value", None) == "VERIFIED"
-                and getattr(drag_success, "target_verified", False)
+                and is_progress_verified(drag_success, allow_soft=True)
             ):
                 return False, None, "Failed to drag icon"
 
@@ -294,7 +324,7 @@ class SafeOperationManager:
                 
                 if not drag_success or not (
                     getattr(getattr(drag_success, "status", None), "value", None) == "VERIFIED"
-                    and getattr(drag_success, "target_verified", False)
+                    and is_progress_verified(drag_success, allow_soft=True)
                 ):
                     raise Exception(f"Failed to drag icon {icon_index} to slot {slot_position}")
 
@@ -377,21 +407,41 @@ class SafeOperationManager:
                     return_success = bool(return_result)
                     return_status = getattr(getattr(return_result, "status", None), "value", None)
                     target_verified = getattr(return_result, "target_verified", False)
+                    cleanup_scope = (getattr(return_result, "details", {}) or {}).get(
+                        "cleanupVerificationScope",
+                        "target" if target_verified else "unknown",
+                    )
                     if return_status == "RECOVERED":
                         # Recovery verified the whole board, so the old slot
                         # queue is stale.  Do not continue replaying it.
-                        self.active_slots.clear()
+                        self._mark_board_cleanup()
                         self.logger.warning("⚠️ Game recovered; cleared stale active_slots queue")
                         return
                     if return_success and (
-                        return_status == "ALREADY_EMPTY"
-                        or (return_status == "VERIFIED" and target_verified)
+                        cleanup_scope == "board"
+                        and return_status in {"ALREADY_EMPTY", "VERIFIED"}
                     ):
-                        self._mark_cleanup(slot_index, True)
+                        self._mark_board_cleanup()
+                        self.logger.info("✅ Board-level cleanup verified after slot index %s", slot_index)
+                        return
+                    if return_success and (
+                        cleanup_scope in {"target", "board"}
+                        and return_status in {"ALREADY_EMPTY", "VERIFIED"}
+                    ):
+                        self._mark_cleanup(slot_index, True, cleanup_scope)
                         self.logger.info(f"✅ Icon returned successfully from slot index {slot_index}")
                         if target_slot in self.active_slots:
                             self.active_slots.remove(target_slot)
                             self.logger.info(f"✅ Slot index {slot_index} removed from active_slots")
+                    elif return_success:
+                        # Aggregate Polos progress is useful for the final
+                        # board-level cleanup gate, but it is not proof that
+                        # this particular slot was cleared.
+                        self._mark_cleanup(slot_index, False, cleanup_scope)
+                        self.logger.warning(
+                            "⚠️ Return made aggregate progress but target slot %s was not proven",
+                            slot_index,
+                        )
                     else:
                         self.logger.warning(f"⚠️ Failed to return icon from slot index {slot_index}")
                 except Exception as e:
@@ -420,9 +470,20 @@ class SafeOperationManager:
                         return_success = bool(return_result)
                         return_status = getattr(getattr(return_result, "status", None), "value", None)
                         target_verified = getattr(return_result, "target_verified", False)
+                        cleanup_scope = (getattr(return_result, "details", {}) or {}).get(
+                            "cleanupVerificationScope",
+                            "target" if target_verified else "unknown",
+                        )
                         if return_status == "RECOVERED":
-                            self.active_slots.clear()
+                            self._mark_board_cleanup()
                             self.logger.warning("⚠️ Game recovered; stopped stale remix cleanup queue")
+                            break
+                        if return_success and (
+                            cleanup_scope == "board"
+                            and return_status in {"ALREADY_EMPTY", "VERIFIED"}
+                        ):
+                            self._mark_board_cleanup()
+                            self.logger.info("✅ Board-level remix cleanup verified")
                             break
                         if return_status in {"UNKNOWN", "STOPPED", "FAILED"}:
                             self.logger.warning(
@@ -431,11 +492,17 @@ class SafeOperationManager:
                             )
                             break
                         if return_success and (
-                            return_status == "ALREADY_EMPTY"
-                            or (return_status == "VERIFIED" and target_verified)
+                            cleanup_scope in {"target", "board"}
+                            and return_status in {"ALREADY_EMPTY", "VERIFIED"}
                         ) and slot in self.active_slots:
-                            self._mark_cleanup(slot.get("index"), True)
+                            self._mark_cleanup(slot.get("index"), True, cleanup_scope)
                             self.active_slots.remove(slot)
+                        elif return_success:
+                            self._mark_cleanup(slot.get("index"), False, cleanup_scope)
+                            self.logger.warning(
+                                "⚠️ Remix return made aggregate progress but target slot %s was not proven",
+                                slot.get("index"),
+                            )
                         time.sleep(0.1)
                     except Exception as e:
                         self.logger.error(f"Error returning icon from slot during cleanup: {e}")
@@ -462,8 +529,12 @@ class SafeOperationManager:
                     result = self.game_player.corrected_return_icon(slot)
                     result_status = getattr(getattr(result, "status", None), "value", None)
                     target_verified = getattr(result, "target_verified", False)
+                    cleanup_scope = (getattr(result, "details", {}) or {}).get(
+                        "cleanupVerificationScope",
+                        "target" if target_verified else "unknown",
+                    )
                     if result_status == "RECOVERED":
-                        self.active_slots.clear()
+                        self._mark_board_cleanup()
                         self.logger.warning("⚠️ Game recovered; cleared stale emergency cleanup queue")
                         break
                     if result_status in {"UNKNOWN", "STOPPED", "FAILED"}:
@@ -472,8 +543,11 @@ class SafeOperationManager:
                             result_status,
                         )
                         break
+                    if result and result_status in {"ALREADY_EMPTY", "VERIFIED"} and cleanup_scope == "board":
+                        self._mark_board_cleanup()
+                        break
                     if result and (
-                        result_status == "ALREADY_EMPTY"
+                        (result_status == "ALREADY_EMPTY" and target_verified)
                         or (result_status == "VERIFIED" and target_verified)
                     ):
                         self.active_slots.remove(slot)
@@ -1729,7 +1803,7 @@ class UnifiedProcessingManager:
         transactions = list(getattr(player, "_workflow_placement_transactions", []) or []) if player else []
         report.evidence["placementTransactions"] = transactions
         report.placement_verified = any(
-            transaction.get("status") == "VERIFIED" and transaction.get("targetVerified") is True
+            placement_transaction_proves_progress(transaction)
             for transaction in transactions
         )
         report.cleanup_verified = report.placement_verified and all(
@@ -2342,8 +2416,7 @@ class UnifiedProcessingManager:
                 transactions = getattr(player, "_workflow_placement_transactions", [])
                 report.evidence["placementTransactions"] = list(transactions)
                 report.placement_verified = any(
-                    transaction.get("status") == "VERIFIED"
-                    and transaction.get("targetVerified") is True
+                    placement_transaction_proves_progress(transaction)
                     for transaction in transactions
                 )
                 report.cleanup_verified = report.placement_verified and all(

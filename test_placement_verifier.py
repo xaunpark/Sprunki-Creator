@@ -12,10 +12,12 @@ from placement_verifier import (
     OperationResult,
     OperationStatus,
     classify_precondition,
+    compare_polos_transition,
     evaluate_transition,
     is_progress_verified,
     observe_until_verified,
     promote_aggregate_transition,
+    summarize_polos,
     wait_for_stable_snapshot,
 )
 from sprunki_game_player import SprunkiGamePlayer
@@ -41,28 +43,66 @@ class FakeClock:
 
 
 class PlacementVerifierTests(unittest.TestCase):
-    def test_target_specific_polos_transition_is_verified(self):
+    def test_polos_transition_is_verified_as_aggregate_only(self):
         before = _snapshot(
             1,
             1,
-            characters_count=0,
-            putted_characters=0,
-            polos_array=["0"],
+            polos_array=["0", "0"],
         )
         after = _snapshot(
             2,
             2,
-            characters_count=1,
-            putted_characters=1,
-            polos_array=["1"],
+            polos_array=["0", "1"],
         )
 
         evaluation = evaluate_transition(before, after, "place", 0)
 
         self.assertEqual(evaluation.status, OperationStatus.VERIFIED)
-        self.assertTrue(evaluation.target_specific)
-        self.assertIn("polos_target", evaluation.evidence)
-        self.assertFalse(evaluation.aggregate_fallback)
+        self.assertFalse(evaluation.target_specific)
+        self.assertIn("polos_aggregate_delta", evaluation.evidence)
+        self.assertNotIn("polos_target", evaluation.evidence)
+        self.assertTrue(evaluation.aggregate_fallback)
+        self.assertTrue(evaluation.details["softVerified"])
+        self.assertEqual(evaluation.details["verificationConfidence"], "soft")
+        self.assertEqual(evaluation.details["polosChangedIndices"], [1])
+        self.assertEqual(evaluation.details["targetSlot"], 0)
+
+    def test_polos_summary_normalizes_supported_tokens_and_rejects_unknown(self):
+        summary = summarize_polos([0, False, "", 1, True])
+
+        self.assertTrue(summary.present)
+        self.assertTrue(summary.valid)
+        self.assertEqual(summary.length, 5)
+        self.assertEqual(summary.occupied_count, 2)
+        self.assertEqual(summary.occupied_indices, (3, 4))
+
+        invalid = summarize_polos(["0", "pending"])
+        self.assertTrue(invalid.present)
+        self.assertFalse(invalid.valid)
+        self.assertIsNone(invalid.occupied_count)
+        self.assertEqual(invalid.invalid_indices, (1,))
+        self.assertIsNone(summarize_polos(None).valid)
+
+    def test_polos_transition_requires_one_expected_binary_change(self):
+        place = compare_polos_transition([False, 0], ["0", "true"], "place")
+        self.assertEqual(place.kind, "single_place")
+        self.assertEqual(place.before_count, 0)
+        self.assertEqual(place.after_count, 1)
+        self.assertEqual(place.changed_indices, (1,))
+
+        wrong_direction = compare_polos_transition(["1"], ["0"], "place")
+        self.assertEqual(wrong_direction.kind, "ambiguous")
+
+        multiple = compare_polos_transition(["0", "0"], ["1", "1"], "place")
+        self.assertEqual(multiple.kind, "ambiguous")
+        self.assertEqual(multiple.changed_indices, (0, 1))
+
+        length_changed = compare_polos_transition(["0"], ["0", "1"], "place")
+        self.assertEqual(length_changed.kind, "ambiguous")
+        self.assertEqual(length_changed.reason, "length_changed")
+
+        unknown = compare_polos_transition(["0"], ["none"], "place")
+        self.assertEqual(unknown.kind, "unknown")
 
     def test_wrong_slot_is_not_marked_as_target_success(self):
         before = _snapshot(
@@ -199,15 +239,21 @@ class PlacementVerifierTests(unittest.TestCase):
         empty = _snapshot(2, 2, polos_array=["0"])
         unknown = _snapshot(3, 3, polos_array=[None])
 
-        self.assertEqual(
-            classify_precondition(placed, "place", 0),
-            OperationStatus.ALREADY_PLACED,
-        )
-        self.assertEqual(
-            classify_precondition(empty, "return", 0),
-            OperationStatus.ALREADY_EMPTY,
-        )
+        # Polos positions are diagnostic-only: neither value can identify the
+        # requested layout slot or suppress a physical operation.
+        self.assertIsNone(classify_precondition(placed, "place", 0))
+        self.assertIsNone(classify_precondition(empty, "return", 0))
         self.assertIsNone(classify_precondition(unknown, "return", 0))
+
+        # Return is action-first even when a target-specific signal reports
+        # empty before the action.
+        self.assertIsNone(
+            classify_precondition(
+                _snapshot(4, 4, characters_array=["0"]),
+                "return",
+                0,
+            )
+        )
 
         self.assertEqual(
             classify_precondition(
@@ -217,6 +263,79 @@ class PlacementVerifierTests(unittest.TestCase):
             ),
             OperationStatus.ALREADY_PLACED,
         )
+
+    def test_polos_only_transition_requires_two_stable_post_action_reads(self):
+        clock = FakeClock()
+        baseline = _snapshot(1, 1, polos_array=["0", "0"])
+        reads = iter([
+            _snapshot(2, 2, polos_array=["0", "1"]),
+            _snapshot(3, 3, polos_array=["0", "1"]),
+        ])
+
+        result = observe_until_verified(
+            baseline,
+            lambda: next(reads),
+            "place",
+            0,
+            timeout_ms=3000,
+            poll_ms=10,
+            stable_samples=1,
+            clock=clock.now,
+            sleep_fn=clock.sleep,
+        )
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertFalse(result.target_verified)
+        self.assertTrue(result.details["softVerified"])
+        self.assertEqual(result.details["requiredStableSamples"], 2)
+        self.assertEqual(result.details["polosChangedIndices"], [1])
+        self.assertEqual(result.reads, 2)
+
+    def test_soft_physical_drag_emits_correlated_success_event(self):
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player._active_operation_context = OperationContext.begin(
+            "place",
+            4,
+            operation_id="place-event-test",
+        )
+        player.obs_controller = Mock()
+        player.obs_controller.recording_start_time = 0.0
+        player.drag_stats = Mock()
+
+        player._record_aggregate_drag_progress(
+            {"index": 0},
+            {"index": 4},
+            {
+                "operationId": "place-event-test",
+                "verificationMethod": "polos_aggregate_delta",
+                "verificationConfidence": "soft",
+                "softVerified": True,
+                "beforePolosOccupiedCount": 0,
+                "afterPolosOccupiedCount": 1,
+                "polosChangedIndices": [7],
+                "action_start_time": 1.0,
+                "drop_time": 2.0,
+                "verified_at": 3.0,
+            },
+            1,
+            "search_mode_aggregate_fallback",
+        )
+
+        calls = player.obs_controller.log_event_timestamp.call_args_list
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            ["successful_drag_started", "icon_dropped_successfully"],
+        )
+        metadata = calls[0].args[2]
+        self.assertEqual(metadata["operationId"], "place-event-test")
+        self.assertEqual(metadata["icon_index"], 0)
+        self.assertEqual(metadata["slot_index"], 4)
+        self.assertEqual(metadata["verificationMethod"], "polos_aggregate_delta")
+        self.assertEqual(metadata["verificationConfidence"], "soft")
+        self.assertFalse(metadata["targetVerified"])
+        self.assertEqual(metadata["beforePolosCount"], 0)
+        self.assertEqual(metadata["afterPolosCount"], 1)
+        self.assertEqual(metadata["changedPolosIndices"], [7])
 
     def test_stable_baseline_requires_two_semantically_equal_samples(self):
         clock = FakeClock()

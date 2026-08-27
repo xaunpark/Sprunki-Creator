@@ -66,6 +66,166 @@ def _optional_tuple(value: Any) -> Optional[Tuple[str, ...]]:
     return None
 
 
+POLOS_EMPTY_TOKENS = frozenset({"", "0", "false"})
+POLOS_OCCUPIED_TOKENS = frozenset({"1", "true"})
+POLOS_UNKNOWN_TOKENS = frozenset({"none", "null"})
+
+
+@dataclass(frozen=True)
+class PolosSignalSummary:
+    """Normalized, index-agnostic summary of the runtime ``Polos`` list.
+
+    The list positions are deliberately retained only as diagnostics.  This
+    summary is the safe interface for aggregate occupancy decisions when a
+    mod does not use the same ordering as the JSON layout slots.
+    """
+
+    present: bool
+    valid: Optional[bool]
+    length: int
+    occupied_count: Optional[int]
+    occupied_indices: Tuple[int, ...] = field(default_factory=tuple)
+    unknown_indices: Tuple[int, ...] = field(default_factory=tuple)
+    invalid_indices: Tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class PolosTransition:
+    """Comparison of two Polos arrays without assigning an array index to a slot."""
+
+    kind: str
+    expected_delta: int
+    before_count: Optional[int]
+    after_count: Optional[int]
+    changed_indices: Tuple[int, ...] = field(default_factory=tuple)
+    reason: str = ""
+
+
+def _normalize_polos_token(value: Any) -> str:
+    return _token(value).strip().lower()
+
+
+def summarize_polos(values: Any) -> PolosSignalSummary:
+    """Return a conservative aggregate summary for a Polos value."""
+
+    if values is None:
+        return PolosSignalSummary(False, None, 0, None)
+    if not isinstance(values, (list, tuple)):
+        return PolosSignalSummary(True, False, 0, None, invalid_indices=(0,))
+
+    occupied_indices = []
+    unknown_indices = []
+    invalid_indices = []
+    for index, value in enumerate(values):
+        token = _normalize_polos_token(value)
+        if token in POLOS_OCCUPIED_TOKENS:
+            occupied_indices.append(index)
+        elif token in POLOS_EMPTY_TOKENS:
+            continue
+        elif token in POLOS_UNKNOWN_TOKENS:
+            unknown_indices.append(index)
+        else:
+            invalid_indices.append(index)
+
+    valid = not unknown_indices and not invalid_indices
+    return PolosSignalSummary(
+        True,
+        valid,
+        len(values),
+        len(occupied_indices) if valid else None,
+        tuple(occupied_indices),
+        tuple(unknown_indices),
+        tuple(invalid_indices),
+    )
+
+
+def compare_polos_transition(
+    before: Any,
+    after: Any,
+    direction: str,
+) -> PolosTransition:
+    """Compare Polos before/after as one safe aggregate transition.
+
+    A soft transition is accepted only when exactly one binary element moved
+    in the expected direction.  The changed index is returned for logging,
+    never as a slot mapping.
+    """
+
+    expected_delta = _expected_delta(direction)
+    before_summary = summarize_polos(before)
+    after_summary = summarize_polos(after)
+    if not before_summary.present or not after_summary.present:
+        return PolosTransition(
+            "unknown",
+            expected_delta,
+            before_summary.occupied_count,
+            after_summary.occupied_count,
+            reason="missing_signal",
+        )
+    if not before_summary.valid or not after_summary.valid:
+        return PolosTransition(
+            "unknown",
+            expected_delta,
+            before_summary.occupied_count,
+            after_summary.occupied_count,
+            reason="invalid_or_unknown_values",
+        )
+    if before_summary.length != after_summary.length:
+        return PolosTransition(
+            "ambiguous",
+            expected_delta,
+            before_summary.occupied_count,
+            after_summary.occupied_count,
+            reason="length_changed",
+        )
+
+    before_tokens = tuple(_normalize_polos_token(value) for value in before)
+    after_tokens = tuple(_normalize_polos_token(value) for value in after)
+    changed_indices = tuple(
+        index
+        for index, (old, new) in enumerate(zip(before_tokens, after_tokens))
+        if old != new
+    )
+    if not changed_indices:
+        return PolosTransition(
+            "unchanged",
+            expected_delta,
+            before_summary.occupied_count,
+            after_summary.occupied_count,
+            reason="no_changed_elements",
+        )
+
+    if len(changed_indices) == 1:
+        index = changed_indices[0]
+        old = before_tokens[index]
+        new = after_tokens[index]
+        if expected_delta > 0 and old in POLOS_EMPTY_TOKENS and new in POLOS_OCCUPIED_TOKENS:
+            return PolosTransition(
+                "single_place",
+                expected_delta,
+                before_summary.occupied_count,
+                after_summary.occupied_count,
+                changed_indices,
+            )
+        if expected_delta < 0 and old in POLOS_OCCUPIED_TOKENS and new in POLOS_EMPTY_TOKENS:
+            return PolosTransition(
+                "single_return",
+                expected_delta,
+                before_summary.occupied_count,
+                after_summary.occupied_count,
+                changed_indices,
+            )
+
+    return PolosTransition(
+        "ambiguous",
+        expected_delta,
+        before_summary.occupied_count,
+        after_summary.occupied_count,
+        changed_indices,
+        reason="multiple_or_unexpected_changes",
+    )
+
+
 @dataclass(frozen=True)
 class PlacementSnapshot:
     """One logically consistent read of all available placement signals."""
@@ -132,16 +292,33 @@ class PlacementSnapshot:
 
     @property
     def has_known_signal(self) -> bool:
+        polos_known = self.polos is not None and self.polos_signal_valid is True
         return any(
             signal is not None
             for signal in (
                 self.characters_count,
                 self.putted_count,
-                self.polos,
                 self.characters,
                 self.button_enable_list,
             )
-        )
+        ) or polos_known
+
+    @property
+    def polos_summary(self) -> PolosSignalSummary:
+        """Return the normalized aggregate view of the raw Polos array."""
+        return summarize_polos(self.polos)
+
+    @property
+    def polos_occupied_count(self) -> Optional[int]:
+        return self.polos_summary.occupied_count
+
+    @property
+    def polos_signal_valid(self) -> Optional[bool]:
+        return self.polos_summary.valid
+
+    @property
+    def polos_length(self) -> Optional[int]:
+        return self.polos_summary.length if self.polos is not None else None
 
     def semantic_key(self) -> Tuple[Any, ...]:
         """Return a comparison key without volatile timestamp/sequence fields."""
@@ -149,6 +326,24 @@ class PlacementSnapshot:
             self.characters_count,
             self.putted_count,
             self.polos,
+            self.characters,
+            self.button_enable_list,
+            self.read_error,
+        )
+
+    def aggregate_key(self) -> Tuple[Any, ...]:
+        """Return a retry/cleanup key without Polos array positions.
+
+        Raw Polos is retained in ``semantic_key`` for transition diagnostics,
+        but callers deciding whether a new physical gesture is safe must not
+        interpret an individual Polos position as a layout-slot signal.
+        """
+        return (
+            self.characters_count,
+            self.putted_count,
+            self.polos_occupied_count,
+            self.polos_signal_valid,
+            self.polos_length,
             self.characters,
             self.button_enable_list,
             self.read_error,
@@ -208,11 +403,32 @@ class OperationResult:
         carry ``targetSpecific`` explicitly; legacy results keep the historical
         default of ``True`` for compatibility.
         """
-        if self.status in {OperationStatus.ALREADY_PLACED, OperationStatus.ALREADY_EMPTY}:
+        if self.status == OperationStatus.ALREADY_PLACED:
+            return True
+        if self.status == OperationStatus.ALREADY_EMPTY:
+            # ``ALREADY_EMPTY`` can be target-specific or only prove that the
+            # whole board is empty.  Preserve the historical default for
+            # legacy callers, while honoring explicit board-level evidence.
+            details = self.details or {}
+            if "targetSpecific" in details:
+                return bool(details.get("targetSpecific"))
+            if (
+                details.get("softVerified")
+                or details.get("aggregateFallback")
+                or details.get("cleanupVerificationScope") in {"board", "unknown"}
+            ):
+                return False
             return True
         if self.status != OperationStatus.VERIFIED:
             return False
-        return bool(self.details.get("targetSpecific", not self.details.get("aggregateFallback", False)))
+        details = self.details or {}
+        if "targetSpecific" in details:
+            return bool(details.get("targetSpecific"))
+        if details.get("softVerified") or details.get("aggregateFallback"):
+            return False
+        # Keep the historical default for old strong VERIFIED payloads that
+        # predate the explicit target/soft distinction.
+        return True
 
     @property
     def is_terminal(self) -> bool:
@@ -236,17 +452,23 @@ class OperationResult:
         return self.succeeded
 
     def as_dict(self) -> Dict[str, Any]:
+        details = dict(self.details)
         return {
             "status": self.status.value,
             "operationId": self.operation_id,
             "direction": self.direction,
             "message": self.message,
             "evidence": list(self.evidence),
-            "details": dict(self.details),
+            "details": details,
             "attempts": self.attempts,
             "reads": self.reads,
             "recoveryAttempts": self.recovery_attempts,
             "targetVerified": self.target_verified,
+            "softVerified": bool(details.get("softVerified") or details.get("aggregateFallback")),
+            "verificationConfidence": details.get(
+                "verificationConfidence",
+                "strong" if self.target_verified else None,
+            ),
         }
 
 
@@ -463,10 +685,11 @@ def evaluate_transition(
 ) -> TransitionEvaluation:
     """Evaluate one before/after pair without issuing input.
 
-    Priority is target-specific Polos, target-specific button enable state,
-    Putted count, then Characters count as an aggregate fallback.  The
-    fallback is deliberately marked so callers cannot learn a slot coordinate
-    from it.
+    Polos is intentionally aggregate-only here.  Its array position is not
+    assumed to be the same as the requested layout slot, so a valid one-bit
+    transition can prove board progress but can never prove the target slot.
+    Target-specific button/Characters evidence and the existing aggregate
+    counters retain their historical roles.
     """
     before_snapshot = PlacementSnapshot.from_mapping(before)
     after_snapshot = PlacementSnapshot.from_mapping(after)
@@ -485,6 +708,11 @@ def evaluate_transition(
         and after_snapshot.characters_count is not None
         and after_snapshot.characters_count - before_snapshot.characters_count == delta
     )
+    polos_transition = compare_polos_transition(
+        before_snapshot.polos,
+        after_snapshot.polos,
+        direction,
+    )
     details: Dict[str, Any] = {
         "before": before_snapshot.semantic_key(),
         "after": after_snapshot.semantic_key(),
@@ -492,12 +720,21 @@ def evaluate_transition(
         "afterCharactersCount": after_snapshot.characters_count,
         "beforePuttedCount": before_snapshot.putted_count,
         "afterPuttedCount": after_snapshot.putted_count,
+        "beforePolosOccupiedCount": polos_transition.before_count,
+        "afterPolosOccupiedCount": polos_transition.after_count,
+        "polosSignalValid": (
+            before_snapshot.polos_signal_valid is True
+            and after_snapshot.polos_signal_valid is True
+        ),
+        "beforePolosLength": before_snapshot.polos_length,
+        "afterPolosLength": after_snapshot.polos_length,
+        "polosChangedIndices": list(polos_transition.changed_indices),
+        "polosTransition": polos_transition.kind,
+        "polosTransitionReason": polos_transition.reason,
         "expectedDelta": delta,
         "targetSlot": target_slot,
     }
 
-    if _target_changed(before_snapshot.polos, after_snapshot.polos, target_slot, delta):
-        target_evidence.append("polos_target")
     if _target_changed(
         before_snapshot.button_enable_list,
         after_snapshot.button_enable_list,
@@ -513,8 +750,14 @@ def evaluate_transition(
     ):
         target_evidence.append("characters_target")
 
+    polos_aggregate_changed = polos_transition.kind in {
+        "single_place",
+        "single_return",
+    }
+
     # Prefer target-specific evidence whenever it exists.  Putted remains the
-    # first aggregate signal, followed by the Characters count fallback.
+    # first aggregate signal, followed by Characters and then the strict
+    # one-bit Polos aggregate transition.
     if target_evidence:
         evidence = list(target_evidence)
         if putted_changed:
@@ -529,10 +772,23 @@ def evaluate_transition(
         evidence = ["characters_count"]
         target_specific = False
         aggregate_fallback = True
+    elif polos_aggregate_changed and allow_aggregate_fallback:
+        evidence = ["polos_aggregate_delta"]
+        target_specific = False
+        aggregate_fallback = True
     else:
         evidence = []
         target_specific = False
         aggregate_fallback = False
+
+    details.update(
+        {
+            "targetSpecific": target_specific,
+            "aggregateFallback": aggregate_fallback,
+            "softVerified": bool(aggregate_fallback and not target_specific),
+            "verificationConfidence": "strong" if target_specific else "soft",
+        }
+    )
 
     if evidence:
         return TransitionEvaluation(
@@ -575,6 +831,17 @@ def _aggregate_delta_from_details(details: Any, direction: str) -> Tuple[str, ..
         after = _optional_int(details.get(f"after{label}Count"))
         if before is not None and after is not None and after - before == expected_delta:
             matched.append(label.lower())
+    expected_polos_transition = "single_place" if expected_delta > 0 else "single_return"
+    if details.get("polosTransition") == expected_polos_transition:
+        before = _optional_int(details.get("beforePolosOccupiedCount"))
+        after = _optional_int(details.get("afterPolosOccupiedCount"))
+        if (
+            before is not None
+            and after is not None
+            and after - before == expected_delta
+            and details.get("polosSignalValid") is True
+        ):
+            matched.append("polos_occupied_count")
     return tuple(matched)
 
 
@@ -620,6 +887,16 @@ def promote_aggregate_transition(
         and result.status == OperationStatus.UNKNOWN
         and result.message == "transition_seen_but_not_stable"
     )
+    # A Polos-only transition must have been observed in a stable snapshot;
+    # accepting a transient bit can mistake an animation or delayed update
+    # for a completed drag.  Existing counter-based unstable promotion stays
+    # compatible with the historical verifier policy.
+    if (
+        is_unstable_transition
+        and aggregate_signals
+        and set(aggregate_signals) <= {"polos_occupied_count"}
+    ):
+        return result
     if not aggregate_signals or not (is_aggregate_verified or is_unstable_transition):
         return result
 
@@ -680,41 +957,33 @@ def classify_precondition(
     direction: str,
     target_slot: Optional[int],
 ) -> Optional[OperationStatus]:
-    """Return an idempotent status when the target precondition is known."""
+    """Return a safe idempotent status without trusting Polos array indices.
+
+    Polos is deliberately excluded from this precondition path because its
+    list ordering is not normalized against layout slots.  Return callers
+    must also perform their physical action first, so this function never
+    short-circuits a return operation.
+    """
     current = PlacementSnapshot.from_mapping(snapshot)
     if current is None or target_slot is None:
         return None
     normalized_direction = str(direction).lower()
-    if current.polos is not None:
-        if target_slot < 0 or target_slot >= len(current.polos):
-            return None
-        value = _token(current.polos[target_slot])
-        if normalized_direction in {"place", "drag", "put"} and value == "1":
-            return OperationStatus.ALREADY_PLACED
-        if normalized_direction in {"return", "remove", "take"} and value == "0":
-            return OperationStatus.ALREADY_EMPTY
 
-    # Some mods expose the slot occupancy/identity only through Characters.
-    # Use it as a target-specific precondition when Polos is unavailable or
-    # inconclusive; never infer an empty target from a missing (None) value.
-    polos_inconclusive = True
-    if current.polos is not None and 0 <= target_slot < len(current.polos):
-        polos_inconclusive = _token(current.polos[target_slot]) not in {"0", "1"}
-    if current.characters is not None and polos_inconclusive:
+    # Action-first is a hard invariant for every return path.  A pre-action
+    # empty observation is retained in state logs, but cannot suppress Remove
+    # or any of the legacy return actions.
+    if normalized_direction in {"return", "remove", "take"}:
+        return None
+
+    # Some mods expose the slot occupancy/identity through Characters.  Keep
+    # this independent target-specific signal for placement preconditions;
+    # Polos must not gate whether it is consulted.
+    if current.characters is not None:
         if target_slot < 0 or target_slot >= len(current.characters):
             return None
         value = current.characters[target_slot]
         if normalized_direction in {"place", "drag", "put"} and not _is_empty_token(value):
             return OperationStatus.ALREADY_PLACED
-        if normalized_direction in {"return", "remove", "take"} and _is_empty_token(value):
-            return OperationStatus.ALREADY_EMPTY
-
-    if normalized_direction in {"return", "remove", "take"} and current.polos is None:
-        # With no Polos array, a known zero aggregate is the only safe
-        # idempotent precondition available.  It is intentionally not used for
-        # placement because an aggregate count cannot identify a free target.
-        if current.putted_count == 0 or current.characters_count == 0:
-            return OperationStatus.ALREADY_EMPTY
     return None
 
 
@@ -790,28 +1059,43 @@ def _confirmed_empty_return_result(
     before_putted = details.get("beforePuttedCount", before_snapshot.putted_count)
     after_characters = details.get("afterCharactersCount")
     after_putted = details.get("afterPuttedCount")
-    if not all(
-        isinstance(value, int)
-        for value in (before_characters, before_putted, after_characters, after_putted)
+    before_polos = details.get(
+        "beforePolosOccupiedCount",
+        before_snapshot.polos_occupied_count,
+    )
+    after_polos = details.get("afterPolosOccupiedCount")
+
+    signal_pairs = []
+    for before_value, after_value, name in (
+        (before_characters, after_characters, "characters"),
+        (before_putted, after_putted, "putted"),
+        (before_polos, after_polos, "polos"),
     ):
+        before_value = _optional_int(before_value)
+        after_value = _optional_int(after_value)
+        if before_value is None and after_value is None:
+            continue
+        if before_value is None or after_value is None:
+            return None
+        signal_pairs.append((before_value, after_value, name))
+
+    if not signal_pairs or not any(before_value > 0 for before_value, _, _ in signal_pairs):
         return None
-    if before_characters <= 0 or before_putted <= 0:
-        return None
-    if after_characters != 0 or after_putted != 0:
+    if any(after_value != 0 for _, after_value, _ in signal_pairs):
         return None
 
     details["targetSpecific"] = last_eval.target_specific
     details["aggregateFallback"] = last_eval.aggregate_fallback
     details["stabilityFallback"] = "atomic_empty_after_return"
+    empty_evidence = tuple(
+        f"{name}_empty_after_return" for _, _, name in signal_pairs
+    )
     return OperationResult(
         OperationStatus.ALREADY_EMPTY,
         operation_id=operation_id,
         direction="return",
         message="atomic_empty_after_return_transition",
-        evidence=tuple(last_eval.evidence) + (
-            "characters_empty_after_return",
-            "putted_empty_after_return",
-        ),
+        evidence=tuple(last_eval.evidence) + empty_evidence,
         details=details,
         reads=reads,
     )
@@ -977,7 +1261,15 @@ def observe_until_verified(
                 else:
                     stable = 1
                 previous_key = current_key
-                if stable >= max(int(stable_samples), 1):
+                required_stable = max(int(stable_samples), 1)
+                # A Polos-only result is intentionally soft and index-blind.
+                # Require two identical post-action reads before accepting it;
+                # one transient bit during an animation is not enough.
+                if set(last_eval.evidence or ()) <= {"polos_aggregate_delta"}:
+                    required_stable = max(required_stable, 2)
+                if stable >= required_stable:
+                    target_specific = last_eval.target_specific
+                    aggregate_fallback = last_eval.aggregate_fallback
                     return OperationResult(
                         OperationStatus.VERIFIED,
                         operation_id=operation_id,
@@ -986,8 +1278,13 @@ def observe_until_verified(
                         evidence=last_eval.evidence,
                         details={
                             **last_eval.details,
-                            "targetSpecific": last_eval.target_specific,
-                            "aggregateFallback": last_eval.aggregate_fallback,
+                            "targetSpecific": target_specific,
+                            "aggregateFallback": aggregate_fallback,
+                            "softVerified": bool(aggregate_fallback and not target_specific),
+                            "verificationConfidence": (
+                                "strong" if target_specific else "soft"
+                            ),
+                            "requiredStableSamples": required_stable,
                         },
                         reads=reads,
                     )

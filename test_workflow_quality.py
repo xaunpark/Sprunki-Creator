@@ -9,6 +9,7 @@ from workflow_quality import (
     evaluate_idle_timeout_partial_success,
     evaluate_workflow_report,
     failure_is_retryable,
+    placement_transaction_proves_progress,
     validate_playable_layout,
 )
 
@@ -544,7 +545,7 @@ class WorkflowQualityTests(unittest.TestCase):
             )
         )
 
-    def test_targeted_cleanup_recovery_re_scans_occupied_polos_slot(self):
+    def test_targeted_cleanup_does_not_map_occupied_polos_index_to_slot(self):
         import threading
 
         from placement_verifier import OperationContext, OperationResult, OperationStatus
@@ -554,7 +555,8 @@ class WorkflowQualityTests(unittest.TestCase):
         player.config = {
             "layout": {
                 "slots": [
-                    {"index": 3, "x": 100, "y": 200},
+                    {"index": 0, "x": 100, "y": 200},
+                    {"index": 1, "x": 200, "y": 200},
                 ]
             }
         }
@@ -595,7 +597,7 @@ class WorkflowQualityTests(unittest.TestCase):
 
         player.get_comprehensive_slot_state = read_state
         player._execute_precision_return_click = fake_precision
-        context = OperationContext.begin("cleanup", 3, max_input_attempts=20)
+        context = OperationContext.begin("cleanup", 0, max_input_attempts=20)
         player._active_operation_context = context
 
         result = player._targeted_cleanup_recovery(
@@ -604,8 +606,90 @@ class WorkflowQualityTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, OperationStatus.VERIFIED)
-        self.assertEqual(calls[0]["slot"], 3)
+        # Polos[3] is occupied, but it is never converted to slot index 3.
+        # The bounded configured candidate list starts at JSON slot 0.
+        self.assertEqual(calls[0]["slot"], 0)
+        self.assertNotIn(3, [call["slot"] for call in calls])
         self.assertEqual(state["polos_array"][3], "0")
+
+    def test_cleanup_candidates_are_configured_slots_not_polos_positions(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "slots": [
+                    {"index": 0, "x": 100, "y": 200},
+                    {"index": 2, "x": 200, "y": 200},
+                ]
+            }
+        }
+        player._workflow_placement_transactions = []
+
+        state = {"polos_array": ["0", "0", "0", "1"]}
+
+        self.assertIsNone(player._occupied_slot_indices_from_state(state))
+        self.assertEqual(player._cleanup_candidate_slot_indices(), [0, 2])
+
+        player.get_comprehensive_slot_state = lambda: state
+        self.assertEqual(player.get_active_slots_queue(), [0, 2])
+
+    def test_nine_configured_slots_are_all_available_to_cleanup_scan(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "slots": [{"index": index} for index in range(9)],
+            }
+        }
+        player._workflow_placement_transactions = []
+
+        self.assertEqual(player._cleanup_candidate_slot_indices(), list(range(9)))
+
+    def test_strict_polos_transaction_proves_soft_progress_without_slot_proof(self):
+        transaction = {
+            "status": "VERIFIED",
+            "targetVerified": False,
+            "softVerified": True,
+            "verificationConfidence": "soft",
+            "transitionEvidence": {
+                "polosTransition": "single_place",
+                "polosSignalValid": True,
+                "beforePolosLength": 9,
+                "afterPolosLength": 9,
+                "beforePolosOccupiedCount": 0,
+                "afterPolosOccupiedCount": 1,
+                "polosChangedIndices": [4],
+            },
+        }
+
+        self.assertTrue(placement_transaction_proves_progress(transaction))
+
+        ambiguous = {
+            **transaction,
+            "transitionEvidence": {
+                **transaction["transitionEvidence"],
+                "polosTransition": "ambiguous",
+                "polosChangedIndices": [3, 4],
+            },
+        }
+        self.assertFalse(placement_transaction_proves_progress(ambiguous))
+
+    def test_soft_transaction_raw_polos_difference_without_transition_is_rejected(self):
+        transaction = {
+            "status": "VERIFIED",
+            "targetVerified": False,
+            "softVerified": True,
+            "before": 0,
+            "after": 0,
+            "transitionEvidence": {
+                "before": (0, 0, ("0", "0")),
+                "after": (0, 0, ("0", "1")),
+            },
+        }
+
+        self.assertFalse(placement_transaction_proves_progress(transaction))
 
     def test_cleanup_aggregate_progress_still_requires_empty_board(self):
         import threading

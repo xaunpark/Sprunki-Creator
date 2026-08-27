@@ -103,7 +103,7 @@ class RemoveButtonReturnTests(unittest.TestCase):
             OperationResult(
                 OperationStatus.VERIFIED,
                 details={"targetSpecific": True},
-                evidence=("polos_target",),
+                evidence=("characters_target",),
             ),
         ])
 
@@ -123,6 +123,41 @@ class RemoveButtonReturnTests(unittest.TestCase):
         second = player._execute_precision_return_click.call_args_list[1].args[0]
         self.assertEqual((first["x"], first["y"]), (386, 655))
         self.assertEqual((second["x"], second["y"]), (381, 655))
+
+    def test_remove_first_stops_jitter_when_polos_shape_is_uncertain(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.config = _remove_config()
+        player.stop_event = threading.Event()
+        player.remove_button_verify_timeout_ms = 250
+
+        context = OperationContext.begin(
+            "return",
+            0,
+            max_input_attempts=20,
+            deadline_seconds=10,
+            operation_id="test-remove-uncertain-polos",
+        )
+        player._active_operation_context = context
+        player._capture_stable_placement_snapshot = Mock(return_value=_occupied_snapshot())
+        player._execute_precision_return_click = Mock(
+            return_value=OperationResult(
+                OperationStatus.FAILED,
+                message="expected_transition_not_observed",
+                details={"polosTransitionReason": "length_changed"},
+            )
+        )
+
+        with patch("builtins.print"):
+            result = player._try_remove_button_return(
+                player.config["layout"]["slots"][0],
+                use_cdp=True,
+                operation_context=context,
+                before_snapshot=_occupied_snapshot(),
+                target_slot_index=0,
+            )
+
+        self.assertEqual(result.status, OperationStatus.UNKNOWN)
+        self.assertEqual(player._execute_precision_return_click.call_count, 1)
 
     def test_manual_layout_merge_preserves_manual_slots_and_adds_live_controls(self):
         manual_state = {
