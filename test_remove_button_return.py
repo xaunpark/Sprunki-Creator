@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from json_generator import SprunkiJSONGenerator
+from cdp_gesture_executor import execute_cdp_click
 from placement_verifier import OperationContext, OperationResult, OperationStatus, PlacementSnapshot
 from sprunki_game_player import SprunkiGamePlayer
 
@@ -60,6 +61,183 @@ def _remove_config():
 
 
 class RemoveButtonReturnTests(unittest.TestCase):
+    def test_cdp_click_emits_complete_primary_button_gesture(self):
+        commands = []
+
+        def send_command(ws, command):
+            commands.append(command)
+            return {"id": len(commands), "result": {}}
+
+        result = execute_cdp_click(
+            object(),
+            send_command,
+            123,
+            456,
+            hold_ms=0,
+            sleep_fn=lambda seconds: None,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            [command["method"] for command in commands],
+            [
+                "Input.dispatchMouseEvent",
+                "Input.dispatchMouseEvent",
+                "Input.dispatchMouseEvent",
+            ],
+        )
+        self.assertEqual(commands[0]["params"]["type"], "mouseMoved")
+        self.assertEqual(commands[1]["params"]["buttons"], 1)
+        self.assertEqual(commands[2]["params"]["buttons"], 0)
+        self.assertEqual(commands[1]["params"]["clickCount"], 1)
+
+    def test_exact_game_page_target_does_not_fallback_to_other_cocrea_tab(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.game_url = "https://www.cocrea.world/@Mirr/MyProject9"
+        player.debugging_port = 9222
+        player.ws_url = None
+        player._remove_cdp_target_id = None
+
+        response = Mock()
+        response.json.return_value = [
+            {
+                "type": "page",
+                "id": "wrong",
+                "url": "https://www.cocrea.world/@Other/OtherProject",
+                "webSocketDebuggerUrl": "ws://wrong",
+            },
+            {
+                "type": "page",
+                "id": "right",
+                "url": "https://www.cocrea.world/@Mirr/MyProject9",
+                "webSocketDebuggerUrl": "ws://right",
+            },
+        ]
+
+        with patch("sprunki_game_player.requests.get", return_value=response), \
+             patch("builtins.print"):
+            target = player._find_exact_game_page_target()
+
+        self.assertEqual(target["id"], "right")
+
+    def test_exact_game_page_target_rejects_ambiguous_duplicate_tabs(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.game_url = "https://www.cocrea.world/@Mirr/MyProject9"
+        player.debugging_port = 9222
+        player.ws_url = None
+        player._remove_cdp_target_id = None
+
+        response = Mock()
+        response.json.return_value = [
+            {
+                "type": "page",
+                "id": "one",
+                "url": "https://www.cocrea.world/@Mirr/MyProject9",
+                "webSocketDebuggerUrl": "ws://one",
+            },
+            {
+                "type": "page",
+                "id": "two",
+                "url": "https://www.cocrea.world/@Mirr/MyProject9/",
+                "webSocketDebuggerUrl": "ws://two",
+            },
+        ]
+
+        with patch("sprunki_game_player.requests.get", return_value=response), \
+             patch("builtins.print"):
+            target = player._find_exact_game_page_target()
+
+        self.assertIsNone(target)
+
+    def test_live_remove_resolver_uses_matching_runtime_target_and_bounds(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.game_url = "https://www.cocrea.world/@Mirr/MyProject9"
+        player._send_cdp_command = Mock(return_value={
+            "result": {
+                "result": {
+                    "value": {
+                        "ok": True,
+                        "page": {
+                            "href": player.game_url,
+                            "innerWidth": 1280,
+                            "innerHeight": 720,
+                            "devicePixelRatio": 1,
+                        },
+                        "canvas": {"scaleX": 2, "scaleY": 2},
+                        "removeButtons": [
+                            {
+                                "runtimeIndex": 2,
+                                "id": "target-right",
+                                "logicX": 40,
+                                "logicY": -120,
+                                "clickX": 700,
+                                "clickY": 600,
+                                "bounds": {
+                                    "left": 688,
+                                    "top": 588,
+                                    "right": 712,
+                                    "bottom": 612,
+                                },
+                            },
+                            {
+                                "runtimeIndex": 1,
+                                "id": "target-wrong",
+                                "logicX": -40,
+                                "logicY": -120,
+                                "clickX": 300,
+                                "clickY": 600,
+                                "bounds": {
+                                    "left": 288,
+                                    "top": 588,
+                                    "right": 312,
+                                    "bottom": 612,
+                                },
+                            },
+                        ],
+                    }
+                }
+            }
+        })
+
+        target_slot = {
+            "removeButton": {
+                "logicX": 40,
+                "logicY": -120,
+                "clickX": 700,
+                "clickY": 600,
+            }
+        }
+        delivery = player._resolve_live_remove_button(
+            object(),
+            target_slot,
+            700,
+            600,
+        )
+
+        self.assertEqual(delivery["targetId"], "target-right")
+        self.assertEqual((delivery["runtimeX"], delivery["runtimeY"]), (700, 600))
+
+    def test_remove_input_uses_strict_cdp_even_when_cleanup_caller_requests_legacy_transport(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player._active_operation_context = object()
+        player._execute_remove_button_cdp_click = Mock(return_value=True)
+        player._execute_pyautogui_single_click = Mock(return_value=True)
+        target_slot = {"removeButton": {"resolved": True}}
+
+        with patch("builtins.print"):
+            result = player._execute_single_return_click(
+                386,
+                655,
+                use_cdp=False,
+                domain_adj={},
+                target_slot=target_slot,
+                operation_context=player._active_operation_context,
+            )
+
+        self.assertTrue(result)
+        player._execute_remove_button_cdp_click.assert_called_once()
+        player._execute_pyautogui_single_click.assert_not_called()
+
     def test_remove_candidates_are_bounded_by_captured_bounds(self):
         player = object.__new__(SprunkiGamePlayer)
         player.config = _remove_config()

@@ -42,7 +42,7 @@ from manual_prepare_timeline import (
     validate_prepare_timeline,
 )
 from manual_prepare_gestures import DOUBLE_CLICK_DRAG_TYPE
-from cdp_gesture_executor import execute_cdp_gesture
+from cdp_gesture_executor import execute_cdp_click, execute_cdp_gesture
 from placement_verifier import (
     OperationContext,
     OperationResult,
@@ -252,6 +252,12 @@ class SprunkiGamePlayer:
         self.chrome_process = None
         self.ws_url = None
         self.game_url = None
+        # Remove-button input is bound to one exact CDP page for the lifetime
+        # of the cleanup operation.  It must never fall back to the first
+        # visible Chrome window or to an arbitrary Cocrea tab.
+        self._remove_cdp_session = None
+        self._remove_cdp_target_id = None
+        self._last_remove_click_delivery = {}
         
         self.obs_controller: Optional['SprunkiController'] = None
 
@@ -655,6 +661,7 @@ class SprunkiGamePlayer:
         return scope
 
     def _finish_operation(self, context, result):
+        self._close_remove_cdp_session()
         if context is not None:
             context.close()
         self.last_operation_result = result
@@ -1100,17 +1107,24 @@ class SprunkiGamePlayer:
                 before_snapshot=current_baseline,
                 target_slot_index=target_slot_index,
                 timeout_ms=verify_timeout_ms,
+                remove_button_input=True,
             )
+            delivery = dict(getattr(self, "_last_remove_click_delivery", {}) or {})
             attempt = {
                 "attempt": attempt_index,
                 "x": candidate["x"],
                 "y": candidate["y"],
-                "referenceX": candidate["x"],
-                "referenceY": candidate["y"],
-                "runtimeX": candidate["x"],
-                "runtimeY": candidate["y"],
+                "referenceX": delivery.get("referenceX", candidate["x"]),
+                "referenceY": delivery.get("referenceY", candidate["y"]),
+                "runtimeX": delivery.get("runtimeX", candidate["x"]),
+                "runtimeY": delivery.get("runtimeY", candidate["y"]),
                 "coordinateSystem": "reference-screen-1920x1080",
-                "useCdp": bool(use_cdp),
+                "runtimeCoordinateSystem": "page-viewport-css",
+                "useCdp": True,
+                "transport": delivery.get("transport", "cdp_exact_game_page"),
+                "targetId": delivery.get("targetId"),
+                "runtimeIndex": delivery.get("runtimeIndex"),
+                "pageUrl": delivery.get("pageUrl"),
                 "offsetX": candidate["offsetX"],
                 "offsetY": candidate["offsetY"],
                 "status": result.status.value,
@@ -2931,6 +2945,7 @@ class SprunkiGamePlayer:
         🔧 FIXED: Force complete browser shutdown with port cleanup verification
         """
         try:
+            self._close_remove_cdp_session()
             print("🔧 ENHANCED: Force complete browser shutdown with port verification...")
             
             # Phase 1: Close WebSocket connections immediately
@@ -3078,6 +3093,7 @@ class SprunkiGamePlayer:
             
             # Phase 5: Reset internal state
             self.ws_url = None
+            self._remove_cdp_target_id = None
             self.chrome_process = None
             self.session_websocket = None
             self.session_websocket_url = None
@@ -3089,6 +3105,7 @@ class SprunkiGamePlayer:
             print(f"🚫 Enhanced browser shutdown error: {e}")
             # Still reset state even if error
             self.ws_url = None
+            self._remove_cdp_target_id = None
             self.chrome_process = None
             self.session_websocket = None
             self.batch_verification_active = False
@@ -8810,7 +8827,587 @@ class SprunkiGamePlayer:
             print(f"❌ SMART DUAL verification error: {e}")
             return False
 
-    def _execute_single_return_click(self, click_x, click_y, use_cdp, domain_adj):
+    @staticmethod
+    def _normalize_cdp_page_url(url):
+        """Normalize a page URL for strict current-game target matching."""
+        try:
+            parsed = urlparse(str(url or "").strip())
+            if not parsed.scheme or not parsed.netloc:
+                return ""
+            path = parsed.path.rstrip("/") or "/"
+            return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+        except (TypeError, ValueError, AttributeError):
+            return ""
+
+    def _find_exact_game_page_target(self):
+        """Return the unique DevTools page for the current game URL.
+
+        This deliberately does not fall back to an arbitrary Cocrea tab.  A
+        Remove click is destructive input, so an ambiguous or missing target
+        must stop the input path instead of clicking another game.
+        """
+        expected_url = self._normalize_cdp_page_url(self.game_url)
+        if not expected_url:
+            print("   🛑 Remove click rejected: current game URL is unavailable")
+            return None
+
+        try:
+            response = requests.get(
+                f"http://localhost:{self.debugging_port}/json",
+                timeout=3,
+            )
+            response.raise_for_status()
+            tabs = response.json()
+        except Exception as error:
+            print(f"   🛑 Remove click rejected: cannot enumerate CDP pages ({error})")
+            return None
+
+        matching_tabs = []
+        for tab in tabs if isinstance(tabs, list) else []:
+            if not isinstance(tab, dict) or tab.get("type") != "page":
+                continue
+            tab_url = self._normalize_cdp_page_url(tab.get("url"))
+            ws_url = tab.get("webSocketDebuggerUrl")
+            if tab_url == expected_url and ws_url:
+                matching_tabs.append(tab)
+
+        if not matching_tabs:
+            print(
+                "   🛑 Remove click rejected: no exact CDP page matched "
+                f"{self.game_url}"
+            )
+            return None
+
+        preferred_target_id = getattr(self, "_remove_cdp_target_id", None)
+        if preferred_target_id:
+            preferred = [
+                tab for tab in matching_tabs
+                if tab.get("id") == preferred_target_id
+            ]
+            if preferred:
+                return preferred[0]
+
+        cached_ws_url = getattr(self, "ws_url", None)
+        if cached_ws_url:
+            preferred = [
+                tab for tab in matching_tabs
+                if tab.get("webSocketDebuggerUrl") == cached_ws_url
+            ]
+            if preferred:
+                return preferred[0]
+
+        if len(matching_tabs) > 1:
+            print(
+                "   🛑 Remove click rejected: multiple exact game tabs are "
+                f"open ({len(matching_tabs)}), target is ambiguous"
+            )
+            return None
+
+        return matching_tabs[0]
+
+    def _read_cdp_page_identity(self, ws):
+        """Read identity and viewport data from the currently bound CDP page."""
+        response = self._send_cdp_command(ws, {
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": "({href: window.location.href, visibilityState: document.visibilityState, hidden: document.hidden, readyState: document.readyState, innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio})",
+                "returnByValue": True,
+            },
+        })
+        if not response or "error" in response:
+            return None
+        value = response.get("result", {}).get("result", {}).get("value")
+        return value if isinstance(value, dict) else None
+
+    def _close_remove_cdp_session(self):
+        """Close the operation-scoped Remove input session, if any."""
+        session = getattr(self, "_remove_cdp_session", None)
+        self._remove_cdp_session = None
+        if not isinstance(session, dict):
+            return
+        ws = session.get("ws")
+        try:
+            if ws:
+                ws.close()
+        except Exception:
+            pass
+
+    def _get_remove_cdp_session(self, operation_context):
+        """Bind Remove input to one exact, validated game page."""
+        operation_id = getattr(operation_context, "operation_id", None)
+        session = getattr(self, "_remove_cdp_session", None)
+
+        if isinstance(session, dict) and session.get("operationId") == operation_id:
+            ws = session.get("ws")
+            try:
+                front_response = self._send_cdp_command(
+                    ws,
+                    {"method": "Page.bringToFront", "params": {}},
+                )
+                identity = self._read_cdp_page_identity(ws)
+                expected_url = self._normalize_cdp_page_url(self.game_url)
+                actual_url = self._normalize_cdp_page_url(
+                    (identity or {}).get("href")
+                )
+                if (
+                    front_response
+                    and "error" not in front_response
+                    and identity
+                    and actual_url == expected_url
+                    and identity.get("visibilityState") == "visible"
+                ):
+                    session["page"] = identity
+                    return session
+            except Exception:
+                pass
+            self._close_remove_cdp_session()
+
+        elif isinstance(session, dict):
+            self._close_remove_cdp_session()
+
+        target = self._find_exact_game_page_target()
+        if not target:
+            return None
+
+        ws = None
+        try:
+            ws = websocket.create_connection(
+                target["webSocketDebuggerUrl"],
+                timeout=10,
+            )
+            front_response = self._send_cdp_command(
+                ws,
+                {"method": "Page.bringToFront", "params": {}},
+            )
+            identity = self._read_cdp_page_identity(ws)
+            expected_url = self._normalize_cdp_page_url(self.game_url)
+            actual_url = self._normalize_cdp_page_url(
+                (identity or {}).get("href")
+            )
+            if not (
+                front_response
+                and "error" not in front_response
+                and identity
+                and actual_url == expected_url
+                and identity.get("visibilityState") == "visible"
+            ):
+                print("   🛑 Remove click rejected: CDP page identity validation failed")
+                ws.close()
+                return None
+
+            self._remove_cdp_target_id = target.get("id")
+            session = {
+                "operationId": operation_id,
+                "targetId": target.get("id"),
+                "targetUrl": target.get("url"),
+                "wsUrl": target.get("webSocketDebuggerUrl"),
+                "ws": ws,
+                "page": identity,
+            }
+            self._remove_cdp_session = session
+            print(
+                "   🎯 Remove input bound to exact page: "
+                f"{identity.get('href', '')}"
+            )
+            return session
+        except Exception as error:
+            print(f"   🛑 Remove CDP session failed: {error}")
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
+            return None
+
+    @staticmethod
+    def _remove_button_runtime_js():
+        """Read live Remove targets and viewport coordinates from the game page."""
+        return r"""
+        (() => {
+          try {
+            const STAGE_WIDTH = 640;
+            const STAGE_HEIGHT = 360;
+
+            function findVM() {
+              if (window.__vm && window.__vm.runtime) return window.__vm;
+              function getReactKey(el) {
+                return Object.keys(el).find(k => k.startsWith('__react'));
+              }
+              const selectors = [
+                'canvas',
+                '.ccw-stage-wrapper',
+                '#stage-canvas-wrapper',
+                '.gandi_stage_stage_1fD7k'
+              ];
+              for (const selector of selectors) {
+                for (const el of document.querySelectorAll(selector)) {
+                  const reactKey = getReactKey(el);
+                  if (!reactKey) continue;
+                  let fiber = el[reactKey];
+                  let depth = 0;
+                  while (fiber && depth++ < 120) {
+                    const props = fiber.pendingProps || fiber.memoizedProps || fiber.props;
+                    if (props?.vm && props.vm.runtime) {
+                      window.__vm = props.vm;
+                      return props.vm;
+                    }
+                    fiber = fiber.return;
+                  }
+                }
+              }
+              return null;
+            }
+
+            function findStageCanvas() {
+              const selectors = [
+                '.ccw-stage-wrapper canvas',
+                '#stage-canvas-wrapper canvas',
+                '.gandi_stage_stage_1fD7k canvas',
+                'canvas'
+              ];
+              const candidates = [];
+              const seen = new Set();
+              selectors.forEach((selector, priority) => {
+                document.querySelectorAll(selector).forEach((element) => {
+                  if (seen.has(element)) return;
+                  const rect = element.getBoundingClientRect();
+                  if (!(rect.width > 0 && rect.height > 0)) return;
+                  seen.add(element);
+                  candidates.push({element, priority, area: rect.width * rect.height});
+                });
+              });
+              candidates.sort((a, b) => a.priority - b.priority || b.area - a.area);
+              return candidates[0]?.element || null;
+            }
+
+            function readRawBounds(target, renderer) {
+              const drawableId = target.drawableID ?? target._drawableID;
+              const readers = [];
+              if (renderer && drawableId !== undefined && drawableId !== null) {
+                for (const name of ['getBounds', 'getBoundsForDrawable']) {
+                  try {
+                    if (typeof renderer[name] === 'function') {
+                      readers.push(() => renderer[name](drawableId));
+                    }
+                  } catch (e) {}
+                }
+              }
+              try {
+                if (typeof target.getBounds === 'function') {
+                  readers.push(() => target.getBounds());
+                }
+              } catch (e) {}
+              for (const reader of readers) {
+                try {
+                  const bounds = reader();
+                  if (bounds) return bounds;
+                } catch (e) {}
+              }
+              return null;
+            }
+
+            const vm = findVM();
+            if (!vm) return {ok: false, reason: 'vm_not_found'};
+            const canvas = findStageCanvas();
+            if (!canvas) return {ok: false, reason: 'stage_canvas_not_found'};
+
+            const canvasRect = canvas.getBoundingClientRect();
+            const scaleX = canvasRect.width / STAGE_WIDTH;
+            const scaleY = canvasRect.height / STAGE_HEIGHT;
+            if (!(scaleX > 0 && scaleY > 0)) {
+              return {ok: false, reason: 'stage_canvas_has_invalid_geometry'};
+            }
+            const centerX = canvasRect.left + (canvasRect.width / 2);
+            const centerY = canvasRect.top + (canvasRect.height / 2);
+
+            function toViewport(logicX, logicY) {
+              return {
+                x: centerX + (Number(logicX) * scaleX),
+                y: centerY - (Number(logicY) * scaleY)
+              };
+            }
+
+            function mapBounds(raw) {
+              if (!raw) return null;
+              const left = Number(raw.left);
+              const right = Number(raw.right);
+              const top = Number(raw.top);
+              const bottom = Number(raw.bottom);
+              if (![left, right, top, bottom].every(Number.isFinite)) return null;
+              const points = [
+                toViewport(left, top),
+                toViewport(left, bottom),
+                toViewport(right, top),
+                toViewport(right, bottom)
+              ];
+              const xValues = points.map(point => point.x);
+              const yValues = points.map(point => point.y);
+              const mappedLeft = Math.min(...xValues);
+              const mappedRight = Math.max(...xValues);
+              const mappedTop = Math.min(...yValues);
+              const mappedBottom = Math.max(...yValues);
+              if (!(mappedRight > mappedLeft && mappedBottom > mappedTop)) return null;
+              return {
+                left: mappedLeft,
+                top: mappedTop,
+                right: mappedRight,
+                bottom: mappedBottom,
+                width: mappedRight - mappedLeft,
+                height: mappedBottom - mappedTop,
+                centerX: (mappedLeft + mappedRight) / 2,
+                centerY: (mappedTop + mappedBottom) / 2
+              };
+            }
+
+            const renderer = vm.runtime.renderer || vm.renderer || null;
+            const removeButtons = [];
+            (vm.runtime.targets || []).forEach((target, runtimeIndex) => {
+              if (target.isStage || !target.visible || !target.sprite) return;
+              if (!(Number(target.size ?? 1) > 0)) return;
+              const name = String(target.sprite.name || '');
+              const costume = target.sprite.costumes?.[target.currentCostume];
+              const costumeName = String(costume?.name || '');
+              if (name.toLowerCase() !== 'mute buttons') return;
+              if (costumeName.toLowerCase() !== 'remove') return;
+              const rawBounds = readRawBounds(target, renderer);
+              const bounds = mapBounds(rawBounds);
+              if (!bounds) return;
+              removeButtons.push({
+                runtimeIndex,
+                id: target.id ?? null,
+                targetName: name,
+                costumeName,
+                logicX: Number(target.x),
+                logicY: Number(target.y),
+                bounds,
+                clickX: bounds.centerX,
+                clickY: bounds.centerY
+              });
+            });
+
+            return {
+              ok: true,
+              page: {
+                href: window.location.href,
+                visibilityState: document.visibilityState,
+                hidden: document.hidden,
+                readyState: document.readyState,
+                innerWidth: window.innerWidth,
+                innerHeight: window.innerHeight,
+                devicePixelRatio: window.devicePixelRatio
+              },
+              canvas: {
+                left: canvasRect.left,
+                top: canvasRect.top,
+                width: canvasRect.width,
+                height: canvasRect.height,
+                scaleX,
+                scaleY,
+                centerX,
+                centerY
+              },
+              removeButtons
+            };
+          } catch (error) {
+            return {ok: false, reason: 'runtime_error', error: String(error)};
+          }
+        })()
+        """
+
+    def _resolve_live_remove_button(self, ws, target_slot, reference_x, reference_y):
+        """Resolve the current Remove target before dispatching one click."""
+        response = self._send_cdp_command(ws, {
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": self._remove_button_runtime_js(),
+                "returnByValue": True,
+            },
+        })
+        value = response.get("result", {}).get("result", {}).get("value") if response else None
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            print(
+                "   🛑 Remove click rejected: live Remove target scan failed "
+                f"({(value or {}).get('reason', 'no_result')})"
+            )
+            return None
+
+        button_config = (target_slot or {}).get("removeButton") or {}
+        if not isinstance(button_config, dict):
+            return None
+
+        def finite_number(candidate):
+            try:
+                number = float(candidate)
+                return number if math.isfinite(number) else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+        expected_logic_x = finite_number(button_config.get("logicX"))
+        expected_logic_y = finite_number(button_config.get("logicY"))
+        stored_click_x = finite_number(button_config.get("clickX"))
+        stored_click_y = finite_number(button_config.get("clickY"))
+        reference_x = finite_number(reference_x)
+        reference_y = finite_number(reference_y)
+        if reference_x is None or reference_y is None:
+            return None
+
+        # Older metadata may not contain logicX/logicY.  Recover the expected
+        # logical point from its existing 1920x1080 reference coordinate.
+        if expected_logic_x is None or expected_logic_y is None:
+            reference_scale = min((1920 - 78) / 640, 1080 / 360)
+            reference_center_x = 78 + ((640 * reference_scale) / 2)
+            reference_center_y = ((1080 - (360 * reference_scale)) / 2) + ((360 * reference_scale) / 2)
+            expected_logic_x = (reference_x - reference_center_x) / reference_scale
+            expected_logic_y = (reference_center_y - reference_y) / reference_scale
+
+        live_buttons = [
+            item for item in (value.get("removeButtons") or [])
+            if isinstance(item, dict)
+        ]
+        ranked = []
+        for item in live_buttons:
+            logic_x = finite_number(item.get("logicX"))
+            logic_y = finite_number(item.get("logicY"))
+            if logic_x is None or logic_y is None:
+                continue
+            distance = math.hypot(
+                logic_x - expected_logic_x,
+                logic_y - expected_logic_y,
+            )
+            ranked.append((distance, item))
+        ranked.sort(key=lambda entry: entry[0])
+        if not ranked:
+            print("   🛑 Remove click rejected: no live Remove target found")
+            return None
+
+        best_distance, live_target = ranked[0]
+        # The expected logical point comes from the same Scratch runtime.  A
+        # large distance means the page/layout is not the captured game.
+        if best_distance > 45:
+            print(
+                "   🛑 Remove click rejected: live Remove target is too far "
+                f"from expected target ({best_distance:.1f} logical px)"
+            )
+            return None
+        if len(ranked) > 1 and ranked[1][0] - best_distance < 5:
+            print("   🛑 Remove click rejected: live Remove target is ambiguous")
+            return None
+
+        live_bounds = live_target.get("bounds") or {}
+        live_left = finite_number(live_bounds.get("left"))
+        live_top = finite_number(live_bounds.get("top"))
+        live_right = finite_number(live_bounds.get("right"))
+        live_bottom = finite_number(live_bounds.get("bottom"))
+        live_center_x = finite_number(live_target.get("clickX"))
+        live_center_y = finite_number(live_target.get("clickY"))
+        canvas = value.get("canvas") or {}
+        scale_x = finite_number(canvas.get("scaleX"))
+        scale_y = finite_number(canvas.get("scaleY"))
+        if not all(value is not None for value in (
+            live_left, live_top, live_right, live_bottom,
+            live_center_x, live_center_y, scale_x, scale_y,
+        )):
+            print("   🛑 Remove click rejected: live Remove bounds are invalid")
+            return None
+
+        if stored_click_x is None:
+            stored_click_x = reference_x
+        if stored_click_y is None:
+            stored_click_y = reference_y
+        reference_scale = min((1920 - 78) / 640, 1080 / 360)
+        click_x = live_center_x + ((reference_x - stored_click_x) * scale_x / reference_scale)
+        click_y = live_center_y + ((reference_y - stored_click_y) * scale_y / reference_scale)
+        click_x = min(max(click_x, live_left), live_right)
+        click_y = min(max(click_y, live_top), live_bottom)
+
+        page = value.get("page") or {}
+        delivery = {
+            "referenceX": int(round(reference_x)),
+            "referenceY": int(round(reference_y)),
+            "runtimeX": int(round(click_x)),
+            "runtimeY": int(round(click_y)),
+            "targetId": live_target.get("id"),
+            "runtimeIndex": live_target.get("runtimeIndex"),
+            "targetLogicX": live_target.get("logicX"),
+            "targetLogicY": live_target.get("logicY"),
+            "targetDistance": best_distance,
+            "bounds": live_bounds,
+            "pageUrl": page.get("href"),
+            "viewport": {
+                "width": page.get("innerWidth"),
+                "height": page.get("innerHeight"),
+                "devicePixelRatio": page.get("devicePixelRatio"),
+            },
+        }
+        return delivery
+
+    def _execute_remove_button_cdp_click(
+        self,
+        reference_x,
+        reference_y,
+        target_slot,
+        operation_context,
+    ):
+        """Deliver one Remove click to the validated live game target."""
+        self._last_remove_click_delivery = {}
+        session = self._get_remove_cdp_session(operation_context)
+        if not session:
+            return False
+
+        ws = session.get("ws")
+        live_target = self._resolve_live_remove_button(
+            ws,
+            target_slot,
+            reference_x,
+            reference_y,
+        )
+        if not live_target:
+            return False
+
+        page_url = self._normalize_cdp_page_url(live_target.get("pageUrl"))
+        expected_url = self._normalize_cdp_page_url(self.game_url)
+        if page_url != expected_url:
+            print("   🛑 Remove click rejected: live target page URL changed")
+            return False
+
+        runtime_x = live_target["runtimeX"]
+        runtime_y = live_target["runtimeY"]
+        print(
+            "   🖱️ CDP Remove click: "
+            f"reference=({live_target['referenceX']},{live_target['referenceY']}) "
+            f"runtime=({runtime_x},{runtime_y}) "
+            f"targetId={live_target.get('targetId')}"
+        )
+        gesture = execute_cdp_click(
+            ws,
+            self._send_cdp_command,
+            runtime_x,
+            runtime_y,
+            hold_ms=50,
+            sleep_fn=time.sleep,
+        )
+        self._last_remove_click_delivery = {
+            **live_target,
+            "transport": "cdp_exact_game_page",
+            "gestureSuccess": bool(gesture.success),
+            "gestureError": gesture.error,
+        }
+        if not gesture.success:
+            print(f"   🛑 CDP Remove click inconclusive: {gesture.error}")
+            self._close_remove_cdp_session()
+            return False
+        print("   ✅ CDP Remove click dispatched to validated live target")
+        return True
+
+    def _execute_single_return_click(
+        self,
+        click_x,
+        click_y,
+        use_cdp,
+        domain_adj,
+        target_slot=None,
+        operation_context=None,
+    ):
         """
         UPDATED: Always use CDP first for game operations with fallback
         """
@@ -8818,6 +9415,25 @@ class SprunkiGamePlayer:
             if getattr(self, "_active_operation_context", None) is None:
                 print("❌ Return click rejected without an active OperationContext")
                 return False
+            if isinstance(target_slot, dict) and isinstance(
+                target_slot.get("removeButton"), dict
+            ):
+                # Remove controls are never sent through the screen-level
+                # PyAutoGUI path.  The live target resolver below binds this
+                # click to the current game page and current Remove costume.
+                context = operation_context or getattr(
+                    self, "_active_operation_context", None
+                )
+                print(
+                    f"🌐 Using strict CDP Remove input at reference "
+                    f"({click_x}, {click_y})"
+                )
+                return self._execute_remove_button_cdp_click(
+                    click_x,
+                    click_y,
+                    target_slot,
+                    context,
+                )
             # 🌐 Choose the transport before sending input.  If a browser
             # target exists but CDP becomes inconclusive, a second PyAutoGUI
             # click could duplicate a partially delivered return gesture.
@@ -12163,6 +12779,7 @@ class SprunkiGamePlayer:
         before_snapshot=None,
         target_slot_index=None,
         timeout_ms=None,
+        remove_button_input=False,
     ):
         """Execute exactly one precision click and observe its transition."""
         try:
@@ -12192,6 +12809,8 @@ class SprunkiGamePlayer:
                 center_y,
                 use_cdp,
                 domain_adj,
+                target_slot=target_slot if remove_button_input else None,
+                operation_context=context,
             )
             if not executed:
                 return self._operation_result(context, OperationStatus.FAILED, "precision_click_execution_failed")

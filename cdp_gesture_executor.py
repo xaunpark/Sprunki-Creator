@@ -39,6 +39,82 @@ def _sleep(seconds: float, sleep_fn: SleepFn) -> None:
         sleep_fn(seconds)
 
 
+def execute_cdp_click(
+    ws: Any,
+    send_command: SendCommand,
+    x: float,
+    y: float,
+    *,
+    hold_ms: int = 50,
+    sleep_fn: SleepFn = time.sleep,
+) -> GestureExecutionResult:
+    """Emit one browser-native click without changing the caller's verifier.
+
+    The click is deliberately a complete mouse gesture on one CDP target.
+    ``buttons`` is included on both button transitions so the browser receives
+    the same state information as a real primary-button click.  This helper
+    never retries or falls back after a partial gesture.
+    """
+    action_start = time.monotonic()
+    mouse_pressed = False
+    try:
+        x = float(x)
+        y = float(y)
+        hold_ms = max(0, int(hold_ms))
+
+        if not _send(ws, send_command, "Input.dispatchMouseEvent", {
+            "type": "mouseMoved",
+            "x": x,
+            "y": y,
+        }):
+            return GestureExecutionResult(False, action_start, error="move_failed")
+
+        if not _send(ws, send_command, "Input.dispatchMouseEvent", {
+            "type": "mousePressed",
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": 1,
+            "clickCount": 1,
+        }):
+            return GestureExecutionResult(False, action_start, error="press_failed")
+        mouse_pressed = True
+        _sleep(hold_ms / 1000.0, sleep_fn)
+
+        release_time = time.monotonic()
+        if not _send(ws, send_command, "Input.dispatchMouseEvent", {
+            "type": "mouseReleased",
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": 0,
+            "clickCount": 1,
+        }):
+            return GestureExecutionResult(
+                False,
+                action_start,
+                release_time,
+                "release_failed",
+            )
+        mouse_pressed = False
+        return GestureExecutionResult(True, action_start, release_time)
+    except Exception as exc:
+        return GestureExecutionResult(False, action_start, error=str(exc))
+    finally:
+        if mouse_pressed:
+            try:
+                _send(ws, send_command, "Input.dispatchMouseEvent", {
+                    "type": "mouseReleased",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "buttons": 0,
+                    "clickCount": 1,
+                })
+            except Exception:
+                pass
+
+
 def execute_cdp_gesture(
     ws: Any,
     send_command: SendCommand,
