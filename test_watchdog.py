@@ -270,6 +270,19 @@ class WatchdogTests(unittest.TestCase):
                 normal_remixes_played=2,
                 normal_remixes_total=4,
             )
+            report.evidence.update(
+                {
+                    "cleanupBoundaryId": "watchdog-boundary-1",
+                    "boardState": "UNKNOWN",
+                    "cleanupBoundaryCompleted": True,
+                    "cleanupDecisionComplete": True,
+                    "reRunAttempted": True,
+                    "reRunStatus": "FAILED",
+                    "reRunVerified": False,
+                    "contaminationCarriedForward": True,
+                    "contentSuccessWithUnverifiedCleanup": True,
+                }
+            )
             report.apply_quality_gate(
                 QualityGateResult.failure("workflow_stopped", retryable=False)
             )

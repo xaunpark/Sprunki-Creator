@@ -159,6 +159,11 @@ class SafeOperationManager:
         self.logger = logger
         self.attempt_index = max(1, int(attempt_index or 1))
         self.active_slots = []  # Track slots có icons
+        self._cleanup_sequence = 0
+
+    def _next_cleanup_boundary_id(self, kind):
+        self._cleanup_sequence += 1
+        return f"individual-{self.attempt_index}-{kind}-{self._cleanup_sequence}"
 
     def _attempt_filename(self, filename):
         """Keep first-attempt names compatible; suffix later retries."""
@@ -190,7 +195,16 @@ class SafeOperationManager:
                 "strong" if target_verified else "soft"
             ),
             "cleanupVerified": False,
+            "validForCurrentBoard": True,
             "cleanupVerificationScope": "target" if target_verified else "unknown",
+            "boardGeneration": int(
+                getattr(self.game_player, "_board_generation", 0) or 0
+            ),
+            "cleanupBoundaryId": getattr(
+                getattr(self.game_player, "_active_operation_context", None),
+                "cleanup_boundary_id",
+                None,
+            ),
             "operationId": getattr(result, "operation_id", None),
             "transitionEvidence": transition_details,
         }
@@ -403,7 +417,17 @@ class SafeOperationManager:
                 self.logger.info(f"🔄 Cleanup: Returning icon from slot index {slot_index}")
                 self.logger.info(f"🔄 Attempting return at coords ({target_slot.get('x', 'N/A')}, {target_slot.get('y', 'N/A')})")
                 try:
-                    return_result = self.game_player.corrected_return_icon(target_slot)
+                    boundary_id = self._next_cleanup_boundary_id("single")
+                    try:
+                        return_result = self.game_player.corrected_return_icon(
+                            target_slot,
+                            cleanup_boundary_id=boundary_id,
+                        )
+                    except TypeError:
+                        # Keep compatibility with test doubles and legacy
+                        # player adapters that still expose the two-argument
+                        # signature.
+                        return_result = self.game_player.corrected_return_icon(target_slot)
                     return_success = bool(return_result)
                     return_status = getattr(getattr(return_result, "status", None), "value", None)
                     target_verified = getattr(return_result, "target_verified", False)
@@ -461,53 +485,55 @@ class SafeOperationManager:
                 except Exception as e:
                     self.logger.error(f"Failed to emergency stop remix recording: {e}")
             
-            # Return all placed icons
+            # Run one board-level cleanup boundary for the whole remix.  The
+            # player owns Remove/precision/carpet/targeted recovery and the
+            # single Re-Run decision; looping corrected_return_icon per slot
+            # could otherwise restart the same dirty board repeatedly.
             if icons_placed:
                 self.logger.info(f"🔄 Cleanup: Returning {len(icons_placed)} icons from remix...")
-                for slot in icons_placed:
-                    try:
-                        return_result = self.game_player.corrected_return_icon(slot)
-                        return_success = bool(return_result)
-                        return_status = getattr(getattr(return_result, "status", None), "value", None)
-                        target_verified = getattr(return_result, "target_verified", False)
-                        cleanup_scope = (getattr(return_result, "details", {}) or {}).get(
-                            "cleanupVerificationScope",
-                            "target" if target_verified else "unknown",
+                boundary_id = self._next_cleanup_boundary_id("remix")
+                try:
+                    success_count, total_attempted, errors = (
+                        self.game_player.smart_batch_return_all_slots_with_mode(
+                            use_cdp=False,
+                            context={
+                                "workflow": "individual_safe_remix_cleanup",
+                                "cleanupBoundaryId": boundary_id,
+                            },
+                            obs_controller=self.obs_controller,
                         )
-                        if return_status == "RECOVERED":
-                            self._mark_board_cleanup()
-                            self.logger.warning("⚠️ Game recovered; stopped stale remix cleanup queue")
-                            break
-                        if return_success and (
-                            cleanup_scope == "board"
-                            and return_status in {"ALREADY_EMPTY", "VERIFIED"}
-                        ):
-                            self._mark_board_cleanup()
-                            self.logger.info("✅ Board-level remix cleanup verified")
-                            break
-                        if return_status in {"UNKNOWN", "STOPPED", "FAILED"}:
-                            self.logger.warning(
-                                "🛑 Remix cleanup stopped after non-replayable slot result: %s",
-                                return_status,
-                            )
-                            break
-                        if return_success and (
-                            cleanup_scope in {"target", "board"}
-                            and return_status in {"ALREADY_EMPTY", "VERIFIED"}
-                        ) and slot in self.active_slots:
-                            self._mark_cleanup(slot.get("index"), True, cleanup_scope)
-                            self.active_slots.remove(slot)
-                        elif return_success:
-                            self._mark_cleanup(slot.get("index"), False, cleanup_scope)
-                            self.logger.warning(
-                                "⚠️ Remix return made aggregate progress but target slot %s was not proven",
-                                slot.get("index"),
-                            )
-                        time.sleep(0.1)
-                    except Exception as e:
-                        self.logger.error(f"Error returning icon from slot during cleanup: {e}")
-                
-                self.logger.info("✅ Remix cleanup completed")
+                    )
+                    boundary_evidence = dict(
+                        getattr(
+                            self.game_player,
+                            "_last_cleanup_boundary_evidence",
+                            {},
+                        )
+                        or {}
+                    )
+                    cleanup_ok = (
+                        self.game_player._cleanup_boundary_result_is_verified(
+                            boundary_evidence
+                        )
+                        if hasattr(
+                            self.game_player,
+                            "_cleanup_boundary_result_is_verified",
+                        )
+                        else (
+                            total_attempted == 0
+                            or success_count == total_attempted
+                        ) and not errors
+                    )
+                    if cleanup_ok:
+                        self._mark_board_cleanup()
+                        self.logger.info("✅ Board-level remix cleanup verified")
+                    else:
+                        self.logger.warning(
+                            "⚠️ Remix cleanup remains unverified after one Re-Run: %s",
+                            boundary_evidence.get("boardState", "UNKNOWN"),
+                        )
+                except Exception as e:
+                    self.logger.error(f"Error during board-level remix cleanup: {e}")
             
         except Exception as e:
             self.logger.error(f"Error during remix cleanup: {e}")
@@ -523,42 +549,66 @@ class SafeOperationManager:
             except:
                 pass
             
-            # Return all active slots
-            for slot in self.active_slots.copy():
-                try:
-                    result = self.game_player.corrected_return_icon(slot)
-                    result_status = getattr(getattr(result, "status", None), "value", None)
-                    target_verified = getattr(result, "target_verified", False)
-                    cleanup_scope = (getattr(result, "details", {}) or {}).get(
-                        "cleanupVerificationScope",
-                        "target" if target_verified else "unknown",
+            last_boundary = dict(
+                getattr(
+                    self.game_player,
+                    "_last_cleanup_boundary_evidence",
+                    {},
+                )
+                or {}
+            )
+            if (
+                last_boundary.get("cleanupBoundaryCompleted") is True
+                and last_boundary.get("reRunAttempted") is True
+                and last_boundary.get("reRunVerified") is not True
+            ):
+                self.logger.warning(
+                    "⚠️ Emergency cleanup reuses the existing unverified boundary; "
+                    "no duplicate Re-Run will be sent"
+                )
+                return
+
+            boundary_id = self._next_cleanup_boundary_id("emergency")
+            try:
+                success_count, total_attempted, errors = (
+                    self.game_player.smart_batch_return_all_slots_with_mode(
+                        use_cdp=False,
+                        context={
+                            "workflow": "individual_emergency_cleanup",
+                            "cleanupBoundaryId": boundary_id,
+                        },
+                        obs_controller=self.obs_controller,
                     )
-                    if result_status == "RECOVERED":
-                        self._mark_board_cleanup()
-                        self.logger.warning("⚠️ Game recovered; cleared stale emergency cleanup queue")
-                        break
-                    if result_status in {"UNKNOWN", "STOPPED", "FAILED"}:
-                        self.logger.warning(
-                            "🛑 Emergency cleanup stopped after non-replayable slot result: %s",
-                            result_status,
-                        )
-                        break
-                    if result and result_status in {"ALREADY_EMPTY", "VERIFIED"} and cleanup_scope == "board":
-                        self._mark_board_cleanup()
-                        break
-                    if result and (
-                        (result_status == "ALREADY_EMPTY" and target_verified)
-                        or (result_status == "VERIFIED" and target_verified)
-                    ):
-                        self.active_slots.remove(slot)
-                        time.sleep(0.1)
-                    else:
-                        self.logger.warning(
-                            "Emergency cleanup did not verify slot %s; keeping it tracked",
-                            slot.get('index', 'unknown'),
-                        )
-                except:
-                    pass
+                )
+                boundary_evidence = dict(
+                    getattr(
+                        self.game_player,
+                        "_last_cleanup_boundary_evidence",
+                        {},
+                    )
+                    or {}
+                )
+                cleanup_ok = (
+                    self.game_player._cleanup_boundary_result_is_verified(
+                        boundary_evidence
+                    )
+                    if hasattr(
+                        self.game_player,
+                        "_cleanup_boundary_result_is_verified",
+                    )
+                    else (
+                        total_attempted == 0
+                        or (success_count == total_attempted and not errors)
+                    )
+                )
+                if cleanup_ok:
+                    self._mark_board_cleanup()
+                else:
+                    self.logger.warning(
+                        "Emergency board cleanup remains unverified after one Re-Run"
+                    )
+            except Exception:
+                pass
             
             self.logger.info("✅ Emergency cleanup completed")
             
@@ -1812,6 +1862,18 @@ class UnifiedProcessingManager:
         if transactions:
             report.placement_before = transactions[0].get("before")
             report.placement_after = transactions[0].get("after")
+        if player and hasattr(player, "_update_report_cleanup_evidence"):
+            player._update_report_cleanup_evidence(report)
+            boundary_evidence = dict(
+                getattr(player, "_last_cleanup_boundary_evidence", {}) or {}
+            )
+            if boundary_evidence.get("cleanupBoundaryCompleted") is True:
+                report.cleanup_verified = bool(
+                    report.cleanup_verified
+                    and player._cleanup_boundary_result_is_verified(
+                        boundary_evidence
+                    )
+                )
 
         phase_gate_candidates = [
             phase_report.quality_gate
@@ -2425,6 +2487,18 @@ class UnifiedProcessingManager:
                 if transactions:
                     report.placement_before = transactions[0].get("before")
                     report.placement_after = transactions[0].get("after")
+                if hasattr(player, "_update_report_cleanup_evidence"):
+                    player._update_report_cleanup_evidence(report)
+                report.evidence["contentSuccessWithUnverifiedCleanup"] = bool(
+                    is_successful
+                    and report.placement_verified
+                    and not report.cleanup_verified
+                    and report.evidence.get("cleanupDecisionComplete")
+                    and report.evidence.get("reRunAttempted")
+                )
+                report.content_success_with_unverified_cleanup = bool(
+                    report.evidence["contentSuccessWithUnverifiedCleanup"]
+                )
                 evaluate_workflow_report(report, mode="individual", require_identity=False)
                 item.workflow_report = report
 

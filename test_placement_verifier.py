@@ -602,12 +602,20 @@ class ReturnActionPolicyTests(unittest.TestCase):
 
     def test_occupied_post_action_state_advances_to_next_return_method(self):
         player = self._player()
+        player.verifier_targeted_cleanup_recovery_enabled = False
         baseline = self._state(1, 1, ["0"], ["1"])
         after_precision = self._state(2, 1, ["1"], ["1"])
         after_carpet = self._state(3, 1, ["1"], ["1"])
-        after_restart = self._state(4, 0, ["0"], ["0"])
+        after_targeted = self._state(4, 1, ["1"], ["1"])
+        after_restart = self._state(5, 0, ["0"], ["0"])
         player._capture_stable_placement_snapshot = Mock(
-            side_effect=[baseline, after_precision, after_carpet, after_restart]
+            side_effect=[
+                baseline,
+                after_precision,
+                after_carpet,
+                after_targeted,
+                after_restart,
+            ]
         )
         player._execute_precision_return_click = Mock(
             return_value=OperationResult(OperationStatus.FAILED, message="no_transition")
@@ -658,6 +666,196 @@ class ReturnActionPolicyTests(unittest.TestCase):
         self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
         self.assertEqual(player._execute_precision_return_click.call_count, 1)
         self.assertEqual(player._execute_carpet_bombing_return.call_count, 1)
+
+    def _cleanup_boundary_player(self):
+        player = self._player()
+        player._board_generation = 0
+        player._board_contamination_carried_forward = False
+        player._cleanup_boundary_history = []
+        player._cleanup_boundary_states = {}
+        player._last_cleanup_boundary_evidence = {}
+        player._workflow_placement_transactions = []
+        player.verifier_final_stable_samples = 2
+        return player
+
+    def test_clean_boundary_does_not_send_rerun(self):
+        from placement_verifier import PlacementSnapshot
+
+        player = self._cleanup_boundary_player()
+        baseline = self._state(1, 1, ["1"], ["1"])
+        clean = self._state(2, 0, ["0"], ["0"])
+        context = OperationContext.begin(
+            "cleanup",
+            None,
+            max_input_attempts=20,
+            operation_id="cleanup-clean-boundary",
+        )
+        context.cleanup_boundary_id = "cleanup-clean-boundary"
+        context.set_baseline(PlacementSnapshot.from_mapping(baseline))
+        player.restart_game_to_initial_state = Mock()
+
+        result = player._run_cleanup_boundary_recovery(
+            context,
+            use_cdp=False,
+            baseline=baseline,
+            current_snapshot=clean,
+        )
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertTrue(result.details["cleanupVerified"])
+        self.assertFalse(result.details["reRunAttempted"])
+        player.restart_game_to_initial_state.assert_not_called()
+
+    def test_dirty_boundary_runs_exactly_one_rerun_and_invalidates_old_ledger(self):
+        from placement_verifier import PlacementSnapshot
+
+        player = self._cleanup_boundary_player()
+        dirty = self._state(1, 1, ["1"], ["1"])
+        clean = self._state(2, 0, ["0"], ["0"])
+        player._workflow_placement_transactions = [
+            {
+                "status": "VERIFIED",
+                "targetVerified": True,
+                "slotIndex": 0,
+            }
+        ]
+        context = OperationContext.begin(
+            "cleanup",
+            None,
+            max_input_attempts=20,
+            operation_id="cleanup-dirty-boundary",
+        )
+        context.cleanup_boundary_id = "cleanup-dirty-boundary"
+        context.set_baseline(PlacementSnapshot.from_mapping(dirty))
+        player.restart_game_to_initial_state = Mock(
+            return_value=OperationResult(
+                OperationStatus.RECOVERED,
+                direction="recovery",
+                details={"postState": clean},
+            )
+        )
+
+        result = player._run_cleanup_boundary_recovery(
+            context,
+            use_cdp=False,
+            baseline=dirty,
+            current_snapshot=dirty,
+        )
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertTrue(result.details["cleanupVerified"])
+        self.assertTrue(result.details["reRunAttempted"])
+        self.assertTrue(result.details["reRunVerified"])
+        self.assertEqual(player._board_generation, 1)
+        self.assertTrue(player._workflow_placement_transactions[0]["invalidatedByRerun"])
+        self.assertFalse(player._workflow_placement_transactions[0]["validForCurrentBoard"])
+        self.assertEqual(
+            player._workflow_placement_transactions[0]["cleanupBoundaryId"],
+            "cleanup-dirty-boundary",
+        )
+        self.assertEqual(
+            player._workflow_placement_transactions[0]["boardGenerationBeforeRerun"],
+            0,
+        )
+        self.assertEqual(
+            player._workflow_placement_transactions[0]["invalidatedByCleanupBoundary"],
+            "cleanup-dirty-boundary",
+        )
+        player.restart_game_to_initial_state.assert_called_once()
+
+    def test_unknown_boundary_runs_one_rerun_but_missing_post_signal_stays_unknown(self):
+        from placement_verifier import PlacementSnapshot
+
+        player = self._cleanup_boundary_player()
+        dirty = self._state(1, 1, ["1"], ["1"])
+        missing_signal = {
+            "sequence": 2,
+            "timestamp": 2.0,
+            "characters_count": 0,
+            "putted_characters": 0,
+            "polos_array": ["0"],
+            # ``characters_array`` existed in the baseline and is deliberately
+            # absent after Re-Run, so the reset cannot be verified.
+        }
+        context = OperationContext.begin(
+            "cleanup",
+            None,
+            max_input_attempts=20,
+            operation_id="cleanup-unknown-boundary",
+        )
+        context.cleanup_boundary_id = "cleanup-unknown-boundary"
+        context.set_baseline(PlacementSnapshot.from_mapping(dirty))
+        player.restart_game_to_initial_state = Mock(
+            return_value=OperationResult(
+                OperationStatus.RECOVERED,
+                direction="recovery",
+                details={"postState": missing_signal},
+            )
+        )
+
+        result = player._run_cleanup_boundary_recovery(
+            context,
+            use_cdp=False,
+            baseline=dirty,
+            current_snapshot={"sequence": 2, "timestamp": 2.0},
+        )
+
+        self.assertEqual(result.status, OperationStatus.UNKNOWN)
+        self.assertEqual(result.details["boardState"], "UNKNOWN")
+        self.assertTrue(result.details["reRunAttempted"])
+        self.assertFalse(result.details["reRunVerified"])
+        self.assertTrue(result.details["contaminationCarriedForward"])
+        player.restart_game_to_initial_state.assert_called_once()
+
+    def test_rerun_failure_is_terminal_for_boundary_and_is_not_repeated(self):
+        from placement_verifier import PlacementSnapshot
+
+        player = self._cleanup_boundary_player()
+        dirty = self._state(1, 1, ["1"], ["1"])
+        context = OperationContext.begin(
+            "cleanup",
+            None,
+            max_input_attempts=20,
+            operation_id="cleanup-failed-rerun",
+        )
+        context.cleanup_boundary_id = "cleanup-failed-rerun"
+        context.set_baseline(PlacementSnapshot.from_mapping(dirty))
+        player.restart_game_to_initial_state = Mock(
+            return_value=OperationResult(
+                OperationStatus.FAILED,
+                direction="recovery",
+                message="rerun_click_failed",
+                details={"postState": dirty},
+            )
+        )
+
+        first = player._run_cleanup_boundary_recovery(
+            context,
+            use_cdp=False,
+            baseline=dirty,
+            current_snapshot=dirty,
+        )
+        second = player._run_cleanup_boundary_recovery(
+            context,
+            use_cdp=False,
+            baseline=dirty,
+            current_snapshot=dirty,
+        )
+
+        self.assertEqual(first.status, OperationStatus.FAILED)
+        self.assertEqual(second.status, OperationStatus.FAILED)
+        self.assertTrue(second.details["cleanupDecisionComplete"])
+        self.assertTrue(second.details["reRunAttempted"])
+        self.assertFalse(second.details["reRunVerified"])
+        player.restart_game_to_initial_state.assert_called_once()
+
+    def test_conflicting_cleanup_signals_are_unknown_not_dirty(self):
+        player = self._cleanup_boundary_player()
+        state = self._state(1, 1, ["0"], ["0"])
+        board_state, evidence = player._classify_cleanup_board(state)
+
+        self.assertEqual(board_state, "UNKNOWN")
+        self.assertEqual(evidence["reason"], "cleanup_signal_conflict")
 
 
 if __name__ == "__main__":

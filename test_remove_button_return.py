@@ -238,6 +238,42 @@ class RemoveButtonReturnTests(unittest.TestCase):
         player._execute_remove_button_cdp_click.assert_called_once()
         player._execute_pyautogui_single_click.assert_not_called()
 
+    def test_rerun_click_is_bound_to_visible_current_game_page(self):
+        from types import SimpleNamespace
+
+        player = object.__new__(SprunkiGamePlayer)
+        player.game_url = "https://www.cocrea.world/@Mirr/MyProject9"
+        session = {
+            "operationId": "cleanup-1",
+            "targetId": "game-target",
+            "ws": object(),
+        }
+        player._get_remove_cdp_session = Mock(return_value=session)
+        player._send_cdp_command = Mock()
+        player._read_cdp_page_identity = Mock(
+            return_value={
+                "href": player.game_url,
+                "visibilityState": "visible",
+            }
+        )
+        player._normalize_cdp_page_url = lambda value: str(value).rstrip("/")
+        player._close_remove_cdp_session = Mock()
+
+        with patch(
+            "sprunki_game_player.execute_cdp_click",
+            return_value=SimpleNamespace(success=True, error=None),
+        ) as click:
+            delivered, evidence = player._execute_rerun_button_click(
+                SimpleNamespace(operation_id="cleanup-1")
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual(evidence["targetId"], "game-target")
+        self.assertEqual(evidence["pageUrl"], player.game_url)
+        click.assert_called_once()
+        self.assertEqual(click.call_args.args[2:4], (40, 75))
+        player._close_remove_cdp_session.assert_not_called()
+
     def test_remove_candidates_are_bounded_by_captured_bounds(self):
         player = object.__new__(SprunkiGamePlayer)
         player.config = _remove_config()

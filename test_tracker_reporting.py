@@ -79,6 +79,19 @@ class TrackerReportingTests(unittest.TestCase):
         report.cleanup_verified = False
         report.normal_remixes_played = 2
         report.normal_remixes_total = 4
+        report.evidence.update(
+            {
+                "cleanupBoundaryId": "watchdog-boundary-1",
+                "boardState": "UNKNOWN",
+                "cleanupBoundaryCompleted": True,
+                "cleanupDecisionComplete": True,
+                "reRunAttempted": True,
+                "reRunStatus": "FAILED",
+                "reRunVerified": False,
+                "contaminationCarriedForward": True,
+                "contentSuccessWithUnverifiedCleanup": True,
+            }
+        )
         accepted = evaluate_idle_timeout_partial_success(
             report,
             timeout_reason="idle_timeout",
@@ -104,7 +117,8 @@ class TrackerReportingTests(unittest.TestCase):
             check for check in diagnostic["quality_gate"]["checks"]
             if check["name"] == "normal_remixes"
         )
-        self.assertEqual(cleanup_check["status"], "PASS")
+        self.assertEqual(cleanup_check["status"], "FAIL")
+        self.assertTrue(cleanup_check["evidence"]["accepted_by_policy"])
         self.assertEqual(remix_check["evidence"]["succeeded"], 2)
         self.assertEqual(remix_check["evidence"]["total"], 4)
 
@@ -136,6 +150,15 @@ class TrackerReportingTests(unittest.TestCase):
             {
                 "finalCleanupOptional": True,
                 "finalRemixContentComplete": True,
+                "cleanupBoundaryId": "final-boundary-1",
+                "boardState": "UNKNOWN",
+                "cleanupBoundaryCompleted": True,
+                "cleanupDecisionComplete": True,
+                "reRunAttempted": True,
+                "reRunStatus": "FAILED",
+                "reRunVerified": False,
+                "contaminationCarriedForward": True,
+                "contentSuccessWithUnverifiedCleanup": True,
             }
         )
 
@@ -151,7 +174,7 @@ class TrackerReportingTests(unittest.TestCase):
             if check["name"] == "cleanup"
         )
         self.assertTrue(diagnostic["quality_gate"]["passed"])
-        self.assertEqual(cleanup_check["status"], "PASS")
+        self.assertEqual(cleanup_check["status"], "FAIL")
         self.assertTrue(cleanup_check["evidence"]["accepted_by_policy"])
         self.assertEqual(diagnostic["tracker_ui"]["badge"], "COMPLETED")
 

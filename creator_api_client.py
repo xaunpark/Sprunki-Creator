@@ -2270,16 +2270,30 @@ class CreatorService:
 
             player = getattr(self, "game_player", None)
             if player and hasattr(player, "_run_cleanup_once") and not expired():
-                if hasattr(player, "_reset_cleanup_guard"):
+                previous_boundary = dict(
+                    getattr(player, "_last_cleanup_boundary_evidence", {}) or {}
+                )
+                reuse_boundary = bool(
+                    hasattr(player, "_cleanup_boundary_is_terminal_unverified")
+                    and player._cleanup_boundary_is_terminal_unverified(
+                        previous_boundary
+                    )
+                )
+                if hasattr(player, "_reset_cleanup_guard") and not reuse_boundary:
                     player._reset_cleanup_guard()
+                cleanup_context = {
+                    "workflow": "watchdog_recovery",
+                    "queue_id": queue_id,
+                    "attempt": attempt,
+                }
+                if reuse_boundary and previous_boundary.get("cleanupBoundaryId"):
+                    cleanup_context["cleanupBoundaryId"] = previous_boundary[
+                        "cleanupBoundaryId"
+                    ]
                 completed, cleanup_operation, cleanup_error = self._run_bounded_cleanup_call(
                     lambda: player._run_cleanup_once(
                         use_cdp=False,
-                        context={
-                            "workflow": "watchdog_recovery",
-                            "queue_id": queue_id,
-                            "attempt": attempt,
-                        },
+                        context=cleanup_context,
                         obs_controller=controller,
                         force_retry=True,
                     ),
@@ -2301,6 +2315,9 @@ class CreatorService:
                     result["board_cleanup"] = {
                         "status": cleanup_status,
                         "message": getattr(cleanup_operation, "message", ""),
+                        "details": dict(
+                            getattr(cleanup_operation, "details", {}) or {}
+                        ),
                     }
                     if cleanup_status not in {"VERIFIED", "ALREADY_EMPTY"}:
                         result["status"] = "failed"
@@ -2418,6 +2435,34 @@ class CreatorService:
             if isinstance(cleanup, dict)
             else None
         )
+        if isinstance(cleanup, dict):
+            board_cleanup = cleanup.get("board_cleanup")
+            if isinstance(board_cleanup, dict):
+                cleanup_details = board_cleanup.get("details")
+                if isinstance(cleanup_details, dict):
+                    # Preserve the coordinator's board-state/Re-Run evidence
+                    # for the shared quality gate.  This is read-only report
+                    # propagation and does not alter the OBS lifecycle.
+                    report.evidence.update(cleanup_details)
+                    report.cleanup_state = str(
+                        cleanup_details.get("boardState", report.cleanup_state)
+                    )
+                    report.rerun_attempted = bool(
+                        cleanup_details.get(
+                            "reRunAttempted", report.rerun_attempted
+                        )
+                    )
+                    report.rerun_verified = bool(
+                        cleanup_details.get(
+                            "reRunVerified", report.rerun_verified
+                        )
+                    )
+                    report.contamination_carried_forward = bool(
+                        cleanup_details.get(
+                            "contaminationCarriedForward",
+                            report.contamination_carried_forward,
+                        )
+                    )
         gate = evaluate_idle_timeout_partial_success(
             report,
             timeout_reason=timeout_reason,

@@ -747,8 +747,30 @@ def build_tracker_diagnostic_report(
     final_content_complete = bool(
         report_evidence.get("finalRemixContentComplete", False)
     )
+    cleanup_decision_complete = bool(
+        report_evidence.get("cleanupDecisionComplete")
+        or report_evidence.get("cleanupBoundaryCompleted")
+    )
+    rerun_attempted = bool(
+        report.get("rerun_attempted")
+        or report_evidence.get("reRunAttempted")
+        or report_evidence.get("rerunAttempted")
+    )
+    content_success_with_unverified_cleanup = bool(
+        report.get("content_success_with_unverified_cleanup")
+        or report_evidence.get("contentSuccessWithUnverifiedCleanup")
+    )
     cleanup_accepted_by_policy = bool(
-        final_cleanup_optional and final_content_complete
+        report.get("cleanup_verified") is not True
+        and content_success_with_unverified_cleanup
+        and cleanup_decision_complete
+        and rerun_attempted
+        and str(
+            report_evidence.get("boardState")
+            or report.get("cleanup_state")
+            or ""
+        ).upper()
+        in {"DIRTY", "UNKNOWN"}
     )
     placement_status = (
         PASS
@@ -759,7 +781,7 @@ def build_tracker_diagnostic_report(
     )
     cleanup_status = (
         PASS
-        if report.get("cleanup_verified") is True or cleanup_accepted_by_policy
+        if report.get("cleanup_verified") is True
         else FAIL
         if workflow_report
         else NOT_STARTED
@@ -809,9 +831,13 @@ def build_tracker_diagnostic_report(
         PASS if icons and slots else FAIL,
         phase_statuses["runtime_entry"],
         phase_statuses["placement"],
-        phase_statuses["cleanup"],
         phase_statuses["normal_gameplay"],
     ]
+    # Cleanup remains visible as FAIL/UNVERIFIED in its own phase, while an
+    # explicitly completed Re-Run decision may be non-blocking for an
+    # otherwise content-complete workflow.
+    if not cleanup_accepted_by_policy:
+        blocking_statuses.append(phase_statuses["cleanup"])
     if effective_mode == "both":
         blocking_statuses.extend(
             phase_statuses[name] for name in ("master", "individual")
@@ -879,6 +905,14 @@ def build_tracker_diagnostic_report(
                 "accepted_by_policy": cleanup_accepted_by_policy,
                 "final_cleanup_optional": final_cleanup_optional,
                 "final_content_complete": final_content_complete,
+                "cleanup_decision_complete": cleanup_decision_complete,
+                "rerun_attempted": rerun_attempted,
+                "content_success_with_unverified_cleanup": content_success_with_unverified_cleanup,
+                "board_state": report.get("cleanup_state") or report_evidence.get("boardState"),
+                "contamination_carried_forward": bool(
+                    report.get("contamination_carried_forward")
+                    or report_evidence.get("contaminationCarriedForward")
+                ),
             },
         ),
         _check(

@@ -496,6 +496,15 @@ class OperationContext:
     failure_counts: Dict[str, int] = field(default_factory=dict)
     no_progress_cycles: int = 0
     last_failure_signature: Optional[str] = None
+    # Cleanup-boundary metadata is intentionally kept on the shared context
+    # so nested return helpers cannot start a second Re-Run for the same
+    # logical cleanup operation.
+    cleanup_boundary_id: Optional[str] = None
+    board_generation: int = 0
+    board_state: str = "UNKNOWN"
+    rerun_attempted: bool = False
+    rerun_verified: bool = False
+    rerun_status: Optional[str] = None
 
     @classmethod
     def begin(

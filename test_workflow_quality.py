@@ -119,6 +119,20 @@ class WorkflowQualityTests(unittest.TestCase):
             normal_remixes_played=2,
             normal_remixes_total=4,
         )
+        report.evidence.update(
+            {
+                "cleanupBoundaryId": "watchdog-boundary-1",
+                "boardState": "UNKNOWN",
+                "cleanupVerified": False,
+                "cleanupBoundaryCompleted": True,
+                "cleanupDecisionComplete": True,
+                "reRunAttempted": True,
+                "reRunStatus": "FAILED",
+                "reRunVerified": False,
+                "contaminationCarriedForward": True,
+                "contentSuccessWithUnverifiedCleanup": True,
+            }
+        )
 
         result = evaluate_idle_timeout_partial_success(
             report,
@@ -203,13 +217,21 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual(result.failure_code, "placement_not_verified")
         self.assertTrue(result.retryable)
 
-    def test_final_cleanup_is_optional_after_complete_remix_content(self):
+    def test_final_cleanup_optional_flag_needs_completed_rerun_decision(self):
         report = verified_report("remix_only")
         report.cleanup_verified = False
         report.evidence.update(
             {
                 "finalCleanupOptional": True,
                 "finalRemixContentComplete": True,
+                "cleanupBoundaryId": "final-boundary-1",
+                "boardState": "UNKNOWN",
+                "cleanupBoundaryCompleted": True,
+                "cleanupDecisionComplete": True,
+                "reRunAttempted": True,
+                "reRunStatus": "FAILED",
+                "reRunVerified": False,
+                "contentSuccessWithUnverifiedCleanup": True,
             }
         )
 
@@ -219,7 +241,7 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertTrue(result.evidence["cleanupAcceptedByPolicy"])
         self.assertFalse(result.evidence["cleanupVerified"])
 
-    def test_remix_cleanup_policy_accepts_two_known_residual_icons(self):
+    def test_remix_cleanup_policy_rejects_two_known_residual_icons(self):
         from placement_verifier import PlacementSnapshot
         from sprunki_game_player import SprunkiGamePlayer
 
@@ -237,7 +259,7 @@ class WorkflowQualityTests(unittest.TestCase):
             final_remix=False,
         )
 
-        self.assertTrue(evidence["policyAccepted"])
+        self.assertFalse(evidence["policyAccepted"])
         self.assertFalse(evidence["emptyVerified"])
         self.assertEqual(evidence["residualCount"], 2)
 
@@ -256,7 +278,7 @@ class WorkflowQualityTests(unittest.TestCase):
 
         excessive = player._remix_cleanup_policy_evidence(cleanup_attempted=True)
         self.assertFalse(excessive["policyAccepted"])
-        self.assertEqual(excessive["reason"], "residual_exceeds_tolerance")
+        self.assertEqual(excessive["reason"], "residual_present")
 
         player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
             timestamp=1.0,
@@ -266,7 +288,7 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(unknown["policyAccepted"])
         self.assertEqual(unknown["reason"], "cleanup_signal_unknown")
 
-    def test_remix_skips_occupied_slot_and_accepts_two_residual_icons(self):
+    def test_remix_skips_occupied_slot_and_keeps_content_success_with_unverified_cleanup(self):
         import contextlib
         import io
         import threading
@@ -297,6 +319,23 @@ class WorkflowQualityTests(unittest.TestCase):
             putted_count=2,
             polos=("1", "1"),
         )
+        player._last_cleanup_boundary_evidence = {
+            "cleanupBoundaryId": "residual-boundary-1",
+            "boardState": "DIRTY",
+            "cleanupBoundaryCompleted": True,
+            "cleanupDecisionComplete": True,
+            "cleanupVerified": False,
+            "reRunAttempted": True,
+            "reRunStatus": "FAILED",
+            "reRunVerified": False,
+            "contaminationCarriedForward": True,
+            "stateEvidenceAfterRerun": {
+                "checks": {
+                    "characters": {"clean": False, "value": 2},
+                    "putted": {"clean": False, "value": 2},
+                }
+            },
+        }
 
         drag_calls = []
 
@@ -345,7 +384,7 @@ class WorkflowQualityTests(unittest.TestCase):
         )
         self.assertEqual(len(player._workflow_placement_transactions), 1)
 
-    def test_final_remix_success_does_not_require_cleanup_success(self):
+    def test_final_remix_content_success_requires_completed_rerun_decision(self):
         import contextlib
         import io
         import threading
@@ -376,6 +415,23 @@ class WorkflowQualityTests(unittest.TestCase):
             putted_count=6,
             polos=("1", "1", "1", "1", "1", "1"),
         )
+        player._last_cleanup_boundary_evidence = {
+            "cleanupBoundaryId": "final-boundary-2",
+            "boardState": "DIRTY",
+            "cleanupBoundaryCompleted": True,
+            "cleanupDecisionComplete": True,
+            "cleanupVerified": False,
+            "reRunAttempted": True,
+            "reRunStatus": "FAILED",
+            "reRunVerified": False,
+            "contaminationCarriedForward": True,
+            "stateEvidenceAfterRerun": {
+                "checks": {
+                    "characters": {"clean": False, "value": 6},
+                    "putted": {"clean": False, "value": 6},
+                }
+            },
+        }
         player.corrected_drag_and_drop = lambda *args, **kwargs: OperationResult(
             OperationStatus.VERIFIED,
             direction="place",
@@ -400,9 +456,14 @@ class WorkflowQualityTests(unittest.TestCase):
             )
 
         self.assertTrue(success)
-        self.assertTrue(player._last_remix_cleanup_outcome["policyAccepted"])
+        self.assertFalse(player._last_remix_cleanup_outcome["policyAccepted"])
         self.assertFalse(player._last_remix_cleanup_outcome["emptyVerified"])
         self.assertEqual(player._last_remix_cleanup_outcome["residualCount"], 6)
+        self.assertTrue(
+            player._last_remix_cleanup_outcome[
+                "contentSuccessWithUnverifiedCleanup"
+            ]
+        )
 
     def test_last_remix_marks_final_cleanup_as_optional_without_new_status(self):
         import contextlib
@@ -755,6 +816,15 @@ class WorkflowQualityTests(unittest.TestCase):
             OperationStatus.RECOVERED,
             direction="recovery",
             message="game_recovered",
+            details={
+                "postState": {
+                    "sequence": 2,
+                    "timestamp": 2.0,
+                    "characters_count": 0,
+                    "putted_characters": 0,
+                    "polos_array": ["0", "0", "0"],
+                }
+            },
         )
 
         result = player.smart_batch_return_all_slots_with_mode(
@@ -954,6 +1024,13 @@ class WorkflowQualityTests(unittest.TestCase):
                     "successCount": 1,
                     "totalAttempted": 1,
                     "errors": [],
+                    "cleanupBoundaryId": "retry-boundary-1",
+                    "boardState": "CLEAN",
+                    "cleanupBoundaryCompleted": True,
+                    "cleanupDecisionComplete": True,
+                    "cleanupVerified": True,
+                    "reRunAttempted": False,
+                    "reRunVerified": False,
                 }
                 return False
             return True
@@ -1097,6 +1174,15 @@ class WorkflowQualityTests(unittest.TestCase):
 
         def fake_cleanup(**kwargs):
             cleanup_calls.append(kwargs["context"])
+            player._last_cleanup_boundary_evidence = {
+                "cleanupBoundaryId": "retry-boundary-2",
+                "boardState": "CLEAN",
+                "cleanupBoundaryCompleted": True,
+                "cleanupDecisionComplete": True,
+                "cleanupVerified": True,
+                "reRunAttempted": False,
+                "reRunVerified": False,
+            }
             return 1, 1, []
 
         player.play_complete_remix_corrected = fake_play
@@ -1163,10 +1249,10 @@ class WorkflowQualityTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             result = player.play_all_remixes_corrected()
 
-        self.assertEqual(play_calls, ["Dirty-board fixture"])
-        self.assertEqual(result.attempted, 1)
+        self.assertEqual(play_calls, ["Dirty-board fixture", "Must-not-start"])
+        self.assertEqual(result.attempted, 2)
         self.assertEqual(result.succeeded, 0)
-        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.skipped, 0)
         self.assertEqual(result.failure_code, "remix_threshold_not_met")
 
     def test_creator_job_entrypoint_returns_false_when_final_gate_fails(self):

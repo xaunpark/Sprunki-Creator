@@ -147,6 +147,8 @@ class RemixResult:
     failure_code: Optional[str] = None
     quality_pass: Optional[bool] = None
     retry_attempts: int = 0
+    cleanup_unverified: int = 0
+    contamination_carried_forward: bool = False
     attempt_details: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -207,6 +209,11 @@ class WorkflowReport:
     placement_after: Optional[int] = None
     placement_verified: bool = False
     cleanup_verified: bool = False
+    cleanup_state: str = UNKNOWN
+    rerun_attempted: bool = False
+    rerun_verified: bool = False
+    contamination_carried_forward: bool = False
+    content_success_with_unverified_cleanup: bool = False
     identity_status: str = "not_started"
     quality_gate: Optional[QualityGateResult] = None
 
@@ -453,6 +460,45 @@ def validate_playable_layout(config_data: Any) -> QualityGateResult:
     )
 
 
+def cleanup_can_be_non_blocking_for_content(report: WorkflowReport) -> bool:
+    """Return whether cleanup-only uncertainty may coexist with content success.
+
+    Cleanup is still reported as unverified in this case.  The exception is
+    deliberately narrow: the cleanup boundary must have completed its
+    decision path, and a Re-Run must have been attempted when the board was
+    dirty or unreadable.  This prevents a missing cleanup call from being
+    mistaken for the content-only success policy.
+    """
+    evidence = report.evidence if isinstance(report.evidence, dict) else {}
+    if report.cleanup_verified:
+        return False
+    content_complete = bool(
+        report.content_success_with_unverified_cleanup
+        or evidence.get("contentSuccessWithUnverifiedCleanup")
+    )
+    decision_complete = bool(
+        evidence.get("cleanupDecisionComplete")
+        or evidence.get("cleanupBoundaryCompleted")
+    )
+    rerun_attempted = bool(
+        report.rerun_attempted
+        or evidence.get("reRunAttempted")
+        or evidence.get("rerunAttempted")
+    )
+    board_state = str(
+        evidence.get("boardState") or report.cleanup_state or ""
+    ).upper()
+    # Content-only acceptance is an exception for a completed cleanup
+    # decision that remains DIRTY/UNKNOWN after its bounded Re-Run.  It must
+    # never turn an inconsistent/missing board verdict into a pass.
+    return (
+        content_complete
+        and decision_complete
+        and rerun_attempted
+        and board_state in {"DIRTY", "UNKNOWN"}
+    )
+
+
 def evaluate_workflow_report(
     report: WorkflowReport,
     *,
@@ -568,17 +614,16 @@ def evaluate_workflow_report(
                 )
             )
 
-    # The final board is housekeeping after the remix content has already
-    # completed.  It remains observable evidence, but it is not a completion
-    # blocker when the caller explicitly marks the final cleanup as optional
-    # and the content itself is complete.  Intermediate remix cleanup keeps
-    # the bounded remix cleanup policy and must still be handled by the remix
-    # coordinator before the next attempt.
+    # Cleanup is a separate operational result.  A content-complete workflow
+    # may remain publishable after the bounded cleanup/Re-Run decision has
+    # completed, but only through the explicit content-only policy.  The old
+    # finalCleanupOptional flag is retained as diagnostic compatibility data;
+    # it is no longer a cleanup bypass.
     final_cleanup_optional = bool(report.evidence.get("finalCleanupOptional", False))
     final_content_complete = bool(
         report.evidence.get("finalRemixContentComplete", False)
     )
-    cleanup_accepted_by_policy = final_cleanup_optional and final_content_complete
+    cleanup_accepted_by_policy = cleanup_can_be_non_blocking_for_content(report)
 
     if not report.cleanup_verified and not cleanup_accepted_by_policy:
         cleanup_retryable = bool(report.evidence.get("cleanupRetryable", False))
@@ -590,6 +635,15 @@ def evaluate_workflow_report(
                 evidence={
                     "cleanupVerified": False,
                     "cleanupRetryable": cleanup_retryable,
+                    "cleanupDecisionComplete": bool(
+                        report.evidence.get("cleanupDecisionComplete")
+                        or report.evidence.get("cleanupBoundaryCompleted")
+                    ),
+                    "reRunAttempted": bool(
+                        report.rerun_attempted
+                        or report.evidence.get("reRunAttempted")
+                        or report.evidence.get("rerunAttempted")
+                    ),
                 },
                 message="Workflow cleanup was not verified after placement.",
             )
@@ -730,6 +784,21 @@ def evaluate_workflow_report(
                 "cleanupVerified": report.cleanup_verified,
                 "cleanupAcceptedByPolicy": cleanup_accepted_by_policy,
                 "finalCleanupOptional": final_cleanup_optional,
+                "cleanupDecisionComplete": bool(
+                    report.evidence.get("cleanupDecisionComplete")
+                    or report.evidence.get("cleanupBoundaryCompleted")
+                ),
+                "reRunAttempted": bool(
+                    report.rerun_attempted
+                    or report.evidence.get("reRunAttempted")
+                    or report.evidence.get("rerunAttempted")
+                ),
+                "boardState": report.cleanup_state
+                or report.evidence.get("boardState"),
+                "contaminationCarriedForward": bool(
+                    report.contamination_carried_forward
+                    or report.evidence.get("contaminationCarriedForward")
+                ),
                 "identityStatus": identity,
                 "identityVerified": identity == "verified",
             },
@@ -763,17 +832,33 @@ def evaluate_idle_timeout_partial_success(
         return None
 
     # Reuse the normal Master quality gate instead of maintaining a second
-    # hardcoded ratio/count policy for watchdog recovery.  The only temporary
-    # override is the already-approved final-cleanup exception; all layout,
-    # runtime, placement, icon-ratio, and remix-ratio checks remain identical
-    # to a normal success decision.
+    # hardcoded ratio/count policy for watchdog recovery.  The watchdog may
+    # use the same content-only cleanup policy, but only when the cleanup
+    # coordinator explicitly recorded a completed decision and a Re-Run
+    # attempt.  All layout, runtime, placement, icon-ratio, and remix-ratio
+    # checks remain identical to a normal success decision.
     evidence = report.evidence
     previous_cleanup_flags = {
         "finalCleanupOptional": evidence.get("finalCleanupOptional"),
         "finalRemixContentComplete": evidence.get("finalRemixContentComplete"),
+        "contentSuccessWithUnverifiedCleanup": evidence.get(
+            "contentSuccessWithUnverifiedCleanup"
+        ),
     }
     evidence["finalCleanupOptional"] = True
     evidence["finalRemixContentComplete"] = True
+    cleanup_decision_complete = bool(
+        evidence.get("cleanupDecisionComplete")
+        or evidence.get("cleanupBoundaryCompleted")
+    )
+    rerun_attempted = bool(
+        report.rerun_attempted
+        or evidence.get("reRunAttempted")
+        or evidence.get("rerunAttempted")
+    )
+    evidence["contentSuccessWithUnverifiedCleanup"] = bool(
+        cleanup_decision_complete and rerun_attempted
+    )
     result = evaluate_workflow_report(report, mode="master", require_identity=False)
     if not result.passed:
         for key, previous in previous_cleanup_flags.items():
@@ -802,15 +887,20 @@ def evaluate_idle_timeout_partial_success(
         "normalIconsTotal": icon_total,
         "normalIconRatio": round(icon_ratio, 4),
         "qualityGateReused": "evaluate_workflow_report",
-        # These flags also let the downstream diagnostic contract report
-        # cleanup as accepted policy instead of turning a completed recording
-        # back into FAILED solely because the final board was not empty.
+        # Keep the content-only decision explicit in downstream diagnostics;
+        # cleanup itself remains unverified when the board could not be reset.
         "finalCleanupOptional": True,
         "finalRemixContentComplete": True,
-        "cleanupAcceptedByPolicy": True,
-        "cleanupNonBlocking": True,
+        "cleanupAcceptedByPolicy": bool(
+            result.evidence.get("cleanupAcceptedByPolicy", False)
+        ),
+        "cleanupNonBlocking": bool(
+            result.evidence.get("cleanupAcceptedByPolicy", False)
+        ),
         "cleanupVerified": bool(report.cleanup_verified),
         "cleanupStatus": cleanup_status,
+        "cleanupDecisionComplete": cleanup_decision_complete,
+        "reRunAttempted": rerun_attempted,
     }
     result.evidence.update(partial_evidence)
     result.message = (
