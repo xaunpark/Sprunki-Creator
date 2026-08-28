@@ -2040,6 +2040,18 @@ class SprunkiJSONGenerator:
             print(f"ERROR: CDP command error: {e}")
             return None
 
+    def _touch_watchdog_progress(self, substep, **metadata):
+        """Forward JSON-generation progress from the generator-owned player."""
+
+        player = getattr(self, "game_player", None)
+        reporter = getattr(player, "_touch_watchdog_progress", None)
+        if callable(reporter):
+            reporter(
+                "json_generation",
+                substep,
+                **metadata,
+            )
+
     def reset_state_for_new_job(self):
         """
         🔥 CRITICAL: Resets the state for a new JSON generation job.
@@ -2078,14 +2090,30 @@ class SprunkiJSONGenerator:
                 print("="*70)
                 print("Logic: A(initial) vs B(icon19) vs C(highest) - Stop when hasHorror=True")
                 print("="*70)
+                self._touch_watchdog_progress(
+                    "started",
+                    progress_token={"url": url, "stage": "json_generation_started"},
+                    progress_source="json_generator",
+                )
                 
                 # Setup game
                 if not self.navigate_and_prepare_game(url): 
                     return False, None, None
 
+                self._touch_watchdog_progress(
+                    "entry_ready",
+                    progress_token={"url": url, "stage": "game_entry_ready"},
+                    progress_source="json_generator",
+                )
+
                 # 🔧 SERVICE MODE FIX: Ensure window activation after game setup
                 print("🔧 Ensuring window activation after game setup...")
                 self.ensure_window_activation("post-game-setup")
+                self._touch_watchdog_progress(
+                    "window_ready",
+                    progress_token={"stage": "window_activation_completed"},
+                    progress_source="json_generator",
+                )
 
                 manual_profile = None
                 manual_profile_path = None
@@ -2120,6 +2148,11 @@ class SprunkiJSONGenerator:
                     self.game_player.cleanup_chrome_complete()
                     return False, None, None
                 print(f"✅ JavaScript environment ready. Current URL: {test_response}")
+                self._touch_watchdog_progress(
+                    "runtime_verified",
+                    progress_token={"stage": "javascript_environment_ready", "url": test_response},
+                    progress_source="json_generator",
+                )
                 
                 print("⏩ Preparing game entry...")
                 if manual_profile:
@@ -2130,6 +2163,14 @@ class SprunkiJSONGenerator:
                     ):
                         raise Exception(f"Manual profile replay failed: {manual_profile_path}")
                     print("✅ Manual prepare replay finished - Game should be ready for interaction")
+                    self._touch_watchdog_progress(
+                        "prepare_completed",
+                        progress_token={
+                            "stage": "manual_prepare_completed",
+                            "actions": len(manual_profile.get("prepareActions", [])),
+                        },
+                        progress_source="json_generator",
+                    )
                 else:
                     # ============================
                     # MULTI-TARGET SKIP INTRO (Sử dụng engine)
@@ -2217,6 +2258,15 @@ class SprunkiJSONGenerator:
                         print("   🔄 Standard method used as fallback")
 
                     print("✅ Skip intro phase finished - Game should be ready for interaction")
+                    self._touch_watchdog_progress(
+                        "prepare_completed",
+                        progress_token={
+                            "stage": "automatic_intro_skip_completed",
+                            "smartClicks": smart_clicks_performed,
+                            "blindClicks": blind_clicks_performed,
+                        },
+                        progress_source="json_generator",
+                    )
 
                 ### ========Xong phần SKIP INTRO ======== ###
 
@@ -2233,6 +2283,11 @@ class SprunkiJSONGenerator:
                 # Hàm này sẽ inject các hàm JS cần thiết vào trang web.
                 if self.game_player.setup_dual_verification_system():
                     print("✅ DUAL Verification system is now ready for use in tests.")
+                    self._touch_watchdog_progress(
+                        "verification_ready",
+                        progress_token={"stage": "dual_verification_ready"},
+                        progress_source="json_generator",
+                    )
                 else:
                     print("⚠️ DUAL Verification setup failed. Control detection will be less reliable.")
                     # Không dừng lại, nhưng cần lưu ý rằng xác minh có thể thất bại.
@@ -2285,6 +2340,15 @@ class SprunkiJSONGenerator:
                 if 'failure_reason' in game_control_details:
                     print(f"   Failure Reason: {game_control_details['failure_reason']}")
                 print("="*70)
+                self._touch_watchdog_progress(
+                    "control_detection_completed",
+                    progress_token={
+                        "stage": "control_detection_completed",
+                        "controlType": game_control_type,
+                        "method": game_control_details.get("method"),
+                    },
+                    progress_source="json_generator",
+                )
 
                 print("📊 Horror detection disabled by showcase-only policy...")
 
@@ -2295,6 +2359,11 @@ class SprunkiJSONGenerator:
                     # ============================
                     print("\n📄 Extracting final full layout...")
                     
+                    self._touch_watchdog_progress(
+                        "layout_capture_started",
+                        progress_token={"stage": "layout_capture_started"},
+                        progress_source="json_generator",
+                    )
                     layout_state = None
                     if manual_profile:
                         layout_state = self._build_manual_layout_state(ws, manual_profile)
@@ -2332,6 +2401,15 @@ class SprunkiJSONGenerator:
                     
                     print("✅ Final layout captured successfully")
                     layout_state.get('layout', {}).pop('recordingArea', None)
+                    self._touch_watchdog_progress(
+                        "layout_captured",
+                        progress_token={
+                            "stage": "layout_captured",
+                            "iconCount": len(layout_state.get("layout", {}).get("icons", []) or []),
+                            "slotCount": len(layout_state.get("layout", {}).get("slots", []) or []),
+                        },
+                        progress_source="json_generator",
+                    )
 
                 finally:
                     # Single WebSocket cleanup
@@ -2371,10 +2449,23 @@ class SprunkiJSONGenerator:
                     self.game_player.cleanup_chrome_complete()
                     return False, None, None
                 self.save_icon_identity_sidecar(final_json, json_file_path, layout_state.get('iconIdentityEvidence', {}))
+                self._touch_watchdog_progress(
+                    "json_saved",
+                    progress_token={
+                        "stage": "json_saved",
+                        "filename": os.path.basename(json_file_path),
+                    },
+                    progress_source="json_generator",
+                )
 
                 print(f"\n🎯 SIMPLIFIED COMPLETE LOGIC COMPLETED!")
                 print(f"✅ hasHorror Detection: {final_has_horror}")
                 print(f"✅ Detection Method: {final_detection_method}")
+                self._touch_watchdog_progress(
+                    "completed",
+                    progress_token={"stage": "json_generation_completed"},
+                    progress_source="json_generator",
+                )
 
                 self.game_player.cleanup_chrome_complete()
                 return True, json_file_path, final_json

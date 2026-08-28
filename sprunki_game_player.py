@@ -611,6 +611,21 @@ class SprunkiGamePlayer:
             except Exception as exc:
                 self.logger.debug("Watchdog progress callback ignored: %s", exc)
 
+    @staticmethod
+    def _stable_watchdog_probe_token(payload) -> str:
+        """Build a compact token for comparing successive load probes."""
+
+        try:
+            return json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                default=str,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return repr(payload)
+
     def _cleanup_input_budget(self):
         """Reserve enough input budget for one complete cleanup attempt.
 
@@ -2612,6 +2627,20 @@ class SprunkiGamePlayer:
                 self.page_verification_criteria = self.page_verification.get('criteria', {})
                 self.page_verification_retries = self.page_verification.get('max_retries', 3)
                 self.stabilization_wait = self.page_verification.get('stabilization_wait_seconds', 3)
+                page_adaptive = self.page_verification.get('adaptive_loading', {})
+                if not isinstance(page_adaptive, dict):
+                    page_adaptive = {}
+                self.page_verification_adaptive_enabled = bool(
+                    page_adaptive.get('enabled', True)
+                )
+                self.page_verification_max_timeout = max(
+                    self.page_verification_timeout,
+                    float(page_adaptive.get('max_timeout_ms', 360000)) / 1000.0,
+                )
+                self.page_verification_progress_extension = max(
+                    0.0,
+                    float(page_adaptive.get('progress_extension_ms', 30000)) / 1000.0,
+                )
                 
                 # Game load verification settings
                 self.game_verification = self.app_config.get('game_load_verification', {})
@@ -2622,6 +2651,20 @@ class SprunkiGamePlayer:
                 self.min_containers_required = self.game_verification.get('min_containers_required', 1)
                 self.check_react_components = self.game_verification.get('check_react_components', True)
                 self.check_run_button_dom = self.game_verification.get('check_run_button_dom', True)
+                game_adaptive = self.game_verification.get('adaptive_loading', {})
+                if not isinstance(game_adaptive, dict):
+                    game_adaptive = {}
+                self.game_verification_adaptive_enabled = bool(
+                    game_adaptive.get('enabled', True)
+                )
+                self.game_verification_max_timeout = max(
+                    self.game_verification_timeout,
+                    float(game_adaptive.get('max_timeout_ms', 480000)) / 1000.0,
+                )
+                self.game_verification_progress_extension = max(
+                    0.0,
+                    float(game_adaptive.get('progress_extension_ms', 30000)) / 1000.0,
+                )
                 
                 print(f"âœ… Verification config loaded:")
                 print(f"   Page verification: {'âœ… Enabled' if self.page_verification_enabled else 'âŒ Disabled'}")
@@ -2636,6 +2679,12 @@ class SprunkiGamePlayer:
                 self.game_verification_enabled = True
                 self.page_verification_timeout = 120
                 self.game_verification_timeout = 90
+                self.page_verification_adaptive_enabled = True
+                self.page_verification_max_timeout = 360
+                self.page_verification_progress_extension = 30
+                self.game_verification_adaptive_enabled = True
+                self.game_verification_max_timeout = 480
+                self.game_verification_progress_extension = 30
                 self.page_verification_interval = 2
                 self.game_verification_interval = 2
                 self.stabilization_wait = 3
@@ -3134,8 +3183,12 @@ class SprunkiGamePlayer:
 
     def verify_page_fully_loaded(self, target_url):
         """
-        ðŸ” Smart Page Load Verification System
-        Checks if page is fully loaded before proceeding with image detection
+        Smart Page Load Verification System.
+
+        A slow page is allowed to continue only while observable DOM or
+        resource evidence changes.  Identical probes cannot keep the page
+        alive forever; both the initial stall window and the absolute adaptive
+        cap remain bounded.
         """
         try:
             if not self.page_verification_enabled:
@@ -3165,7 +3218,10 @@ class SprunkiGamePlayer:
                     },
                     networkActivity: {
                         pendingRequests: 0,
-                        estimatedIdle: true
+                        estimatedIdle: true,
+                        resourceCount: 0,
+                        transferredBytes: 0,
+                        lastResponseEnd: 0
                     },
                     currentUrl: window.location.href,
                     timestamp: Date.now()
@@ -3201,6 +3257,17 @@ class SprunkiGamePlayer:
                             results.networkActivity.loadComplete = nav.loadEventEnd > 0;
                             results.networkActivity.domComplete = nav.domComplete > 0;
                         }
+                        const resources = window.performance.getEntriesByType('resource') || [];
+                        results.networkActivity.resourceCount = resources.length;
+                        resources.forEach(resource => {
+                            results.networkActivity.transferredBytes += Number(
+                                resource.transferSize || resource.encodedBodySize || 0
+                            );
+                            results.networkActivity.lastResponseEnd = Math.max(
+                                results.networkActivity.lastResponseEnd,
+                                Number(resource.responseEnd || 0)
+                            );
+                        });
                     }
                 } catch (e) {
                     console.log('Network activity check failed:', e);
@@ -3218,11 +3285,56 @@ class SprunkiGamePlayer:
                 return results;
             })();
             """
-            
-            start_time = time.time()
-            max_retries = self.page_verification_retries
-            
-            for attempt in range(1, max_retries + 1):
+
+            start_time = time.monotonic()
+            base_timeout = max(float(self.page_verification_timeout), 0.1)
+            adaptive_enabled = bool(
+                getattr(self, "page_verification_adaptive_enabled", True)
+            )
+            max_timeout = max(
+                base_timeout,
+                float(
+                    getattr(
+                        self,
+                        "page_verification_max_timeout",
+                        base_timeout,
+                    )
+                ),
+            ) if adaptive_enabled and timeout_override is None else base_timeout
+            progress_extension = max(
+                0.0,
+                float(
+                    getattr(
+                        self,
+                        "page_verification_progress_extension",
+                        30.0,
+                    )
+                ),
+            )
+            interval = max(float(self.page_verification_interval), 0.1)
+            configured_retries = max(1, int(self.page_verification_retries))
+            max_retries = (
+                max(20, int(math.ceil(max_timeout / interval)) + 5)
+                if adaptive_enabled
+                else configured_retries
+            )
+            absolute_deadline = start_time + max_timeout
+            progress_deadline = start_time + base_timeout
+            last_progress_at = start_time
+            last_progress_token = None
+            progress_extensions = 0
+
+            print(
+                "   Adaptive load budget: "
+                f"initial={base_timeout:.1f}s, max={max_timeout:.1f}s, "
+                f"extension={progress_extension:.1f}s"
+                if adaptive_enabled
+                else "   Adaptive load budget: disabled"
+            )
+
+            attempt = 0
+            while attempt < max_retries:
+                attempt += 1
                 if self.stop_event.is_set():
                     return QualityGateResult.failure(
                         "workflow_stopped",
@@ -3240,6 +3352,52 @@ class SprunkiGamePlayer:
                     loading_spinners = verification_result.get('loadingSpinners', {})
                     ready_score = verification_result.get('readyScore', 0)
                     is_ready = verification_result.get('isReady', False)
+                    network_activity = verification_result.get('networkActivity', {})
+                    probe_token = self._stable_watchdog_probe_token(
+                        {
+                            "documentState": document_state,
+                            "basicElements": {
+                                "hasBody": bool(basic_elements.get('hasBody')),
+                                "hasHead": bool(basic_elements.get('hasHead')),
+                                "bodyChildren": basic_elements.get('bodyChildren'),
+                            },
+                            "loadingSpinners": {
+                                "count": loading_spinners.get('count'),
+                                "types": loading_spinners.get('types', []),
+                            },
+                            "network": {
+                                "resourceCount": network_activity.get('resourceCount'),
+                                "transferredBytes": network_activity.get('transferredBytes'),
+                                "lastResponseEnd": network_activity.get('lastResponseEnd'),
+                            },
+                            "currentUrl": verification_result.get('currentUrl'),
+                        }
+                    )
+                    now = time.monotonic()
+                    token_changed = probe_token != last_progress_token
+                    if token_changed:
+                        last_progress_token = probe_token
+                        last_progress_at = now
+                        if adaptive_enabled:
+                            progress_deadline = min(
+                                absolute_deadline,
+                                now + base_timeout + (
+                                    progress_extension
+                                    if progress_extensions > 0
+                                    else 0.0
+                                ),
+                            )
+                            progress_extensions += 1
+                    self._touch_watchdog_progress(
+                        "runtime_entry",
+                        "page_verification_probe",
+                        progress_token=probe_token,
+                        progress_source="page_load_probe",
+                        progress_observed=bool(token_changed),
+                        loading_active=not bool(is_ready),
+                        attempt=attempt,
+                        elapsed_seconds=round(now - start_time, 3),
+                    )
                     
                     print(f"   ðŸ“Š Document state: {document_state}")
                     print(f"   ðŸ“Š Basic elements: Body={basic_elements.get('hasBody')}, Head={basic_elements.get('hasHead')}, Children={basic_elements.get('bodyChildren', 0)}")
@@ -3248,11 +3406,24 @@ class SprunkiGamePlayer:
                     print(f"   ðŸ“Š Overall assessment: {'âœ… READY' if is_ready else 'â³ NOT READY'}")
                     
                     if is_ready:
-                        elapsed = time.time() - start_time
+                        elapsed = time.monotonic() - start_time
                         print(f"âœ… PAGE VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
                         print("="*70)
                         return QualityGateResult.pass_result(
-                            evidence=verification_result,
+                            evidence={
+                                **verification_result,
+                                "adaptiveLoading": {
+                                    "enabled": adaptive_enabled,
+                                    "initialTimeoutSeconds": base_timeout,
+                                    "maxTimeoutSeconds": max_timeout,
+                                    "progressExtensionSeconds": progress_extension,
+                                    "progressExtensions": progress_extensions,
+                                    "lastProgressAgeSeconds": round(
+                                        time.monotonic() - last_progress_at,
+                                        3,
+                                    ),
+                                },
+                            },
                             message="Page verification passed.",
                         )
                     else:
@@ -3266,32 +3437,92 @@ class SprunkiGamePlayer:
                 
                 else:
                     print(f"   âš ï¸ Verification JavaScript failed, using fallback check")
+                    self._touch_watchdog_progress(
+                        "runtime_entry",
+                        "page_verification_probe",
+                        observation_only=True,
+                        progress_source="page_load_probe_failed",
+                        progress_observed=False,
+                        attempt=attempt,
+                    )
                     # Fallback: Simple document ready check
                     simple_check = self._execute_verification_js("document.readyState")
                     if simple_check == 'complete':
                         print(f"   âœ… Fallback check passed: document.readyState = complete")
+                        self._touch_watchdog_progress(
+                            "runtime_entry",
+                            "page_verification_fallback_ready",
+                            progress_token={
+                                "fallback": "document.readyState",
+                                "state": simple_check,
+                            },
+                            progress_source="page_load_fallback",
+                        )
                         return QualityGateResult.pass_result(
                             evidence={"fallback": "document.readyState", "state": simple_check},
                             message="Page verification passed using readyState fallback.",
                         )
                 
-                # Check timeout
-                elapsed = time.time() - start_time
-                if elapsed > self.page_verification_timeout:
-                    print(f"âš ï¸ Page verification timeout ({self.page_verification_timeout}s exceeded)")
-                    print("   Verification is UNKNOWN; workflow must not continue as success.")
+                # A repeated identical probe does not extend the budget. Only
+                # changing DOM/resource evidence can keep a slow page alive.
+                now = time.monotonic()
+                elapsed = now - start_time
+                if now >= absolute_deadline:
+                    print(
+                        "âš ï¸ Page verification phase cap exceeded "
+                        f"({max_timeout:.1f}s)"
+                    )
                     return QualityGateResult.failure(
                         "runtime_verification_unknown",
                         status="UNKNOWN",
                         retryable=True,
-                        evidence={"attempt": attempt, "timeoutSeconds": self.page_verification_timeout},
-                        message="Page verification timed out.",
+                        evidence={
+                            "attempt": attempt,
+                            "timeoutSeconds": base_timeout,
+                            "adaptiveMaxTimeoutSeconds": max_timeout,
+                            "adaptiveTimeoutReason": "phase_max_timeout",
+                            "elapsedSeconds": round(elapsed, 3),
+                            "lastProgressAgeSeconds": round(
+                                now - last_progress_at,
+                                3,
+                            ),
+                            "progressExtensions": progress_extensions,
+                        },
+                        message="Page verification exceeded its bounded phase limit.",
+                    )
+                if now >= progress_deadline:
+                    print(
+                        "âš ï¸ Page verification stalled: no meaningful "
+                        f"progress for {now - last_progress_at:.1f}s"
+                    )
+                    return QualityGateResult.failure(
+                        "runtime_verification_unknown",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            "attempt": attempt,
+                            "timeoutSeconds": base_timeout,
+                            "adaptiveMaxTimeoutSeconds": max_timeout,
+                            "adaptiveTimeoutReason": "no_meaningful_progress",
+                            "elapsedSeconds": round(elapsed, 3),
+                            "lastProgressAgeSeconds": round(
+                                now - last_progress_at,
+                                3,
+                            ),
+                            "progressExtensions": progress_extensions,
+                        },
+                        message="Page verification stalled without meaningful progress.",
                     )
                 
                 # Wait before next attempt
                 if attempt < max_retries:
-                    print(f"   â³ Waiting {self.page_verification_interval}s before next check...")
-                    time.sleep(self.page_verification_interval)
+                    print(f"   â³ Waiting {interval}s before next check...")
+                    time.sleep(
+                        min(
+                            interval,
+                            max(progress_deadline - time.monotonic(), 0.05),
+                        )
+                    )
             
             # All attempts failed; do not fail open.
             print(f"âš ï¸ Page verification failed after {max_retries} attempts")
@@ -3299,7 +3530,17 @@ class SprunkiGamePlayer:
                 "runtime_verification_unknown",
                 status="UNKNOWN",
                 retryable=True,
-                evidence={"attempts": max_retries},
+                evidence={
+                    "attempts": max_retries,
+                    "timeoutSeconds": base_timeout,
+                    "adaptiveMaxTimeoutSeconds": max_timeout,
+                    "adaptiveTimeoutReason": "attempt_budget_exhausted",
+                    "lastProgressAgeSeconds": round(
+                        time.monotonic() - last_progress_at,
+                        3,
+                    ),
+                    "progressExtensions": progress_extensions,
+                },
                 message="Page verification remained inconclusive.",
             )
 
@@ -3361,6 +3602,14 @@ class SprunkiGamePlayer:
                         details: []
                     }},
                     runButtonInDOM: false,
+                    documentState: document.readyState,
+                    bodyChildren: document.body ? document.body.children.length : 0,
+                    loadingSpinners: 0,
+                    networkActivity: {{
+                        resourceCount: 0,
+                        transferredBytes: 0,
+                        lastResponseEnd: 0
+                    }},
                     errorPage: {{
                         detected: false,
                         pattern: null,
@@ -3384,6 +3633,27 @@ class SprunkiGamePlayer:
                 const normalize = value => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
                 const normalizedTitle = normalize(results.errorPage.title);
                 const normalizedHeadings = headingCandidates.map(normalize);
+
+                // Resource progress is a useful slow-load signal.  Do not
+                // treat the mere presence of a pending request as progress;
+                // use changing resource counts/bytes instead.
+                try {{
+                    const resources = window.performance?.getEntriesByType
+                        ? window.performance.getEntriesByType('resource')
+                        : [];
+                    results.networkActivity.resourceCount = resources.length;
+                    resources.forEach(resource => {{
+                        results.networkActivity.transferredBytes += Number(
+                            resource.transferSize || resource.encodedBodySize || 0
+                        );
+                        results.networkActivity.lastResponseEnd = Math.max(
+                            results.networkActivity.lastResponseEnd,
+                            Number(resource.responseEnd || 0)
+                        );
+                    }});
+                }} catch (e) {{
+                    console.log('Resource progress probe failed:', e);
+                }}
 
                 // Match only exact error titles/headings. Do not scan body text;
                 // comments can contain accidental sequences such as "404".
@@ -3541,10 +3811,54 @@ class SprunkiGamePlayer:
             }})();
             """
             
-            start_time = time.time()
-            max_attempts = 20
-            
-            for attempt in range(1, max_attempts + 1):
+            start_time = time.monotonic()
+            base_timeout = max(float(timeout), 0.1)
+            adaptive_enabled = bool(
+                getattr(self, "game_verification_adaptive_enabled", True)
+            )
+            max_timeout = max(
+                base_timeout,
+                float(
+                    getattr(
+                        self,
+                        "game_verification_max_timeout",
+                        base_timeout,
+                    )
+                ),
+            ) if adaptive_enabled else base_timeout
+            progress_extension = max(
+                0.0,
+                float(
+                    getattr(
+                        self,
+                        "game_verification_progress_extension",
+                        30.0,
+                    )
+                ),
+            )
+            absolute_deadline = start_time + max_timeout
+            progress_deadline = start_time + base_timeout
+            last_progress_at = start_time
+            last_progress_token = None
+            progress_extensions = 0
+            interval = max(float(self.game_verification_interval), 0.1)
+            max_attempts = (
+                max(20, int(math.ceil(max_timeout / interval)) + 5)
+                if adaptive_enabled
+                else 20
+            )
+            attempt = 0
+
+            print(
+                "   Adaptive load budget: "
+                f"initial={base_timeout:.1f}s, max={max_timeout:.1f}s, "
+                f"extension={progress_extension:.1f}s"
+                if adaptive_enabled
+                else "   Adaptive load budget: disabled"
+            )
+
+            while attempt < max_attempts:
+                attempt += 1
                 if self.stop_event.is_set():
                     return QualityGateResult.failure(
                         "workflow_stopped",
@@ -3573,6 +3887,60 @@ class SprunkiGamePlayer:
                             evidence=error_page,
                             message="Game verification detected an error page.",
                         )
+
+                    container_token = [
+                        {
+                            "selector": container.get("selector"),
+                            "index": container.get("index"),
+                            "visible": bool(container.get("visible")),
+                            "hasChildren": bool(container.get("hasChildren")),
+                            "dimensions": container.get("dimensions"),
+                        }
+                        for container in game_containers[:20]
+                        if isinstance(container, dict)
+                    ]
+                    network_activity = game_result.get("networkActivity", {})
+                    probe_token = self._stable_watchdog_probe_token(
+                        {
+                            "documentState": game_result.get("documentState"),
+                            "bodyChildren": game_result.get("bodyChildren"),
+                            "loadingSpinners": game_result.get("loadingSpinners"),
+                            "containers": container_token,
+                            "reactFound": bool(react_components.get("found")),
+                            "reactCount": react_components.get("count"),
+                            "runButton": bool(run_button_in_dom),
+                            "network": {
+                                "resourceCount": network_activity.get("resourceCount"),
+                                "transferredBytes": network_activity.get("transferredBytes"),
+                                "lastResponseEnd": network_activity.get("lastResponseEnd"),
+                            },
+                        }
+                    )
+                    now = time.monotonic()
+                    token_changed = probe_token != last_progress_token
+                    if token_changed:
+                        last_progress_token = probe_token
+                        last_progress_at = now
+                        if adaptive_enabled:
+                            progress_deadline = min(
+                                absolute_deadline,
+                                now + base_timeout + (
+                                    progress_extension
+                                    if progress_extensions > 0
+                                    else 0.0
+                                ),
+                            )
+                            progress_extensions += 1
+                    self._touch_watchdog_progress(
+                        "runtime_entry",
+                        "game_verification_probe",
+                        progress_token=probe_token,
+                        progress_source="game_component_probe",
+                        progress_observed=bool(token_changed),
+                        loading_active=not bool(overall_ready),
+                        attempt=attempt,
+                        elapsed_seconds=round(now - start_time, 3),
+                    )
                     
                     print(f"   ðŸŽ¯ Game containers found: {len(game_containers)}")
                     for container in game_containers[:3]:  # Show first 3
@@ -3589,11 +3957,24 @@ class SprunkiGamePlayer:
                     print(f"   ðŸŽ¯ Overall game ready: {'âœ… YES' if overall_ready else 'âŒ NO'}")
                     
                     if overall_ready:
-                        elapsed = time.time() - start_time
+                        elapsed = time.monotonic() - start_time
                         print(f"âœ… GAME VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
                         print("="*70)
                         return QualityGateResult.pass_result(
-                            evidence=game_result,
+                            evidence={
+                                **game_result,
+                                "adaptiveLoading": {
+                                    "enabled": adaptive_enabled,
+                                    "initialTimeoutSeconds": base_timeout,
+                                    "maxTimeoutSeconds": max_timeout,
+                                    "progressExtensionSeconds": progress_extension,
+                                    "progressExtensions": progress_extensions,
+                                    "lastProgressAgeSeconds": round(
+                                        time.monotonic() - last_progress_at,
+                                        3,
+                                    ),
+                                },
+                            },
                             message="Game components verified.",
                         )
                     else:
@@ -3606,23 +3987,75 @@ class SprunkiGamePlayer:
                 
                 else:
                     print(f"   âš ï¸ Game verification JavaScript failed")
+                    self._touch_watchdog_progress(
+                        "runtime_entry",
+                        "game_verification_probe",
+                        observation_only=True,
+                        progress_source="game_component_probe_failed",
+                        progress_observed=False,
+                        attempt=attempt,
+                    )
                 
-                # [MODIFIED] Check timeout using the determined timeout value
-                elapsed = time.time() - start_time
-                if elapsed > timeout:
-                    print(f"âš ï¸  Game verification timeout ({timeout}s exceeded)")
+                # A repeated identical probe does not extend the budget. Only
+                # changing DOM/runtime/resource evidence can keep a slow load
+                # alive, and the absolute phase cap always wins.
+                now = time.monotonic()
+                elapsed = now - start_time
+                if now >= absolute_deadline:
+                    print(
+                        "âš ï¸  Game verification phase cap exceeded "
+                        f"({max_timeout:.1f}s)"
+                    )
                     return QualityGateResult.failure(
                         "runtime_verification_unknown",
                         status="UNKNOWN",
                         retryable=True,
-                        evidence={"attempt": attempt, "timeoutSeconds": timeout},
-                        message="Game component verification timed out.",
+                        evidence={
+                            "attempt": attempt,
+                            "timeoutSeconds": base_timeout,
+                            "adaptiveMaxTimeoutSeconds": max_timeout,
+                            "adaptiveTimeoutReason": "phase_max_timeout",
+                            "elapsedSeconds": round(elapsed, 3),
+                            "lastProgressAgeSeconds": round(
+                                now - last_progress_at,
+                                3,
+                            ),
+                            "progressExtensions": progress_extensions,
+                        },
+                        message="Game component verification exceeded its bounded phase limit.",
+                    )
+                if now >= progress_deadline:
+                    print(
+                        "âš ï¸  Game verification stalled: no meaningful "
+                        f"progress for {now - last_progress_at:.1f}s"
+                    )
+                    return QualityGateResult.failure(
+                        "runtime_verification_unknown",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            "attempt": attempt,
+                            "timeoutSeconds": base_timeout,
+                            "adaptiveMaxTimeoutSeconds": max_timeout,
+                            "adaptiveTimeoutReason": "no_meaningful_progress",
+                            "elapsedSeconds": round(elapsed, 3),
+                            "lastProgressAgeSeconds": round(
+                                now - last_progress_at,
+                                3,
+                            ),
+                            "progressExtensions": progress_extensions,
+                        },
+                        message="Game component verification stalled without meaningful progress.",
                     )
                 
-                # Wait before next attempt
                 if attempt < max_attempts:
                     print(f"   â ³ Waiting {self.game_verification_interval}s before next check...")
-                    time.sleep(self.game_verification_interval)
+                    time.sleep(
+                        min(
+                            interval,
+                            max(progress_deadline - time.monotonic(), 0.05),
+                        )
+                    )
             
             # All attempts failed within the timeout
             print(f"âš ï¸  Game verification failed after {max_attempts} attempts")
@@ -3630,7 +4063,17 @@ class SprunkiGamePlayer:
                 "runtime_verification_unknown",
                 status="UNKNOWN",
                 retryable=True,
-                evidence={"attempts": max_attempts},
+                evidence={
+                    "attempts": max_attempts,
+                    "timeoutSeconds": base_timeout,
+                    "adaptiveMaxTimeoutSeconds": max_timeout,
+                    "adaptiveTimeoutReason": "attempt_budget_exhausted",
+                    "lastProgressAgeSeconds": round(
+                        time.monotonic() - last_progress_at,
+                        3,
+                    ),
+                    "progressExtensions": progress_extensions,
+                },
                 message="Game component verification remained inconclusive.",
             )
             
@@ -4359,6 +4802,12 @@ class SprunkiGamePlayer:
                 "tested": [],
                 "verification": UNKNOWN,
             }
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "navigation_started",
+                progress_token={"stage": "navigation_started", "url": url},
+                progress_source="game_navigation",
+            )
 
             preflight_result = self.preflight_url_playable(url)
             if not preflight_result:
@@ -4368,6 +4817,12 @@ class SprunkiGamePlayer:
                     f"{getattr(preflight_result, 'failure_code', 'unknown')}"
                 )
                 return False
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "url_preflight_passed",
+                progress_token={"stage": "url_preflight_passed", "url": url},
+                progress_source="game_navigation",
+            )
 
             # --- PHASE 1: BROWSER LAUNCH (Không thay đổi) ---
             print("PHASE 1: Launching Browser and Loading Page...")
@@ -4419,6 +4874,12 @@ class SprunkiGamePlayer:
             ]
             
             self.chrome_process = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "browser_launched",
+                progress_token={"stage": "browser_launched", "url": url},
+                progress_source="game_navigation",
+            )
 
             print(f"   -> Waiting for browser initialization...")
             time.sleep(3) # Chờ 1 chút cho Chrome hiện lên hẳn
@@ -4481,6 +4942,12 @@ class SprunkiGamePlayer:
             self.safe_maximize_window(game_window)
             self.ensure_game_focus_light()
             print("   -> Browser is ready.\n")
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "browser_ready",
+                progress_token={"stage": "browser_ready", "url": url},
+                progress_source="game_navigation",
+            )
 
             # --- PHASE 2: PATIENTLY VERIFY GAME COMPONENTS (Logic quyết định duy nhất) ---
             # Đây là logic cốt lõi. Nếu trang là 404, nó sẽ không có component game và sẽ timeout.
@@ -4494,6 +4961,12 @@ class SprunkiGamePlayer:
                 )
                 self.cleanup_chrome_complete()
                 return False
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "error_page_check_passed",
+                progress_token={"stage": "error_page_check_passed", "url": url},
+                progress_source="game_navigation",
+            )
 
             print(f"PHASE 2: Patiently Verifying Game Components (Timeout: {self.game_verification_timeout}s)...")
             
@@ -4509,6 +4982,12 @@ class SprunkiGamePlayer:
                 return False
             
             print("   -> ✅ Game components found. The page is a valid game. Proceeding to interaction.\n")
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "components_verified",
+                progress_token={"stage": "game_components_verified", "url": url},
+                progress_source="game_navigation",
+            )
 
             # --- PHASE 3: INTERACTION (RUN & FULLSCREEN) ---
             print("PHASE 3: Interacting with Game Interface...")
@@ -4523,6 +5002,12 @@ class SprunkiGamePlayer:
                 print("❌ SETUP FAILED: Could not find or click the 'Run' button.")
                 self.cleanup_chrome_complete()
                 return False
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "run_verified",
+                progress_token={"stage": "run_button_verified", "url": url},
+                progress_source="game_navigation",
+            )
             
             print(f"   -> Waiting {self.game_load_wait}s for game to load after Run click...")
             time.sleep(self.game_load_wait)
@@ -4537,9 +5022,21 @@ class SprunkiGamePlayer:
                 print("❌ SETUP FAILED: Could not find or click the 'Fullscreen' button.")
                 self.cleanup_chrome_complete()
                 return False
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "fullscreen_verified",
+                progress_token={"stage": "fullscreen_verified", "url": url},
+                progress_source="game_navigation",
+            )
 
             self.press_f11_for_game_fullscreen()
 
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "navigation_completed",
+                progress_token={"stage": "navigation_completed", "url": url},
+                progress_source="game_navigation",
+            )
             print("\n✅ GAME SETUP COMPLETED SUCCESSFULLY. Ready for automation.")
             print("======================================================================")
             return True

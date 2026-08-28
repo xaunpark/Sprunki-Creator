@@ -6,6 +6,7 @@ import threading
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from tracker_reporting import build_tracker_diagnostic_report
 from watchdog_state import (
@@ -13,6 +14,8 @@ from watchdog_state import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_JOB_TIMEOUT_MINUTES,
     DEFAULT_MAX_FULL_RETRIES,
+    DEFAULT_MAX_PROGRESS_EXTENSIONS,
+    DEFAULT_PROGRESS_EXTENSION_SECONDS,
     DEFAULT_RETRY_MIN_REMAINING_SECONDS,
     WatchdogState,
     attempt_scoped_filename,
@@ -43,6 +46,16 @@ class WatchdogTests(unittest.TestCase):
             settings["retry_min_remaining_seconds"],
             DEFAULT_RETRY_MIN_REMAINING_SECONDS,
         )
+        self.assertTrue(settings["adaptive_enabled"])
+        self.assertEqual(settings["stall_timeout_seconds"], DEFAULT_IDLE_TIMEOUT_SECONDS)
+        self.assertEqual(
+            settings["progress_extension_seconds"],
+            DEFAULT_PROGRESS_EXTENSION_SECONDS,
+        )
+        self.assertEqual(
+            settings["max_progress_extensions"],
+            DEFAULT_MAX_PROGRESS_EXTENSIONS,
+        )
 
         invalid = {
             "processing.job_timeout_minutes": 0,
@@ -62,6 +75,185 @@ class WatchdogTests(unittest.TestCase):
             settings["retry_min_remaining_seconds"],
             DEFAULT_RETRY_MIN_REMAINING_SECONDS,
         )
+
+    def test_identical_probe_does_not_refresh_progress(self):
+        clock = FakeClock()
+        state = WatchdogState(
+            106,
+            hard_timeout_seconds=100,
+            idle_timeout_seconds=20,
+            adaptive_enabled=True,
+            stall_timeout_seconds=10,
+            progress_extension_seconds=5,
+            max_progress_extensions=2,
+            phase_max_seconds={"json_generation": 30},
+            clock=clock,
+        )
+
+        self.assertTrue(
+            state.observe(
+                "json_generation",
+                "probe",
+                progress_token={"resourceCount": 1},
+                progress_source="test",
+            )
+        )
+        initial = state.snapshot()
+        clock.advance(4)
+        self.assertFalse(
+            state.observe(
+                "json_generation",
+                "probe",
+                progress_token={"resourceCount": 1},
+                progress_source="test",
+            )
+        )
+        unchanged = state.snapshot()
+        self.assertEqual(
+            unchanged["last_progress_at_monotonic"],
+            initial["last_progress_at_monotonic"],
+        )
+        self.assertGreater(
+            unchanged["last_observed_at_monotonic"],
+            initial["last_observed_at_monotonic"],
+        )
+
+        clock.advance(6)
+        self.assertEqual(state.timeout_reason(), "idle_timeout")
+
+    def test_meaningful_probe_extends_only_until_phase_cap(self):
+        clock = FakeClock()
+        state = WatchdogState(
+            107,
+            hard_timeout_seconds=100,
+            idle_timeout_seconds=20,
+            adaptive_enabled=True,
+            stall_timeout_seconds=10,
+            progress_extension_seconds=5,
+            max_progress_extensions=2,
+            phase_max_seconds={"json_generation": 25},
+            clock=clock,
+        )
+
+        state.observe("json_generation", "probe", progress_token={"step": 1})
+        clock.advance(9)
+        state.observe("json_generation", "probe", progress_token={"step": 2})
+        first_extension = state.snapshot()
+        self.assertEqual(first_extension["phase_progress_extensions"], 1)
+        self.assertLessEqual(
+            first_extension["phase_deadline_at_monotonic"],
+            first_extension["phase_absolute_deadline_at_monotonic"],
+        )
+
+        clock.advance(9)
+        state.observe("json_generation", "probe", progress_token={"step": 3})
+        second_extension = state.snapshot()
+        self.assertEqual(second_extension["phase_progress_extensions"], 2)
+        self.assertEqual(
+            second_extension["phase_deadline_at_monotonic"],
+            second_extension["phase_absolute_deadline_at_monotonic"],
+        )
+
+        clock.advance(7)
+        self.assertEqual(state.timeout_reason(), "phase_timeout")
+
+    def test_adaptive_watchdog_settings_are_validated(self):
+        configured = {
+            "processing.job_timeout_minutes": 30,
+            "processing.watchdog_idle_timeout_seconds": 240,
+            "processing.watchdog_adaptive": {
+                "enabled": "false",
+                "stall_timeout_seconds": 90,
+                "progress_extension_seconds": 12,
+                "max_progress_extensions": 3,
+                "phase_max_seconds": {"json_generation": 300},
+            },
+        }
+        settings = load_watchdog_settings(
+            lambda key, default=None: configured.get(key, default)
+        )
+        self.assertFalse(settings["adaptive_enabled"])
+        self.assertEqual(settings["stall_timeout_seconds"], 90.0)
+        self.assertEqual(settings["progress_extension_seconds"], 12.0)
+        self.assertEqual(settings["max_progress_extensions"], 3)
+        self.assertEqual(settings["phase_max_seconds"]["json_generation"], 300.0)
+
+    def test_processing_manager_propagates_watchdog_callback_to_both_players(self):
+        from sprunki_ultimate_master import UnifiedProcessingManager
+
+        generator_player = SimpleNamespace()
+        controller_player = SimpleNamespace()
+        manager = object.__new__(UnifiedProcessingManager)
+        manager.json_generator = SimpleNamespace(game_player=generator_player)
+        manager.master_controller = SimpleNamespace(game_player=controller_player)
+        callback = object()
+
+        manager.set_watchdog_progress_callback(callback)
+
+        self.assertIs(manager.watchdog_progress_callback, callback)
+        self.assertIs(generator_player.watchdog_progress_callback, callback)
+        self.assertIs(controller_player.watchdog_progress_callback, callback)
+
+    def test_game_verification_accepts_bounded_slow_progress(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = object.__new__(SprunkiGamePlayer)
+        player.game_verification_enabled = True
+        player.game_verification_timeout = 1
+        player.game_verification_interval = 0.01
+        player.game_verification_adaptive_enabled = True
+        player.game_verification_max_timeout = 2
+        player.game_verification_progress_extension = 0.5
+        player.game_container_selectors = ["canvas"]
+        player.min_containers_required = 1
+        player.check_react_components = True
+        player.check_run_button_dom = True
+        player.stop_event = threading.Event()
+
+        def probe(step, ready=False):
+            return {
+                "gameContainers": [
+                    {
+                        "selector": "canvas",
+                        "index": 0,
+                        "visible": True,
+                        "hasChildren": True,
+                        "dimensions": f"{step}x100",
+                    }
+                ],
+                "reactComponents": {
+                    "found": ready,
+                    "count": step,
+                    "details": [{"element": "DIV"}] if ready else [],
+                },
+                "runButtonInDOM": ready,
+                "documentState": "complete" if ready else "loading",
+                "bodyChildren": step,
+                "loadingSpinners": 0 if ready else 1,
+                "networkActivity": {
+                    "resourceCount": step,
+                    "transferredBytes": step * 100,
+                    "lastResponseEnd": step * 10,
+                },
+                "errorPage": {"detected": False},
+                "overallReady": ready,
+            }
+
+        player._execute_verification_js = Mock(
+            side_effect=[probe(1), probe(2), probe(3, ready=True)]
+        )
+        player._touch_watchdog_progress = Mock()
+
+        with patch("sprunki_game_player.time.sleep", return_value=None):
+            result = player.verify_game_components_ready()
+
+        self.assertTrue(result.passed)
+        self.assertTrue(result.evidence["adaptiveLoading"]["enabled"])
+        self.assertGreaterEqual(
+            result.evidence["adaptiveLoading"]["progressExtensions"],
+            2,
+        )
+        self.assertEqual(player._execute_verification_js.call_count, 3)
 
     def test_progress_refreshes_idle_but_never_hard_deadline(self):
         clock = FakeClock()

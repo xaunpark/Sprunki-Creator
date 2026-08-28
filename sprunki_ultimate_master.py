@@ -701,6 +701,15 @@ class UnifiedProcessingManager:
 
     def set_watchdog_progress_callback(self, callback):
         self.watchdog_progress_callback = callback
+        # JSON discovery and video processing use different GamePlayer
+        # instances. Propagate the same callback to both so a slow, still
+        # progressing JSON load is visible to the job watchdog.
+        generator_player = getattr(getattr(self, "json_generator", None), "game_player", None)
+        if generator_player is not None:
+            generator_player.watchdog_progress_callback = callback
+        controller_player = getattr(self.master_controller, "game_player", None)
+        if controller_player is not None:
+            controller_player.watchdog_progress_callback = callback
 
     def touch_watchdog_progress(self, phase, substep=None, metadata=None):
         callback = self.watchdog_progress_callback
@@ -3476,6 +3485,11 @@ class SprunkiUltimateMaster:
             # 1. Tạo các component chính
             self.game_player = SprunkiGamePlayer(stop_event=active_stop_event)
             self.obs_controller = SprunkiController()
+            self.game_player.watchdog_progress_callback = getattr(
+                self.processing_manager,
+                "watchdog_progress_callback",
+                None,
+            )
             
             # 2. LIÊN KẾT CÁC COMPONENT
             # Gán obs_controller vào game_player để tất cả các hàm bên trong nó có thể truy cập

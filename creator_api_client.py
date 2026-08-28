@@ -1855,7 +1855,22 @@ class CreatorService:
     ) -> None:
         state = self._get_watchdog_state(queue_id)
         if state is not None:
-            state.touch(phase, substep, **metadata)
+            progress_token = metadata.pop("progress_token", None)
+            if progress_token is None and "progressToken" in metadata:
+                progress_token = metadata.pop("progressToken")
+            observation_only = bool(metadata.pop("observation_only", False))
+            if progress_token is not None or observation_only:
+                state.observe(
+                    phase,
+                    substep,
+                    progress_token=progress_token,
+                    force_progress=False,
+                    **metadata,
+                )
+            else:
+                # Legacy operation events are explicit progress events. They
+                # continue to refresh the idle window exactly as before.
+                state.touch(phase, substep, **metadata)
 
     def _watchdog_progress_callback(
         self,
@@ -1884,11 +1899,15 @@ class CreatorService:
                 return
 
             snapshot = state.snapshot()
-            reason = None
-            if snapshot["remaining_seconds"] <= 0:
-                reason = "hard_timeout"
-            elif snapshot["last_progress_age_seconds"] >= state.idle_timeout_seconds:
-                reason = "idle_timeout"
+            timeout_reason = getattr(state, "timeout_reason", None)
+            reason = timeout_reason() if callable(timeout_reason) else None
+            if reason is None:
+                # Compatibility for legacy test doubles and older state
+                # adapters that only expose the original idle fields.
+                if snapshot["remaining_seconds"] <= 0:
+                    reason = "hard_timeout"
+                elif snapshot["last_progress_age_seconds"] >= state.idle_timeout_seconds:
+                    reason = "idle_timeout"
 
             if reason:
                 event = state.mark_timeout(reason)
@@ -2682,6 +2701,20 @@ class CreatorService:
             queue_id,
             hard_timeout_seconds=self.watchdog_settings["hard_timeout_seconds"],
             idle_timeout_seconds=self.watchdog_settings["idle_timeout_seconds"],
+            adaptive_enabled=self.watchdog_settings.get("adaptive_enabled", True),
+            stall_timeout_seconds=self.watchdog_settings.get(
+                "stall_timeout_seconds",
+                self.watchdog_settings["idle_timeout_seconds"],
+            ),
+            progress_extension_seconds=self.watchdog_settings.get(
+                "progress_extension_seconds",
+                60.0,
+            ),
+            max_progress_extensions=self.watchdog_settings.get(
+                "max_progress_extensions",
+                8,
+            ),
+            phase_max_seconds=self.watchdog_settings.get("phase_max_seconds", {}),
         )
         self._register_watchdog_state(queue_id, watchdog_state)
         job_stop_event = threading.Event()
