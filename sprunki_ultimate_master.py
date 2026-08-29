@@ -1477,11 +1477,32 @@ class UnifiedProcessingManager:
             self.logger.info(f"Generating JSON for: {item.source_url}")
             
             success, json_path, json_data = self.json_generator.generate_complete_json(item.source_url)
-            
-            layout_quality = validate_playable_layout(json_data) if json_data else QualityGateResult.failure(
-                "manual_json_invalid",
-                message="JSON generator returned no data.",
+
+            generation_result = getattr(self.json_generator, "last_generation_result", None)
+            player_result = getattr(
+                getattr(self.json_generator, "game_player", None),
+                "last_setup_result",
+                None,
             )
+            # A classified loader/runtime failure must remain the primary
+            # result even if a partial JSON object happened to be returned.
+            # Otherwise loading failures are incorrectly relabelled as
+            # ``manual_json_invalid`` by layout validation.
+            if not success and isinstance(generation_result, QualityGateResult):
+                layout_quality = generation_result
+            elif not success and isinstance(player_result, QualityGateResult):
+                layout_quality = player_result
+            elif json_data:
+                layout_quality = validate_playable_layout(json_data)
+            elif isinstance(generation_result, QualityGateResult):
+                layout_quality = generation_result
+            elif isinstance(player_result, QualityGateResult):
+                layout_quality = player_result
+            else:
+                layout_quality = QualityGateResult.failure(
+                    "manual_json_invalid",
+                    message="JSON generator returned no data after no classified loading failure.",
+                )
             if success and json_data and layout_quality.passed:
                 item.json_path = json_path
                 item.json_data = json_data
@@ -1504,11 +1525,16 @@ class UnifiedProcessingManager:
             error_msg = f"JSON generation error: {str(e)}"
             self.logger.error(f"Error for {item.source_url}: {error_msg}", exc_info=True)
             
+            generation_result = getattr(self.json_generator, "last_generation_result", None)
+            failure_result = generation_result if isinstance(generation_result, QualityGateResult) else None
+            failure_code = failure_result.failure_code if failure_result else "manual_json_invalid"
+            failure_message = failure_result.message if failure_result else error_msg
+            failure_evidence = failure_result.evidence if failure_result else {"error": error_msg}
             self._record_quality_failure(
                 item,
-                "manual_json_invalid",
-                error_msg,
-                evidence={"error": error_msg},
+                failure_code,
+                failure_message,
+                evidence=failure_evidence,
             )
             item.json_generation_status = "failure"
             return False
@@ -1843,7 +1869,9 @@ class UnifiedProcessingManager:
             "master": master_report.as_dict() if isinstance(master_report, WorkflowReport) else None,
             "individual": individual_report.as_dict() if isinstance(individual_report, WorkflowReport) else None,
         }
-        report.evidence["entryStrategy"] = {
+        report.evidence["entryStrategy"] = dict(
+            getattr(player, "entry_strategy", {}) or {}
+        ) if player else {
             "selected": report.entry_candidate,
             "tested": report.tested_candidates,
             "runtimeState": report.runtime_state,

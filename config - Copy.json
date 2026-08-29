@@ -92,7 +92,7 @@
       "no_loading_spinners": true,
       "basic_elements": true
     },
-    "max_retries": 999,
+    "max_retries": 3,
     "stabilization_wait_seconds": 3
   },
   "game_load_verification": {

@@ -79,6 +79,31 @@ _FAILURE_CONTEXT = {
         "Không chứng minh được runtime gameplay.",
         "Retry browser/runtime verification và kiểm tra entry candidate.",
     ),
+    "game_loading_transient": (
+        "runtime_entry",
+        "Game đang tải, chưa đủ bằng chứng để bắt đầu.",
+        "Theo dõi lại readiness pipeline; chưa gửi thao tác prepare khi stage chưa active.",
+    ),
+    "game_load_stalled": (
+        "runtime_entry",
+        "Game dừng tiến trình tải trước khi xuất hiện Run control thật.",
+        "Retry entry một lần theo bounded recovery và kiểm tra lại kết nối/render.",
+    ),
+    "game_load_timeout": (
+        "runtime_entry",
+        "Game vượt quá thời gian tải tối đa.",
+        "Retry job hoặc kiểm tra mod/network; không tiếp tục bằng DOM giả.",
+    ),
+    "run_button_not_verified": (
+        "runtime_entry",
+        "Không xác minh được nút Run đúng trên game page hiện tại.",
+        "Kiểm tra target/session/frame và chạy lại entry pipeline.",
+    ),
+    "post_run_runtime_not_ready": (
+        "runtime_entry",
+        "Run đã được gửi nhưng runtime sau Run chưa hoạt động.",
+        "Chờ/retry entry trong bounded budget; không replay prepare sớm.",
+    ),
     "placement_not_verified": (
         "placement",
         "Placement không chứng minh được state transition.",
@@ -760,6 +785,45 @@ def build_tracker_diagnostic_report(
         report.get("content_success_with_unverified_cleanup")
         or report_evidence.get("contentSuccessWithUnverifiedCleanup")
     )
+    entry_strategy_evidence = (
+        report_evidence.get("entryStrategy")
+        if isinstance(report_evidence.get("entryStrategy"), dict)
+        else {}
+    )
+    readiness_evidence = (
+        entry_strategy_evidence.get("readiness")
+        if isinstance(entry_strategy_evidence.get("readiness"), dict)
+        else {}
+    )
+    load_result = readiness_evidence.get("load") if isinstance(readiness_evidence.get("load"), dict) else {}
+    load_evidence = load_result.get("evidence") if isinstance(load_result.get("evidence"), dict) else {}
+    if not load_evidence:
+        load_evidence = (
+            entry_strategy_evidence.get("loadEvidence")
+            if isinstance(entry_strategy_evidence.get("loadEvidence"), dict)
+            else {}
+        )
+    if not load_evidence:
+        load_evidence = {
+            key: report_evidence.get(key)
+            for key in (
+                "loadStatus",
+                "loadElapsedSeconds",
+                "lastLoadingPercent",
+                "lastProgressAgeSeconds",
+                "probeAttempts",
+                "loadRecoveryAttempted",
+                "loadRecoveryCount",
+                "entryAttemptId",
+                "runButtonEvidence",
+                "pageIdentity",
+            )
+            if key in report_evidence
+        }
+    run_evidence = readiness_evidence.get("run") if isinstance(readiness_evidence.get("run"), dict) else {}
+    if isinstance(run_evidence.get("evidence"), dict):
+        run_evidence = run_evidence.get("evidence")
+    page_identity = load_evidence.get("pageIdentity") or run_evidence.get("pageIdentity") or {}
     cleanup_accepted_by_policy = bool(
         report.get("cleanup_verified") is not True
         and content_success_with_unverified_cleanup
@@ -870,7 +934,15 @@ def build_tracker_diagnostic_report(
         _check(
             "runtime_verification",
             runtime_status,
-            failure_code=failure_code if failure_code in {"runtime_verification_unknown", "no_playable_entry"} else None,
+            failure_code=failure_code if failure_code in {
+                "runtime_verification_unknown",
+                "no_playable_entry",
+                "game_loading_transient",
+                "game_load_stalled",
+                "game_load_timeout",
+                "run_button_not_verified",
+                "post_run_runtime_not_ready",
+            } else None,
             evidence={
                 "runtime_state": report.get("runtime_state"),
                 "runtime_verified": report.get("runtime_verified"),
@@ -1098,6 +1170,16 @@ def build_tracker_diagnostic_report(
                 "evidence": report_evidence.get("entryStrategy", {})
                 if isinstance(report_evidence, dict)
                 else {},
+                "loadStatus": load_evidence.get("loadStatus"),
+                "loadElapsedSeconds": load_evidence.get("loadElapsedSeconds"),
+                "lastLoadingPercent": load_evidence.get("lastLoadingPercent"),
+                "lastProgressAgeSeconds": load_evidence.get("lastProgressAgeSeconds"),
+                "probeAttempts": load_evidence.get("probeAttempts"),
+                "loadRecoveryAttempted": load_evidence.get("loadRecoveryAttempted"),
+                "loadRecoveryCount": load_evidence.get("loadRecoveryCount"),
+                "entryAttemptId": load_evidence.get("entryAttemptId") or readiness_evidence.get("entryAttemptId"),
+                "runButtonEvidence": run_evidence.get("runButtonEvidence") or load_evidence.get("runButtonEvidence"),
+                "pageIdentity": page_identity,
             },
             "normal_gameplay": {
                 "status": normal_gameplay_status,

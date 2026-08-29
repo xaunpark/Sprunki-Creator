@@ -26,6 +26,7 @@ import gc
 import weakref
 import logging
 import ctypes
+import uuid
 from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from sprunki_obs_controller import SprunkiController
@@ -252,6 +253,18 @@ class SprunkiGamePlayer:
         self.chrome_process = None
         self.ws_url = None
         self.game_url = None
+        self._cdp_target_id = None
+        self._cdp_target_url = None
+        self._cdp_page_identity = None
+        self._entry_attempt_id = None
+        self._game_entry_started_at = None
+        self._game_entry_deadline = None
+        self._load_recovery_count = 0
+        self._last_game_readiness_probe = {}
+        self._last_run_click_result = None
+        self._last_prepare_ready_result = None
+        self._last_game_weak_token = None
+        self._game_readiness_state = "PAGE_READY"
         # Remove-button input is bound to one exact CDP page for the lifetime
         # of the cleanup operation.  It must never fall back to the first
         # visible Chrome window or to an arbitrary Cocrea tab.
@@ -2563,6 +2576,12 @@ class SprunkiGamePlayer:
                 self.fullscreen_wait = self.game_config.get('fullscreen_wait', 8)
                 self.max_pagedown_attempts = self.game_config.get('max_pagedown_attempts', 5)
                 self.intro_skip_clicks = self.game_config.get('intro_skip_clicks', 10)
+                try:
+                    self.run_button_max_retries = max(
+                        1, int(self.game_config.get('run_button_max_retries', 3))
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    self.run_button_max_retries = 3
                 self.remix_max_attempts = max(
                     1, int(self.game_config.get('remix_max_attempts', 2))
                 )
@@ -2598,6 +2617,7 @@ class SprunkiGamePlayer:
                 self.fullscreen_wait = 8
                 self.max_pagedown_attempts = 5
                 self.intro_skip_clicks = 10
+                self.run_button_max_retries = 3
                 self.remix_max_attempts = 2
                 self.remix_retry_delay_seconds = 1.0
                 self.remix_cleanup_max_residual_icons = 0
@@ -2665,6 +2685,119 @@ class SprunkiGamePlayer:
                     0.0,
                     float(game_adaptive.get('progress_extension_ms', 30000)) / 1000.0,
                 )
+
+                def bounded_seconds(value, fallback, maximum):
+                    try:
+                        number = float(value)
+                        if not math.isfinite(number) or number <= 0:
+                            raise ValueError("invalid positive duration")
+                    except (TypeError, ValueError, OverflowError):
+                        number = float(fallback)
+                    return min(max(number, 0.1), float(maximum))
+
+                def bounded_milliseconds(value, fallback_ms, maximum_seconds):
+                    """Parse a millisecond setting without leaking type errors.
+
+                    Config files are user-editable and older profiles sometimes
+                    contain numeric values as strings.  Keep the unit
+                    conversion inside the guarded parser so a malformed value
+                    cannot abort the whole verification configuration.
+                    """
+                    try:
+                        milliseconds = float(value)
+                        if not math.isfinite(milliseconds) or milliseconds <= 0:
+                            raise ValueError("invalid positive millisecond duration")
+                    except (TypeError, ValueError, OverflowError):
+                        milliseconds = float(fallback_ms)
+                    return bounded_seconds(
+                        milliseconds / 1000.0,
+                        float(fallback_ms) / 1000.0,
+                        maximum_seconds,
+                    )
+
+                # The readiness loop has its own bounded budget.  These
+                # settings deliberately do not use historical per-mod data.
+                self.game_load_stall_timeout = bounded_milliseconds(
+                    self.game_verification.get(
+                        'stall_timeout_ms',
+                        game_adaptive.get('stall_timeout_ms', 10000),
+                    ),
+                    10000,
+                    60.0,
+                )
+                self.game_load_phase_timeout = bounded_milliseconds(
+                    self.game_verification.get(
+                        'phase_hard_timeout_ms',
+                        game_adaptive.get('phase_hard_timeout_ms', 60000),
+                    ),
+                    60000,
+                    60.0,
+                )
+                self.game_entry_total_timeout = bounded_milliseconds(
+                    self.game_verification.get(
+                        'entry_total_timeout_ms',
+                        game_adaptive.get('entry_total_timeout_ms', 90000),
+                    ),
+                    90000,
+                    90.0,
+                )
+                self.game_probe_timeout = bounded_milliseconds(
+                    self.game_verification.get(
+                        'probe_timeout_ms',
+                        game_adaptive.get('probe_timeout_ms', 3000),
+                    ),
+                    3000,
+                    10.0,
+                )
+                try:
+                    self.game_load_recovery_attempts = min(
+                        max(
+                            int(self.game_verification.get('load_recovery_attempts', 1)),
+                            0,
+                        ),
+                        1,
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    self.game_load_recovery_attempts = 1
+                try:
+                    self.ready_confirmation_interval = min(
+                        max(
+                            float(self.game_verification.get(
+                                'ready_confirmation_interval_ms', 250
+                            )) / 1000.0,
+                            0.05,
+                        ),
+                        2.0,
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    self.ready_confirmation_interval = 0.25
+                raw_poll_intervals = self.game_verification.get(
+                    'poll_intervals_ms',
+                    game_adaptive.get('poll_intervals_ms', [250, 500, 1000, 2000, 3000, 5000]),
+                )
+                if not isinstance(raw_poll_intervals, (list, tuple)):
+                    raw_poll_intervals = [250, 500, 1000, 2000, 3000, 5000]
+                parsed_poll_intervals = []
+                for raw_interval in raw_poll_intervals:
+                    try:
+                        interval = float(raw_interval) / 1000.0
+                        if math.isfinite(interval) and interval > 0:
+                            parsed_poll_intervals.append(min(interval, 5.0))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                self.game_readiness_poll_intervals = tuple(
+                    parsed_poll_intervals or (0.25, 0.5, 1.0, 2.0, 3.0, 5.0)
+                )
+                try:
+                    self.run_button_max_retries = min(
+                        max(int(self.game_verification.get(
+                            'run_button_max_retries',
+                            getattr(self, 'run_button_max_retries', 3),
+                        )), 1),
+                        3,
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    self.run_button_max_retries = 3
                 
                 print(f"âœ… Verification config loaded:")
                 print(f"   Page verification: {'âœ… Enabled' if self.page_verification_enabled else 'âŒ Disabled'}")
@@ -2685,6 +2818,14 @@ class SprunkiGamePlayer:
                 self.game_verification_adaptive_enabled = True
                 self.game_verification_max_timeout = 480
                 self.game_verification_progress_extension = 30
+                self.game_load_stall_timeout = 10.0
+                self.game_load_phase_timeout = 60.0
+                self.game_entry_total_timeout = 90.0
+                self.game_probe_timeout = 3.0
+                self.game_load_recovery_attempts = 1
+                self.ready_confirmation_interval = 0.25
+                self.game_readiness_poll_intervals = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0)
+                self.run_button_max_retries = 3
                 self.page_verification_interval = 2
                 self.game_verification_interval = 2
                 self.stabilization_wait = 3
@@ -3025,33 +3166,57 @@ class SprunkiGamePlayer:
             print(f"âŒ Edge reinforcement error: {e}")
             return 0
 
-    def _execute_verification_js(self, js_code):
-        """Execute JavaScript for verification via WebSocket/CDP"""
+    def _execute_verification_js(self, js_code, timeout_seconds=None):
+        """Execute JavaScript for verification via WebSocket/CDP."""
+        ws = None
         try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:  # âœ… CHECK None trÆ°á»›c
+            command_timeout = timeout_seconds if timeout_seconds is not None else 30
+            try:
+                command_timeout = max(0.1, float(command_timeout))
+            except (TypeError, ValueError, OverflowError):
+                command_timeout = 30.0
+
+            # Readiness probes are high-frequency observations.  They must not
+            # inherit the general CDP lookup retry loop (5 x 2 seconds), or a
+            # single missing target would defeat the probe/stall budgets.
+            if timeout_seconds is not None:
+                try:
+                    ws_url = self._get_websocket_url(
+                        max_retries=1,
+                        retry_delay=0,
+                        lookup_timeout_seconds=command_timeout,
+                    )
+                except TypeError:
+                    # Compatibility with older test doubles/integrations that
+                    # still expose the old zero-argument lookup method.
+                    ws_url = self._get_websocket_url()
+            else:
+                ws_url = self._get_websocket_url()
+            if not ws_url:
                 print("âš ï¸ WebSocket not available for verification, skipping JS check")
                 return None
-            
-            ws = websocket.create_connection(ws_url, timeout=10)  # â† ÄÃƒ SAFE
-            
+
+            ws = websocket.create_connection(ws_url, timeout=command_timeout)
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
                 "params": {"expression": js_code, "awaitPromise": True, "returnByValue": True}
-            })
-            
-            ws.close()
-            
+            }, timeout_seconds=command_timeout)
+
             if response and 'result' in response:
                 result = response.get('result', {}).get('result', {}).get('value')
                 return result
-            else:
-                print("âš ï¸ No response from verification JavaScript")
-                return None
-                
+            print("âš ï¸ No response from verification JavaScript")
+            return None
+
         except Exception as e:
             print(f"âš ï¸ Error executing verification JavaScript: {e}")
             return None
+        finally:
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
 
     def preflight_url_playable(self, target_url):
         """Fail fast for URLs that are definitely unavailable before launching Chrome."""
@@ -3554,7 +3719,832 @@ class SprunkiGamePlayer:
                 message="Page verification raised an exception.",
             )
 
+    def _begin_game_entry_attempt(self, url=None):
+        """Start one bounded browser-entry attempt.
+
+        Loading recovery belongs to this attempt.  Keeping the identifier and
+        deadline on the player prevents the loader, an outer workflow retry,
+        and the watchdog from independently creating another reload loop.
+        """
+        if url:
+            self.game_url = url
+        started_at = time.monotonic()
+        self._entry_attempt_id = f"entry-{uuid.uuid4().hex[:12]}"
+        self._game_entry_started_at = started_at
+        self._game_entry_deadline = started_at + float(
+            getattr(self, "game_entry_total_timeout", 90.0)
+        )
+        self._load_recovery_count = 0
+        self._last_game_readiness_probe = {}
+        self._last_run_click_result = None
+        self._last_prepare_ready_result = None
+        self._last_game_weak_token = None
+        self._game_readiness_state = "PAGE_READY"
+        self._invalidate_cdp_target()
+        return self._entry_attempt_id
+
+    def _remaining_game_entry_budget(self):
+        deadline = getattr(self, "_game_entry_deadline", None)
+        if deadline is None:
+            return None
+        try:
+            return max(0.0, float(deadline) - time.monotonic())
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    def _invalidate_cdp_target(self, close_session=True):
+        """Discard cached CDP identity so no input can use a stale target."""
+        if close_session:
+            session = getattr(self, "session_websocket", None)
+            try:
+                if session:
+                    session.close()
+            except Exception:
+                pass
+        self.ws_url = None
+        self._cdp_target_id = None
+        self._cdp_target_url = None
+        self._cdp_page_identity = None
+
+    @staticmethod
+    def _cdp_urls_match(left, right):
+        """Compare page identities without accepting substring matches."""
+        left_normalized = SprunkiGamePlayer._normalize_cdp_page_url(left)
+        right_normalized = SprunkiGamePlayer._normalize_cdp_page_url(right)
+        if not left_normalized or not right_normalized:
+            return False
+        if left_normalized == right_normalized:
+            return True
+        # A normal HTTP-to-HTTPS redirect keeps the same Cocrea page.  The
+        # host, path and query still have to match exactly.
+        try:
+            left_parts = urlparse(left_normalized)
+            right_parts = urlparse(right_normalized)
+            return (
+                {left_parts.scheme, right_parts.scheme} <= {"http", "https"}
+                and left_parts.netloc == right_parts.netloc
+                and left_parts.path == right_parts.path
+                and left_parts.query == right_parts.query
+            )
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    def _get_game_readiness_probe_js(self):
+        """Return the small, semantic probe used by every entry readiness path.
+
+        This intentionally avoids ``querySelectorAll('*')`` and React-fiber
+        traversal.  Those diagnostics are useful after a failure, but are too
+        expensive and too ambiguous to run every few hundred milliseconds.
+        """
+        return r'''
+        (() => {
+          try {
+            const result = {
+              state: 'PAGE_READY',
+              pageReady: false,
+              documentState: document.readyState,
+              pageIdentity: {
+                href: window.location.href,
+                visibilityState: document.visibilityState,
+                hidden: !!document.hidden,
+                isTopFrame: window.top === window,
+                frameName: window.name || ''
+              },
+              errorPage: { detected: false, pattern: null, title: document.title || '', headingText: '' },
+              stage: { found: false, visible: false, bounds: null, identity: null, canvasCount: 0, childCount: 0 },
+              runButton: {
+                found: false,
+                visible: false,
+                enabled: false,
+                clickable: false,
+                tagName: null,
+                text: '',
+                className: '',
+                strategy: null,
+                bounds: null,
+                candidateCount: 0
+              },
+              loading: {
+                active: false,
+                percent: null,
+                label: '',
+                spinnerCount: 0
+              },
+              runtime: {
+                responding: false,
+                vmAvailable: false,
+                targetCount: null,
+                canvasReady: false
+              },
+              networkActivity: {
+                resourceCount: 0,
+                transferredBytes: 0,
+                lastResponseEnd: 0
+              },
+              strongProgressToken: null,
+              weakProgressToken: null,
+              timestamp: Date.now()
+            };
+
+            const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+            const lower = value => normalize(value).toLowerCase();
+            const isVisible = element => {
+              if (!element || !element.isConnected) return false;
+              const rect = element.getBoundingClientRect();
+              const style = window.getComputedStyle(element);
+              return rect.width > 0 && rect.height > 0 &&
+                style.display !== 'none' && style.visibility !== 'hidden' &&
+                Number(style.opacity || 1) > 0;
+            };
+            const safeRect = element => {
+              if (!element) return null;
+              const rect = element.getBoundingClientRect();
+              if (![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)) return null;
+              return {
+                left: Math.round(rect.left * 100) / 100,
+                top: Math.round(rect.top * 100) / 100,
+                width: Math.round(rect.width * 100) / 100,
+                height: Math.round(rect.height * 100) / 100,
+                centerX: Math.round((rect.left + rect.width / 2) * 100) / 100,
+                centerY: Math.round((rect.top + rect.height / 2) * 100) / 100
+              };
+            };
+            const stageSelectors = [
+              '.style_stage-cover__VITCW',
+              '.ccw-stage-wrapper',
+              '#stage-canvas-wrapper',
+              '.style_gandi-player-wrapper__WCs0P',
+              '.style_stage-player__0Xy7d',
+              '.gandi_stage_stage_1fD7k',
+              'canvas'
+            ];
+            const stageRoots = [];
+            for (const selector of stageSelectors) {
+              let elements = [];
+              try { elements = Array.from(document.querySelectorAll(selector)); } catch (e) {}
+              for (const element of elements) {
+                if (!stageRoots.includes(element)) stageRoots.push(element);
+              }
+            }
+            const visibleStages = stageRoots.filter(isVisible);
+            const stage = visibleStages[0] || stageRoots[0] || null;
+            const stageContext = element => {
+              if (!element) return false;
+              if (stageRoots.some(root => root === element || root.contains(element))) return true;
+              // The specific Run class can be wrapped by a player element that
+              // is not itself one of the known stage roots.
+              return !!element.closest('[class*="stage"], [class*="player"], [class*="game"]');
+            };
+
+            if (stage) {
+              const stageRect = safeRect(stage);
+              const stageClass = typeof stage.className === 'string' ? stage.className : String(stage.className || '');
+              result.stage = {
+                found: true,
+                visible: visibleStages.length > 0,
+                bounds: stageRect,
+                identity: {
+                  tagName: stage.tagName || '',
+                  id: stage.id || '',
+                  className: stageClass.slice(0, 180)
+                },
+                canvasCount: stage.querySelectorAll ? stage.querySelectorAll('canvas').length : 0,
+                childCount: stage.children ? stage.children.length : 0
+              };
+            }
+
+            const canvas = visibleStages.map(root =>
+              root.matches && root.matches('canvas') ? root : root.querySelector && root.querySelector('canvas')
+            ).find(Boolean) || null;
+            if (canvas) {
+              const canvasRect = safeRect(canvas);
+              result.runtime.canvasReady = !!canvasRect && canvasRect.width > 0 && canvasRect.height > 0;
+            }
+
+            // Only inspect explicit loading/progress nodes and the bounded
+            // text of the stage.  Never use body text to infer a Run control.
+            const loadingNodes = [];
+            try {
+              loadingNodes.push(...Array.from(document.querySelectorAll(
+                '.loading, .loader, .spinner, [class*="loading"], [class*="progress"], progress, [role="progressbar"]'
+              )).slice(0, 20));
+            } catch (e) {}
+            const loadingLabels = loadingNodes.map(node => normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '')).filter(Boolean);
+            if (stage) {
+              const stageLabel = normalize(stage.innerText || stage.textContent || '').slice(0, 240);
+              if (stageLabel) loadingLabels.push(stageLabel);
+            }
+            const loadingText = loadingLabels.join(' ');
+            const percentMatch = loadingText.match(/(?:loading|progress|download|initializ[^ ]*)[^%]{0,30}(\d{1,3})\s*%/i) || loadingText.match(/\b(\d{1,3})\s*%\b/);
+            if (percentMatch) {
+              const percent = Number(percentMatch[1]);
+              if (Number.isFinite(percent) && percent >= 0 && percent <= 100) result.loading.percent = percent;
+            }
+            result.loading.spinnerCount = loadingNodes.filter(isVisible).length;
+            result.loading.label = loadingText.slice(0, 240);
+            result.loading.active = result.loading.spinnerCount > 0 ||
+              (result.loading.percent !== null && result.loading.percent < 100) ||
+              /\b(loading|initializ|download|preparing)\b/i.test(loadingText);
+
+            // A small title/heading check catches definite error pages without
+            // scanning user-generated body text.
+            const headings = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
+              .map(node => normalize(node.innerText || node.textContent || ''))
+              .filter(Boolean);
+            const titleAndHeadings = [lower(document.title || ''), ...headings.map(lower)];
+            const errorMatchers = [
+              ['404', /^(?:404|error 404|404 error)(?:[ .:!?]|$)/i],
+              ['page not found', /^page not found(?:[ .:!?]|$)/i],
+              ['project not found', /^project not found(?:[ .:!?]|$)/i],
+              ['không tìm thấy', /^không tìm thấy(?:[ .:!?]|$)/i],
+              ['khong tim thay', /^khong tim thay(?:[ .:!?]|$)/i]
+            ];
+            for (const [pattern, matcher] of errorMatchers) {
+              if (titleAndHeadings.some(value => matcher.test(value))) {
+                result.errorPage = {
+                  detected: true,
+                  pattern,
+                  title: document.title || '',
+                  headingText: headings.slice(0, 3).join(' ').slice(0, 200)
+                };
+                break;
+              }
+            }
+
+            const candidates = [];
+            const addCandidate = (element, strategy) => {
+              if (!element || candidates.some(item => item.element === element)) return;
+              if (!stageContext(element)) return;
+              const tag = (element.tagName || '').toLowerCase();
+              if (!(tag === 'button' || tag === 'input' || element.getAttribute('role') === 'button')) return;
+              const text = normalize(element.textContent || element.value || element.getAttribute('aria-label') || '');
+              const label = lower(text);
+              const className = typeof element.className === 'string' ? element.className : String(element.className || '');
+              const exactClass = /(^|\s)style_run-button__VjFSY(?:\s|$)/i.test(className);
+              const exactLabel = ['run', 'play', 'start'].includes(label);
+              if (!exactClass && !exactLabel) return;
+              const rect = safeRect(element);
+              const style = window.getComputedStyle(element);
+              const enabled = !element.disabled && lower(element.getAttribute('aria-disabled')) !== 'true';
+              const pointerEvents = style.pointerEvents !== 'none';
+              const visible = isVisible(element);
+              let hitTest = false;
+              if (rect && visible && pointerEvents) {
+                const hit = document.elementFromPoint(rect.centerX, rect.centerY);
+                hitTest = hit === element || !!(hit && element.contains(hit));
+              }
+              candidates.push({
+                element,
+                strategy,
+                tagName: tag,
+                text,
+                className: className.slice(0, 240),
+                exactClass,
+                exactLabel,
+                visible,
+                enabled,
+                pointerEvents,
+                hitTest,
+                clickable: visible && enabled && pointerEvents && hitTest,
+                bounds: rect
+              });
+            };
+
+            let preferred = [];
+            try { preferred = Array.from(document.querySelectorAll('button.style_run-button__VjFSY')); } catch (e) {}
+            preferred.forEach(element => addCandidate(element, 'specific_run_class'));
+            if (!candidates.some(item => item.visible)) {
+                for (const root of stageRoots) {
+                let controls = [];
+                try { controls = Array.from(root.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]')); } catch (e) {}
+                controls.forEach(element => addCandidate(element, 'scoped_exact_label'));
+              }
+            }
+            const candidate = candidates.find(item => item.clickable) || candidates.find(item => item.visible) || candidates[0];
+            result.runButton.candidateCount = candidates.length;
+            if (candidate) {
+              result.runButton = {
+                found: true,
+                visible: !!candidate.visible,
+                enabled: !!candidate.enabled,
+                clickable: !!candidate.clickable,
+                tagName: candidate.tagName,
+                text: candidate.text,
+                className: candidate.className,
+                strategy: candidate.strategy,
+                bounds: candidate.bounds,
+                candidateCount: candidates.length
+              };
+            }
+
+            try {
+              const resources = window.performance && window.performance.getEntriesByType
+                ? window.performance.getEntriesByType('resource') : [];
+              result.networkActivity.resourceCount = resources.length;
+              resources.forEach(resource => {
+                result.networkActivity.transferredBytes += Number(resource.transferSize || resource.encodedBodySize || 0);
+                result.networkActivity.lastResponseEnd = Math.max(result.networkActivity.lastResponseEnd, Number(resource.responseEnd || 0));
+              });
+            } catch (e) {}
+
+            try {
+              const vm = window.__vm && window.__vm.runtime ? window.__vm : null;
+              const runtime = vm && vm.runtime;
+              const targetCount = runtime && Array.isArray(runtime.targets) ? runtime.targets.length : null;
+              result.runtime.vmAvailable = !!runtime;
+              result.runtime.targetCount = targetCount;
+              result.runtime.responding = !!runtime && (typeof runtime.startHats === 'function' || Array.isArray(runtime.targets));
+            } catch (e) {
+              result.runtime.responding = false;
+            }
+
+            result.pageReady = document.readyState === 'complete' && !!document.body && !!document.head;
+             result.stageActive = !!(
+               result.stage.visible && !result.loading.active && !result.errorPage.detected &&
+               !result.runButton.visible && (result.runtime.responding || result.runtime.canvasReady)
+             );
+            result.prepareReady = result.stageActive;
+            result.playableRuntime = !!(
+              result.stageActive && result.runtime.responding &&
+              Number(result.runtime.targetCount || 0) > 0
+            );
+            result.strongProgressToken = {
+              documentState: result.documentState,
+              loadingPercent: result.loading.percent,
+              loadingActive: result.loading.active,
+              stageVisible: result.stage.visible,
+              stageBounds: result.stage.bounds,
+              stageIdentity: result.stage.identity,
+              canvasReady: result.runtime.canvasReady,
+              runtimeResponding: result.runtime.responding,
+              runtimeTargetCount: result.runtime.targetCount,
+              runFound: result.runButton.found,
+              runClickable: result.runButton.clickable,
+              error: result.errorPage.detected
+            };
+            result.weakProgressToken = {
+              resourceCount: result.networkActivity.resourceCount,
+              transferredBytes: result.networkActivity.transferredBytes,
+              lastResponseEnd: result.networkActivity.lastResponseEnd,
+              stageChildCount: result.stage.childCount
+            };
+            result.state = result.runButton.clickable ? 'RUN_CONTROL_READY' :
+              result.stageActive ? 'STAGE_ACTIVE' : 'PAGE_READY';
+            result.ready = !!(result.pageReady && result.runButton.clickable && !result.loading.active && !result.errorPage.detected);
+            result.overallReady = result.ready;
+            result.runButtonInDOM = result.runButton.found;
+            return result;
+          } catch (error) {
+            return { ok: false, reason: 'probe_error', error: String(error && error.stack || error) };
+          }
+        })()
+        '''
+
+    def _read_game_readiness_probe(self):
+        """Execute one readiness probe and attach the bound CDP identity."""
+        try:
+            probe_js = self._get_game_readiness_probe_js()
+            try:
+                raw = self._execute_verification_js(
+                    probe_js,
+                    timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+                )
+            except TypeError:
+                # Keep compatibility with lightweight test doubles and older
+                # integrations that still expose a one-argument executor.
+                raw = self._execute_verification_js(probe_js)
+            probe = self._normalize_game_readiness_probe(raw)
+            if isinstance(probe, dict):
+                page_identity = probe.setdefault("pageIdentity", {})
+                page_identity.setdefault("cdpTargetId", getattr(self, "_cdp_target_id", None))
+                page_identity.setdefault("cdpTargetUrl", getattr(self, "_cdp_target_url", None))
+                probe["entryAttemptId"] = getattr(self, "_entry_attempt_id", None)
+                self._game_readiness_state = str(probe.get("state") or "PAGE_READY")
+                self._last_game_readiness_probe = probe
+            return probe
+        except Exception as error:
+            self._last_game_readiness_probe = {
+                "ok": False,
+                "probeError": str(error),
+                "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+            }
+            return None
+
+    def _normalize_game_readiness_probe(self, raw):
+        """Normalize the new probe and old test/integration probe shapes."""
+        if not isinstance(raw, dict):
+            return None
+        probe = dict(raw)
+        legacy = any(key in probe for key in ("gameContainers", "reactComponents", "runButtonInDOM"))
+        run = probe.get("runButton")
+        if not isinstance(run, dict):
+            found = bool(probe.get("runButtonInDOM") or probe.get("runButton"))
+            run = {
+                "found": found,
+                "visible": found,
+                "enabled": found,
+                "clickable": found,
+                "strategy": "legacy_probe" if legacy else None,
+                "candidateCount": 1 if found else 0,
+            }
+        else:
+            run = dict(run)
+        for key in ("found", "visible", "enabled", "clickable"):
+            run[key] = bool(run.get(key))
+        probe["runButton"] = run
+        probe["runButtonInDOM"] = bool(run.get("found"))
+
+        containers = probe.get("gameContainers")
+        stage = probe.get("stage") if isinstance(probe.get("stage"), dict) else {}
+        if isinstance(containers, list):
+            visible_container = any(
+                isinstance(container, dict) and bool(container.get("visible"))
+                for container in containers
+            )
+            stage.setdefault("found", bool(containers))
+            stage.setdefault("visible", visible_container)
+            stage.setdefault("childCount", sum(
+                1 for container in containers
+                if isinstance(container, dict) and container.get("hasChildren")
+            ))
+        stage["found"] = bool(stage.get("found"))
+        stage["visible"] = bool(stage.get("visible"))
+        probe["stage"] = stage
+
+        page_ready = probe.get("pageReady")
+        if page_ready is None:
+            page_ready = str(probe.get("documentState", "complete")).lower() == "complete"
+        probe["pageReady"] = bool(page_ready)
+        loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
+        if "active" not in loading:
+            spinner_count = probe.get("loadingSpinners", 0)
+            loading["active"] = bool(spinner_count)
+        if "percent" not in loading:
+            loading["percent"] = probe.get("lastLoadingPercent")
+        loading["active"] = bool(loading.get("active"))
+        probe["loading"] = loading
+
+        runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+        if "canvasReady" not in runtime:
+            runtime["canvasReady"] = bool(stage.get("visible"))
+        if "responding" not in runtime:
+            runtime["responding"] = bool(probe.get("runtimeResponding"))
+        probe["runtime"] = runtime
+
+        if "stageActive" not in probe:
+            probe["stageActive"] = bool(
+                stage.get("visible") and not loading.get("active") and not run.get("visible")
+            )
+        if "prepareReady" not in probe:
+            probe["prepareReady"] = bool(probe.get("stageActive"))
+        if "strongProgressToken" not in probe:
+            probe["strongProgressToken"] = {
+                "documentState": probe.get("documentState"),
+                "containers": [
+                    {
+                        "selector": item.get("selector"),
+                        "visible": bool(item.get("visible")),
+                        "dimensions": item.get("dimensions"),
+                    }
+                    for item in (containers or [])[:20]
+                    if isinstance(item, dict)
+                ],
+                "reactFound": bool((probe.get("reactComponents") or {}).get("found")),
+                "reactCount": (probe.get("reactComponents") or {}).get("count"),
+                "runFound": bool(run.get("found")),
+                "loadingActive": bool(loading.get("active")),
+            }
+        if "weakProgressToken" not in probe:
+            network = probe.get("networkActivity") if isinstance(probe.get("networkActivity"), dict) else {}
+            probe["weakProgressToken"] = {
+                "resourceCount": network.get("resourceCount"),
+                "transferredBytes": network.get("transferredBytes"),
+                "lastResponseEnd": network.get("lastResponseEnd"),
+            }
+
+        # A legacy overallReady value is retained only for compatibility with
+        # old probe adapters.  Production readiness still requires the exact,
+        # clickable semantic Run candidate.
+        legacy_ready = bool(probe.get("overallReady")) if legacy else False
+        probe["ready"] = bool(
+            (legacy_ready or (probe.get("pageReady") and run.get("clickable"))) and
+            not loading.get("active") and
+            not (probe.get("errorPage") or {}).get("detected", False)
+        )
+        probe["overallReady"] = probe["ready"]
+        return probe
+
+    def _game_readiness_strong_token(self, probe):
+        if not isinstance(probe, dict):
+            return None
+        return self._stable_watchdog_probe_token(probe.get("strongProgressToken"))
+
+    def _game_probe_matches_current_page(self, probe):
+        """Return False when a probe came from a different page/session."""
+        if not isinstance(probe, dict):
+            return False
+        identity = probe.get("pageIdentity")
+        if not isinstance(identity, dict):
+            # Legacy test adapters did not expose page identity.  The CDP
+            # target lookup still enforces the exact URL in production.
+            return True
+        href = identity.get("href")
+        expected = getattr(self, "game_url", None)
+        if not href or not expected:
+            return True
+        return self._cdp_urls_match(href, expected)
+
+    def _game_readiness_evidence(
+        self,
+        *,
+        probe_attempts,
+        started_at,
+        last_progress_at,
+        progress_extensions,
+        weak_progress_observations,
+        last_probe,
+        load_status,
+        recovery_attempted=None,
+    ):
+        probe = last_probe if isinstance(last_probe, dict) else {}
+        loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
+        page_identity = probe.get("pageIdentity") if isinstance(probe.get("pageIdentity"), dict) else {}
+        network = probe.get("networkActivity") if isinstance(probe.get("networkActivity"), dict) else {}
+        elapsed = max(0.0, time.monotonic() - started_at)
+        return {
+            "loadStatus": load_status,
+            "loadElapsedSeconds": round(elapsed, 3),
+            "lastLoadingPercent": loading.get("percent"),
+            "lastProgressAgeSeconds": round(max(0.0, time.monotonic() - last_progress_at), 3),
+            "probeAttempts": int(probe_attempts),
+            "loadRecoveryAttempted": bool(
+                getattr(self, "_load_recovery_count", 0) > 0
+                if recovery_attempted is None else recovery_attempted
+            ),
+            "loadRecoveryCount": int(getattr(self, "_load_recovery_count", 0) or 0),
+            "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+            "pageIdentity": {
+                **page_identity,
+                "cdpTargetId": getattr(self, "_cdp_target_id", None),
+                "cdpTargetUrl": getattr(self, "_cdp_target_url", None),
+            },
+            "runButtonEvidence": probe.get("runButton", {}),
+            "stageEvidence": probe.get("stage", {}),
+            "runtimeEvidence": probe.get("runtime", {}),
+            "loadingEvidence": loading,
+            "networkActivity": network,
+            "progressExtensions": int(progress_extensions),
+            "weakProgressObservations": int(weak_progress_observations),
+        }
+
+    def _game_loading_failure(
+        self,
+        code,
+        message,
+        *,
+        probe_attempts,
+        started_at,
+        last_progress_at,
+        progress_extensions,
+        weak_progress_observations,
+        last_probe,
+    ):
+        evidence = self._game_readiness_evidence(
+            probe_attempts=probe_attempts,
+            started_at=started_at,
+            last_progress_at=last_progress_at,
+            progress_extensions=progress_extensions,
+            weak_progress_observations=weak_progress_observations,
+            last_probe=last_probe,
+            load_status=code,
+        )
+        evidence["adaptiveLoading"] = {
+            "enabled": True,
+            "initialTimeoutSeconds": round(getattr(self, "game_verification_timeout", 0) or 0, 3),
+            "maxTimeoutSeconds": round(getattr(self, "game_load_phase_timeout", 60.0), 3),
+            "stallTimeoutSeconds": round(getattr(self, "game_load_stall_timeout", 10.0), 3),
+            "phaseHardTimeoutSeconds": round(getattr(self, "game_load_phase_timeout", 60.0), 3),
+            "entryTotalTimeoutSeconds": round(getattr(self, "game_entry_total_timeout", 90.0), 3),
+            "progressExtensions": int(progress_extensions),
+        }
+        result = QualityGateResult.failure(
+            code,
+            retryable=True,
+            evidence=evidence,
+            message=message,
+        )
+        entry_strategy = getattr(self, "entry_strategy", None)
+        if not isinstance(entry_strategy, dict):
+            entry_strategy = {"selected": None, "tested": [], "verification": UNKNOWN}
+            self.entry_strategy = entry_strategy
+        entry_strategy.setdefault("readiness", {})["load"] = result.as_dict()
+        return result
+
     def verify_game_components_ready(self, timeout_override: Optional[float] = None):
+        """Wait for a real, clickable Run control using bounded adaptive polling."""
+        started_at = time.monotonic()
+        if not getattr(self, "game_verification_enabled", True):
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                message="Game verification is disabled.",
+            )
+
+        configured_phase = getattr(self, "game_load_phase_timeout", None)
+        if configured_phase is None:
+            configured_phase = getattr(self, "game_verification_max_timeout", None)
+        if configured_phase is None:
+            configured_phase = timeout_override if timeout_override is not None else 60.0
+        try:
+            phase_budget = max(0.1, float(configured_phase))
+        except (TypeError, ValueError, OverflowError):
+            phase_budget = 60.0
+        if timeout_override is not None:
+            try:
+                phase_budget = min(phase_budget, max(0.1, float(timeout_override)))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        phase_budget = min(phase_budget, 60.0)
+        entry_remaining = self._remaining_game_entry_budget()
+        if entry_remaining is not None:
+            phase_budget = min(phase_budget, entry_remaining)
+        phase_deadline = started_at + max(0.1, phase_budget)
+        stall_timeout = max(0.1, float(getattr(self, "game_load_stall_timeout", 10.0)))
+        stall_deadline = started_at + min(stall_timeout, phase_budget)
+        poll_schedule = tuple(getattr(
+            self,
+            "game_readiness_poll_intervals",
+            (0.25, 0.5, 1.0, 2.0, 3.0, 5.0),
+        )) or (0.25, 0.5, 1.0, 2.0, 3.0, 5.0)
+
+        previous_strong_token = None
+        last_probe = None
+        last_progress_at = started_at
+        progress_extensions = 0
+        weak_progress_observations = 0
+        consecutive_probe_failures = 0
+        attempt = 0
+
+        print(
+            "🎮 GAME READINESS: exact Run probe with bounded adaptive loading "
+            f"(stall={stall_timeout:.1f}s, phase={phase_budget:.1f}s)"
+        )
+        while True:
+            now = time.monotonic()
+            if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
+                return QualityGateResult.failure(
+                    "workflow_stopped",
+                    message="Game verification stopped by the job.",
+                )
+            if now >= phase_deadline:
+                return self._game_loading_failure(
+                    "game_load_timeout",
+                    "Game loading exceeded the bounded phase timeout.",
+                    probe_attempts=attempt,
+                    started_at=started_at,
+                    last_progress_at=last_progress_at,
+                    progress_extensions=progress_extensions,
+                    weak_progress_observations=weak_progress_observations,
+                    last_probe=last_probe,
+                )
+            if now >= stall_deadline:
+                return self._game_loading_failure(
+                    "game_load_stalled",
+                    "Game loading stopped showing meaningful progress.",
+                    probe_attempts=attempt,
+                    started_at=started_at,
+                    last_progress_at=last_progress_at,
+                    progress_extensions=progress_extensions,
+                    weak_progress_observations=weak_progress_observations,
+                    last_probe=last_probe,
+                )
+
+            attempt += 1
+            probe = self._read_game_readiness_probe()
+            now = time.monotonic()
+            if isinstance(probe, dict):
+                last_probe = probe
+                page_identity_mismatch = not self._game_probe_matches_current_page(probe)
+                consecutive_probe_failures = consecutive_probe_failures + 1 if page_identity_mismatch else 0
+                if page_identity_mismatch:
+                    probe["pageIdentityMismatch"] = True
+                    probe["ready"] = False
+                if (probe.get("errorPage") or {}).get("detected"):
+                    return QualityGateResult.failure(
+                        "no_playable_entry",
+                        evidence=self._game_readiness_evidence(
+                            probe_attempts=attempt,
+                            started_at=started_at,
+                            last_progress_at=last_progress_at,
+                            progress_extensions=progress_extensions,
+                            weak_progress_observations=weak_progress_observations,
+                            last_probe=probe,
+                            load_status="error_page",
+                        ),
+                        message="Game verification detected an error page.",
+                    )
+
+                strong_token = self._game_readiness_strong_token(probe)
+                strong_changed = bool(strong_token and strong_token != previous_strong_token)
+                if strong_changed:
+                    if previous_strong_token is None:
+                        # The first meaningful stage observation starts the
+                        # stall window but is not counted as a transition.
+                        last_progress_at = now
+                    else:
+                        progress_extensions += 1
+                        last_progress_at = now
+                    previous_strong_token = strong_token
+                    stall_deadline = min(phase_deadline, now + stall_timeout)
+                weak_token = self._stable_watchdog_probe_token(probe.get("weakProgressToken"))
+                weak_changed = bool(
+                    weak_token and weak_token != getattr(self, "_last_game_weak_token", None)
+                )
+                if weak_changed:
+                    weak_progress_observations += 1
+                    self._last_game_weak_token = weak_token
+
+                ready = bool(probe.get("ready")) and not page_identity_mismatch
+                self._touch_watchdog_progress(
+                    "runtime_entry",
+                    "game_readiness_probe",
+                    progress_token=strong_token,
+                    progress_source="game_readiness_strong" if strong_changed else "game_readiness_observation",
+                    progress_observed=strong_changed,
+                    weak_progress_observed=weak_changed,
+                    loading_active=not ready,
+                    attempt=attempt,
+                    elapsed_seconds=round(now - started_at, 3),
+                    entry_attempt_id=getattr(self, "_entry_attempt_id", None),
+                )
+                if ready:
+                    evidence = self._game_readiness_evidence(
+                        probe_attempts=attempt,
+                        started_at=started_at,
+                        last_progress_at=last_progress_at,
+                        progress_extensions=progress_extensions,
+                        weak_progress_observations=weak_progress_observations,
+                        last_probe=probe,
+                        load_status="run_control_ready",
+                    )
+                    evidence["adaptiveLoading"] = {
+                        "enabled": True,
+                        "initialTimeoutSeconds": round(getattr(self, "game_verification_timeout", 0) or 0, 3),
+                        "maxTimeoutSeconds": round(phase_budget, 3),
+                        "stallTimeoutSeconds": round(stall_timeout, 3),
+                        "phaseHardTimeoutSeconds": round(phase_budget, 3),
+                        "entryTotalTimeoutSeconds": round(getattr(self, "game_entry_total_timeout", 90.0), 3),
+                        "progressExtensions": int(progress_extensions),
+                    }
+                    return QualityGateResult.pass_result(
+                        evidence=evidence,
+                        message="Exact Run control is visible, enabled, and hit-testable.",
+                    )
+                if page_identity_mismatch and consecutive_probe_failures >= 2:
+                    return self._game_loading_failure(
+                        "game_load_stalled",
+                        "Readiness probes no longer belong to the requested game page.",
+                        probe_attempts=attempt,
+                        started_at=started_at,
+                        last_progress_at=last_progress_at,
+                        progress_extensions=progress_extensions,
+                        weak_progress_observations=weak_progress_observations,
+                        last_probe=probe,
+                    )
+            else:
+                consecutive_probe_failures += 1
+                self._touch_watchdog_progress(
+                    "runtime_entry",
+                    "game_readiness_probe_failed",
+                    observation_only=True,
+                    progress_source="game_readiness_probe_failed",
+                    progress_observed=False,
+                    attempt=attempt,
+                    consecutive_failures=consecutive_probe_failures,
+                )
+                if consecutive_probe_failures >= 2:
+                    return self._game_loading_failure(
+                        "game_load_stalled",
+                        "Two consecutive CDP readiness probes failed.",
+                        probe_attempts=attempt,
+                        started_at=started_at,
+                        last_progress_at=last_progress_at,
+                        progress_extensions=progress_extensions,
+                        weak_progress_observations=weak_progress_observations,
+                        last_probe=last_probe,
+                    )
+
+            now = time.monotonic()
+            if now >= phase_deadline:
+                continue
+            if now >= stall_deadline:
+                continue
+            delay = float(poll_schedule[min(attempt - 1, len(poll_schedule) - 1)])
+            delay = min(delay, max(0.0, phase_deadline - now), max(0.0, stall_deadline - now))
+            if delay > 0:
+                time.sleep(delay)
+
+    def verify_game_components_ready_legacy(self, timeout_override: Optional[float] = None):
         """
         [MODIFIED] Smart Game Load Verification System.
         Now accepts a timeout_override for fail-fast scenarios.
@@ -4161,6 +5151,61 @@ class SprunkiGamePlayer:
 
 
     def verify_game_components_ready_lightweight(self):
+        """Run one cheap semantic game probe for continuous monitoring.
+
+        Continuous monitoring must never use the old broad DOM/React scan.  A
+        caller that needs to wait uses ``verify_game_components_ready``; this
+        method is intentionally a single observation.
+        """
+        try:
+            probe = self._read_game_readiness_probe()
+            if (
+                isinstance(probe, dict)
+                and probe.get("ready")
+                and self._game_probe_matches_current_page(probe)
+            ):
+                return QualityGateResult.pass_result(
+                    evidence=self._game_readiness_evidence(
+                        probe_attempts=1,
+                        started_at=time.monotonic(),
+                        last_progress_at=time.monotonic(),
+                        progress_extensions=0,
+                        weak_progress_observations=0,
+                        last_probe=probe,
+                        load_status="run_control_ready",
+                    ),
+                    message="Lightweight semantic game readiness passed.",
+                )
+            if isinstance(probe, dict) and (probe.get("errorPage") or {}).get("detected"):
+                return QualityGateResult.failure(
+                    "no_playable_entry",
+                    evidence=probe.get("errorPage") or {},
+                    message="Lightweight game probe detected an error page.",
+                )
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={
+                    **(probe or {}),
+                    "pageIdentityMismatch": bool(
+                        isinstance(probe, dict)
+                        and probe.get("ready")
+                        and not self._game_probe_matches_current_page(probe)
+                    ),
+                },
+                message="Lightweight semantic game readiness is not yet proven.",
+            )
+        except Exception as error:
+            return QualityGateResult.failure(
+                "runtime_verification_unknown",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"error": str(error)},
+                message="Lightweight semantic game probe raised an exception.",
+            )
+
+    def verify_game_components_ready_lightweight_legacy(self):
         """Lightweight component probe with the same tri-state contract."""
         try:
             # Simplified game check
@@ -4407,6 +5452,9 @@ class SprunkiGamePlayer:
             
             # Phase 5: Reset internal state
             self.ws_url = None
+            self._cdp_target_id = None
+            self._cdp_target_url = None
+            self._cdp_page_identity = None
             self._remove_cdp_target_id = None
             self.chrome_process = None
             self.session_websocket = None
@@ -4419,6 +5467,9 @@ class SprunkiGamePlayer:
             print(f"🚫 Enhanced browser shutdown error: {e}")
             # Still reset state even if error
             self.ws_url = None
+            self._cdp_target_id = None
+            self._cdp_target_url = None
+            self._cdp_page_identity = None
             self._remove_cdp_target_id = None
             self.chrome_process = None
             self.session_websocket = None
@@ -4738,6 +5789,334 @@ class SprunkiGamePlayer:
             print(f"âŒ Error in continuous monitoring: {e}")
             return False
 
+    def _wait_for_stage_active(self, timeout=None, stable_samples=2):
+        """Wait for the post-Run stage without sending premature input."""
+        started_at = time.monotonic()
+        configured_budget = getattr(self, "game_load_phase_timeout", 60.0)
+        try:
+            budget = max(0.1, float(timeout if timeout is not None else configured_budget))
+        except (TypeError, ValueError, OverflowError):
+            budget = 60.0
+        remaining = self._remaining_game_entry_budget()
+        if remaining is not None:
+            budget = min(budget, remaining)
+        deadline = started_at + max(0.1, budget)
+        required_samples = max(1, int(stable_samples or 1))
+        intervals = tuple(getattr(
+            self,
+            "game_readiness_poll_intervals",
+            (0.25, 0.5, 1.0, 2.0, 3.0, 5.0),
+        )) or (0.25, 0.5, 1.0, 2.0, 3.0, 5.0)
+        last_probe = None
+        last_signature = None
+        stable_count = 0
+        attempts = 0
+
+        while time.monotonic() < deadline:
+            if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
+                return QualityGateResult.failure(
+                    "workflow_stopped",
+                    message="Stage activation wait stopped by the job.",
+                )
+            attempts += 1
+            probe = self._read_game_readiness_probe()
+            if isinstance(probe, dict):
+                last_probe = probe
+                if (probe.get("errorPage") or {}).get("detected"):
+                    return QualityGateResult.failure(
+                        "no_playable_entry",
+                        evidence=probe.get("errorPage") or {},
+                        message="Stage activation encountered an error page.",
+                    )
+                stage = probe.get("stage") if isinstance(probe.get("stage"), dict) else {}
+                run = probe.get("runButton") if isinstance(probe.get("runButton"), dict) else {}
+                loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
+                runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+                active = bool(
+                    self._game_probe_matches_current_page(probe) and
+                    probe.get("stageActive") and stage.get("visible") and
+                    not loading.get("active") and not run.get("visible") and
+                    (runtime.get("responding") or runtime.get("canvasReady"))
+                )
+                signature = self._stable_watchdog_probe_token({
+                    "stage": stage.get("bounds"),
+                    "stageIdentity": stage.get("identity"),
+                    "canvasReady": runtime.get("canvasReady"),
+                    "runtimeResponding": runtime.get("responding"),
+                    "runFound": run.get("found"),
+                    "loading": loading.get("active"),
+                })
+                if active:
+                    stable_count = stable_count + 1 if signature == last_signature else 1
+                    last_signature = signature
+                    if stable_count >= required_samples:
+                        self._game_readiness_state = "STAGE_ACTIVE"
+                        evidence = self._game_readiness_evidence(
+                            probe_attempts=attempts,
+                            started_at=started_at,
+                            last_progress_at=started_at,
+                            progress_extensions=0,
+                            weak_progress_observations=0,
+                            last_probe=probe,
+                            load_status="stage_active",
+                        )
+                        evidence["stageStableSamples"] = stable_count
+                        return QualityGateResult.pass_result(
+                            evidence=evidence,
+                            message="Post-Run stage is active and stable.",
+                        )
+                else:
+                    stable_count = 0
+                    last_signature = None
+
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            delay = float(intervals[min(attempts - 1, len(intervals) - 1)])
+            time.sleep(min(delay, max(0.0, deadline - now)))
+
+        evidence = self._game_readiness_evidence(
+            probe_attempts=attempts,
+            started_at=started_at,
+            last_progress_at=started_at,
+            progress_extensions=0,
+            weak_progress_observations=0,
+            last_probe=last_probe,
+            load_status="post_run_runtime_not_ready",
+        )
+        return QualityGateResult.failure(
+            "post_run_runtime_not_ready",
+            retryable=True,
+            evidence=evidence,
+            message="Run was dispatched, but the active game stage was not verified.",
+        )
+
+    def wait_for_prepare_ready(self, timeout=None):
+        """Public entry gate for manual profiles and Skip Intro actions."""
+        result = self._wait_for_stage_active(timeout=timeout, stable_samples=2)
+        if result:
+            self._game_readiness_state = "PREPARE_READY"
+        return result
+
+    def _check_prepare_ready_for_input(self):
+        """Perform one no-input guard immediately before prepare actions."""
+        probe = self._read_game_readiness_probe()
+        if isinstance(probe, dict):
+            stage = probe.get("stage") if isinstance(probe.get("stage"), dict) else {}
+            run = probe.get("runButton") if isinstance(probe.get("runButton"), dict) else {}
+            loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
+            runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+            if (
+                self._game_probe_matches_current_page(probe) and
+                probe.get("stageActive") and stage.get("visible") and
+                not run.get("visible") and not loading.get("active") and
+                (runtime.get("responding") or runtime.get("canvasReady"))
+            ):
+                result = QualityGateResult.pass_result(
+                    evidence={"prepareReady": True, "probe": probe},
+                    message="Prepare input is allowed on the active game stage.",
+                )
+                self._last_prepare_ready_result = result
+                return result
+        result = QualityGateResult.failure(
+            "post_run_runtime_not_ready",
+            retryable=True,
+            evidence={"prepareReady": False, "probe": probe or {}},
+            message="Prepare input was blocked because the game stage is still loading or unknown.",
+        )
+        self._last_prepare_ready_result = result
+        return result
+
+    def _wait_for_playable_runtime_entry(self, timeout=None, stable_samples=2):
+        """Wait for two stable icon/slot snapshots after entry preparation."""
+        started_at = time.monotonic()
+        configured_budget = getattr(self, "game_load_phase_timeout", 60.0)
+        try:
+            budget = max(0.1, float(timeout if timeout is not None else configured_budget))
+        except (TypeError, ValueError, OverflowError):
+            budget = 60.0
+        remaining = self._remaining_game_entry_budget()
+        if remaining is not None:
+            budget = min(budget, remaining)
+        deadline = started_at + max(0.1, budget)
+        required_samples = max(1, int(stable_samples or 1))
+        intervals = tuple(getattr(
+            self,
+            "game_readiness_poll_intervals",
+            (0.25, 0.5, 1.0, 2.0, 3.0, 5.0),
+        )) or (0.25, 0.5, 1.0, 2.0, 3.0, 5.0)
+        previous_signature = None
+        stable_count = 0
+        attempts = 0
+        last_state = None
+        last_probe = None
+        runtime_observed = False
+        runtime_stable_observed = False
+        previous_runtime_signature = None
+        runtime_stable_count = 0
+
+        while time.monotonic() < deadline:
+            if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
+                return QualityGateResult.failure(
+                    "workflow_stopped",
+                    message="Playable-runtime wait stopped by the job.",
+                )
+            attempts += 1
+            readiness_probe = self._read_game_readiness_probe()
+            last_probe = readiness_probe if isinstance(readiness_probe, dict) else last_probe
+            loading = (readiness_probe or {}).get("loading", {}) if isinstance(readiness_probe, dict) else {}
+            if not isinstance(loading, dict):
+                loading = {}
+
+            ws = None
+            state = None
+            try:
+                ws_url = self._get_websocket_url()
+                if ws_url:
+                    ws = websocket.create_connection(
+                        ws_url,
+                        timeout=getattr(self, "game_probe_timeout", 3.0),
+                    )
+                    try:
+                        state = self._evaluate_entry_state_via_ws(
+                            ws,
+                            timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+                        )
+                    except TypeError:
+                        # Compatibility with older adapters exposing the
+                        # original one-argument runtime-state reader.
+                        state = self._evaluate_entry_state_via_ws(ws)
+            except Exception:
+                state = None
+            finally:
+                try:
+                    if ws:
+                        ws.close()
+                except Exception:
+                    pass
+
+            if isinstance(state, dict):
+                last_state = state
+                runtime_observed = runtime_observed or bool(state.get("ok"))
+                icons = int(state.get("iconCount") or 0) if str(state.get("iconCount", "")).lstrip("-").isdigit() else 0
+                slots = int(state.get("slotCount") or 0) if str(state.get("slotCount", "")).lstrip("-").isdigit() else 0
+                open_indicators = state.get("openPanelIndicators") or []
+                runtime_signature = self._stable_watchdog_probe_token({
+                    "icons": icons,
+                    "slots": slots,
+                    "openIndicators": len(open_indicators),
+                })
+                runtime_stable_count = (
+                    runtime_stable_count + 1
+                    if runtime_signature == previous_runtime_signature
+                    else 1
+                )
+                previous_runtime_signature = runtime_signature
+                if not loading.get("active") and runtime_stable_count >= 2:
+                    runtime_stable_observed = True
+                playable = bool(
+                    state.get("ok") and icons > 0 and slots > 0 and
+                    not loading.get("active") and not open_indicators
+                )
+                signature = self._stable_watchdog_probe_token({
+                    "icons": icons,
+                    "slots": slots,
+                    "openIndicators": len(open_indicators),
+                    "loadingPercent": loading.get("percent"),
+                })
+                if playable:
+                    stable_count = stable_count + 1 if signature == previous_signature else 1
+                    previous_signature = signature
+                    if stable_count >= required_samples:
+                        self._game_readiness_state = "PLAYABLE_RUNTIME"
+                        evidence = {
+                            "icons": icons,
+                            "slots": slots,
+                            "playButtons": int(state.get("playButtonCount") or 0),
+                            "openIndicators": len(open_indicators),
+                            "stableSamples": stable_count,
+                            "probeAttempts": attempts,
+                            "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                            "pageIdentity": (last_probe or {}).get("pageIdentity", {}),
+                        }
+                        entry_strategy = getattr(self, "entry_strategy", None)
+                        if not isinstance(entry_strategy, dict):
+                            entry_strategy = {"selected": None, "tested": [], "verification": UNKNOWN}
+                            self.entry_strategy = entry_strategy
+                        entry_strategy["runtimeState"] = evidence
+                        result = QualityGateResult.pass_result(
+                            evidence=evidence,
+                            message="Playable runtime verified by stable icon and slot snapshots.",
+                        )
+                        entry_strategy["verification"] = result.status
+                        entry_strategy["verificationResult"] = result.as_dict()
+                        if not entry_strategy.get("selected"):
+                            entry_strategy["selected"] = {
+                                "strategy": "runtime_vm",
+                                "reason": "stable_icons_and_slots",
+                            }
+                        return result
+                else:
+                    stable_count = 0
+                    previous_signature = None
+
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            delay = float(intervals[min(attempts - 1, len(intervals) - 1)])
+            time.sleep(min(delay, max(0.0, deadline - now)))
+
+        last_icons = 0
+        last_slots = 0
+        if isinstance(last_state, dict) and last_state.get("ok"):
+            try:
+                last_icons = int(last_state.get("iconCount") or 0)
+            except (TypeError, ValueError, OverflowError):
+                last_icons = 0
+            try:
+                last_slots = int(last_state.get("slotCount") or 0)
+            except (TypeError, ValueError, OverflowError):
+                last_slots = 0
+        evidence = {
+            "icons": last_icons,
+            "slots": last_slots,
+            "probeAttempts": attempts,
+            "runtimeObserved": runtime_observed,
+            "runtimeStableObserved": runtime_stable_observed,
+            "runtimeStableCount": runtime_stable_count,
+            "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+            "pageIdentity": (last_probe or {}).get("pageIdentity", {}) if isinstance(last_probe, dict) else {},
+            "readinessProbe": last_probe or {},
+        }
+        if not runtime_observed or not isinstance(last_state, dict):
+            code = "post_run_runtime_not_ready"
+            message = "Playable runtime did not respond within the bounded budget."
+        elif not runtime_stable_observed:
+            code = "post_run_runtime_not_ready"
+            message = "Runtime did not provide a stable post-prepare snapshot."
+        elif last_icons <= 0:
+            code = "no_icons"
+            message = "Runtime became stable but exposed no playable icons."
+        elif last_slots <= 0:
+            code = "no_slots"
+            message = "Runtime became stable but exposed no playable slots."
+        else:
+            code = "post_run_runtime_not_ready"
+            message = "Runtime signals did not produce two stable playable snapshots."
+        result = QualityGateResult.failure(
+            code,
+            retryable=code == "post_run_runtime_not_ready",
+            evidence=evidence,
+            message=message,
+        )
+        entry_strategy = getattr(self, "entry_strategy", None)
+        if not isinstance(entry_strategy, dict):
+            entry_strategy = {"selected": None, "tested": [], "verification": UNKNOWN}
+            self.entry_strategy = entry_strategy
+        entry_strategy["verification"] = result.status
+        entry_strategy["verificationResult"] = result.as_dict()
+        return result
+
     def _calculate_slots_coverage_area(self, slot_indices, all_slots, overlap_margin):
         """
         ðŸŽ¯ ADDED: Calculate coverage area for slots
@@ -4787,6 +6166,93 @@ class SprunkiGamePlayer:
             print(f"âŒ Error calculating coverage area: {e}")
             return None
 
+    def _recover_game_load_once(self):
+        """Reload a stalled entry at most once, without leaving a stale target."""
+        if int(getattr(self, "_load_recovery_count", 0) or 0) >= int(
+            getattr(self, "game_load_recovery_attempts", 1)
+        ):
+            return QualityGateResult.failure(
+                "game_load_stalled",
+                retryable=True,
+                evidence={
+                    "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                    "loadRecoveryAttempted": True,
+                    "loadRecoveryCount": int(getattr(self, "_load_recovery_count", 0) or 0),
+                },
+                message="The bounded game-load recovery budget is exhausted.",
+            )
+        remaining = self._remaining_game_entry_budget()
+        if remaining is not None and remaining <= 0:
+            return QualityGateResult.failure(
+                "game_load_timeout",
+                retryable=True,
+                message="The total game-entry budget is exhausted before recovery.",
+            )
+
+        ws = None
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return QualityGateResult.failure(
+                    "game_load_stalled",
+                    retryable=True,
+                    message="The exact game CDP target was unavailable for recovery.",
+                )
+            ws = websocket.create_connection(
+                ws_url,
+                timeout=getattr(self, "game_probe_timeout", 3.0),
+            )
+            response = self._send_cdp_command(
+                ws,
+                {"method": "Page.reload", "params": {"ignoreCache": False}},
+                timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+            )
+            if not response or "error" in response:
+                return QualityGateResult.failure(
+                    "game_load_stalled",
+                    retryable=True,
+                    evidence={"reloadResponse": response},
+                    message="The bounded game-load recovery reload was not acknowledged.",
+                )
+            self._load_recovery_count += 1
+            self._touch_watchdog_progress(
+                "runtime_entry",
+                "game_load_recovery_started",
+                progress_token={
+                    "stage": "game_load_recovery_started",
+                    "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                    "count": self._load_recovery_count,
+                },
+                progress_source="game_load_recovery",
+            )
+            return QualityGateResult.pass_result(
+                evidence={
+                    "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                    "loadRecoveryAttempted": True,
+                    "loadRecoveryCount": self._load_recovery_count,
+                    "targetId": getattr(self, "_cdp_target_id", None),
+                },
+                message="Game-load recovery reload dispatched to the exact page.",
+            )
+        except Exception as error:
+            return QualityGateResult.failure(
+                "game_load_stalled",
+                retryable=True,
+                evidence={"error": str(error)},
+                message="The bounded game-load recovery raised an exception.",
+            )
+        finally:
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
+            # The target id normally survives Page.reload, but the websocket
+            # URL and all candidate bounds must be revalidated from scratch.
+            self._invalidate_cdp_target(close_session=False)
+            if remaining is None or remaining > 0:
+                time.sleep(min(0.25, max(0.0, remaining or 0.25)))
+
     def navigate_and_prepare_game(self, url):
         """
         [REWRITTEN - FINAL STRATEGY] A robust setup process that patiently
@@ -4796,7 +6262,9 @@ class SprunkiGamePlayer:
         try:
             print(f"\n🚀 STARTING GAME SETUP (FINAL STRATEGY): {url}")
             print("======================================================================")
+            self.last_setup_result = None
             self.game_url = url
+            self._begin_game_entry_attempt(url)
             self.entry_strategy = {
                 "selected": None,
                 "tested": [],
@@ -4953,7 +6421,10 @@ class SprunkiGamePlayer:
             # Đây là logic cốt lõi. Nếu trang là 404, nó sẽ không có component game và sẽ timeout.
             # Nếu là trang game, nó sẽ chờ cho đến khi component xuất hiện.
             error_page_result = self.detect_cocrea_error_page_fast()
-            if not isinstance(error_page_result, QualityGateResult) or error_page_result.status != "PASS":
+            if (
+                isinstance(error_page_result, QualityGateResult)
+                and error_page_result.failure_code == "no_playable_entry"
+            ):
                 self.last_setup_result = error_page_result
                 print(
                     "[FAIL] SETUP FAILED: Cocrea error-page verification did not pass: "
@@ -4961,6 +6432,11 @@ class SprunkiGamePlayer:
                 )
                 self.cleanup_chrome_complete()
                 return False
+            if not isinstance(error_page_result, QualityGateResult) or not error_page_result.passed:
+                print(
+                    "   ⚠️ Error-page probe is inconclusive; continuing into the "
+                    "bounded semantic game-readiness pipeline."
+                )
             self._touch_watchdog_progress(
                 "runtime_entry",
                 "error_page_check_passed",
@@ -4972,6 +6448,31 @@ class SprunkiGamePlayer:
             
             # Chúng ta sẽ gọi hàm verify_game_components_ready với timeout mặc định (dài) từ config
             component_result = self.verify_game_components_ready()
+            if (
+                not component_result
+                and getattr(component_result, "failure_code", None) == "game_load_stalled"
+                and int(getattr(self, "_load_recovery_count", 0) or 0) < int(
+                    getattr(self, "game_load_recovery_attempts", 1)
+                )
+            ):
+                print("   🔄 Loading stalled; performing the single bounded entry recovery...")
+                recovery_result = self._recover_game_load_once()
+                if recovery_result:
+                    component_result = self.verify_game_components_ready()
+                elif isinstance(component_result, QualityGateResult):
+                    recovery_evidence = dict(component_result.evidence or {})
+                    recovery_evidence.update({
+                        "loadRecoveryAttempted": True,
+                        "loadRecoveryCount": int(getattr(self, "_load_recovery_count", 0) or 0),
+                        "recoveryFailure": recovery_result.as_dict(),
+                    })
+                    component_result = QualityGateResult.failure(
+                        component_result.failure_code or "game_load_stalled",
+                        retryable=True,
+                        evidence=recovery_evidence,
+                        message=component_result.message,
+                    )
+                    self.entry_strategy.setdefault("readiness", {})["load"] = component_result.as_dict()
             if not component_result:
                 self.last_setup_result = component_result
                 # Nếu sau 120 giây mà vẫn không tìm thấy component game, chúng ta có thể chắc chắn
@@ -4988,17 +6489,26 @@ class SprunkiGamePlayer:
                 progress_token={"stage": "game_components_verified", "url": url},
                 progress_source="game_navigation",
             )
+            self.entry_strategy.setdefault("readiness", {}).update({
+                "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                "load": component_result.as_dict() if isinstance(component_result, QualityGateResult) else {},
+            })
 
             # --- PHASE 3: INTERACTION (RUN & FULLSCREEN) ---
             print("PHASE 3: Interacting with Game Interface...")
 
-            if not self._click_run_button_cdp_only():
-                self.last_setup_result = QualityGateResult.failure(
-                    "runtime_verification_unknown",
-                    status="UNKNOWN",
-                    retryable=True,
-                    message="Run button interaction was not verified.",
+            run_result = self._click_run_button_cdp_only()
+            if not run_result:
+                self.last_setup_result = (
+                    run_result
+                    if isinstance(run_result, QualityGateResult)
+                    else QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        message="Run button interaction was not verified.",
+                    )
                 )
+                self.entry_strategy.setdefault("readiness", {})["run"] = self.last_setup_result.as_dict()
                 print("❌ SETUP FAILED: Could not find or click the 'Run' button.")
                 self.cleanup_chrome_complete()
                 return False
@@ -5009,14 +6519,37 @@ class SprunkiGamePlayer:
                 progress_source="game_navigation",
             )
             
-            print(f"   -> Waiting {self.game_load_wait}s for game to load after Run click...")
-            time.sleep(self.game_load_wait)
+            print("   -> Waiting for a stable active stage after Run click...")
+            stage_result = self._wait_for_stage_active()
+            if not stage_result:
+                self.last_setup_result = stage_result
+                self.entry_strategy.setdefault("readiness", {})["run"] = (
+                    run_result.as_dict() if isinstance(run_result, QualityGateResult) else {}
+                )
+                self.entry_strategy.setdefault("readiness", {})["stage"] = (
+                    stage_result.as_dict() if isinstance(stage_result, QualityGateResult) else {}
+                )
+                print(
+                    "❌ SETUP FAILED: post-Run runtime was not ready: "
+                    f"{stage_result.failure_code or stage_result.status}"
+                )
+                self.cleanup_chrome_complete()
+                return False
+            self.entry_strategy["readiness"] = {
+                "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                "load": component_result.as_dict() if isinstance(component_result, QualityGateResult) else {},
+                "run": run_result.as_dict() if isinstance(run_result, QualityGateResult) else {},
+                "stage": stage_result.as_dict() if isinstance(stage_result, QualityGateResult) else {},
+                "loadRecoveryAttempted": int(getattr(self, "_load_recovery_count", 0) or 0) > 0,
+                "loadRecoveryCount": int(getattr(self, "_load_recovery_count", 0) or 0),
+            }
 
             if not self._click_fullscreen_button_cdp_only():
                 self.last_setup_result = QualityGateResult.failure(
                     "runtime_verification_unknown",
                     status="UNKNOWN",
                     retryable=True,
+                    evidence={"readiness": self.entry_strategy.get("readiness", {})},
                     message="Fullscreen interaction was not verified.",
                 )
                 print("❌ SETUP FAILED: Could not find or click the 'Fullscreen' button.")
@@ -5037,6 +6570,16 @@ class SprunkiGamePlayer:
                 progress_token={"stage": "navigation_completed", "url": url},
                 progress_source="game_navigation",
             )
+            self.last_setup_result = QualityGateResult.pass_result(
+                evidence={
+                    "loadStatus": "playable_entry_pending_prepare",
+                    "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                    "loadRecoveryAttempted": int(getattr(self, "_load_recovery_count", 0) or 0) > 0,
+                    "loadRecoveryCount": int(getattr(self, "_load_recovery_count", 0) or 0),
+                    "readiness": self.entry_strategy.get("readiness", {}),
+                },
+                message="Game page, Run transition, and active stage were verified.",
+            )
             print("\n✅ GAME SETUP COMPLETED SUCCESSFULLY. Ready for automation.")
             print("======================================================================")
             return True
@@ -5046,13 +6589,15 @@ class SprunkiGamePlayer:
             print(f"❌ CRITICAL ERROR during game setup: {e}")
             import traceback
             traceback.print_exc()
-            self.last_setup_result = QualityGateResult.failure(
-                "runtime_verification_unknown",
-                status="UNKNOWN",
-                retryable=True,
-                evidence={"error": str(e), "url": getattr(self, "game_url", None)},
-                message="Game setup raised an exception.",
-            )
+            existing_result = getattr(self, "last_setup_result", None)
+            if not isinstance(existing_result, QualityGateResult) or existing_result.passed:
+                self.last_setup_result = QualityGateResult.failure(
+                    "runtime_verification_unknown",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"error": str(e), "url": getattr(self, "game_url", None)},
+                    message="Game setup raised an exception.",
+                )
             self.cleanup_chrome_complete()
             try:
                 messagebox.showerror("Setup Error", f"Failed to prepare game: {e}")
@@ -5132,149 +6677,151 @@ class SprunkiGamePlayer:
             print(f"   âŒ Extension health check error: {e}")
             return False
 
-    def _get_websocket_url(self, max_retries=5, retry_delay=2):
-        """
-        🔍 FIXED: Get WebSocket URL with retry mechanism and health verification. Automatically invalidates stale URLs.
-        """
-        import websocket
+    def _get_websocket_url(self, max_retries=5, retry_delay=2, lookup_timeout_seconds=None):
+        """Return a functional CDP socket for the exact current game page.
 
-        # Nếu ws_url đã có, hãy kiểm tra xem nó còn "sống" không
+        The previous implementation fell back to the first Cocrea tab when a
+        URL match was temporarily unavailable.  That can deliver a perfectly
+        valid CDP command to the wrong project, so an absent or ambiguous exact
+        match is now a hard failure for this lookup.
+        """
+        current_job_url = getattr(self, "game_url", None) or ""
+        if not current_job_url:
+            print("🛑 CDP target lookup rejected: current game URL is unavailable")
+            return None
+
+        try:
+            lookup_timeout = (
+                max(0.1, min(float(lookup_timeout_seconds), 10.0))
+                if lookup_timeout_seconds is not None else 5.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            lookup_timeout = 5.0
+        try:
+            lookup_retries = max(1, int(max_retries))
+        except (TypeError, ValueError, OverflowError):
+            lookup_retries = 1
+        try:
+            lookup_delay = max(0.0, float(retry_delay))
+        except (TypeError, ValueError, OverflowError):
+            lookup_delay = 0.0
+
         if self.ws_url:
+            ws_test = None
             try:
-                # Cố gắng tạo một kết nối ngắn để kiểm tra
-                ws_test = websocket.create_connection(self.ws_url, timeout=3) # Bây giờ sẽ không báo lỗi nữa
-                ws_test.close()
-                print(f"   ✅ Existing WebSocket URL is still valid: {self.ws_url[:60]}...")
-                return self.ws_url
+                ws_test = websocket.create_connection(self.ws_url, timeout=lookup_timeout)
+                # Validate the live page as well as the socket.  A target can
+                # stay connected while its page has navigated elsewhere.
+                response = self._send_cdp_command(ws_test, {
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "window.location.href",
+                        "returnByValue": True,
+                    },
+                }, timeout_seconds=lookup_timeout)
+                value = response.get("result", {}).get("result", {}).get("value") if response else None
+                if self._cdp_urls_match(value, current_job_url):
+                    print(f"   ✅ Existing exact CDP target is still valid: {self.ws_url[:60]}...")
+                    self._cdp_page_identity = {"href": value}
+                    return self.ws_url
             except Exception:
-                # Nếu kết nối thất bại, URL này đã cũ. Xóa nó đi.
-                print(f"   ⚠️ Stale WebSocket URL detected. Invalidating and fetching a new one.")
-                self.ws_url = None # 🔥 ĐÂY LÀ ĐIỂM QUAN TRỌNG
-        
-        print(f"🔍 Getting WebSocket URL with retry (max: {max_retries} attempts)...")
-        
-        for attempt in range(1, max_retries + 1):
+                pass
+            finally:
+                try:
+                    if ws_test:
+                        ws_test.close()
+                except Exception:
+                    pass
+            print("   ⚠️ Stale or navigated CDP target detected; invalidating it.")
+            self._invalidate_cdp_target(close_session=False)
+
+        print(f"🔍 Getting exact game WebSocket URL (max: {lookup_retries} attempts)...")
+        for attempt in range(1, lookup_retries + 1):
             try:
-                print(f"   🔄 WebSocket attempt {attempt}/{max_retries}...")
-                
-                # Check if Chrome debug port is accessible
                 import socket
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(3)
+                sock.settimeout(lookup_timeout)
                 port_result = sock.connect_ex(('localhost', self.debugging_port))
                 sock.close()
-                
                 if port_result != 0:
-                    print(f"   ⚠️ Port {self.debugging_port} not accessible, Chrome may not be ready")
-                    if attempt < max_retries:
-                        print(f"   ⏳ Waiting {retry_delay}s before retry...")
-                        time.sleep(retry_delay)
+                    if attempt < lookup_retries:
+                        time.sleep(lookup_delay)
                         continue
-                    else:
-                        print(f"   🚫 Port {self.debugging_port} still not accessible after {max_retries} attempts")
-                        return None
-                
-                # Port accessible, try to get tabs
-                import requests
-                response = requests.get(f"http://localhost:{self.debugging_port}/json", timeout=5)
-                
-                if response.status_code != 200:
-                    print(f"   ⚠️ HTTP {response.status_code} from debug endpoint")
-                    if attempt < max_retries:
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        return None
-                
-                tabs = response.json()
-                print(f"   📋 Found {len(tabs)} tabs from Chrome debug endpoint")
-                
-                # [FIXED] Find the EXACT tab for the current job's URL
-                target_tab = None
-                
-                # self.game_url được thiết lập ở đầu hàm navigate_and_prepare_game
-                current_job_url = self.game_url or ""
-
-                if not current_job_url:
-                    self.logger.error("Cannot get WebSocket URL because self.game_url is not set.")
                     return None
 
-                # Tìm tab có URL khớp chính xác nhất
-                for tab in tabs:
-                    tab_url = tab.get('url', '')
-                    if tab.get('type') == 'page' and current_job_url in tab_url:
-                        target_tab = tab
-                        print(f"   🎯 [EXACT MATCH] Found target tab: {tab.get('title', 'Unknown')[:50]}...")
-                        break
-                
-                # Fallback: nếu không tìm thấy khớp chính xác, thử tìm bất kỳ tab cocrea nào
-                if not target_tab:
-                    print(f"   ⚠️ Could not find exact match for {current_job_url}. Falling back to first available cocrea tab...")
-                    for tab in tabs:
-                        if tab.get('type') == 'page' and 'cocrea.world' in tab.get('url', '').lower():
-                            target_tab = tab
-                            print(f"   🎯 [FALLBACK] Found cocrea.world tab: {tab.get('title', 'Unknown')[:50]}...")
-                            break
-                
-                if not target_tab:
-                    print(f"   ⚠️ No cocrea.world tab found in {len(tabs)} tabs")
-                    
-                    # Log available tabs for debugging
-                    for i, tab in enumerate(tabs[:3]):  # Show first 3 tabs
-                        url = tab.get('url', 'No URL')[:50]
-                        title = tab.get('title', 'No title')[:30]
-                        print(f"      Tab {i+1}: {title} - {url}")
-                    
-                    if attempt < max_retries:
-                        print(f"   ⏳ Tab may still be loading, waiting {retry_delay}s...")
-                        time.sleep(retry_delay)
+                response = requests.get(
+                    f"http://localhost:{self.debugging_port}/json",
+                    timeout=lookup_timeout,
+                )
+                response.raise_for_status()
+                tabs = response.json()
+                matching_tabs = [
+                    tab for tab in tabs if isinstance(tab, dict)
+                    and tab.get("type") == "page"
+                    and tab.get("webSocketDebuggerUrl")
+                    and self._cdp_urls_match(tab.get("url"), current_job_url)
+                ]
+                preferred_target_id = getattr(self, "_cdp_target_id", None)
+                if preferred_target_id:
+                    preferred = [
+                        tab for tab in matching_tabs
+                        if tab.get("id") == preferred_target_id
+                    ]
+                    if preferred:
+                        matching_tabs = preferred
+                if len(matching_tabs) != 1:
+                    if len(matching_tabs) > 1:
+                        print(f"   🛑 Exact game target is ambiguous ({len(matching_tabs)} matching pages).")
+                    else:
+                        print(f"   ⏳ Exact game target is not visible yet (attempt {attempt}/{lookup_retries}).")
+                    if attempt < lookup_retries:
+                        time.sleep(lookup_delay)
                         continue
-                    else:
-                        print("   🚫 No cocrea.world tab found after all attempts")
-                        return None
-                
-                # Test WebSocket connection
-                ws_url = target_tab['webSocketDebuggerUrl']
-                print(f"   🔌 Testing WebSocket connection to: {ws_url[:50]}...")
-                
+                    return None
+
+                target_tab = matching_tabs[0]
+                ws_url = target_tab["webSocketDebuggerUrl"]
+                test_ws = None
                 try:
-                    import websocket
-                    test_ws = websocket.create_connection(ws_url, timeout=5)
-                    
-                    # Send a simple test command
-                    test_command = {
-                        "id": 999999,
+                    test_ws = websocket.create_connection(ws_url, timeout=lookup_timeout)
+                    response = self._send_cdp_command(test_ws, {
                         "method": "Runtime.evaluate",
-                        "params": {"expression": "1", "returnByValue": True}
-                    }
-                    test_ws.send(json.dumps(test_command))
-                    
-                    # Wait for response
-                    test_response = test_ws.recv()
-                    test_ws.close()
-                    
-                    response_data = json.loads(test_response)
-                    if response_data.get('id') == 999999:
-                        self.ws_url = ws_url
-                        print(f"   ✅ WebSocket connection verified and functional")
-                        return self.ws_url
-                    else:
-                        print(f"   ⚠️ WebSocket test command failed")
-                        
-                except Exception as ws_error:
-                    print(f"   ⚠️ WebSocket test failed: {ws_error}")
-                
-                if attempt < max_retries:
-                    print(f"   ⏳ WebSocket test failed, waiting {retry_delay}s before retry...")
-                    time.sleep(retry_delay)
-                
-            except Exception as e:
-                print(f"   ⚠️ WebSocket URL attempt {attempt} error: {e}")
-                if attempt < max_retries:
-                    print(f"   ⏳ Waiting {retry_delay}s before retry...")
-                    time.sleep(retry_delay)
-        
-        print(f"🚫 Failed to get functional WebSocket URL after {max_retries} attempts")
+                        "params": {
+                            "expression": "window.location.href",
+                            "returnByValue": True,
+                        },
+                    }, timeout_seconds=lookup_timeout)
+                    actual_url = response.get("result", {}).get("result", {}).get("value") if response else None
+                    if not self._cdp_urls_match(actual_url, current_job_url):
+                        raise RuntimeError("CDP target navigated away from the requested page")
+                finally:
+                    try:
+                        if test_ws:
+                            test_ws.close()
+                    except Exception:
+                        pass
+
+                self.ws_url = ws_url
+                self._cdp_target_id = target_tab.get("id")
+                self._cdp_target_url = target_tab.get("url")
+                self._cdp_page_identity = {
+                    "href": actual_url,
+                    "targetId": self._cdp_target_id,
+                    "targetUrl": self._cdp_target_url,
+                    "frame": "main",
+                }
+                print(
+                    "   ✅ Exact CDP target verified: "
+                    f"{self._cdp_target_id or 'unknown'} / {actual_url}"
+                )
+                return self.ws_url
+            except Exception as error:
+                print(f"   ⚠️ Exact CDP lookup attempt {attempt} failed: {error}")
+                self._invalidate_cdp_target(close_session=False)
+                if attempt < lookup_retries:
+                    time.sleep(lookup_delay)
+
+        print(f"🚫 Failed to resolve an exact functional CDP target after {lookup_retries} attempts")
         return None
 
     def verify_cdp_ready(self, max_attempts=3):
@@ -5313,10 +6860,15 @@ class SprunkiGamePlayer:
                         current_url = test_response.get('result', {}).get('result', {}).get('value', '')
                         print(f"   ✅ CDP test successful - Page: {current_url[:50]}...")
                         
-                        # Test if it's the right page
-                        if 'cocrea.world' in current_url.lower():
+                        # Test the exact page, not merely the Cocrea domain.
+                        if self._cdp_urls_match(current_url, getattr(self, "game_url", None)):
+                            self._cdp_page_identity = {
+                                "href": current_url,
+                                "targetId": getattr(self, "_cdp_target_id", None),
+                                "targetUrl": getattr(self, "_cdp_target_url", None),
+                            }
                             ws.close()
-                            print(f"   🎯 CDP verified ready on cocrea.world page")
+                            print(f"   🎯 CDP verified ready on the exact game page")
                             return True
                         else:
                             print(f"   ⚠️ CDP working but wrong page: {current_url}")
@@ -5339,17 +6891,21 @@ class SprunkiGamePlayer:
             print(f"❌ CDP verification error: {e}")
             return False
 
-    def _send_cdp_command(self, ws, command):
-        """Send CDP command via WebSocket"""
+    def _send_cdp_command(self, ws, command, timeout_seconds=None):
+        """Send one CDP command with a bounded, caller-selectable timeout."""
         try:
             command_id = random.randint(1, 1000000)
             command['id'] = command_id
             ws.send(json.dumps(command))
+
+            max_wait_time = timeout_seconds if timeout_seconds is not None else 30
+            try:
+                max_wait_time = max(0.1, float(max_wait_time))
+            except (TypeError, ValueError, OverflowError):
+                max_wait_time = 30.0
+            start_time = time.monotonic()
             
-            max_wait_time = 30 
-            start_time = time.time()
-            
-            while time.time() - start_time < max_wait_time:
+            while time.monotonic() - start_time < max_wait_time:
                 try:
                     response_str = ws.recv()
                     response_data = json.loads(response_str)
@@ -5357,7 +6913,9 @@ class SprunkiGamePlayer:
                         return response_data
                 except Exception as timeout_e:
                     if "timeout" in str(timeout_e).lower():
-                        print("WARNING: WebSocket timeout, continuing to wait...")
+                        # A single recv timeout is an observation, not proof
+                        # that the renderer is stalled.  The caller's bounded
+                        # command budget decides when to return.
                         continue
                     else:
                         raise timeout_e
@@ -5876,145 +7434,255 @@ class SprunkiGamePlayer:
             print(f"âš ï¸ Window activation failed for {operation_name}: {e}")
             return False
 
+    def _evaluate_game_readiness_on_ws(self, ws):
+        """Evaluate the canonical readiness probe on an already bound socket."""
+        response = self._send_cdp_command(
+            ws,
+            {
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": self._get_game_readiness_probe_js(),
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                },
+            },
+            timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+        )
+        if not response or "error" in response:
+            return None
+        value = response.get("result", {}).get("result", {}).get("value")
+        return self._normalize_game_readiness_probe(value)
+
+    @staticmethod
+    def _run_button_scroll_js():
+        """Scroll only a semantic Run candidate into the current viewport."""
+        return r'''
+        (() => {
+          const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const stageSelectors = [
+            '.style_stage-cover__VITCW', '.ccw-stage-wrapper', '#stage-canvas-wrapper',
+            '.style_gandi-player-wrapper__WCs0P', '.style_stage-player__0Xy7d',
+            '.gandi_stage_stage_1fD7k', 'canvas'
+          ];
+          const roots = [];
+          for (const selector of stageSelectors) {
+            try {
+              for (const element of document.querySelectorAll(selector)) {
+                if (!roots.includes(element)) roots.push(element);
+              }
+            } catch (e) {}
+          }
+          const inStage = element => roots.some(root => root === element || root.contains(element)) ||
+            !!element.closest('[class*="stage"], [class*="player"], [class*="game"]');
+          const controls = [];
+          const visible = element => {
+            if (!element || !element.isConnected) return false;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          try { controls.push(...Array.from(document.querySelectorAll('button.style_run-button__VjFSY'))); } catch (e) {}
+          if (!controls.some(visible)) {
+            for (const root of roots) {
+              try { controls.push(...Array.from(root.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]'))); } catch (e) {}
+            }
+          }
+          const candidate = controls.find(element => {
+            if (!inStage(element)) return false;
+            const tag = (element.tagName || '').toLowerCase();
+            if (!(tag === 'button' || tag === 'input' || element.getAttribute('role') === 'button')) return false;
+            const label = normalize(element.textContent || element.value || element.getAttribute('aria-label') || '');
+            const className = typeof element.className === 'string' ? element.className : String(element.className || '');
+            return /(^|\s)style_run-button__VjFSY(?:\s|$)/i.test(className) || ['run', 'play', 'start'].includes(label);
+          });
+          if (!candidate) return { success: false, reason: 'candidate_disappeared' };
+          candidate.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+          return { success: true };
+        })()
+        '''
+
     def _click_run_button_cdp_only(self):
-        """Pure CDP implementation for Run button detection and clicking"""
+        """Click the exact current Run control and verify the state transition."""
+        ws = None
         try:
-            print("[RUN] CDP: finding Run button bounds, then clicking with mouse events...")
+            print("[RUN] CDP: probing the exact Run control, then dispatching on the same target...")
             ws_url = self._get_websocket_url()
             if not ws_url:
-                print("[RUN] WebSocket not available")
-                return False
+                result = QualityGateResult.failure(
+                    "run_button_not_verified",
+                    retryable=True,
+                    message="The exact game CDP target is unavailable for Run.",
+                )
+                self._last_run_click_result = result
+                return result
 
             ws = websocket.create_connection(ws_url, timeout=30)
-            run_button_bounds_js = r'''
-            (() => {
-                try {
-                    const selectors = [
-                        '.style_run-button__VjFSY',
-                        'button.MuiButton-contained.MuiButton-containedPrimary',
-                        'button[class*="style_run-button"]',
-                        'button[class*="run"]',
-                        'button[class*="play"]',
-                        'button[class*="start"]',
-                        '.MuiButton-contained',
-                        'button',
-                        'input[type="submit"]',
-                        'input[type="button"]',
-                        '[role="button"]',
-                        '[aria-label*="run" i]',
-                        '[aria-label*="play" i]',
-                        '[aria-label*="start" i]'
-                    ];
+            last_result = None
+            max_attempts = min(
+                3,
+                max(1, int(getattr(self, "run_button_max_retries", 3))),
+            )
+            for click_attempt in range(1, max_attempts + 1):
+                try:
+                    identity = self._read_cdp_page_identity(
+                        ws,
+                        timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+                    )
+                except TypeError:
+                    identity = self._read_cdp_page_identity(ws)
+                expected_url = self._normalize_cdp_page_url(getattr(self, "game_url", None))
+                actual_url = self._normalize_cdp_page_url((identity or {}).get("href"))
+                if not identity or not self._cdp_urls_match(actual_url, expected_url):
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={"pageIdentity": identity, "expectedUrl": expected_url, "actualUrl": actual_url},
+                        message="The Run target page identity changed before click.",
+                    )
+                    break
 
-                    function describe(el, selector) {
-                        const rect = el.getBoundingClientRect();
-                        const text = (el.textContent || el.value || el.alt || el.getAttribute('aria-label') || '').trim();
-                        const lowerText = text.toLowerCase();
-                        const className = typeof el.className === 'string' ? el.className : String(el.className || '');
-                        const lowerClass = className.toLowerCase();
-                        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        const style = window.getComputedStyle(el);
-                        const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-                        const looksLikeRun =
-                            lowerText === 'run' ||
-                            lowerText.includes('run') ||
-                            lowerText.includes('play') ||
-                            lowerText.includes('start') ||
-                            aria.includes('run') ||
-                            aria.includes('play') ||
-                            aria.includes('start') ||
-                            lowerClass.includes('run-button') ||
-                            lowerClass.includes('run');
-                        return {el, selector, text, className, visible, looksLikeRun};
-                    }
+                front_response = self._send_cdp_command(
+                    ws,
+                    {"method": "Page.bringToFront", "params": {}},
+                    timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+                )
+                if not front_response or "error" in front_response:
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={"pageIdentity": identity, "bringToFrontResponse": front_response},
+                        message="The exact game page could not be brought to the foreground.",
+                    )
+                    break
+                scroll_response = self._send_cdp_command(ws, {
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": self._run_button_scroll_js(), "returnByValue": True},
+                }, timeout_seconds=getattr(self, "game_probe_timeout", 3.0))
+                scroll_value = scroll_response.get("result", {}).get("result", {}).get("value") if scroll_response else None
+                if not isinstance(scroll_value, dict) or not scroll_value.get("success"):
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={"reason": (scroll_value or {}).get("reason", "candidate_disappeared"), "pageIdentity": identity},
+                        message="The semantic Run candidate disappeared before click.",
+                    )
+                    break
 
-                    const candidates = [];
-                    for (const selector of selectors) {
-                        let elements = [];
-                        try {
-                            elements = Array.from(document.querySelectorAll(selector));
-                        } catch (e) {
-                            continue;
-                        }
-                        for (const el of elements) {
-                            const info = describe(el, selector);
-                            if (info.visible && info.looksLikeRun) candidates.push(info);
-                        }
-                    }
+                probe = self._evaluate_game_readiness_on_ws(ws)
+                if isinstance(probe, dict) and not self._game_probe_matches_current_page(probe):
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={"pageIdentity": probe.get("pageIdentity", {}), "expectedUrl": expected_url},
+                        message="The Run probe returned a different page identity.",
+                    )
+                    break
+                run = (probe or {}).get("runButton") if isinstance(probe, dict) else None
+                if not isinstance(run, dict) or not all(
+                    bool(run.get(key)) for key in ("found", "visible", "enabled", "clickable")
+                ):
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={"runButtonEvidence": run or {}, "pageIdentity": identity, "attempt": click_attempt},
+                        message="The Run control was not visible, enabled, and hit-testable.",
+                    )
+                    break
+                bounds = run.get("bounds") or {}
+                x = bounds.get("centerX")
+                y = bounds.get("centerY")
+                if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={"runButtonEvidence": run, "pageIdentity": identity},
+                        message="The live Run bounds were invalid.",
+                    )
+                    break
 
-                    if (!candidates.length) {
-                        return {success: false, reason: 'button_not_found', candidateCount: 0};
-                    }
+                dispatches = []
+                for event_type, extra in (
+                    ("mouseMoved", {}),
+                    ("mousePressed", {"button": "left", "clickCount": 1}),
+                    ("mouseReleased", {"button": "left", "clickCount": 1}),
+                ):
+                    response = self._send_cdp_command(ws, {
+                        "method": "Input.dispatchMouseEvent",
+                        "params": {"type": event_type, "x": x, "y": y, **extra},
+                    }, timeout_seconds=getattr(self, "game_probe_timeout", 3.0))
+                    dispatches.append(response)
+                    if not response or "error" in response:
+                        break
+                    if event_type != "mouseMoved":
+                        time.sleep(0.05)
 
-                    const candidate = candidates[0];
-                    candidate.el.scrollIntoView({block: 'center', inline: 'center'});
-                    const rect = candidate.el.getBoundingClientRect();
-                    return {
-                        success: true,
-                        method: 'bounds_then_cdp_mouse',
-                        strategy: candidate.selector,
-                        text: candidate.text,
-                        className: candidate.className,
-                        candidateCount: candidates.length,
-                        x: rect.left + rect.width / 2,
-                        y: rect.top + rect.height / 2,
-                        width: rect.width,
-                        height: rect.height
-                    };
-                } catch (error) {
-                    return {success: false, reason: 'js_error', error: String(error && error.stack || error)};
-                }
-            })();
-            '''
+                if dispatches and all(item and "error" not in item for item in dispatches):
+                    self._game_readiness_state = "RUN_CLICKED"
+                post_probe = self._evaluate_game_readiness_on_ws(ws)
+                post_run = (post_probe or {}).get("runButton") if isinstance(post_probe, dict) else {}
+                post_stage = (post_probe or {}).get("stage") if isinstance(post_probe, dict) else {}
+                post_runtime = (post_probe or {}).get("runtime") if isinstance(post_probe, dict) else {}
+                transition_verified = bool(
+                    isinstance(post_probe, dict) and
+                    self._game_probe_matches_current_page(post_probe) and
+                    not post_run.get("visible") and
+                    post_stage.get("visible") and post_runtime.get("canvasReady")
+                )
+                if transition_verified:
+                    result = QualityGateResult.pass_result(
+                        evidence={
+                            "method": "same_cdp_session_mouse_events",
+                            "attempt": click_attempt,
+                            "runButtonEvidence": run,
+                            "postRunProbe": post_probe,
+                            "pageIdentity": {
+                                **identity,
+                                "targetId": getattr(self, "_cdp_target_id", None),
+                                "targetUrl": getattr(self, "_cdp_target_url", None),
+                            },
+                            "dispatchesDelivered": sum(1 for item in dispatches if item and "error" not in item),
+                            "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                        },
+                        message="Run control transitioned on the exact CDP page.",
+                    )
+                    self._last_run_click_result = result
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                    return result
 
-            response = self._send_cdp_command(ws, {
-                "method": "Runtime.evaluate",
-                "params": {"expression": run_button_bounds_js, "returnByValue": True}
-            })
+                # A state transition without an active canvas is not a reason
+                # to send another click.  Retry only while the same live,
+                # hit-testable Run control is still present.
+                last_result = QualityGateResult.failure(
+                    "post_run_runtime_not_ready" if not post_run.get("visible") else "run_button_not_verified",
+                    retryable=True,
+                    evidence={
+                        "attempt": click_attempt,
+                        "runButtonEvidence": run,
+                        "postRunProbe": post_probe or {},
+                        "pageIdentity": identity,
+                        "dispatchesDelivered": sum(1 for item in dispatches if item and "error" not in item),
+                    },
+                    message="Run click was dispatched but the post-click state was not verified.",
+                )
+                if not post_run.get("visible"):
+                    break
+                if not all(bool(post_run.get(key)) for key in ("visible", "enabled", "clickable")):
+                    break
 
-            if response and 'error' in response:
-                print(f"[RUN] Runtime.evaluate error: {response.get('error')}")
+            result = last_result or QualityGateResult.failure(
+                "run_button_not_verified",
+                retryable=True,
+                message="Run button interaction was not verified.",
+            )
+            self._last_run_click_result = result
+            try:
                 ws.close()
-                return False
-
-            result = None
-            if response and 'result' in response:
-                result = response.get('result', {}).get('result', {}).get('value')
-
-            if not result or not result.get('success'):
-                reason = result.get('reason', 'no_result') if result else 'no_result'
-                error = result.get('error') if result else None
-                if error:
-                    print(f"[RUN] JavaScript error: {error}")
-                print(f"[RUN] Run button not clickable via DOM bounds: {reason}")
-                ws.close()
-                return False
-
-            x = result.get('x')
-            y = result.get('y')
-            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-                print(f"[RUN] Invalid Run button coordinates: ({x}, {y})")
-                ws.close()
-                return False
-
-            print(f"[RUN] Found Run button via {result.get('strategy')} at ({x:.1f}, {y:.1f})")
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {"type": "mouseMoved", "x": x, "y": y}
-            })
-            time.sleep(0.1)
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}
-            })
-            time.sleep(0.1)
-            self._send_cdp_command(ws, {
-                "method": "Input.dispatchMouseEvent",
-                "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}
-            })
-            ws.close()
-            print(f"[RUN] Run button clicked via {result.get('method')} (strategy: {result.get('strategy')})")
-            return True
+            except Exception:
+                pass
+            return result
 
             print("ðŸ”§ CDP-ONLY: Finding and clicking Run button via DOM...")
             
@@ -6183,7 +7851,23 @@ class SprunkiGamePlayer:
             print(f"âŒ CDP-ONLY: Run button detection error: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
+            result = QualityGateResult.failure(
+                "run_button_not_verified",
+                retryable=True,
+                evidence={"error": str(e), "entryAttemptId": getattr(self, "_entry_attempt_id", None)},
+                message="Run button detection raised an exception.",
+            )
+            self._last_run_click_result = result
+            return result
+
+    def _click_run_button_cdp_only_legacy(self):
+        """Retained source for old integrations; not used by entry flow."""
+        return False
 
     def _click_fullscreen_button_cdp_only(self, wait_time=15):
         """SVG-aware Fullscreen with RELAXED verification"""
@@ -10311,7 +11995,8 @@ class SprunkiGamePlayer:
             if not parsed.scheme or not parsed.netloc:
                 return ""
             path = parsed.path.rstrip("/") or "/"
-            return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+            query = f"?{parsed.query}" if parsed.query else ""
+            return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}{query}"
         except (TypeError, ValueError, AttributeError):
             return ""
 
@@ -10381,15 +12066,23 @@ class SprunkiGamePlayer:
 
         return matching_tabs[0]
 
-    def _read_cdp_page_identity(self, ws):
+    def _read_cdp_page_identity(self, ws, timeout_seconds=None):
         """Read identity and viewport data from the currently bound CDP page."""
-        response = self._send_cdp_command(ws, {
+        command = {
             "method": "Runtime.evaluate",
             "params": {
                 "expression": "({href: window.location.href, visibilityState: document.visibilityState, hidden: document.hidden, readyState: document.readyState, innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio})",
                 "returnByValue": True,
             },
-        })
+        }
+        if timeout_seconds is None:
+            response = self._send_cdp_command(ws, command)
+        else:
+            response = self._send_cdp_command(
+                ws,
+                command,
+                timeout_seconds=timeout_seconds,
+            )
         if not response or "error" in response:
             return None
         value = response.get("result", {}).get("result", {}).get("value")
@@ -11872,20 +13565,32 @@ class SprunkiGamePlayer:
         });
         '''
 
-    def _evaluate_entry_state_via_ws(self, ws):
-        response = self._send_cdp_command(ws, {
+    def _evaluate_entry_state_via_ws(self, ws, timeout_seconds=None):
+        command = {
             "method": "Runtime.evaluate",
             "params": {
                 "expression": self._get_entry_state_js(),
                 "awaitPromise": True,
                 "returnByValue": True
             }
-        })
+        }
+        if timeout_seconds is None:
+            response = self._send_cdp_command(ws, command)
+        else:
+            response = self._send_cdp_command(
+                ws,
+                command,
+                timeout_seconds=timeout_seconds,
+            )
         if response and 'result' in response:
             return response.get('result', {}).get('result', {}).get('value')
         return None
 
     def verify_playable_runtime_entry(self):
+        """Verify playable entry through the shared stable-snapshot gate."""
+        return self._wait_for_playable_runtime_entry(stable_samples=2)
+
+    def _verify_playable_runtime_entry_once(self):
         """Verify that the selected runtime is a real playable Sprunki stage.
 
         DOM/container presence is not enough: the Scratch VM must expose at
@@ -12640,6 +14345,14 @@ class SprunkiGamePlayer:
             print(f"🛑 Manual profile replay rejected before input: {validation_reason}")
             return False
 
+        prepare_gate = self._check_prepare_ready_for_input()
+        if not prepare_gate:
+            print(
+                "🛑 Manual profile replay blocked before input: "
+                f"{prepare_gate.failure_code or prepare_gate.status}"
+            )
+            return False
+
         context = operation_context or getattr(self, "_active_operation_context", None)
         owns_context = False
         if context is None:
@@ -12671,6 +14384,8 @@ class SprunkiGamePlayer:
                 # Recovery replay is allowed to send its own bounded inputs,
                 # but no caller can silently send an extra input after this
                 # callback returns False.
+                if not self._check_prepare_ready_for_input():
+                    return False
                 if not context.can_send_input(
                     stop_requested=self.stop_event.is_set(),
                     allow_recovery_input=True,
@@ -12783,6 +14498,13 @@ class SprunkiGamePlayer:
     def intro_skip_via_cdp(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using CDP with smart detection + blind clicks"""
         try:
+            prepare_gate = self._check_prepare_ready_for_input()
+            if not prepare_gate:
+                print(
+                    "🛑 Skip Intro blocked: PREPARE_READY is not active: "
+                    f"{prepare_gate.failure_code or prepare_gate.status}"
+                )
+                return False
             self.entry_strategy = {
                 "selected": None,
                 "tested": [],
@@ -12809,6 +14531,14 @@ class SprunkiGamePlayer:
                 for scan_round in range(1, max_scan_rounds + 1):
                     rounds_completed = scan_round
                     print(f"\n\U0001f504 Scan round {scan_round}/{max_scan_rounds}...")
+
+                    if not self._check_prepare_ready_for_input():
+                        print("   🛑 Skip Intro scan stopped: stage is no longer PREPARE_READY")
+                        try:
+                            ws.close()
+                        except Exception:
+                            pass
+                        return False
                     
                     response = self._send_cdp_command(ws, {
                         "method": "Runtime.evaluate",
@@ -12866,6 +14596,12 @@ class SprunkiGamePlayer:
             # === PHASE 1.5: PRESS ANY KEY (NEW) ===
             print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
             try:
+                if not self._check_prepare_ready_for_input():
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                    return False
                 if not self._register_scoped_physical_input():
                     return False
                 pyautogui.press('space')
@@ -12893,6 +14629,13 @@ class SprunkiGamePlayer:
                 except (TypeError, ValueError, OverflowError):
                     intro_click_limit = 0
                 for i in range(intro_click_limit):
+                    if not self._check_prepare_ready_for_input():
+                        print("   🛑 Blind Skip Intro click blocked: stage is loading or unknown")
+                        try:
+                            ws.close()
+                        except Exception:
+                            pass
+                        return False
                     self._simulate_click_via_cdp(ws, 960, 540)
                     blind_clicks_performed += 1
                     time.sleep(0.5)
@@ -12926,6 +14669,13 @@ class SprunkiGamePlayer:
     def intro_skip_via_pyautogui(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using PyAutoGUI with smart detection + blind drags"""
         try:
+            prepare_gate = self._check_prepare_ready_for_input()
+            if not prepare_gate:
+                print(
+                    "🛑 PyAutoGUI Skip Intro blocked: PREPARE_READY is not active: "
+                    f"{prepare_gate.failure_code or prepare_gate.status}"
+                )
+                return False
             self.entry_strategy.setdefault("tested", []).append(
                 {"strategy": "pyautogui_fallback", "result": "attempted"}
             )
@@ -13237,6 +14987,21 @@ class SprunkiGamePlayer:
             # Wait for game restart process
             print("   Waiting for game restart process (3s)...")
             time.sleep(3.0)
+
+            # Re-Run can leave the renderer in its loading screen for a short
+            # time.  Do not replay Space/manual gestures until the fresh page
+            # has passed the same stage gate used during initial entry.
+            prepare_ready = self.wait_for_prepare_ready()
+            if not prepare_ready:
+                result = self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "post_rerun_prepare_not_ready",
+                    details={"prepareReady": prepare_ready.as_dict() if isinstance(prepare_ready, QualityGateResult) else {}},
+                )
+                if operation_context is None:
+                    context.end_recovery()
+                return self._finish_operation(context, result) if owns_context else result
             
             # Re-enter the game using the same manual profile that was used
             # during the initial setup. A restart does not call
@@ -13482,6 +15247,9 @@ class SprunkiGamePlayer:
                 # Phase 3: Clear all connections and state
                 print("Phase 3: Clear all sessions and connections...")
                 self.ws_url = None
+                self._cdp_target_id = None
+                self._cdp_target_url = None
+                self._cdp_page_identity = None
                 self.session_websocket = None
                 self.session_websocket_url = None
                 self.batch_verification_active = False
@@ -13557,6 +15325,15 @@ class SprunkiGamePlayer:
             else:
                 print("✅ CDP verification successful - automation ready!")
 
+            prepare_ready = self.wait_for_prepare_ready()
+            if not prepare_ready:
+                self.last_setup_result = prepare_ready
+                print(
+                    "🛑 SETUP FAILED: PREPARE_READY was not verified: "
+                    f"{prepare_ready.failure_code or prepare_ready.status}"
+                )
+                return False
+
             manual_profile, manual_profile_path = self._resolve_manual_profile()
             profile_resolution_error = getattr(self, "_manual_profile_resolution_error", None)
             if profile_resolution_error:
@@ -13628,11 +15405,10 @@ class SprunkiGamePlayer:
 
             # 🎮 FINAL GAME PREPARATION (existing logic, keep as-is)
             self.prepare_game_for_playing()
-            time.sleep(1)
-
             # Containers and a Run button are only structural evidence.  The
-            # VM must expose real icons and slots before any recording starts.
-            runtime_entry = self.verify_playable_runtime_entry()
+            # VM must expose real icons and slots in two stable snapshots
+            # before any recording starts; no fixed layout sleep is used.
+            runtime_entry = self._wait_for_playable_runtime_entry()
             if not runtime_entry:
                 self.last_setup_result = runtime_entry
                 print(

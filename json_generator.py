@@ -19,6 +19,7 @@ from page_load_verifier import PageLoadVerifier
 from manual_profile_manager import find_profile, validate_profile
 from manual_prepare_gestures import DOUBLE_CLICK_DRAG_TYPE
 from cdp_gesture_executor import execute_cdp_gesture
+from workflow_quality import QualityGateResult
 
 from sprunki_game_player import SprunkiGamePlayer
 
@@ -75,6 +76,7 @@ class SprunkiJSONGenerator:
         # có luồng sống riêng và ngắn. Nó sẽ tự tạo stop_event mặc định.
         self.game_player = SprunkiGamePlayer() 
         self.ws_url = None
+        self.last_generation_result = None
 
         # JavaScript for comprehensive state capture (coordinates + game data)
         self.js_get_state_and_coordinates = '''
@@ -1997,18 +1999,13 @@ class SprunkiJSONGenerator:
         return game_control_type, game_control_details
 
     def _get_websocket_url(self):
-        if self.ws_url: return self.ws_url
+        """Use the game-player's exact page/session binding for all JSON work."""
         try:
-            response = requests.get("http://localhost:9222/json", timeout=5)
-            tabs = response.json()
-            target_tab = next((t for t in tabs if t.get('type') == 'page' and 'cocrea.world' in t.get('url', '')), None)
-            if not target_tab: 
-                print("Ã¢ÂÅ’ CDP Error: Could not find cocrea.world tab.")
-                return None
-            self.ws_url = target_tab['webSocketDebuggerUrl']
-            return self.ws_url
+            player_url = self.game_player._get_websocket_url()
+            self.ws_url = player_url
+            return player_url
         except Exception as e:
-            print(f"ÃƒÂ¢Ã‚ÂÃ…â€™ Could not get WebSocket URL: {e}")
+            print(f"ÃƒÂ¢Ã‚ÂÃ…â€™ Could not get exact game WebSocket URL: {e}")
             return None
 
     def _send_cdp_command(self, ws, command):
@@ -2059,9 +2056,17 @@ class SprunkiJSONGenerator:
         """
         print("🔄 [JSON Generator] Resetting state for new job...")
         self.ws_url = None
+        self.last_generation_result = None
         # Cũng reset trạng thái của game_player để đảm bảo sạch sẽ
         if self.game_player:
             self.game_player.ws_url = None
+            self.game_player._cdp_target_id = None
+            self.game_player._cdp_target_url = None
+            self.game_player._cdp_page_identity = None
+            self.game_player._entry_attempt_id = None
+            self.game_player._game_entry_started_at = None
+            self.game_player._game_entry_deadline = None
+            self.game_player._load_recovery_count = 0
             self.game_player.session_websocket = None
             self.game_player.batch_verification_active = False
         print("✅ [JSON Generator] State reset completed.")
@@ -2086,6 +2091,7 @@ class SprunkiJSONGenerator:
             STOP immediately when hasHorror = True is detected
             """
             try:
+                self.last_generation_result = None
                 print("\n🎯 Starting SIMPLIFIED COMPLETE LOGIC (A vs B vs C)")
                 print("="*70)
                 print("Logic: A(initial) vs B(icon19) vs C(highest) - Stop when hasHorror=True")
@@ -2098,6 +2104,24 @@ class SprunkiJSONGenerator:
                 
                 # Setup game
                 if not self.navigate_and_prepare_game(url): 
+                    self.last_generation_result = getattr(self.game_player, "last_setup_result", None)
+                    if not isinstance(self.last_generation_result, QualityGateResult):
+                        self.last_generation_result = QualityGateResult.failure(
+                            "runtime_verification_unknown",
+                            status="UNKNOWN",
+                            retryable=True,
+                            evidence={"url": url},
+                            message="Game entry did not pass readiness verification.",
+                        )
+                    return False, None, None
+
+                # ``navigate_and_prepare_game`` proves the stage transition;
+                # this shared gate is the explicit PREPARE_READY boundary for
+                # manual profiles and Skip Intro.  It never sends input.
+                prepare_ready = self.game_player.wait_for_prepare_ready()
+                if not prepare_ready:
+                    self.last_generation_result = prepare_ready
+                    self.game_player.cleanup_chrome_complete()
                     return False, None, None
 
                 self._touch_watchdog_progress(
@@ -2129,6 +2153,12 @@ class SprunkiJSONGenerator:
                 # OPTIMIZED: Single WebSocket approach like original working code
                 ws_url = self._get_websocket_url()
                 if not ws_url: 
+                    self.last_generation_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={"url": url},
+                        message="The exact game CDP target was unavailable during JSON generation.",
+                    )
                     self.game_player.cleanup_chrome_complete()
                     return False, None, None
 
@@ -2145,6 +2175,15 @@ class SprunkiJSONGenerator:
                 test_response = self.game_player._execute_verification_js("window.location.href")
                 if test_response is None:
                     print("❌ JavaScript environment test failed via engine")
+                    self.last_generation_result = QualityGateResult.failure(
+                        "post_run_runtime_not_ready",
+                        retryable=True,
+                        evidence={
+                            "entryAttemptId": getattr(self.game_player, "_entry_attempt_id", None),
+                            "pageIdentity": getattr(self.game_player, "_cdp_page_identity", {}) or {},
+                        },
+                        message="The active game CDP runtime stopped responding before JSON generation.",
+                    )
                     self.game_player.cleanup_chrome_complete()
                     return False, None, None
                 print(f"✅ JavaScript environment ready. Current URL: {test_response}")
@@ -2161,6 +2200,9 @@ class SprunkiJSONGenerator:
                         manual_profile.get("prepareActions", []),
                         manual_profile,
                     ):
+                        prepare_failure = getattr(self.game_player, "_last_prepare_ready_result", None)
+                        if isinstance(prepare_failure, QualityGateResult) and not prepare_failure:
+                            self.last_generation_result = prepare_failure
                         raise Exception(f"Manual profile replay failed: {manual_profile_path}")
                     print("✅ Manual prepare replay finished - Game should be ready for interaction")
                     self._touch_watchdog_progress(
@@ -2175,6 +2217,13 @@ class SprunkiJSONGenerator:
                     # ============================
                     # MULTI-TARGET SKIP INTRO (Sử dụng engine)
                     # ============================
+                    prepare_input_gate = self.game_player._check_prepare_ready_for_input()
+                    if not prepare_input_gate:
+                        self.last_generation_result = prepare_input_gate
+                        raise RuntimeError(
+                            "Skip Intro was blocked before input: "
+                            f"{prepare_input_gate.failure_code or prepare_input_gate.status}"
+                        )
                     print("\n🎯 MULTI-TARGET SKIP INTRO: Finding and clicking ALL Skip Intro buttons...")
                     
                     print("🔍 Phase 1: Searching for ALL Skip Intro buttons...")
@@ -2215,6 +2264,10 @@ class SprunkiJSONGenerator:
                     # === PHASE 1.5: PRESS ANY KEY (NEW) ===
                     print("⌨️ Phase 1.5: Pressing 'space' key to continue (for mods requiring key press)...")
                     try:
+                        prepare_input_gate = self.game_player._check_prepare_ready_for_input()
+                        if not prepare_input_gate:
+                            self.last_generation_result = prepare_input_gate
+                            raise RuntimeError("Skip Intro input blocked while stage was loading")
                         pyautogui.press('space')
                         time.sleep(0.5)
                         pyautogui.press('space')
@@ -2234,6 +2287,10 @@ class SprunkiJSONGenerator:
                     blind_clicks_performed = 0
                     if smart_clicks_performed == 0 and not candidate_trials_attempted:
                         for i in range(self.game_player.intro_skip_clicks):
+                            prepare_input_gate = self.game_player._check_prepare_ready_for_input()
+                            if not prepare_input_gate:
+                                self.last_generation_result = prepare_input_gate
+                                raise RuntimeError("Blind Skip Intro click blocked while stage was loading")
                             # [ĐÃ SỬA] Sử dụng hàm click của engine
                             self.game_player._execute_cdp_single_click(960, 540)
                             blind_clicks_performed += 1
@@ -2302,7 +2359,13 @@ class SprunkiJSONGenerator:
                 
                 # Wait briefly for the game to stabilize before static layout extraction.
                 print("⏳ Waiting for game to stabilize before layout extraction...")
-                time.sleep(1)
+                playable_runtime = self.game_player._wait_for_playable_runtime_entry()
+                if not playable_runtime:
+                    self.last_generation_result = playable_runtime
+                    raise RuntimeError(
+                        "Playable runtime was not verified after entry preparation: "
+                        f"{playable_runtime.failure_code or playable_runtime.status}"
+                    )
 
                 print("="*70)
 
@@ -2474,6 +2537,22 @@ class SprunkiJSONGenerator:
                 print(f"❌ Simplified complete logic error: {e}")
                 import traceback
                 traceback.print_exc()
+
+                if not isinstance(self.last_generation_result, QualityGateResult):
+                    prepare_result = getattr(self.game_player, "_last_prepare_ready_result", None)
+                    player_result = getattr(self.game_player, "last_setup_result", None)
+                    if isinstance(prepare_result, QualityGateResult) and not prepare_result:
+                        self.last_generation_result = prepare_result
+                    elif isinstance(player_result, QualityGateResult) and not player_result:
+                        self.last_generation_result = player_result
+                    else:
+                        self.last_generation_result = QualityGateResult.failure(
+                            "runtime_verification_unknown",
+                            status="UNKNOWN",
+                            retryable=True,
+                            evidence={"error": str(e), "url": url},
+                            message="JSON generation stopped before a verified result was produced.",
+                        )
                 
                 self.game_player.cleanup_chrome_complete()
                 return False, None, None
