@@ -101,7 +101,9 @@
     "adaptive_loading": {
       "enabled": true,
       "max_timeout_ms": 480000,
-      "progress_extension_ms": 30000
+      "progress_extension_ms": 30000,
+      "finalization_grace_ms": 45000,
+      "finalization_progress_threshold_percent": 90
     },
     "continuous_check_interval_ms": 10000,
     "check_interval_ms": 2000,

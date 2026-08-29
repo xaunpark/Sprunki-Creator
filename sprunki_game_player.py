@@ -260,6 +260,11 @@ class SprunkiGamePlayer:
         self._game_entry_started_at = None
         self._game_entry_deadline = None
         self._load_recovery_count = 0
+        self._game_finalization_grace_used = False
+        self._game_finalization_grace_applied = False
+        self._game_finalization_grace_started_at = None
+        self._game_finalization_liveness_observations = 0
+        self._game_finalization_grace_deadline = None
         self._last_game_readiness_probe = {}
         self._last_run_click_result = None
         self._last_prepare_ready_result = None
@@ -2741,6 +2746,35 @@ class SprunkiGamePlayer:
                     90000,
                     90.0,
                 )
+                # Some large Scratch/Sprunki projects report a high loading
+                # percentage and then spend a bounded amount of time
+                # finalizing the VM before the real Run control is mounted.
+                # This grace is activated only for that high-progress/live
+                # state; ordinary entries still use the fast path.
+                self.game_load_finalization_grace_timeout = max(
+                    30.0,
+                    bounded_milliseconds(
+                        self.game_verification.get(
+                            'finalization_grace_ms',
+                            game_adaptive.get('finalization_grace_ms', 45000),
+                        ),
+                        45000,
+                        60.0,
+                    ),
+                )
+                try:
+                    finalization_threshold = float(self.game_verification.get(
+                        'finalization_progress_threshold_percent',
+                        game_adaptive.get('finalization_progress_threshold_percent', 90),
+                    ))
+                    if not math.isfinite(finalization_threshold):
+                        raise ValueError("invalid finalization progress threshold")
+                except (TypeError, ValueError, OverflowError):
+                    finalization_threshold = 90.0
+                self.game_load_finalization_percent_threshold = min(
+                    max(finalization_threshold, 0.0),
+                    100.0,
+                )
                 self.game_probe_timeout = bounded_milliseconds(
                     self.game_verification.get(
                         'probe_timeout_ms',
@@ -2821,6 +2855,8 @@ class SprunkiGamePlayer:
                 self.game_load_stall_timeout = 10.0
                 self.game_load_phase_timeout = 60.0
                 self.game_entry_total_timeout = 90.0
+                self.game_load_finalization_grace_timeout = 45.0
+                self.game_load_finalization_percent_threshold = 90.0
                 self.game_probe_timeout = 3.0
                 self.game_load_recovery_attempts = 1
                 self.ready_confirmation_interval = 0.25
@@ -3735,6 +3771,11 @@ class SprunkiGamePlayer:
             getattr(self, "game_entry_total_timeout", 90.0)
         )
         self._load_recovery_count = 0
+        self._game_finalization_grace_used = False
+        self._game_finalization_grace_applied = False
+        self._game_finalization_grace_started_at = None
+        self._game_finalization_liveness_observations = 0
+        self._game_finalization_grace_deadline = None
         self._last_game_readiness_probe = {}
         self._last_run_click_result = None
         self._last_prepare_ready_result = None
@@ -4239,6 +4280,94 @@ class SprunkiGamePlayer:
             return None
         return self._stable_watchdog_probe_token(probe.get("strongProgressToken"))
 
+    def _game_readiness_can_use_finalization_grace(
+        self,
+        probe,
+        *,
+        strong_changed=False,
+        weak_changed=False,
+    ):
+        """Return whether a high-progress loader is still plausibly alive.
+
+        A few large projects reach a high loading percentage and then pause
+        while the VM finishes mounting the project.  That state must not be
+        treated as playable, but it also must not be reloaded immediately.
+        The grace path is deliberately narrow: the requested page must still
+        match, an explicit loading percentage must be high, the stage must be
+        visible, and either the runtime or the current probe must show life.
+        """
+        if not isinstance(probe, dict) or not self._game_probe_matches_current_page(probe):
+            return False
+        if (probe.get("errorPage") or {}).get("detected"):
+            return False
+
+        loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
+        if not loading.get("active"):
+            return False
+        try:
+            percent = float(loading.get("percent"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(percent):
+            return False
+        threshold = getattr(self, "game_load_finalization_percent_threshold", 90.0)
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError, OverflowError):
+            threshold = 90.0
+        if percent < threshold:
+            return False
+
+        stage = probe.get("stage") if isinstance(probe.get("stage"), dict) else {}
+        if not probe.get("pageReady") or not stage.get("visible"):
+            return False
+
+        runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+        try:
+            target_count = float(runtime.get("targetCount"))
+        except (TypeError, ValueError, OverflowError):
+            target_count = 0.0
+        runtime_alive = bool(
+            runtime.get("responding") or
+            runtime.get("canvasReady") or
+            (math.isfinite(target_count) and target_count > 0)
+        )
+        # A changing strong/weak token is also useful during the short period
+        # before the VM exposes its normal runtime fields.
+        return bool(runtime_alive or strong_changed or weak_changed)
+
+    def _game_readiness_finalization_evidence(self):
+        """Expose the bounded finalization decision in readiness evidence."""
+        grace_seconds = getattr(self, "game_load_finalization_grace_timeout", 45.0)
+        try:
+            grace_seconds = float(grace_seconds)
+        except (TypeError, ValueError, OverflowError):
+            grace_seconds = 45.0
+        threshold = getattr(self, "game_load_finalization_percent_threshold", 90.0)
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError, OverflowError):
+            threshold = 90.0
+
+        started_at = getattr(self, "_game_finalization_grace_started_at", None)
+        elapsed = None
+        if started_at is not None:
+            try:
+                elapsed = round(max(0.0, time.monotonic() - float(started_at)), 3)
+            except (TypeError, ValueError, OverflowError):
+                elapsed = None
+        return {
+            "enabled": grace_seconds > 0,
+            "applied": bool(getattr(self, "_game_finalization_grace_applied", False)),
+            "usedInEntryAttempt": bool(getattr(self, "_game_finalization_grace_used", False)),
+            "graceSeconds": round(max(0.0, grace_seconds), 3),
+            "thresholdPercent": round(min(max(threshold, 0.0), 100.0), 3),
+            "livenessObservations": int(
+                getattr(self, "_game_finalization_liveness_observations", 0) or 0
+            ),
+            "elapsedSeconds": elapsed,
+        }
+
     def _game_probe_matches_current_page(self, probe):
         """Return False when a probe came from a different page/session."""
         if not isinstance(probe, dict):
@@ -4292,6 +4421,7 @@ class SprunkiGamePlayer:
             "stageEvidence": probe.get("stage", {}),
             "runtimeEvidence": probe.get("runtime", {}),
             "loadingEvidence": loading,
+            "finalizationGrace": self._game_readiness_finalization_evidence(),
             "networkActivity": network,
             "progressExtensions": int(progress_extensions),
             "weakProgressObservations": int(weak_progress_observations),
@@ -4326,6 +4456,7 @@ class SprunkiGamePlayer:
             "phaseHardTimeoutSeconds": round(getattr(self, "game_load_phase_timeout", 60.0), 3),
             "entryTotalTimeoutSeconds": round(getattr(self, "game_entry_total_timeout", 90.0), 3),
             "progressExtensions": int(progress_extensions),
+            "finalizationGrace": self._game_readiness_finalization_evidence(),
         }
         result = QualityGateResult.failure(
             code,
@@ -4384,6 +4515,15 @@ class SprunkiGamePlayer:
         weak_progress_observations = 0
         consecutive_probe_failures = 0
         attempt = 0
+        finalization_grace_active = False
+        finalization_last_liveness_at = None
+        try:
+            finalization_grace_timeout = max(
+                0.1,
+                float(getattr(self, "game_load_finalization_grace_timeout", 45.0)),
+            )
+        except (TypeError, ValueError, OverflowError):
+            finalization_grace_timeout = 45.0
 
         print(
             "🎮 GAME READINESS: exact Run probe with bounded adaptive loading "
@@ -4455,7 +4595,8 @@ class SprunkiGamePlayer:
                         progress_extensions += 1
                         last_progress_at = now
                     previous_strong_token = strong_token
-                    stall_deadline = min(phase_deadline, now + stall_timeout)
+                    if not finalization_grace_active:
+                        stall_deadline = min(phase_deadline, now + stall_timeout)
                 weak_token = self._stable_watchdog_probe_token(probe.get("weakProgressToken"))
                 weak_changed = bool(
                     weak_token and weak_token != getattr(self, "_last_game_weak_token", None)
@@ -4463,6 +4604,65 @@ class SprunkiGamePlayer:
                 if weak_changed:
                     weak_progress_observations += 1
                     self._last_game_weak_token = weak_token
+
+                finalization_live = self._game_readiness_can_use_finalization_grace(
+                    probe,
+                    strong_changed=strong_changed,
+                    weak_changed=weak_changed,
+                )
+                if (
+                    finalization_live and
+                    not finalization_grace_active and
+                    not bool(getattr(self, "_game_finalization_grace_used", False))
+                ):
+                    # This is the only finalization extension allowed for the
+                    # whole entry attempt.  Extend the phase and entry
+                    # deadlines together so a late Run control cannot be
+                    # cut off by the original 60/90 second budgets.
+                    finalization_grace_active = True
+                    finalization_last_liveness_at = now
+                    self._game_finalization_grace_used = True
+                    self._game_finalization_grace_applied = True
+                    self._game_finalization_grace_started_at = now
+                    self._game_finalization_liveness_observations = 1
+                    finalization_deadline = max(
+                        phase_deadline,
+                        now + finalization_grace_timeout,
+                    )
+                    phase_deadline = finalization_deadline
+                    self._game_finalization_grace_deadline = finalization_deadline
+                    entry_deadline = getattr(self, "_game_entry_deadline", None)
+                    if entry_deadline is not None:
+                        try:
+                            self._game_entry_deadline = max(
+                                float(entry_deadline),
+                                finalization_deadline,
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                    stall_deadline = finalization_deadline
+                    print(
+                        "   ⏳ High-progress game finalization detected; "
+                        f"allowing up to {finalization_grace_timeout:.1f}s "
+                        "for the real Run control to mount."
+                    )
+                elif finalization_grace_active:
+                    if finalization_live:
+                        finalization_last_liveness_at = now
+                        self._game_finalization_liveness_observations = int(
+                            getattr(self, "_game_finalization_liveness_observations", 0) or 0
+                        ) + 1
+                        # A responsive high-progress runtime may keep the
+                        # finalization window alive, but never beyond the
+                        # single hard grace deadline above.
+                        stall_deadline = phase_deadline
+                    elif finalization_last_liveness_at is not None:
+                        # If the page stops responding after entering this
+                        # mode, fall back to the normal bounded stall window.
+                        stall_deadline = min(
+                            phase_deadline,
+                            finalization_last_liveness_at + stall_timeout,
+                        )
 
                 ready = bool(probe.get("ready")) and not page_identity_mismatch
                 self._touch_watchdog_progress(
@@ -4495,6 +4695,7 @@ class SprunkiGamePlayer:
                         "phaseHardTimeoutSeconds": round(phase_budget, 3),
                         "entryTotalTimeoutSeconds": round(getattr(self, "game_entry_total_timeout", 90.0), 3),
                         "progressExtensions": int(progress_extensions),
+                        "finalizationGrace": self._game_readiness_finalization_evidence(),
                     }
                     return QualityGateResult.pass_result(
                         evidence=evidence,

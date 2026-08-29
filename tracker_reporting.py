@@ -817,6 +817,7 @@ def build_tracker_diagnostic_report(
                 "entryAttemptId",
                 "runButtonEvidence",
                 "pageIdentity",
+                "finalizationGrace",
             )
             if key in report_evidence
         }
@@ -1180,6 +1181,7 @@ def build_tracker_diagnostic_report(
                 "entryAttemptId": load_evidence.get("entryAttemptId") or readiness_evidence.get("entryAttemptId"),
                 "runButtonEvidence": run_evidence.get("runButtonEvidence") or load_evidence.get("runButtonEvidence"),
                 "pageIdentity": page_identity,
+                "finalizationGrace": load_evidence.get("finalizationGrace"),
             },
             "normal_gameplay": {
                 "status": normal_gameplay_status,

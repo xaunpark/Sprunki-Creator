@@ -14,6 +14,8 @@ def make_player(probes, *, stall_timeout=0.05, phase_timeout=0.5):
     player.game_verification_timeout = 1.0
     player.game_load_stall_timeout = stall_timeout
     player.game_load_phase_timeout = phase_timeout
+    player.game_load_finalization_grace_timeout = 0.05
+    player.game_load_finalization_percent_threshold = 90.0
     player.game_entry_total_timeout = 1.0
     player.game_probe_timeout = 0.05
     player.game_readiness_poll_intervals = (0.001, 0.001, 0.001)
@@ -21,6 +23,11 @@ def make_player(probes, *, stall_timeout=0.05, phase_timeout=0.5):
     player.stop_event = threading.Event()
     player._entry_attempt_id = "entry-test"
     player._game_entry_deadline = None
+    player._game_finalization_grace_used = False
+    player._game_finalization_grace_applied = False
+    player._game_finalization_grace_started_at = None
+    player._game_finalization_liveness_observations = 0
+    player._game_finalization_grace_deadline = None
     player._cdp_target_id = "target-test"
     player._cdp_target_url = GAME_URL
     player._last_game_readiness_probe = {}
@@ -31,7 +38,15 @@ def make_player(probes, *, stall_timeout=0.05, phase_timeout=0.5):
     return player
 
 
-def readiness_probe(*, run=False, loading=False, percent=None, strong=None, weak=None):
+def readiness_probe(
+    *,
+    run=False,
+    loading=False,
+    percent=None,
+    strong=None,
+    weak=None,
+    runtime=None,
+):
     return {
         "pageReady": True,
         "documentState": "complete",
@@ -53,13 +68,28 @@ def readiness_probe(*, run=False, loading=False, percent=None, strong=None, weak
             "bounds": {"centerX": 320, "centerY": 180} if run else None,
         },
         "loading": {"active": loading, "percent": percent, "label": "Loading 43%" if loading else ""},
-        "runtime": {"responding": True, "canvasReady": True, "targetCount": 10},
+        "runtime": runtime if runtime is not None else {
+            "responding": True,
+            "canvasReady": True,
+            "targetCount": 10,
+        },
         "stageActive": not loading and not run,
         "prepareReady": not loading and not run,
         "networkActivity": {"resourceCount": 1, "transferredBytes": 100},
         "strongProgressToken": strong if strong is not None else {"loading": loading, "run": run},
         "weakProgressToken": weak if weak is not None else {"resourceCount": 1},
     }
+
+
+class FakeClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def monotonic(self):
+        return self.value
+
+    def sleep(self, seconds):
+        self.value += max(0.0, float(seconds))
 
 
 def test_generic_run_text_without_semantic_button_is_not_ready():
@@ -84,6 +114,49 @@ def test_loading_43_percent_is_not_playable_even_if_probe_repeats():
     assert not result
     assert result.failure_code == "game_load_stalled"
     assert result.evidence["lastLoadingPercent"] == 43
+    assert not player._game_finalization_grace_used
+
+
+def test_high_percent_loading_gets_bounded_finalization_grace_until_run_appears():
+    probes = [
+        readiness_probe(loading=True, percent=96, strong={"percent": 96}),
+        readiness_probe(loading=True, percent=96, strong={"percent": 96}),
+        readiness_probe(run=True, strong={"phase": "run"}),
+    ]
+    player = make_player(probes, stall_timeout=0.001, phase_timeout=0.02)
+    player.game_load_finalization_grace_timeout = 0.01
+    clock = FakeClock()
+    with patch("sprunki_game_player.time.monotonic", side_effect=clock.monotonic), \
+            patch("sprunki_game_player.time.sleep", side_effect=clock.sleep):
+        result = player.verify_game_components_ready()
+
+    assert result.passed
+    assert player._game_finalization_grace_used
+    assert player._game_finalization_grace_applied
+    assert result.evidence["finalizationGrace"]["applied"]
+    assert result.evidence["finalizationGrace"]["livenessObservations"] >= 2
+
+
+def test_high_percent_finalization_grace_stays_bounded():
+    player = make_player(
+        [],
+        stall_timeout=0.1,
+        phase_timeout=0.1,
+    )
+    player.game_load_finalization_grace_timeout = 0.1
+    player.game_readiness_poll_intervals = (0.01,)
+    player._read_game_readiness_probe = Mock(
+        return_value=readiness_probe(loading=True, percent=96, strong={"percent": 96})
+    )
+    clock = FakeClock()
+    with patch("sprunki_game_player.time.monotonic", side_effect=clock.monotonic), \
+            patch("sprunki_game_player.time.sleep", side_effect=clock.sleep):
+        result = player.verify_game_components_ready()
+
+    assert not result
+    assert result.failure_code == "game_load_timeout"
+    assert result.evidence["finalizationGrace"]["applied"]
+    assert player._read_game_readiness_probe.call_count <= 12
 
 
 def test_strong_progress_can_reach_run_without_fixed_long_sleep():
@@ -97,6 +170,7 @@ def test_strong_progress_can_reach_run_without_fixed_long_sleep():
 
     assert result.passed
     assert result.evidence["adaptiveLoading"]["progressExtensions"] >= 1
+    assert not result.evidence["finalizationGrace"]["applied"]
     assert sleep.call_count == 2
 
 
