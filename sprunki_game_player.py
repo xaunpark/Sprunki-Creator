@@ -4013,6 +4013,26 @@ class SprunkiGamePlayer:
             }
 
             const candidates = [];
+            const viewportWidth = () => Number(window.innerWidth || document.documentElement.clientWidth || 0);
+            const viewportHeight = () => Number(window.innerHeight || document.documentElement.clientHeight || 0);
+            const isCenterInViewport = rect => {
+              const width = viewportWidth();
+              const height = viewportHeight();
+              return !!rect && width > 0 && height > 0 &&
+                rect.centerX >= 0 && rect.centerX <= width &&
+                rect.centerY >= 0 && rect.centerY <= height;
+            };
+            const describeHitTarget = element => {
+              if (!element) return null;
+              const className = typeof element.className === 'string'
+                ? element.className : String(element.className || '');
+              return {
+                tagName: element.tagName || '',
+                id: element.id || '',
+                className: className.slice(0, 180),
+                text: normalize(element.innerText || element.textContent || '').slice(0, 120)
+              };
+            };
             const addCandidate = (element, strategy) => {
               if (!element || candidates.some(item => item.element === element)) return;
               if (!stageContext(element)) return;
@@ -4024,14 +4044,41 @@ class SprunkiGamePlayer:
               const exactClass = /(^|\s)style_run-button__VjFSY(?:\s|$)/i.test(className);
               const exactLabel = ['run', 'play', 'start'].includes(label);
               if (!exactClass && !exactLabel) return;
-              const rect = safeRect(element);
-              const style = window.getComputedStyle(element);
+              const rectBeforeScroll = safeRect(element);
+              const styleBeforeScroll = window.getComputedStyle(element);
               const enabled = !element.disabled && lower(element.getAttribute('aria-disabled')) !== 'true';
-              const pointerEvents = style.pointerEvents !== 'none';
+              const pointerEvents = styleBeforeScroll.pointerEvents !== 'none';
+              const visibleBeforeScroll = isVisible(element);
+              const inViewportBeforeScroll = isCenterInViewport(rectBeforeScroll);
+              let scrollAttempted = false;
+              let scrollSucceeded = false;
+              let scrollError = null;
+
+              // Readiness uses a real hit-test, so a Run control below the
+              // fold would otherwise be rejected before the click path gets
+              // a chance to scroll it.  Scroll only an already visible,
+              // semantic Run candidate that is outside the viewport.  This
+              // keeps the normal in-viewport path immediate and avoids blind
+              // page scrolling.
+              if (visibleBeforeScroll && rectBeforeScroll && !inViewportBeforeScroll) {
+                scrollAttempted = true;
+                try {
+                  element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' });
+                  const rectAfterScroll = safeRect(element);
+                  scrollSucceeded = isCenterInViewport(rectAfterScroll);
+                } catch (error) {
+                  scrollError = String(error && error.message || error);
+                }
+              }
+
+              const rect = safeRect(element);
               const visible = isVisible(element);
+              const inViewport = isCenterInViewport(rect);
               let hitTest = false;
-              if (rect && visible && pointerEvents) {
+              let hitTarget = null;
+              if (rect && visible && pointerEvents && inViewport) {
                 const hit = document.elementFromPoint(rect.centerX, rect.centerY);
+                hitTarget = describeHitTarget(hit);
                 hitTest = hit === element || !!(hit && element.contains(hit));
               }
               candidates.push({
@@ -4046,6 +4093,12 @@ class SprunkiGamePlayer:
                 enabled,
                 pointerEvents,
                 hitTest,
+                inViewport,
+                inViewportBeforeScroll,
+                scrollAttempted,
+                scrollSucceeded,
+                scrollError,
+                hitTarget,
                 clickable: visible && enabled && pointerEvents && hitTest,
                 bounds: rect
               });
@@ -4074,7 +4127,13 @@ class SprunkiGamePlayer:
                 className: candidate.className,
                 strategy: candidate.strategy,
                 bounds: candidate.bounds,
-                candidateCount: candidates.length
+                candidateCount: candidates.length,
+                inViewport: !!candidate.inViewport,
+                inViewportBeforeScroll: !!candidate.inViewportBeforeScroll,
+                scrollAttempted: !!candidate.scrollAttempted,
+                scrollSucceeded: !!candidate.scrollSucceeded,
+                scrollError: candidate.scrollError,
+                hitTarget: candidate.hitTarget
               };
             }
 
@@ -6676,10 +6735,51 @@ class SprunkiGamePlayer:
                     self.entry_strategy.setdefault("readiness", {})["load"] = component_result.as_dict()
             if not component_result:
                 self.last_setup_result = component_result
-                # Nếu sau 120 giây mà vẫn không tìm thấy component game, chúng ta có thể chắc chắn
-                # đây là trang lỗi (404, sign-in) hoặc một game bị hỏng nặng.
-                print(f"❌ SETUP FAILED: Game components did not appear within {self.game_verification_timeout}s.")
-                print("   This could be a 404/error page or a broken game mod.")
+                # Keep the legacy setup-failure marker for log consumers, but
+                # expose the actual readiness branch.  A visible Run control
+                # can still be rejected by loading/hit-test/target gates, so
+                # saying that game components never appeared is misleading.
+                failure_code = getattr(component_result, "failure_code", None) or "runtime_verification_unknown"
+                failure_evidence = getattr(component_result, "evidence", None)
+                if not isinstance(failure_evidence, dict):
+                    failure_evidence = {}
+                run_evidence = failure_evidence.get("runButtonEvidence")
+                if not isinstance(run_evidence, dict):
+                    run_evidence = {}
+                loading_evidence = failure_evidence.get("loadingEvidence")
+                if not isinstance(loading_evidence, dict):
+                    loading_evidence = {}
+                page_identity = failure_evidence.get("pageIdentity")
+                if not isinstance(page_identity, dict):
+                    page_identity = {}
+                print(
+                    "❌ SETUP FAILED: Game readiness failed: "
+                    f"{failure_code} (legacy configured timeout={self.game_verification_timeout}s)."
+                )
+                print(
+                    "   Run evidence: "
+                    f"found={run_evidence.get('found')}, "
+                    f"visible={run_evidence.get('visible')}, "
+                    f"clickable={run_evidence.get('clickable')}, "
+                    f"inViewport={run_evidence.get('inViewport')}, "
+                    f"scrollAttempted={run_evidence.get('scrollAttempted')}, "
+                    f"scrollSucceeded={run_evidence.get('scrollSucceeded')}, "
+                    f"hitTarget={run_evidence.get('hitTarget')}"
+                )
+                print(
+                    "   Loading evidence: "
+                    f"active={loading_evidence.get('active')}, "
+                    f"percent={loading_evidence.get('percent')}, "
+                    f"label={str(loading_evidence.get('label') or '')[:160]!r}"
+                )
+                print(
+                    "   Page evidence: "
+                    f"href={page_identity.get('href')}, "
+                    f"targetId={page_identity.get('cdpTargetId') or page_identity.get('targetId')}, "
+                    f"frame={page_identity.get('frame')}, "
+                    f"probes={failure_evidence.get('probeAttempts')}, "
+                    f"loadStatus={failure_evidence.get('loadStatus')}"
+                )
                 self.cleanup_chrome_complete()
                 return False
             

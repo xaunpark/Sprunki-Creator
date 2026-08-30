@@ -102,6 +102,28 @@ def test_generic_run_text_without_semantic_button_is_not_ready():
     assert not result.evidence["runButtonEvidence"].get("found")
 
 
+def test_readiness_probe_scrolls_an_offscreen_run_candidate_before_hit_testing():
+    player = object.__new__(SprunkiGamePlayer)
+    probe_js = player._get_game_readiness_probe_js()
+
+    assert "inViewportBeforeScroll" in probe_js
+    assert "scrollAttempted" in probe_js
+    assert "scrollSucceeded" in probe_js
+    assert "if (visibleBeforeScroll && rectBeforeScroll && !inViewportBeforeScroll)" in probe_js
+    assert probe_js.index("element.scrollIntoView") < probe_js.index("document.elementFromPoint")
+
+
+def test_readiness_probe_keeps_in_viewport_fast_path_without_forced_scroll():
+    player = object.__new__(SprunkiGamePlayer)
+    probe_js = player._get_game_readiness_probe_js()
+
+    # Scrolling is conditional on the candidate center being outside the
+    # viewport; the normal in-viewport path should go straight to hit-testing.
+    assert "inViewportBeforeScroll" in probe_js
+    assert "!inViewportBeforeScroll" in probe_js
+    assert "behavior: 'auto'" in probe_js
+
+
 def test_loading_43_percent_is_not_playable_even_if_probe_repeats():
     probes = [
         readiness_probe(loading=True, percent=43, strong={"percent": 43}),
