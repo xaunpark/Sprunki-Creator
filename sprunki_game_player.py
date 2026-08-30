@@ -3931,7 +3931,10 @@ class SprunkiGamePlayer:
                 active: false,
                 percent: null,
                 label: '',
-                spinnerCount: 0
+                spinnerCount: 0,
+                visibleIndicatorCount: 0,
+                textSignal: false,
+                staleTextSuppressed: false
               },
               runtime: {
                 responding: false,
@@ -4038,16 +4041,21 @@ class SprunkiGamePlayer:
               if (stageLabel) loadingLabels.push(stageLabel);
             }
             const loadingText = loadingLabels.join(' ');
-            const percentMatch = loadingText.match(/(?:loading|progress|download|initializ[^ ]*)[^%]{0,30}(\d{1,3})\s*%/i) || loadingText.match(/\b(\d{1,3})\s*%\b/);
+            const percentMatches = Array.from(loadingText.matchAll(/\b(?:loading|progress|download|initializ\w*)\b[^\d%]{0,30}(\d{1,3})\s*%/ig));
+            const percentMatch = percentMatches[percentMatches.length - 1] || loadingText.match(/\b(\d{1,3})\s*%\b/);
             if (percentMatch) {
               const percent = Number(percentMatch[1]);
               if (Number.isFinite(percent) && percent >= 0 && percent <= 100) result.loading.percent = percent;
             }
-            result.loading.spinnerCount = loadingNodes.filter(isVisible).length;
+            const visibleLoadingNodes = loadingNodes.filter(isVisible);
+            const loadingTextSignal = /\b(loading|initializ|download|preparing)\b/i.test(loadingText);
+            result.loading.spinnerCount = visibleLoadingNodes.length;
+            result.loading.visibleIndicatorCount = visibleLoadingNodes.length;
+            result.loading.textSignal = loadingTextSignal;
             result.loading.label = loadingText.slice(0, 240);
-            result.loading.active = result.loading.spinnerCount > 0 ||
+            result.loading.active = visibleLoadingNodes.length > 0 ||
               (result.loading.percent !== null && result.loading.percent < 100) ||
-              /\b(loading|initializ|download|preparing)\b/i.test(loadingText);
+              loadingTextSignal;
 
             // A small title/heading check catches definite error pages without
             // scanning user-generated body text.
@@ -4098,12 +4106,15 @@ class SprunkiGamePlayer:
             const addCandidate = (element, strategy) => {
               if (!element || candidates.some(item => item.element === element)) return;
               if (!stageContext(element)) return;
-              const tag = (element.tagName || '').toLowerCase();
-              if (!(tag === 'button' || tag === 'input' || element.getAttribute('role') === 'button')) return;
               const text = normalize(element.textContent || element.value || element.getAttribute('aria-label') || '');
               const label = lower(text);
+              const tag = (element.tagName || '').toLowerCase();
               const className = typeof element.className === 'string' ? element.className : String(element.className || '');
               const exactClass = /(^|\s)style_run-button__VjFSY(?:\s|$)/i.test(className);
+              // The known Cocrea Run control has appeared as a button and as
+              // a styled player div across versions.  Allow that exact class,
+              // while keeping generic label fallback restricted to controls.
+              if (!(exactClass || tag === 'button' || tag === 'input' || element.getAttribute('role') === 'button')) return;
               const exactLabel = ['run', 'play', 'start'].includes(label);
               if (!exactClass && !exactLabel) return;
               const rectBeforeScroll = safeRect(element);
@@ -4167,7 +4178,7 @@ class SprunkiGamePlayer:
             };
 
             let preferred = [];
-            try { preferred = Array.from(document.querySelectorAll('button.style_run-button__VjFSY')); } catch (e) {}
+            try { preferred = Array.from(document.querySelectorAll('.style_run-button__VjFSY')); } catch (e) {}
             preferred.forEach(element => addCandidate(element, 'specific_run_class'));
             if (!candidates.some(item => item.visible)) {
                 for (const root of stageRoots) {
@@ -4219,6 +4230,28 @@ class SprunkiGamePlayer:
             } catch (e) {
               result.runtime.responding = false;
             }
+
+            // Some Cocrea player versions leave the loading text in the stage
+            // DOM after the real Run control has mounted.  Text alone must not
+            // veto a verified semantic control or a responsive post-Run stage;
+            // an actually visible loading indicator still remains blocking.
+            const runtimeTargetCount = Number(result.runtime.targetCount || 0);
+            const runtimeAlive = !!(
+              result.runtime.responding ||
+              result.runtime.canvasReady ||
+              (Number.isFinite(runtimeTargetCount) && runtimeTargetCount > 0)
+            );
+            const runControlReady = !!(
+              result.stage.visible && result.runButton.clickable
+            );
+            const noVisibleLoadingIndicator = visibleLoadingNodes.length === 0;
+            const staleLoadingText = !!(
+              noVisibleLoadingIndicator &&
+              (result.loading.textSignal || result.loading.percent !== null) &&
+              runControlReady
+            );
+            result.loading.staleTextSuppressed = staleLoadingText;
+            if (staleLoadingText) result.loading.active = false;
 
             result.pageReady = document.readyState === 'complete' && !!document.body && !!document.head;
              result.stageActive = !!(
@@ -4343,6 +4376,39 @@ class SprunkiGamePlayer:
             loading["active"] = bool(spinner_count)
         if "percent" not in loading:
             loading["percent"] = probe.get("lastLoadingPercent")
+        loading_label = str(loading.get("label") or "")
+        percent_matches = re.findall(
+            r"\b(?:loading|progress|download|initializ\w*)\b[^\d%]{0,30}(\d{1,3})\s*%",
+            loading_label,
+            flags=re.IGNORECASE,
+        )
+        if percent_matches:
+            try:
+                parsed_percent = int(percent_matches[-1])
+                if 0 <= parsed_percent <= 100:
+                    # The browser probe historically captured only the final
+                    # digit of values such as ``Loading 98%``.  Normalize from
+                    # the label so adaptive loading does not misclassify 98%
+                    # as 8%.
+                    current_percent = loading.get("percent")
+                    try:
+                        current_percent = float(current_percent)
+                    except (TypeError, ValueError, OverflowError):
+                        current_percent = None
+                    if current_percent is None or (
+                        parsed_percent >= 10 and
+                        math.isfinite(current_percent) and
+                        0 <= current_percent < 10
+                    ):
+                        loading["percent"] = parsed_percent
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if "visibleIndicatorCount" not in loading:
+            loading["visibleIndicatorCount"] = loading.get("spinnerCount", 0) or 0
+        loading["textSignal"] = bool(
+            loading.get("textSignal") or
+            re.search(r"\b(loading|initializ|download|preparing)\b", loading_label, re.IGNORECASE)
+        )
         loading["active"] = bool(loading.get("active"))
         probe["loading"] = loading
 
@@ -4352,6 +4418,49 @@ class SprunkiGamePlayer:
         if "responding" not in runtime:
             runtime["responding"] = bool(probe.get("runtimeResponding"))
         probe["runtime"] = runtime
+
+        # A few player versions leave a completed loading label in the stage
+        # DOM.  It is stale text when no visible indicator remains and either
+        # a hit-testable Run control or a responsive post-Run runtime proves
+        # the state transition.  Keep real visible indicators blocking.
+        try:
+            runtime_target_count = float(runtime.get("targetCount") or 0)
+        except (TypeError, ValueError, OverflowError):
+            runtime_target_count = 0.0
+        run_control_ready = bool(stage.get("visible") and run.get("clickable"))
+        post_run_phase = str(getattr(self, "_game_readiness_state", "") or "").upper()
+        post_run_stage_ready = bool(
+            post_run_phase in {"RUN_CLICKED", "STAGE_ACTIVE", "PREPARE_READY", "PLAYABLE_RUNTIME"} and
+            stage.get("visible") and
+            not run.get("visible") and
+            runtime.get("responding") and
+            runtime.get("canvasReady") and
+            runtime_target_count > 0
+        )
+        try:
+            visible_indicator_count = int(loading.get("visibleIndicatorCount") or 0)
+        except (TypeError, ValueError, OverflowError):
+            visible_indicator_count = 0
+        stale_loading_text = bool(
+            visible_indicator_count == 0 and
+            (loading.get("textSignal") or loading.get("percent") is not None) and
+            (run_control_ready or post_run_stage_ready)
+        )
+        loading["staleTextSuppressed"] = stale_loading_text
+        if stale_loading_text:
+            loading["active"] = False
+            if post_run_stage_ready:
+                # The JS probe computed stageActive before this normalized
+                # loading decision. Recompute it only in an already-entered
+                # post-Run phase; initial loading without Run remains blocked.
+                probe["stageActive"] = bool(
+                    stage.get("visible") and
+                    not run.get("visible") and
+                    not (probe.get("errorPage") or {}).get("detected") and
+                    (runtime.get("responding") or runtime.get("canvasReady"))
+                )
+                probe["prepareReady"] = probe["stageActive"]
+        probe["loading"] = loading
 
         if "stageActive" not in probe:
             probe["stageActive"] = bool(
@@ -8209,7 +8318,7 @@ class SprunkiGamePlayer:
             const style = window.getComputedStyle(element);
             return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
           };
-          try { controls.push(...Array.from(document.querySelectorAll('button.style_run-button__VjFSY'))); } catch (e) {}
+          try { controls.push(...Array.from(document.querySelectorAll('.style_run-button__VjFSY'))); } catch (e) {}
           if (!controls.some(visible)) {
             for (const root of roots) {
               try { controls.push(...Array.from(root.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]'))); } catch (e) {}
@@ -8217,11 +8326,12 @@ class SprunkiGamePlayer:
           }
           const candidate = controls.find(element => {
             if (!inStage(element)) return false;
-            const tag = (element.tagName || '').toLowerCase();
-            if (!(tag === 'button' || tag === 'input' || element.getAttribute('role') === 'button')) return false;
             const label = normalize(element.textContent || element.value || element.getAttribute('aria-label') || '');
             const className = typeof element.className === 'string' ? element.className : String(element.className || '');
-            return /(^|\s)style_run-button__VjFSY(?:\s|$)/i.test(className) || ['run', 'play', 'start'].includes(label);
+            const exactClass = /(^|\s)style_run-button__VjFSY(?:\s|$)/i.test(className);
+            const tag = (element.tagName || '').toLowerCase();
+            if (!(exactClass || tag === 'button' || tag === 'input' || element.getAttribute('role') === 'button')) return false;
+            return exactClass || ['run', 'play', 'start'].includes(label);
           });
           if (!candidate) return { success: false, reason: 'candidate_disappeared' };
           candidate.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });

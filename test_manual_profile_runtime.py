@@ -100,6 +100,19 @@ def test_runtime_resolver_accepts_only_strict_valid_profile(monkeypatch, profile
     assert result.path == str(profile_path)
 
 
+def test_index_path_with_manual_profiles_prefix_is_not_prefixed_twice(monkeypatch):
+    monkeypatch.setattr(profile_manager, "MANUAL_PROFILES_DIR", "manual_profiles")
+
+    resolved = profile_manager._resolve_index_path(
+        os.path.join("manual_profiles", "profiles", "profile.json")
+    )
+
+    assert os.path.normcase(resolved) == os.path.normcase(
+        os.path.abspath(os.path.join("manual_profiles", "profiles", "profile.json"))
+    )
+    assert "manual_profiles" + os.sep + "manual_profiles" not in resolved
+
+
 def test_explicit_invalid_profile_fails_closed_without_auto_fallback(monkeypatch, profile_workspace):
     profiles_dir = patch_profile_store(monkeypatch, profile_workspace)
     valid_path = profiles_dir / "valid.json"

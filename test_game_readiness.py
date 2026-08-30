@@ -102,6 +102,29 @@ def test_generic_run_text_without_semantic_button_is_not_ready():
     assert not result.evidence["runButtonEvidence"].get("found")
 
 
+def test_readiness_probe_supports_known_run_class_when_renderer_uses_a_div():
+    player = object.__new__(SprunkiGamePlayer)
+    probe_js = player._get_game_readiness_probe_js()
+
+    assert "querySelectorAll('.style_run-button__VjFSY')" in probe_js
+    assert "exactClass || tag === 'button'" in probe_js
+
+
+def test_readiness_normalizes_full_loading_percent_and_suppresses_stale_text():
+    player = make_player([])
+    player._game_readiness_state = "RUN_CLICKED"
+    raw = readiness_probe(run=False, loading=True, percent=8)
+    raw["loading"]["label"] = "Loading 98% Loading 98% Run Pause Full screen"
+    raw["loading"]["visibleIndicatorCount"] = 0
+    raw["loading"]["textSignal"] = True
+
+    normalized = player._normalize_game_readiness_probe(raw)
+
+    assert normalized["loading"]["percent"] == 98
+    assert normalized["loading"]["staleTextSuppressed"] is True
+    assert normalized["loading"]["active"] is False
+
+
 def test_readiness_probe_scrolls_an_offscreen_run_candidate_before_hit_testing():
     player = object.__new__(SprunkiGamePlayer)
     probe_js = player._get_game_readiness_probe_js()

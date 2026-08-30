@@ -363,9 +363,25 @@ def rebuild_index() -> Dict:
 
 
 def _resolve_index_path(relative_or_absolute_path: str) -> str:
-    if os.path.isabs(relative_or_absolute_path):
-        return relative_or_absolute_path
-    return os.path.abspath(os.path.join(MANUAL_PROFILES_DIR, relative_or_absolute_path))
+    """Resolve index entries and generated paths relative to the project root.
+
+    Index entries are stored as ``profiles/<file>.json`` while the generated
+    suggested path already contains the ``manual_profiles/`` prefix.  Treating
+    both forms as paths relative to ``MANUAL_PROFILES_DIR`` produced the
+    invalid ``manual_profiles/manual_profiles/...`` candidate and made one
+    valid profile look ambiguous at runtime.
+    """
+    raw_path = str(relative_or_absolute_path or "").strip()
+    if not raw_path:
+        return ""
+    if os.path.isabs(raw_path):
+        return os.path.abspath(raw_path)
+
+    normalized = os.path.normpath(raw_path)
+    profile_root = os.path.normpath(MANUAL_PROFILES_DIR)
+    if normalized == profile_root or normalized.startswith(profile_root + os.sep):
+        return os.path.abspath(normalized)
+    return os.path.abspath(os.path.join(MANUAL_PROFILES_DIR, normalized))
 
 
 def _unique_existing_candidate_paths(url: str, index_data: Dict) -> List[str]:
