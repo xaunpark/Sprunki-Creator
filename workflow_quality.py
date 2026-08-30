@@ -25,6 +25,8 @@ NON_RETRYABLE_FAILURE_CODES = frozenset(
         "remix_threshold_not_met",
         "phase_skipped",
         "manual_json_invalid",
+        "manual_profile_invalid",
+        "manual_profile_ambiguous",
         "skipped_by_policy",
         "unsupported_production_mode",
         "workflow_stopped",

@@ -16,7 +16,7 @@ import websocket
 from image_detector import ImageDetector
 import numpy as np
 from page_load_verifier import PageLoadVerifier
-from manual_profile_manager import find_profile, validate_profile
+from manual_profile_manager import ManualProfileResolution, resolve_profile_for_runtime
 from manual_prepare_gestures import DOUBLE_CLICK_DRAG_TYPE
 from cdp_gesture_executor import execute_cdp_gesture
 from workflow_quality import QualityGateResult
@@ -1861,8 +1861,27 @@ class SprunkiJSONGenerator:
         live_layout = live_state.get("layout") or {}
         live_slots = live_layout.get("slots") or []
         live_controls = live_layout.get("returnControls")
-        if isinstance(live_controls, dict):
-            manual_layout["returnControls"] = live_controls
+        if isinstance(live_controls, dict) and not isinstance(
+            manual_layout.get("returnControls"), dict
+        ):
+            # The top-level object contains policy metadata, not a slot
+            # identity.  Merge it only when the renderer explicitly confirms
+            # the expected Remove target/costume; never let an unrelated
+            # return-control object become a cleanup hint for this profile.
+            live_remove = live_controls.get("remove")
+            if (
+                isinstance(live_remove, dict) and
+                live_remove.get("targetName") == "Mute Buttons" and
+                live_remove.get("costumeName") == "Remove"
+            ):
+                manual_layout["returnControls"] = copy.deepcopy(live_controls)
+            elif "schemaVersion" in live_controls:
+                # Preserve schema/report metadata for compatibility, but do
+                # not copy an unidentified Remove payload into the actionable
+                # manual layout.
+                manual_layout["returnControls"] = {
+                    "schemaVersion": live_controls.get("schemaVersion")
+                }
 
         if not isinstance(live_slots, list):
             return manual_state
@@ -1885,8 +1904,9 @@ class SprunkiJSONGenerator:
                 candidate = live_by_index.get(int(raw_index))
             except (TypeError, ValueError):
                 candidate = None
-            if candidate is None and position < len(live_slots):
-                candidate = live_slots[position]
+            # Never pair a live Remove control by list position.  Manual
+            # slots are authoritative; a live control may be merged only when
+            # the renderer exposed the same explicit slot index.
             if not isinstance(candidate, dict):
                 continue
             remove_button = candidate.get("removeButton")
@@ -1903,7 +1923,12 @@ class SprunkiJSONGenerator:
             manual_layout["returnControls"]["unresolvedSlotIndices"] = unresolved
         return manual_state
 
-    def _detect_game_control_type(self, ws, manual_profile=None):
+    def _detect_game_control_type(
+        self,
+        ws,
+        manual_profile=None,
+        manual_profile_context=None,
+    ):
         game_control_type = "click_drag"
         game_control_details = {
             "method": "default_fallback",
@@ -1949,12 +1974,27 @@ class SprunkiJSONGenerator:
                 test_icon = next((icon for icon in icons if icon.get('index') == 0), None)
                 test_slot = next((slot for slot in slots if slot.get('index') == 0), None)
 
-                if test_icon and test_slot and test_icon.get('x') and test_slot.get('x'):
+                if (
+                    test_icon and test_slot and
+                    test_icon.get('x') is not None and
+                    test_icon.get('y') is not None and
+                    test_slot.get('x') is not None and
+                    test_slot.get('y') is not None
+                ):
                     print(f"🎯 Test setup: Icon 0 at ({test_icon['x']}, {test_icon['y']}) -> Slot 0 at ({test_slot['x']}, {test_slot['y']})")
 
-                    original_icon_pos = {'x': test_icon['x'], 'y': test_icon['y']}
+                    original_icon_pos = {
+                        'index': test_icon.get('index', 0),
+                        'x': test_icon['x'],
+                        'y': test_icon['y'],
+                    }
                     print("🖱️ Testing Double-Click and Drag mechanism...")
-                    success, result_code = self.test_double_click_drag(ws, test_icon, test_slot)
+                    success, result_code = self.test_double_click_drag(
+                        ws,
+                        test_icon,
+                        test_slot,
+                        manual_profile_context=manual_profile_context,
+                    )
 
                     game_control_details['test_performed'] = True
                     game_control_details['result_code'] = result_code
@@ -1966,7 +2006,12 @@ class SprunkiJSONGenerator:
                         game_control_details['confidence'] = 1.0
 
                         print("🔄 Resetting game state...")
-                        reset_success = self.reset_icon_position(ws, test_slot, original_icon_pos)
+                        reset_success = self.reset_icon_position(
+                            ws,
+                            test_slot,
+                            original_icon_pos,
+                            manual_profile_context=manual_profile_context,
+                        )
                         game_control_details['reset_performed'] = reset_success
 
                         if reset_success:
@@ -1976,10 +2021,27 @@ class SprunkiJSONGenerator:
 
                     else:
                         print(f"❌ Double-Click and Drag test FAILED: {result_code}")
-                        print("🎯 Defaulting to Click-Drag mechanism")
-                        game_control_type = "click_drag"
-                        game_control_details['method'] = "double_click_test_failed"
-                        game_control_details['confidence'] = 0.9
+                        manual_input_failure = (
+                            bool(manual_profile_context) and
+                            str(result_code or "").startswith("manual_profile_")
+                        )
+                        if manual_input_failure:
+                            # A verified profile must fail closed when its
+                            # target/session/geometry safety boundary fails.
+                            # Do not hide that failure by selecting a second
+                            # automatic control path.
+                            print(
+                                "🛑 Manual profile input was not verified; "
+                                "refusing automatic control fallback."
+                            )
+                            game_control_type = "manual_profile_failed"
+                            game_control_details['method'] = "manual_profile_failed_closed"
+                            game_control_details['confidence'] = 0.0
+                        else:
+                            print("🎯 Defaulting to Click-Drag mechanism")
+                            game_control_type = "click_drag"
+                            game_control_details['method'] = "double_click_test_failed"
+                            game_control_details['confidence'] = 0.9
                         game_control_details['failure_reason'] = result_code
 
                 else:
@@ -2067,6 +2129,9 @@ class SprunkiJSONGenerator:
             self.game_player._game_entry_started_at = None
             self.game_player._game_entry_deadline = None
             self.game_player._load_recovery_count = 0
+            self.game_player._manual_profile_resolution = None
+            self.game_player._manual_profile_resolution_error = None
+            self.game_player._active_manual_profile_context = None
             self.game_player.session_websocket = None
             self.game_player.batch_verification_active = False
         print("✅ [JSON Generator] State reset completed.")
@@ -2140,15 +2205,45 @@ class SprunkiJSONGenerator:
                 )
 
                 manual_profile = None
+                manual_profile_source = None
+                manual_profile_context = None
                 manual_profile_path = None
-                found_profile, found_profile_path = find_profile(url)
-                is_manual_profile_valid, manual_profile_error = validate_profile(found_profile, expected_url=url)
-                if found_profile and is_manual_profile_valid:
-                    manual_profile = found_profile
-                    manual_profile_path = found_profile_path
+                configured_profile_path = (
+                    ((getattr(self.game_player, "config", None) or {}).get("settings") or {}).get(
+                        "manualProfilePath"
+                    )
+                    if isinstance(getattr(self.game_player, "config", None), dict)
+                    else None
+                )
+                manual_resolution = resolve_profile_for_runtime(
+                    url,
+                    explicit_path=configured_profile_path,
+                )
+                if manual_resolution.status in {"INVALID", "AMBIGUOUS"}:
+                    failure_code = (
+                        "manual_profile_ambiguous"
+                        if manual_resolution.status == "AMBIGUOUS"
+                        else "manual_profile_invalid"
+                    )
+                    self.last_generation_result = QualityGateResult.failure(
+                        failure_code,
+                        retryable=False,
+                        evidence={
+                            "url": url,
+                            "manualProfileResolution": manual_resolution.as_dict(),
+                        },
+                        message=(
+                            "Manual profile resolution is ambiguous."
+                            if manual_resolution.status == "AMBIGUOUS"
+                            else "Manual profile is invalid; automatic entry fallback is disabled."
+                        ),
+                    )
+                    self.game_player.cleanup_chrome_complete()
+                    return False, None, None
+                if manual_resolution.valid:
+                    manual_profile_source = manual_resolution.profile
+                    manual_profile_path = manual_resolution.path
                     print(f"🧭 Manual profile detected for this URL: {manual_profile_path}")
-                elif found_profile and manual_profile_error:
-                    print(f"⚠️ Manual profile found but invalid: {manual_profile_error}")
 
                 # OPTIMIZED: Single WebSocket approach like original working code
                 ws_url = self._get_websocket_url()
@@ -2163,6 +2258,33 @@ class SprunkiJSONGenerator:
                     return False, None, None
 
                 ws = websocket.create_connection(ws_url, timeout=30)
+
+                if manual_profile_source:
+                    manual_profile_context, profile_runtime_result = (
+                        self.game_player._resolve_manual_profile_runtime_context(
+                            manual_profile_source,
+                            manual_profile_path,
+                            ws=ws,
+                        )
+                    )
+                    if not manual_profile_context:
+                        self.last_generation_result = profile_runtime_result
+                        raise RuntimeError(
+                            "Manual profile runtime binding failed: "
+                            f"{getattr(profile_runtime_result, 'failure_code', None) or 'unknown'}"
+                        )
+                    manual_profile = manual_profile_context.get("profile") or manual_profile_source
+                    self.game_player._active_manual_profile_context = manual_profile_context
+                    if isinstance(getattr(self.game_player, "config", None), dict):
+                        self.game_player.config["layout"] = copy.deepcopy(
+                            manual_profile.get("layout") or {}
+                        )
+                        self.game_player.config.setdefault("settings", {})[
+                            "layoutSource"
+                        ] = "manual_profile"
+                        self.game_player.config["settings"][
+                            "manualProfileResolution"
+                        ] = copy.deepcopy(manual_profile_context.get("evidence") or {})
 
                 # Bước 1: ĐÃ XÓA - Quản lý WebSocket thủ công
                 # ws_url = self._get_websocket_url()
@@ -2194,13 +2316,16 @@ class SprunkiJSONGenerator:
                 )
                 
                 print("⏩ Preparing game entry...")
-                if manual_profile:
+                if manual_profile_source:
                     print(f"🧭 Replaying manual profile prepare actions from: {manual_profile_path}")
                     if not self.game_player.replay_manual_prepare_actions(
-                        manual_profile.get("prepareActions", []),
+                        manual_profile_source.get("prepareActions", []),
                         manual_profile,
+                        manual_profile_context=manual_profile_context,
                     ):
-                        prepare_failure = getattr(self.game_player, "_last_prepare_ready_result", None)
+                        prepare_failure = getattr(self.game_player, "_last_manual_input_result", None)
+                        if not isinstance(prepare_failure, QualityGateResult):
+                            prepare_failure = getattr(self.game_player, "_last_prepare_ready_result", None)
                         if isinstance(prepare_failure, QualityGateResult) and not prepare_failure:
                             self.last_generation_result = prepare_failure
                         raise Exception(f"Manual profile replay failed: {manual_profile_path}")
@@ -2209,7 +2334,7 @@ class SprunkiJSONGenerator:
                         "prepare_completed",
                         progress_token={
                             "stage": "manual_prepare_completed",
-                            "actions": len(manual_profile.get("prepareActions", [])),
+                            "actions": len(manual_profile_source.get("prepareActions", [])),
                         },
                         progress_source="json_generator",
                     )
@@ -2359,13 +2484,59 @@ class SprunkiJSONGenerator:
                 
                 # Wait briefly for the game to stabilize before static layout extraction.
                 print("⏳ Waiting for game to stabilize before layout extraction...")
-                playable_runtime = self.game_player._wait_for_playable_runtime_entry()
+                playable_runtime = self.game_player._wait_for_playable_runtime_entry(
+                    manual_profile=manual_profile_context,
+                )
                 if not playable_runtime:
                     self.last_generation_result = playable_runtime
                     raise RuntimeError(
                         "Playable runtime was not verified after entry preparation: "
                         f"{playable_runtime.failure_code or playable_runtime.status}"
                     )
+
+                # PREPARE/Run/fullscreen can change the canvas geometry after
+                # the original profile binding.  Refresh once at the final
+                # gate boundary and use a newly bound socket for all later
+                # layout/control work; never let the early setup socket or
+                # transformed coordinates become stale evidence.
+                if manual_profile_context:
+                    refreshed_context, refresh_result = (
+                        self.game_player._refresh_manual_profile_context_if_needed(
+                            manual_profile_context
+                        )
+                    )
+                    if not refreshed_context:
+                        self.last_generation_result = refresh_result
+                        raise RuntimeError(
+                            "Manual profile geometry changed or became unknown "
+                            "before final layout capture."
+                        )
+                    manual_profile_context = refreshed_context
+                    manual_profile = manual_profile_context.get("profile") or manual_profile
+                    self.game_player._active_manual_profile_context = manual_profile_context
+                    if isinstance(getattr(self.game_player, "config", None), dict):
+                        self.game_player.config["layout"] = copy.deepcopy(
+                            manual_profile.get("layout") or {}
+                        )
+
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                    ws = None
+                    ws_url = self._get_websocket_url()
+                    if not ws_url:
+                        self.last_generation_result = QualityGateResult.failure(
+                            "manual_profile_input_target_mismatch",
+                            status="UNKNOWN",
+                            retryable=True,
+                            evidence=manual_profile_context.get("evidence") or {},
+                            message="The exact game target changed before final layout capture.",
+                        )
+                        raise RuntimeError(
+                            "Manual profile final layout target could not be rebound."
+                        )
+                    ws = websocket.create_connection(ws_url, timeout=30)
 
                 print("="*70)
 
@@ -2393,7 +2564,8 @@ class SprunkiJSONGenerator:
 
                 game_control_type, game_control_details = self._detect_game_control_type(
                     ws,
-                    manual_profile=manual_profile
+                    manual_profile=manual_profile,
+                    manual_profile_context=manual_profile_context,
                 )
 
                 print(f"\n🎮 GAME CONTROL DETECTION RESULT:")
@@ -2403,6 +2575,31 @@ class SprunkiJSONGenerator:
                 if 'failure_reason' in game_control_details:
                     print(f"   Failure Reason: {game_control_details['failure_reason']}")
                 print("="*70)
+                if (
+                    manual_profile_context and
+                    str(game_control_details.get("failure_reason") or "").startswith(
+                        "manual_profile_"
+                    )
+                ):
+                    failure_code = game_control_details.get("failure_reason")
+                    self.last_generation_result = QualityGateResult.failure(
+                        failure_code,
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            "manualProfileResolution": copy.deepcopy(
+                                manual_profile_context.get("evidence") or {}
+                            ),
+                            "controlDetection": copy.deepcopy(game_control_details),
+                        },
+                        message=(
+                            "Manual profile input target or geometry could not be "
+                            "verified during control detection."
+                        ),
+                    )
+                    raise RuntimeError(
+                        f"Manual profile control detection failed closed: {failure_code}"
+                    )
                 self._touch_watchdog_progress(
                     "control_detection_completed",
                     progress_token={
@@ -2503,7 +2700,23 @@ class SprunkiJSONGenerator:
                     },
                     "layout": layout_state.get('layout', {}),
                     "settings": {
-                        "manualProfilePath": manual_profile_path if manual_profile else None
+                        "manualProfilePath": manual_profile_path if manual_profile else None,
+                        "manualProfileStatus": manual_resolution.status,
+                        "layoutSource": (
+                            "manual_profile" if manual_profile else "runtime_detection"
+                        ),
+                        "manualProfileResolution": (
+                            {
+                                **manual_resolution.as_dict(),
+                                **(
+                                    manual_profile_context.get("evidence") or {}
+                                    if manual_profile_context
+                                    else {}
+                                ),
+                            }
+                            if isinstance(manual_resolution, ManualProfileResolution)
+                            else {}
+                        ),
                     }
                 }
 
@@ -2654,9 +2867,40 @@ class SprunkiJSONGenerator:
         else:
             return obj
 
-    def test_double_click_drag(self, ws, icon_coords, slot_coords):
+    def test_double_click_drag(
+        self,
+        ws,
+        icon_coords,
+        slot_coords,
+        manual_profile_context=None,
+    ):
         """Test double-click and drag mechanism with DUAL verification"""
         try:
+            if manual_profile_context:
+                # The test is itself a physical profile-coordinate operation.
+                # Re-resolve by index immediately before dispatch so a
+                # fullscreen/scroll/resize between layout capture and this
+                # test cannot send the old points.  The exact-target helper
+                # opens its own verified WebSocket; the caller's ``ws`` is
+                # retained only for the automatic/live path.
+                refreshed_layout = self.game_player._resolve_manual_layout_for_input(
+                    icon_coords,
+                    slot_coords,
+                )
+                if refreshed_layout is False:
+                    input_result = getattr(
+                        self.game_player,
+                        "_last_manual_input_result",
+                        None,
+                    )
+                    return False, getattr(
+                        input_result,
+                        "failure_code",
+                        None,
+                    ) or "manual_profile_input_target_mismatch"
+                if refreshed_layout:
+                    icon_coords, slot_coords, manual_profile_context = refreshed_layout
+
             print(f"   Testing double-click drag from ({icon_coords['x']}, {icon_coords['y']}) to ({slot_coords['x']}, {slot_coords['y']})")
             
             # BƯỚC 1: Lấy số đếm của DUAL Verification TRƯỚC khi thực hiện hành động
@@ -2673,22 +2917,47 @@ class SprunkiJSONGenerator:
             print("   🖱️ Executing double-click and drag...")
             start_x, start_y = icon_coords['x'], icon_coords['y']
             end_x, end_y = slot_coords['x'], slot_coords['y']
-            gesture_result = execute_cdp_gesture(
-                ws,
-                self._send_cdp_command,
-                start_x,
-                start_y,
-                end_x,
-                end_y,
-                mode=DOUBLE_CLICK_DRAG_TYPE,
-                drag_duration_ms=400,
-                click_interval_ms=300,
-                first_click_duration_ms=100,
-                hold_before_move_ms=200,
-                move_steps=10,
-                sleep_fn=time.sleep,
-            )
-            if not gesture_result.success:
+            if manual_profile_context:
+                gesture_success = self.game_player._execute_cdp_double_click_drag(
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    drag_duration_ms=400,
+                    click_interval_ms=300,
+                    first_click_duration_ms=100,
+                    hold_before_move_ms=200,
+                    manual_context=manual_profile_context,
+                )
+                if not gesture_success:
+                    input_result = getattr(
+                        self.game_player,
+                        "_last_manual_input_result",
+                        None,
+                    )
+                    return False, getattr(
+                        input_result,
+                        "failure_code",
+                        None,
+                    ) or "manual_profile_input_target_mismatch"
+                gesture_result = None
+            else:
+                gesture_result = execute_cdp_gesture(
+                    ws,
+                    self._send_cdp_command,
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    mode=DOUBLE_CLICK_DRAG_TYPE,
+                    drag_duration_ms=400,
+                    click_interval_ms=300,
+                    first_click_duration_ms=100,
+                    hold_before_move_ms=200,
+                    move_steps=10,
+                    sleep_fn=time.sleep,
+                )
+            if gesture_result is not None and not gesture_result.success:
                 return False, f"gesture_failed:{gesture_result.error}"
             
             # BƯỚC 3: Chờ game xử lý và lấy lại số đếm
@@ -2720,9 +2989,27 @@ class SprunkiJSONGenerator:
             print(f"   ❌ Exception during double-click test: {e}")
             return False, f"exception_{str(e)}"
 
-    def reset_icon_position(self, ws, target_icon_coords, original_position):
+    def reset_icon_position(
+        self,
+        ws,
+        target_icon_coords,
+        original_position,
+        manual_profile_context=None,
+    ):
         """Reset icon back to original position with DUAL verification"""
         try:
+            if manual_profile_context:
+                refreshed_layout = self.game_player._resolve_manual_layout_for_input(
+                    original_position,
+                    target_icon_coords,
+                )
+                if refreshed_layout is False:
+                    return False
+                if refreshed_layout:
+                    resolved_icon, resolved_slot, manual_profile_context = refreshed_layout
+                    target_icon_coords = resolved_slot
+                    original_position = resolved_icon
+
             print(f"   🔄 Resetting icon from ({target_icon_coords['x']}, {target_icon_coords['y']}) to ({original_position['x']}, {original_position['y']})")
 
             # BƯỚC 1: Lấy số đếm TRƯỚC khi reset
@@ -2734,8 +3021,31 @@ class SprunkiJSONGenerator:
                 print("   ⚠️ Cannot get verification counts. Proceeding with blind reset.")
 
             # BƯỚC 2: Thực hiện hành động kéo trả về (Giữ nguyên)
-            start_x, start_y = target_icon_coords['x'], target_icon_coords['y']  
+            start_x, start_y = target_icon_coords['x'], target_icon_coords['y']
             end_x, end_y = original_position['x'], original_position['y']
+
+            if manual_profile_context:
+                reset_successful = self.game_player._execute_cdp_single_drag(
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    drag_duration_ms=500,
+                    hold_before_move_ms=100,
+                    manual_context=manual_profile_context,
+                )
+                if not reset_successful:
+                    return False
+                time.sleep(2)
+                characters_after, putted_after = self.game_player.get_dual_counts()
+                print(f"   📊 Counts AFTER: Characters={characters_after}, Putted={putted_after}")
+                reset_successful = self.game_player.verify_return_success_dual(
+                    characters_before,
+                    characters_after,
+                    putted_before,
+                    putted_after,
+                )
+                return bool(reset_successful)
             
             # Standard drag implementation
             self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": start_x, "y": start_y}})

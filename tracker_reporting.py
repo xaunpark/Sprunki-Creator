@@ -69,6 +69,26 @@ _FAILURE_CONTEXT = {
         "Manual JSON không hợp lệ.",
         "Sửa JSON và chạy lại validation trước khi mở runtime.",
     ),
+    "manual_profile_invalid": (
+        "runtime_entry",
+        "Manual Profile không hợp lệ; automation đã dừng fail-closed.",
+        "Kiểm tra URL, prepareActions, icons/slots và geometry của profile.",
+    ),
+    "manual_profile_ambiguous": (
+        "runtime_entry",
+        "Có nhiều Manual Profile phù hợp; automation không tự chọn profile.",
+        "Giữ lại đúng một profile hợp lệ cho URL runtime hoặc cấu hình manualProfilePath rõ ràng.",
+    ),
+    "manual_profile_geometry_unknown": (
+        "runtime_entry",
+        "Không xác định được geometry ổn định để dùng Manual Profile.",
+        "Kiểm tra canvas, F11, viewport và session CDP rồi thử lại.",
+    ),
+    "manual_profile_input_target_mismatch": (
+        "runtime_entry",
+        "Manual input bị chặn vì page/session/frame không còn khớp.",
+        "Xác minh lại tab game và để runtime resolve lại geometry trước thao tác tiếp theo.",
+    ),
     "no_playable_entry": (
         "runtime_entry",
         "Không tìm thấy entry playable.",

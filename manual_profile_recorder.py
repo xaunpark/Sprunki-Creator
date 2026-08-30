@@ -665,6 +665,12 @@ class ManualProfileRecorder:
         if not self.icons or not self.slots:
             messagebox.showwarning("Missing layout", "Please capture at least one icon and one slot before saving.")
             return
+        if not isinstance(self.prepare_actions, list) or not self.prepare_actions:
+            messagebox.showwarning(
+                "Missing PREPARE actions",
+                "Please record at least one prepare action before saving this runtime profile.",
+            )
+            return
 
         timeline_valid, timeline_reason = validate_prepare_timeline(
             self.prepare_actions,
@@ -678,6 +684,11 @@ class ManualProfileRecorder:
             return
 
         width, height = pyautogui.size()
+        capture_geometry = None
+        try:
+            capture_geometry, _geometry_error = self.game_player.capture_manual_profile_geometry()
+        except Exception:
+            capture_geometry = None
         profile_data = {
             "version": 2,
             "sourceUrl": self.url,
@@ -703,6 +714,8 @@ class ManualProfileRecorder:
             },
             "notes": "",
         }
+        if capture_geometry:
+            profile_data["captureGeometry"] = capture_geometry
 
         try:
             profile_path = save_profile(profile_data)

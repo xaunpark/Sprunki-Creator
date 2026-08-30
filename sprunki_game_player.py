@@ -2,6 +2,7 @@
 # CHANGES: Added "Putted characters" variable monitoring and 5-coordinate retry logic
 
 import builtins
+import copy
 import json
 import time
 import webbrowser
@@ -33,7 +34,14 @@ if TYPE_CHECKING:
 from dataclasses import replace
 
 from character_identity import SCRATCH_VM_ICON_STATE_JS, write_character_identity_map
-from manual_profile_manager import find_profile, load_profile_from_path, validate_profile
+from manual_profile_manager import (
+    ManualProfileResolution,
+    find_profile,
+    load_profile_from_path,
+    resolve_profile_for_runtime,
+    validate_profile,
+    validate_runtime_profile,
+)
 from manual_prepare_timeline import (
     MAX_PREPARE_ACTIONS,
     MAX_TOTAL_PREPARE_DURATION_MS,
@@ -266,10 +274,17 @@ class SprunkiGamePlayer:
         self._game_finalization_liveness_observations = 0
         self._game_finalization_grace_deadline = None
         self._last_game_readiness_probe = {}
+        self._last_game_probe_frame_id = None
+        self._last_game_probe_context_id = None
         self._last_run_click_result = None
         self._last_prepare_ready_result = None
+        self._last_manual_input_result = None
+        self._last_manual_profile_runtime_result = None
         self._last_game_weak_token = None
         self._game_readiness_state = "PAGE_READY"
+        self._manual_profile_resolution: Optional[ManualProfileResolution] = None
+        self._active_manual_profile_context: Optional[Dict[str, Any]] = None
+        self._manual_profile_resolution_error = None
         # Remove-button input is bound to one exact CDP page for the lifetime
         # of the cleanup operation.  It must never fall back to the first
         # visible Chrome window or to an arbitrary Cocrea tab.
@@ -1812,6 +1827,35 @@ class SprunkiGamePlayer:
             return
         summary = self._cleanup_workflow_evidence()
         report.evidence.update(summary)
+        manual_context = getattr(self, "_active_manual_profile_context", None)
+        if isinstance(manual_context, dict):
+            profile_evidence = dict(manual_context.get("evidence") or {})
+            report.evidence.update(
+                {
+                    "layoutSource": "manual_profile",
+                    "manualProfilePath": manual_context.get("path"),
+                    "manualProfileStatus": "VALID",
+                    "manualProfileResolution": profile_evidence,
+                    "sourceViewport": profile_evidence.get("sourceViewport"),
+                    "currentViewport": profile_evidence.get("currentViewport"),
+                    "sourceCanvas": profile_evidence.get("sourceCanvas"),
+                    "currentCanvas": profile_evidence.get("currentCanvas"),
+                    "coordinateTransform": {
+                        "method": "source_canvas_to_current_canvas",
+                        "geometryToken": manual_context.get("geometryToken"),
+                    },
+                    "pageIdentity": profile_evidence.get("pageIdentity") or {},
+                    "targetId": profile_evidence.get("targetId"),
+                    "frameId": profile_evidence.get("frameId") or profile_evidence.get("frame"),
+                    "boardGeneration": manual_context.get("boardGeneration"),
+                }
+            )
+        else:
+            settings = (self.config or {}).get("settings", {}) if isinstance(self.config, dict) else {}
+            report.evidence.setdefault(
+                "layoutSource",
+                settings.get("layoutSource", "runtime_detection"),
+            )
         report.cleanup_state = str(summary.get("boardState", "UNKNOWN"))
         if summary.get("cleanupBoundaryCompleted"):
             report.cleanup_verified = bool(summary.get("cleanupVerified", False))
@@ -3233,6 +3277,16 @@ class SprunkiGamePlayer:
                 return None
 
             ws = websocket.create_connection(ws_url, timeout=command_timeout)
+            # The readiness probe is frame-aware.  Other verification
+            # snippets intentionally retain their existing single-context
+            # behavior, so diagnostics and cleanup do not inherit the frame
+            # resolver's extra commands.
+            if (
+                isinstance(js_code, str) and
+                "sprunki-readiness-probe" in js_code
+            ):
+                return self._evaluate_game_readiness_on_ws(ws)
+
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
                 "params": {"expression": js_code, "awaitPromise": True, "returnByValue": True}
@@ -3777,6 +3831,8 @@ class SprunkiGamePlayer:
         self._game_finalization_liveness_observations = 0
         self._game_finalization_grace_deadline = None
         self._last_game_readiness_probe = {}
+        self._last_game_probe_frame_id = None
+        self._last_game_probe_context_id = None
         self._last_run_click_result = None
         self._last_prepare_ready_result = None
         self._last_game_weak_token = None
@@ -3838,6 +3894,7 @@ class SprunkiGamePlayer:
         expensive and too ambiguous to run every few hundred milliseconds.
         """
         return r'''
+        /* sprunki-readiness-probe */
         (() => {
           try {
             const result = {
@@ -3849,7 +3906,12 @@ class SprunkiGamePlayer:
                 visibilityState: document.visibilityState,
                 hidden: !!document.hidden,
                 isTopFrame: window.top === window,
-                frameName: window.name || ''
+                frameName: window.name || '',
+                innerWidth: Number(window.innerWidth || document.documentElement.clientWidth || 0),
+                innerHeight: Number(window.innerHeight || document.documentElement.clientHeight || 0),
+                devicePixelRatio: Number(window.devicePixelRatio || 1),
+                scrollX: Number(window.scrollX || 0),
+                scrollY: Number(window.scrollY || 0)
               },
               errorPage: { detected: false, pattern: null, title: document.title || '', headingText: '' },
               stage: { found: false, visible: false, bounds: null, identity: null, canvasCount: 0, childCount: 0 },
@@ -4439,8 +4501,19 @@ class SprunkiGamePlayer:
         href = identity.get("href")
         expected = getattr(self, "game_url", None)
         if not href or not expected:
-            return True
-        return self._cdp_urls_match(href, expected)
+            url_matches = True
+        else:
+            url_matches = self._cdp_urls_match(href, expected)
+        if not url_matches:
+            return False
+        if (
+            identity.get("visibilityState") is not None and
+            identity.get("visibilityState") != "visible"
+        ):
+            return False
+        if bool(identity.get("hidden")):
+            return False
+        return True
 
     def _game_readiness_evidence(
         self,
@@ -6187,8 +6260,46 @@ class SprunkiGamePlayer:
         self._last_prepare_ready_result = result
         return result
 
-    def _wait_for_playable_runtime_entry(self, timeout=None, stable_samples=2):
-        """Wait for two stable icon/slot snapshots after entry preparation."""
+    def _wait_for_playable_runtime_entry(
+        self,
+        timeout=None,
+        stable_samples=2,
+        manual_profile=None,
+    ):
+        """Wait for a stable playable runtime using the appropriate layout source.
+
+        Without a manual profile, live VM icon/slot classification remains the
+        authoritative gate.  With a validated runtime context, the profile is
+        authoritative for coordinates while the live VM is still required to
+        prove that the correct stage/runtime is responding.
+        """
+        manual_context = (
+            manual_profile
+            if isinstance(manual_profile, dict) and "sourceProfile" in manual_profile
+            else None
+        )
+        profile_data = (
+            manual_context.get("profile")
+            if manual_context
+            else manual_profile
+            if isinstance(manual_profile, dict)
+            else None
+        )
+        manual_layout_enabled = isinstance(profile_data, dict)
+        profile_layout = (profile_data or {}).get("layout") if manual_layout_enabled else {}
+        profile_icons = len((profile_layout or {}).get("icons") or [])
+        profile_slots = len((profile_layout or {}).get("slots") or [])
+        if manual_layout_enabled and (profile_icons <= 0 or profile_slots <= 0):
+            return QualityGateResult.failure(
+                "manual_profile_invalid",
+                retryable=False,
+                evidence={
+                    "layoutSource": "manual_profile",
+                    "profileIconCount": profile_icons,
+                    "profileSlotCount": profile_slots,
+                },
+                message="Manual profile does not contain a playable icon/slot layout.",
+            )
         started_at = time.monotonic()
         configured_budget = getattr(self, "game_load_phase_timeout", 60.0)
         try:
@@ -6228,6 +6339,23 @@ class SprunkiGamePlayer:
             if not isinstance(loading, dict):
                 loading = {}
 
+            probe_stage = (readiness_probe or {}).get("stage") if isinstance(readiness_probe, dict) else {}
+            probe_runtime = (readiness_probe or {}).get("runtime") if isinstance(readiness_probe, dict) else {}
+            probe_identity = (
+                (readiness_probe or {}).get("pageIdentity")
+                if isinstance(readiness_probe, dict)
+                else {}
+            )
+            probe_geometry_token = self._stable_watchdog_probe_token({
+                "frameId": (
+                    probe_identity.get("frameId")
+                    if isinstance(probe_identity, dict)
+                    else None
+                ),
+                "stageBounds": probe_stage.get("bounds"),
+                "stageIdentity": probe_stage.get("identity"),
+            })
+
             ws = None
             state = None
             try:
@@ -6264,7 +6392,12 @@ class SprunkiGamePlayer:
                 runtime_signature = self._stable_watchdog_probe_token({
                     "icons": icons,
                     "slots": slots,
+                    "targetCount": state.get("targetCount"),
+                    "runtimeOk": bool(state.get("ok")),
                     "openIndicators": len(open_indicators),
+                    "layoutSource": "manual_profile" if manual_layout_enabled else "runtime_detection",
+                    "geometryToken": (manual_context or {}).get("geometryToken"),
+                    "probeGeometryToken": probe_geometry_token,
                 })
                 runtime_stable_count = (
                     runtime_stable_count + 1
@@ -6274,15 +6407,29 @@ class SprunkiGamePlayer:
                 previous_runtime_signature = runtime_signature
                 if not loading.get("active") and runtime_stable_count >= 2:
                     runtime_stable_observed = True
+                stage_runtime_ready = bool(
+                    isinstance(readiness_probe, dict) and
+                    self._game_probe_matches_current_page(readiness_probe) and
+                    readiness_probe.get("stageActive") and
+                    probe_stage.get("visible") and
+                    (probe_runtime.get("responding") or probe_runtime.get("canvasReady"))
+                )
                 playable = bool(
-                    state.get("ok") and icons > 0 and slots > 0 and
-                    not loading.get("active") and not open_indicators
+                    state.get("ok") and
+                    stage_runtime_ready and
+                    not loading.get("active") and
+                    not open_indicators and
+                    (manual_layout_enabled or (icons > 0 and slots > 0))
                 )
                 signature = self._stable_watchdog_probe_token({
                     "icons": icons,
                     "slots": slots,
+                    "targetCount": state.get("targetCount"),
                     "openIndicators": len(open_indicators),
                     "loadingPercent": loading.get("percent"),
+                    "layoutSource": "manual_profile" if manual_layout_enabled else "runtime_detection",
+                    "geometryToken": (manual_context or {}).get("geometryToken"),
+                    "probeGeometryToken": probe_geometry_token,
                 })
                 if playable:
                     stable_count = stable_count + 1 if signature == previous_signature else 1
@@ -6292,6 +6439,11 @@ class SprunkiGamePlayer:
                         evidence = {
                             "icons": icons,
                             "slots": slots,
+                            "liveIconCount": icons,
+                            "liveSlotCount": slots,
+                            "profileIconCount": profile_icons if manual_layout_enabled else None,
+                            "profileSlotCount": profile_slots if manual_layout_enabled else None,
+                            "layoutSource": "manual_profile" if manual_layout_enabled else "runtime_detection",
                             "playButtons": int(state.get("playButtonCount") or 0),
                             "openIndicators": len(open_indicators),
                             "stableSamples": stable_count,
@@ -6299,6 +6451,13 @@ class SprunkiGamePlayer:
                             "entryAttemptId": getattr(self, "_entry_attempt_id", None),
                             "pageIdentity": (last_probe or {}).get("pageIdentity", {}),
                         }
+                        if manual_context:
+                            evidence["manualProfileResolution"] = manual_context.get("evidence") or {}
+                            evidence["geometryToken"] = manual_context.get("geometryToken")
+                            evidence["boardGeneration"] = manual_context.get(
+                                "boardGeneration",
+                                int(getattr(self, "_board_generation", 0) or 0),
+                            )
                         entry_strategy = getattr(self, "entry_strategy", None)
                         if not isinstance(entry_strategy, dict):
                             entry_strategy = {"selected": None, "tested": [], "verification": UNKNOWN}
@@ -6306,14 +6465,20 @@ class SprunkiGamePlayer:
                         entry_strategy["runtimeState"] = evidence
                         result = QualityGateResult.pass_result(
                             evidence=evidence,
-                            message="Playable runtime verified by stable icon and slot snapshots.",
+                            message=(
+                                "Playable runtime verified with stable stage/runtime snapshots "
+                                "and manual profile layout."
+                                if manual_layout_enabled
+                                else "Playable runtime verified by stable icon and slot snapshots."
+                            ),
                         )
                         entry_strategy["verification"] = result.status
                         entry_strategy["verificationResult"] = result.as_dict()
                         if not entry_strategy.get("selected"):
                             entry_strategy["selected"] = {
-                                "strategy": "runtime_vm",
-                                "reason": "stable_icons_and_slots",
+                                "strategy": "manual_profile" if manual_layout_enabled else "runtime_vm",
+                                "reason": "stable_stage_runtime_with_manual_layout"
+                                if manual_layout_enabled else "stable_icons_and_slots",
                             }
                         return result
                 else:
@@ -6340,6 +6505,11 @@ class SprunkiGamePlayer:
         evidence = {
             "icons": last_icons,
             "slots": last_slots,
+            "liveIconCount": last_icons,
+            "liveSlotCount": last_slots,
+            "profileIconCount": profile_icons if manual_layout_enabled else None,
+            "profileSlotCount": profile_slots if manual_layout_enabled else None,
+            "layoutSource": "manual_profile" if manual_layout_enabled else "runtime_detection",
             "probeAttempts": attempts,
             "runtimeObserved": runtime_observed,
             "runtimeStableObserved": runtime_stable_observed,
@@ -6348,16 +6518,23 @@ class SprunkiGamePlayer:
             "pageIdentity": (last_probe or {}).get("pageIdentity", {}) if isinstance(last_probe, dict) else {},
             "readinessProbe": last_probe or {},
         }
+        if manual_context:
+            evidence["manualProfileResolution"] = manual_context.get("evidence") or {}
+            evidence["geometryToken"] = manual_context.get("geometryToken")
+            evidence["boardGeneration"] = manual_context.get(
+                "boardGeneration",
+                int(getattr(self, "_board_generation", 0) or 0),
+            )
         if not runtime_observed or not isinstance(last_state, dict):
             code = "post_run_runtime_not_ready"
             message = "Playable runtime did not respond within the bounded budget."
         elif not runtime_stable_observed:
             code = "post_run_runtime_not_ready"
             message = "Runtime did not provide a stable post-prepare snapshot."
-        elif last_icons <= 0:
+        elif not manual_layout_enabled and last_icons <= 0:
             code = "no_icons"
             message = "Runtime became stable but exposed no playable icons."
-        elif last_slots <= 0:
+        elif not manual_layout_enabled and last_slots <= 0:
             code = "no_slots"
             message = "Runtime became stable but exposed no playable slots."
         else:
@@ -6525,6 +6702,9 @@ class SprunkiGamePlayer:
             self.last_setup_result = None
             self.game_url = url
             self._begin_game_entry_attempt(url)
+            self._manual_profile_resolution = None
+            self._manual_profile_resolution_error = None
+            self._active_manual_profile_context = None
             self.entry_strategy = {
                 "selected": None,
                 "tested": [],
@@ -7736,23 +7916,270 @@ class SprunkiGamePlayer:
             return False
 
     def _evaluate_game_readiness_on_ws(self, ws):
-        """Evaluate the canonical readiness probe on an already bound socket."""
-        response = self._send_cdp_command(
+        """Evaluate readiness in the actual game frame on an existing socket.
+
+        The top page can contain a visible player shell while the game itself
+        lives in an iframe.  Evaluating only the top document creates a false
+        ``Run``/stage negative (or, worse, a click into the shell).  The frame
+        resolver below keeps the target WebSocket fixed, evaluates the same
+        semantic probe in each frame, and maps the selected frame's bounds
+        into the top-page input coordinate space.
+        """
+        return self._evaluate_game_readiness_frames_on_ws(ws)
+
+    @staticmethod
+    def _readiness_bounds_with_centers(bounds):
+        if not isinstance(bounds, dict):
+            return None
+        try:
+            left = float(bounds.get("left"))
+            top = float(bounds.get("top"))
+            width = float(bounds.get("width"))
+            height = float(bounds.get("height"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not all(math.isfinite(value) for value in (left, top, width, height)):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        return {
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+            "right": left + width,
+            "bottom": top + height,
+            "centerX": left + width / 2.0,
+            "centerY": top + height / 2.0,
+        }
+
+    @classmethod
+    def _map_readiness_frame_probe(cls, probe, frame_viewport, owner_bounds):
+        """Map child-frame stage/control bounds into top-page coordinates."""
+        if not isinstance(probe, dict):
+            return None
+        mapped = copy.deepcopy(probe)
+        for section_name, key in (("stage", "bounds"), ("runButton", "bounds")):
+            section = mapped.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            local_bounds = section.get(key)
+            if not isinstance(local_bounds, dict):
+                continue
+            top_bounds = cls._map_frame_local_bounds(
+                local_bounds,
+                frame_viewport,
+                owner_bounds,
+            )
+            if not top_bounds:
+                return None
+            section[key] = cls._readiness_bounds_with_centers(top_bounds)
+
+        strong_token = mapped.get("strongProgressToken")
+        if isinstance(strong_token, dict):
+            stage_bounds = strong_token.get("stageBounds")
+            if isinstance(stage_bounds, dict):
+                mapped_stage_bounds = cls._map_frame_local_bounds(
+                    stage_bounds,
+                    frame_viewport,
+                    owner_bounds,
+                )
+                if mapped_stage_bounds:
+                    strong_token["stageBounds"] = cls._readiness_bounds_with_centers(
+                        mapped_stage_bounds
+                    )
+        return mapped
+
+    def _evaluate_game_readiness_frames_on_ws(self, ws):
+        """Run the canonical readiness probe in the correct frame.
+
+        All frame probes use the same CDP WebSocket and exact page target.  A
+        child-frame result is usable only when CDP can expose its iframe owner
+        bounds; otherwise no parent coordinate fallback is accepted.
+        """
+        timeout_seconds = getattr(self, "game_probe_timeout", 3.0)
+        self._last_game_probe_frame_id = None
+        self._last_game_probe_context_id = None
+
+        try:
+            target_identity = self._read_cdp_page_identity(
+                ws,
+                timeout_seconds=timeout_seconds,
+            )
+        except TypeError:
+            target_identity = self._read_cdp_page_identity(ws)
+        if not isinstance(target_identity, dict):
+            return None
+
+        expected_url = self._normalize_cdp_page_url(
+            getattr(self, "game_url", None)
+            or (
+                (self.config or {}).get("currentUrl")
+                if isinstance(getattr(self, "config", None), dict)
+                else None
+            )
+        )
+        target_href = self._normalize_cdp_page_url(target_identity.get("href"))
+        if expected_url and not self._cdp_urls_match(target_href, expected_url):
+            return {
+                "ok": False,
+                "reason": "page_identity_mismatch",
+                "pageIdentity": target_identity,
+                "targetId": getattr(self, "_cdp_target_id", None),
+            }
+        if (
+            target_identity.get("visibilityState") is not None and
+            target_identity.get("visibilityState") != "visible"
+        ) or bool(target_identity.get("hidden")):
+            return {
+                "ok": False,
+                "reason": "page_not_visible",
+                "pageIdentity": target_identity,
+                "targetId": getattr(self, "_cdp_target_id", None),
+            }
+
+        frame_tree_response = self._send_cdp_command(
             ws,
-            {
-                "method": "Runtime.evaluate",
-                "params": {
-                    "expression": self._get_game_readiness_probe_js(),
+            {"method": "Page.getFrameTree", "params": {}},
+            timeout_seconds=timeout_seconds,
+        )
+        frame_records = self._manual_frame_records(frame_tree_response)
+        if not frame_records:
+            return None
+        root_frame_id = frame_records[0].get("id")
+        expression = self._get_game_readiness_probe_js()
+        candidates = []
+
+        for frame in frame_records:
+            frame_id = frame.get("id")
+            if not frame_id:
+                continue
+            context_id = None
+            try:
+                if frame_id != root_frame_id:
+                    world_response = self._send_cdp_command(
+                        ws,
+                        {
+                            "method": "Page.createIsolatedWorld",
+                            "params": {
+                                "frameId": frame_id,
+                                "worldName": "sprunki-game-readiness",
+                            },
+                        },
+                        timeout_seconds=timeout_seconds,
+                    )
+                    context_id = (
+                        world_response.get("result", {}).get("executionContextId")
+                        if isinstance(world_response, dict)
+                        else None
+                    )
+                    if not context_id:
+                        continue
+
+                params = {
+                    "expression": expression,
                     "awaitPromise": True,
                     "returnByValue": True,
-                },
-            },
-            timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
-        )
-        if not response or "error" in response:
+                }
+                if context_id:
+                    params["contextId"] = context_id
+                response = self._send_cdp_command(
+                    ws,
+                    {
+                        "method": "Runtime.evaluate",
+                        "params": params,
+                    },
+                    timeout_seconds=timeout_seconds,
+                )
+                raw = (
+                    response.get("result", {}).get("result", {}).get("value")
+                    if isinstance(response, dict)
+                    else None
+                )
+                probe = self._normalize_game_readiness_probe(raw)
+                if not isinstance(probe, dict):
+                    continue
+
+                is_top_frame = frame_id == root_frame_id
+                frame_identity = probe.get("pageIdentity")
+                if not isinstance(frame_identity, dict):
+                    frame_identity = {}
+                if not is_top_frame:
+                    frame_viewport = self._manual_viewport({
+                        "width": frame_identity.get("innerWidth"),
+                        "height": frame_identity.get("innerHeight"),
+                        "devicePixelRatio": frame_identity.get("devicePixelRatio", 1),
+                    })
+                    owner_bounds = self._manual_frame_owner_bounds(ws, frame_id)
+                    if not frame_viewport or not owner_bounds:
+                        # The child frame was observed, but its coordinate
+                        # mapping is not provable.  Never click the parent.
+                        continue
+                    probe = self._map_readiness_frame_probe(
+                        probe,
+                        frame_viewport,
+                        owner_bounds,
+                    )
+                    if not isinstance(probe, dict):
+                        continue
+
+                bound_identity = dict(target_identity)
+                bound_identity.update({
+                    "cdpTargetId": getattr(self, "_cdp_target_id", None),
+                    "cdpTargetUrl": getattr(self, "_cdp_target_url", None),
+                    "frameId": frame_id,
+                    "frameHref": frame_identity.get("href") or frame.get("url"),
+                    "frameName": frame_identity.get("frameName") or frame.get("name") or "",
+                    "isTopFrame": is_top_frame,
+                })
+                probe["pageIdentity"] = bound_identity
+                probe["targetId"] = getattr(self, "_cdp_target_id", None)
+                probe["targetUrl"] = getattr(self, "_cdp_target_url", None)
+                probe["frameId"] = frame_id
+
+                run = probe.get("runButton") if isinstance(probe.get("runButton"), dict) else {}
+                stage = probe.get("stage") if isinstance(probe.get("stage"), dict) else {}
+                runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+                error_page = probe.get("errorPage") if isinstance(probe.get("errorPage"), dict) else {}
+                score = 0
+                if run.get("clickable"):
+                    score += 1000
+                elif run.get("visible"):
+                    score += 700
+                elif run.get("found"):
+                    score += 400
+                if stage.get("visible"):
+                    score += 250
+                if runtime.get("responding"):
+                    score += 300
+                elif runtime.get("canvasReady"):
+                    score += 50
+                if runtime.get("vmAvailable"):
+                    score += 100
+                try:
+                    if float(runtime.get("targetCount") or 0) > 0:
+                        score += 100
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                if probe.get("ready"):
+                    score += 500
+                if error_page.get("detected"):
+                    score -= 2000
+                if is_top_frame:
+                    score += 1
+                candidates.append((score, probe, frame_id, context_id))
+            except Exception as frame_error:
+                print(f"⚠️ Readiness probe skipped frame {frame_id}: {frame_error}")
+
+        if not candidates:
             return None
-        value = response.get("result", {}).get("result", {}).get("value")
-        return self._normalize_game_readiness_probe(value)
+        _, selected_probe, selected_frame_id, selected_context_id = max(
+            candidates,
+            key=lambda item: item[0],
+        )
+        self._last_game_probe_frame_id = selected_frame_id
+        self._last_game_probe_context_id = selected_context_id
+        return selected_probe
 
     @staticmethod
     def _run_button_scroll_js():
@@ -7818,11 +8245,38 @@ class SprunkiGamePlayer:
                 return result
 
             ws = websocket.create_connection(ws_url, timeout=30)
+            bound_target_id = getattr(self, "_cdp_target_id", None)
             last_result = None
             max_attempts = min(
                 3,
                 max(1, int(getattr(self, "run_button_max_retries", 3))),
             )
+
+            def current_run_page_is_valid():
+                """Reconfirm the same target/page immediately before input."""
+                try:
+                    current_identity = self._read_cdp_page_identity(
+                        ws,
+                        timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+                    )
+                except TypeError:
+                    current_identity = self._read_cdp_page_identity(ws)
+                current_url = self._normalize_cdp_page_url(
+                    (current_identity or {}).get("href")
+                )
+                current_target_id = getattr(self, "_cdp_target_id", None)
+                return bool(
+                    current_identity and
+                    self._cdp_urls_match(current_url, expected_url) and
+                    current_identity.get("visibilityState") == "visible" and
+                    not current_identity.get("hidden") and
+                    (
+                        not bound_target_id or
+                        not current_target_id or
+                        current_target_id == bound_target_id
+                    )
+                ), current_identity
+
             for click_attempt in range(1, max_attempts + 1):
                 try:
                     identity = self._read_cdp_page_identity(
@@ -7855,20 +8309,6 @@ class SprunkiGamePlayer:
                         message="The exact game page could not be brought to the foreground.",
                     )
                     break
-                scroll_response = self._send_cdp_command(ws, {
-                    "method": "Runtime.evaluate",
-                    "params": {"expression": self._run_button_scroll_js(), "returnByValue": True},
-                }, timeout_seconds=getattr(self, "game_probe_timeout", 3.0))
-                scroll_value = scroll_response.get("result", {}).get("result", {}).get("value") if scroll_response else None
-                if not isinstance(scroll_value, dict) or not scroll_value.get("success"):
-                    last_result = QualityGateResult.failure(
-                        "run_button_not_verified",
-                        retryable=True,
-                        evidence={"reason": (scroll_value or {}).get("reason", "candidate_disappeared"), "pageIdentity": identity},
-                        message="The semantic Run candidate disappeared before click.",
-                    )
-                    break
-
                 probe = self._evaluate_game_readiness_on_ws(ws)
                 if isinstance(probe, dict) and not self._game_probe_matches_current_page(probe):
                     last_result = QualityGateResult.failure(
@@ -7876,6 +8316,40 @@ class SprunkiGamePlayer:
                         retryable=True,
                         evidence={"pageIdentity": probe.get("pageIdentity", {}), "expectedUrl": expected_url},
                         message="The Run probe returned a different page identity.",
+                    )
+                    break
+                probe_identity = (
+                    probe.get("pageIdentity", {})
+                    if isinstance(probe, dict) else {}
+                )
+                probe_target_id = (
+                    probe.get("targetId")
+                    or probe_identity.get("cdpTargetId")
+                    or probe_identity.get("targetId")
+                )
+                probe_frame_id = (
+                    probe.get("frameId")
+                    or probe_identity.get("frameId")
+                    or getattr(self, "_last_game_probe_frame_id", None)
+                )
+                if (
+                    bound_target_id and probe_target_id and
+                    probe_target_id != bound_target_id
+                ) or (
+                    probe_frame_id and
+                    getattr(self, "_last_game_probe_frame_id", None) and
+                    probe_frame_id != getattr(self, "_last_game_probe_frame_id", None)
+                ):
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={
+                            "pageIdentity": probe_identity,
+                            "boundTargetId": bound_target_id,
+                            "probeTargetId": probe_target_id,
+                            "probeFrameId": probe_frame_id,
+                        },
+                        message="The Run candidate changed target or frame before click.",
                     )
                     break
                 run = (probe or {}).get("runButton") if isinstance(probe, dict) else None
@@ -7901,12 +8375,46 @@ class SprunkiGamePlayer:
                     )
                     break
 
+                page_valid, current_identity = current_run_page_is_valid()
+                if not page_valid:
+                    last_result = QualityGateResult.failure(
+                        "run_button_not_verified",
+                        retryable=True,
+                        evidence={
+                            "runButtonEvidence": run,
+                            "pageIdentity": current_identity or {},
+                            "boundTargetId": bound_target_id,
+                            "currentTargetId": getattr(self, "_cdp_target_id", None),
+                            "frameId": probe_frame_id,
+                        },
+                        message="The Run target page changed after probing and before click.",
+                    )
+                    break
+
                 dispatches = []
                 for event_type, extra in (
                     ("mouseMoved", {}),
                     ("mousePressed", {"button": "left", "clickCount": 1}),
                     ("mouseReleased", {"button": "left", "clickCount": 1}),
                 ):
+                    if event_type in {"mousePressed", "mouseReleased"}:
+                        page_valid, current_identity = current_run_page_is_valid()
+                        if not page_valid:
+                            dispatches.append(None)
+                            last_result = QualityGateResult.failure(
+                                "run_button_not_verified",
+                                retryable=True,
+                                evidence={
+                                    "runButtonEvidence": run,
+                                    "pageIdentity": current_identity or {},
+                                    "boundTargetId": bound_target_id,
+                                    "currentTargetId": getattr(self, "_cdp_target_id", None),
+                                    "frameId": probe_frame_id,
+                                    "inputEvent": event_type,
+                                },
+                                message="The Run target changed before mouse input dispatch.",
+                            )
+                            break
                     response = self._send_cdp_command(ws, {
                         "method": "Input.dispatchMouseEvent",
                         "params": {"type": event_type, "x": x, "y": y, **extra},
@@ -8467,15 +8975,21 @@ class SprunkiGamePlayer:
             print(f"âŒ CDP-ONLY: Relaxed Fullscreen error: {e}")
             return False
 
-    def _simulate_click_via_cdp(self, ws, x, y):
-        """Simulate mouse click via CDP"""
+    def _simulate_click_via_cdp(self, ws, x, y, send_command=None):
+        """Simulate mouse click via CDP.
+
+        ``send_command`` is optional so the manual-profile path can wrap the
+        two button transitions with its exact-target identity check while the
+        legacy callers keep their original transport.
+        """
         if not self._register_scoped_physical_input():
             return False
+        sender = send_command or self._send_cdp_command
         down_command = {"method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}}
-        down_response = self._send_cdp_command(ws, down_command)
+        down_response = sender(ws, down_command)
         time.sleep(random.uniform(0.05, 0.1))
         up_command = {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}}
-        up_response = self._send_cdp_command(ws, up_command)
+        up_response = sender(ws, up_command)
         return bool(
             down_response
             and up_response
@@ -9777,6 +10291,55 @@ class SprunkiGamePlayer:
                 candidates.append(candidate)
         return candidates
 
+    def _refresh_manual_carpet_coordinate(self, coordinate):
+        """Rebase one generated carpet point onto the current profile slot."""
+        if not isinstance(coordinate, dict):
+            return None
+        manual_context = getattr(self, "_active_manual_profile_context", None)
+        if not isinstance(manual_context, dict):
+            return coordinate.get("x"), coordinate.get("y")
+
+        refreshed_context, refresh_result = (
+            self._refresh_manual_profile_context_if_needed(manual_context)
+        )
+        if not refreshed_context:
+            self._last_manual_input_result = refresh_result
+            return None
+
+        slot_index = coordinate.get("slot_index")
+        layout = (refreshed_context.get("profile") or {}).get("layout") or {}
+        current_slot = self._manual_layout_entry_by_index(
+            layout,
+            "slots",
+            slot_index,
+        )
+        if not current_slot:
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_invalid",
+                retryable=False,
+                evidence={
+                    **(refreshed_context.get("evidence") or {}),
+                    "slotIndex": slot_index,
+                },
+                message="Manual profile slot for carpet cleanup is unavailable.",
+            )
+            return None
+
+        old_center = coordinate.get("slot_center")
+        try:
+            old_x, old_y = float(old_center[0]), float(old_center[1])
+            point_x, point_y = float(coordinate.get("x")), float(coordinate.get("y"))
+            center_x, center_y = float(current_slot.get("x")), float(current_slot.get("y"))
+        except (TypeError, ValueError, OverflowError, IndexError, KeyError):
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_geometry_unknown",
+                retryable=False,
+                message="Manual carpet coordinate metadata is invalid.",
+            )
+            return None
+        self._active_manual_profile_context = refreshed_context
+        return center_x + (point_x - old_x), center_y + (point_y - old_y)
+
     def _targeted_cleanup_recovery(
         self,
         use_cdp=False,
@@ -9821,6 +10384,26 @@ class SprunkiGamePlayer:
                     "targeted_cleanup_stop_requested",
                     details={"attempts": attempts},
                 )
+
+            if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                refreshed_context, refresh_result = (
+                    self._refresh_active_manual_layout_in_config()
+                )
+                if not refreshed_context:
+                    return self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN,
+                        getattr(refresh_result, "failure_code", None)
+                        or "manual_profile_input_target_mismatch",
+                        details={
+                            "attempts": attempts,
+                            "manualProfile": (
+                                refresh_result.as_dict()
+                                if isinstance(refresh_result, QualityGateResult)
+                                else {}
+                            ),
+                        },
+                    )
 
             state = self.get_comprehensive_slot_state()
             if not state:
@@ -10552,6 +11135,34 @@ class SprunkiGamePlayer:
             # coordinates are allowed, but every physical click consumes
             # the one shared operation budget.
             active_context.register_input()
+            manual_context = getattr(self, "_active_manual_profile_context", None)
+            if isinstance(manual_context, dict):
+                # Manual-profile slot coordinates are exact-target input too.
+                # Never use the batch socket or PyAutoGUI, both of which can
+                # address a different tab/window after a session change.
+                refreshed_context, refresh_result = (
+                    self._refresh_manual_profile_context_if_needed(manual_context)
+                )
+                if not refreshed_context:
+                    self._last_manual_input_result = refresh_result
+                    return False
+                if refreshed_context is not manual_context:
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            **(refreshed_context.get("evidence") or {}),
+                            "reason": "carpet_coordinate_stale_after_geometry_refresh",
+                        },
+                        message="Manual carpet coordinate became stale before dispatch.",
+                    )
+                    return False
+                return self._execute_cdp_single_click(
+                    x,
+                    y,
+                    manual_context=manual_context,
+                )
             if use_cdp:
                 return self._execute_cdp_carpet_click(x, y)
             else:
@@ -10591,6 +11202,14 @@ class SprunkiGamePlayer:
 
     def _execute_pyautogui_carpet_click(self, x, y):
         """ðŸ‘† NEW: PyAutoGUI carpet click"""
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                message="PyAutoGUI carpet input is disabled while a manual profile is active.",
+            )
+            return False
         try:
             pyautogui.click(x, y)
             return True
@@ -10600,6 +11219,15 @@ class SprunkiGamePlayer:
     def smart_batch_return_all_slots_with_mode(self, use_cdp=False, context=None, obs_controller=None):
         """Run the return cascade and let one coordinator own Re-Run recovery."""
         current_obs_controller = obs_controller or self.obs_controller
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            _manual_context, manual_layout_result = self._refresh_active_manual_layout_in_config()
+            if not _manual_context:
+                failure_message = getattr(
+                    manual_layout_result,
+                    "failure_code",
+                    None,
+                ) or "manual_profile_input_target_mismatch"
+                return 0, 1, [failure_message]
         operation_context = (
             context if isinstance(context, OperationContext)
             else getattr(self, "_active_operation_context", None)
@@ -11371,7 +11999,14 @@ class SprunkiGamePlayer:
                     ):
                         print("      🛑 Carpet input budget exhausted")
                         return False
-                    click_success = self._execute_carpet_click(coord['x'], coord['y'], use_cdp)
+                    click_x, click_y = coord.get("x"), coord.get("y")
+                    if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                        refreshed_coordinate = self._refresh_manual_carpet_coordinate(coord)
+                        if refreshed_coordinate is None:
+                            print("      🛑 Manual carpet coordinate could not be refreshed")
+                            return False
+                        click_x, click_y = refreshed_coordinate
+                    click_success = self._execute_carpet_click(click_x, click_y, use_cdp)
                     
                     total_clicks += 1
                     if click_success:
@@ -12074,9 +12709,15 @@ class SprunkiGamePlayer:
                     break
                 active_context.register_input()
 
-                # Add small jitter for precision
-                jitter_x = click_x + random.randint(-2, 2)
-                jitter_y = click_y + random.randint(-2, 2)
+                # Manual-profile points are already resolved to the current
+                # canvas.  Jitter would make them no longer the recorded
+                # identity and could turn a safe cleanup click into a blind
+                # neighboring-slot click.
+                if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                    jitter_x, jitter_y = click_x, click_y
+                else:
+                    jitter_x = click_x + random.randint(-2, 2)
+                    jitter_y = click_y + random.randint(-2, 2)
                 
                 if method == "single":
                     success = self._execute_single_return_click(jitter_x, jitter_y, use_cdp, domain_adj)
@@ -12104,6 +12745,20 @@ class SprunkiGamePlayer:
     def _execute_double_return_click(self, click_x, click_y, use_cdp, domain_adj):
         """ðŸ”¥ NEW: Execute double click"""
         try:
+            manual_context = getattr(self, "_active_manual_profile_context", None)
+            if isinstance(manual_context, dict):
+                first = self._execute_cdp_single_click(
+                    click_x,
+                    click_y,
+                    manual_context=manual_context,
+                )
+                time.sleep(0.1)
+                second = self._execute_cdp_single_click(
+                    click_x,
+                    click_y,
+                    manual_context=manual_context,
+                )
+                return bool(first and second)
             if use_cdp:
                 success1 = self._execute_cdp_single_click(click_x, click_y)
                 time.sleep(0.1)
@@ -12120,6 +12775,18 @@ class SprunkiGamePlayer:
     def _execute_triple_return_click(self, click_x, click_y, use_cdp, domain_adj):
         """ðŸ”¥ NEW: Execute triple click"""
         try:
+            manual_context = getattr(self, "_active_manual_profile_context", None)
+            if isinstance(manual_context, dict):
+                success_count = 0
+                for _ in range(3):
+                    if self._execute_cdp_single_click(
+                        click_x,
+                        click_y,
+                        manual_context=manual_context,
+                    ):
+                        success_count += 1
+                    time.sleep(0.08)
+                return success_count >= 2
             success_count = 0
             for _ in range(3):
                 if use_cdp:
@@ -12136,6 +12803,98 @@ class SprunkiGamePlayer:
     def _execute_hold_return_click(self, click_x, click_y, use_cdp, domain_adj):
         """ðŸ”¥ NEW: Execute hold-and-release click"""
         try:
+            manual_context = getattr(self, "_active_manual_profile_context", None)
+            if isinstance(manual_context, dict):
+                if not self._manual_input_coordinate_is_safe(
+                    click_x,
+                    click_y,
+                    manual_context,
+                ):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_geometry_unknown",
+                        retryable=False,
+                        message="Manual hold-click coordinates are outside the active viewport.",
+                    )
+                    return False
+                ws, bound_context, input_result = (
+                    self._open_verified_manual_input_session(manual_context)
+                )
+                if not ws:
+                    self._last_manual_input_result = input_result
+                    return False
+                try:
+                    send_command = lambda current_ws, command: (
+                        self._send_verified_manual_input_command(
+                            current_ws,
+                            command,
+                            bound_context,
+                        )
+                    )
+                    move_response = send_command(ws, {
+                        "method": "Input.dispatchMouseEvent",
+                        "params": {
+                            "type": "mouseMoved",
+                            "x": click_x,
+                            "y": click_y,
+                        },
+                    })
+                    if not move_response or "error" in move_response:
+                        return False
+                    time.sleep(0.1)
+                    press_response = send_command(ws, {
+                        "method": "Input.dispatchMouseEvent",
+                        "params": {
+                            "type": "mousePressed",
+                            "x": click_x,
+                            "y": click_y,
+                            "button": "left",
+                            "clickCount": 1,
+                        },
+                    })
+                    time.sleep(0.5)
+                    release_response = send_command(ws, {
+                        "method": "Input.dispatchMouseEvent",
+                        "params": {
+                            "type": "mouseReleased",
+                            "x": click_x,
+                            "y": click_y,
+                            "button": "left",
+                            "clickCount": 1,
+                        },
+                    })
+                    success = bool(
+                        press_response and "error" not in press_response and
+                        release_response and "error" not in release_response
+                    )
+                    self._last_manual_input_result = (
+                        QualityGateResult.pass_result(
+                            evidence={
+                                **(bound_context.get("evidence") or {}),
+                                "x": click_x,
+                                "y": click_y,
+                                "holdMs": 500,
+                            },
+                            message="Manual CDP hold-click was dispatched to the verified game page.",
+                        )
+                        if success else
+                        QualityGateResult.failure(
+                            "manual_profile_input_target_mismatch",
+                            status="UNKNOWN",
+                            retryable=True,
+                            evidence={
+                                **(bound_context.get("evidence") or {}),
+                                "x": click_x,
+                                "y": click_y,
+                            },
+                            message="Manual CDP hold-click delivery was inconclusive.",
+                        )
+                    )
+                    return success
+                finally:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
             if use_cdp:
                 ws_url = self._get_websocket_url()
                 if ws_url:
@@ -12372,7 +13131,7 @@ class SprunkiGamePlayer:
         command = {
             "method": "Runtime.evaluate",
             "params": {
-                "expression": "({href: window.location.href, visibilityState: document.visibilityState, hidden: document.hidden, readyState: document.readyState, innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio})",
+                "expression": "({href: window.location.href, visibilityState: document.visibilityState, hidden: document.hidden, readyState: document.readyState, innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio, screenX: window.screenX, screenY: window.screenY, scrollX: window.scrollX, scrollY: window.scrollY})",
                 "returnByValue": True,
             },
         }
@@ -12904,6 +13663,34 @@ class SprunkiGamePlayer:
                     target_slot,
                     context,
                 )
+            manual_context = getattr(self, "_active_manual_profile_context", None)
+            if isinstance(manual_context, dict):
+                # A profile-sourced cleanup coordinate is still browser input;
+                # it must not fall through to a screen-level PyAutoGUI click
+                # just because the legacy caller requested ``use_cdp=False``.
+                refreshed_context, refresh_result = (
+                    self._refresh_manual_profile_context_if_needed(manual_context)
+                )
+                if not refreshed_context:
+                    self._last_manual_input_result = refresh_result
+                    return False
+                if refreshed_context is not manual_context:
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            **(refreshed_context.get("evidence") or {}),
+                            "reason": "cleanup_coordinate_stale_after_geometry_refresh",
+                        },
+                        message="Manual cleanup coordinate became stale before dispatch.",
+                    )
+                    return False
+                return self._execute_cdp_single_click(
+                    click_x,
+                    click_y,
+                    manual_context=manual_context,
+                )
             # 🌐 Choose the transport before sending input.  If a browser
             # target exists but CDP becomes inconclusive, a second PyAutoGUI
             # click could duplicate a partially delivered return gesture.
@@ -12921,30 +13708,390 @@ class SprunkiGamePlayer:
             print(f"❌ Single return click execution error: {e}")
             return False
 
-    def _execute_cdp_single_click(self, click_x, click_y):
-        """ADDED: Execute single click using CDP"""
+    def _open_verified_manual_input_session(self, manual_context):
+        """Open one exact CDP page session for profile-sourced input."""
+        if not isinstance(manual_context, dict):
+            return None, None, QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                message="Manual input was requested without a runtime context.",
+            )
+
+        refreshed_context, refresh_result = self._refresh_manual_profile_context_if_needed(
+            manual_context
+        )
+        if not refreshed_context:
+            return None, None, refresh_result
+        if refreshed_context is not manual_context:
+            # The caller's coordinates belong to the previous geometry.  Do
+            # not silently dispatch stale points after F11, resize, scroll or
+            # a target replacement; the next action must use the new context.
+            return None, refreshed_context, QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={
+                    **(refreshed_context.get("evidence") or {}),
+                    "previousGeometryToken": manual_context.get("geometryToken"),
+                    "currentGeometryToken": refreshed_context.get("geometryToken"),
+                },
+                message="Manual input coordinates became stale before dispatch.",
+            )
+        manual_context = refreshed_context
+
+        target = self._find_exact_game_page_target()
+        if not target or not target.get("id") or not target.get("webSocketDebuggerUrl"):
+            return None, manual_context, QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                evidence=manual_context.get("evidence") or {},
+                message="The exact game CDP target was unavailable for manual input.",
+            )
+
+        bound_geometry = manual_context.get("geometry") or {}
+        bound_target_id = bound_geometry.get("targetId")
+        if bound_target_id and target.get("id") != bound_target_id:
+            return None, manual_context, QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={
+                    **(manual_context.get("evidence") or {}),
+                    "boundTargetId": bound_target_id,
+                    "actualTargetId": target.get("id"),
+                },
+                message="The manual profile target changed before input dispatch.",
+            )
+
         ws = None
         try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:
+            ws = websocket.create_connection(
+                target["webSocketDebuggerUrl"],
+                timeout=getattr(self, "game_probe_timeout", 3.0),
+            )
+            front_response = self._send_cdp_command(
+                ws,
+                {"method": "Page.bringToFront", "params": {}},
+                timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+            )
+            identity = self._read_cdp_page_identity(
+                ws,
+                timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+            )
+            expected_url = self._normalize_cdp_page_url(
+                getattr(self, "game_url", None)
+                or ((self.config or {}).get("currentUrl") if isinstance(getattr(self, "config", None), dict) else None)
+            )
+            actual_url = self._normalize_cdp_page_url((identity or {}).get("href"))
+            if not (
+                front_response and "error" not in front_response and
+                identity and identity.get("visibilityState") == "visible" and
+                (not expected_url or self._cdp_urls_match(actual_url, expected_url))
+            ):
+                raise RuntimeError("manual_input_page_identity_failed")
+
+            current_geometry, geometry_error = self._read_manual_profile_geometry(
+                ws=ws,
+                target_id=target.get("id"),
+                target_url=target.get("url"),
+            )
+            if not current_geometry:
+                raise RuntimeError(f"manual_input_geometry_failed:{geometry_error}")
+            current_token = self._manual_geometry_token(current_geometry)
+            if current_token != manual_context.get("geometryToken"):
+                raise RuntimeError("manual_input_geometry_changed")
+
+            return ws, manual_context, QualityGateResult.pass_result(
+                evidence={
+                    **(manual_context.get("evidence") or {}),
+                    "inputTargetId": target.get("id"),
+                    "inputPageIdentity": identity,
+                    "inputGeometryToken": current_token,
+                },
+                message="Manual input is bound to the verified current game page.",
+            )
+        except Exception as error:
+            if ws:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            return None, manual_context, QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={
+                    **(manual_context.get("evidence") or {}),
+                    "inputError": str(error),
+                    "actualTargetId": target.get("id"),
+                },
+                message="Manual input was blocked because page/session geometry changed.",
+            )
+
+    @staticmethod
+    def _manual_input_coordinate_is_safe(x, y, manual_context):
+        if not isinstance(manual_context, dict):
+            return False
+        geometry = manual_context.get("geometry") or {}
+        viewport = SprunkiGamePlayer._manual_viewport(geometry.get("viewport"))
+        if not viewport:
+            return False
+        try:
+            numeric_x = float(x)
+            numeric_y = float(y)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            math.isfinite(numeric_x) and math.isfinite(numeric_y) and
+            0 <= numeric_x <= viewport["width"] and
+            0 <= numeric_y <= viewport["height"]
+        )
+
+    def _send_verified_manual_input_command(self, ws, command, manual_context):
+        """Send a manual input command only while page identity is current.
+
+        The gesture executor deliberately stays transport-only.  This wrapper
+        supplies the manual-profile safety boundary immediately before every
+        button/key transition, so a navigation, F11 resize, frame replacement
+        or target swap cannot receive the remainder of an old gesture.
+        Mouse-move samples are allowed to use the already validated session;
+        presses/releases and key transitions are re-probed on the same
+        WebSocket before dispatch.
+        """
+        if not isinstance(command, dict):
+            return None
+        method = command.get("method")
+        params = command.get("params") or {}
+        event_type = str(params.get("type") or "")
+        must_revalidate = (
+            method == "Input.dispatchMouseEvent"
+            and event_type in {"mousePressed", "mouseReleased"}
+        ) or (
+            method == "Input.dispatchKeyEvent"
+            and event_type in {"keyDown", "keyUp"}
+        )
+
+        if must_revalidate:
+            bound_geometry = manual_context.get("geometry") or {}
+            bound_target_id = bound_geometry.get("targetId")
+            bound_target_url = (
+                bound_geometry.get("targetUrl")
+                or (bound_geometry.get("pageIdentity") or {}).get("cdpTargetUrl")
+                or getattr(self, "_cdp_target_url", None)
+            )
+            current_geometry, geometry_error = self._read_manual_profile_geometry(
+                ws=ws,
+                target_id=bound_target_id,
+                target_url=bound_target_url,
+            )
+            current_token = self._manual_geometry_token(current_geometry)
+            expected_token = manual_context.get("geometryToken")
+            current_identity = (current_geometry or {}).get("pageIdentity") or {}
+            expected_url = self._normalize_cdp_page_url(
+                getattr(self, "game_url", None)
+                or ((self.config or {}).get("currentUrl")
+                    if isinstance(getattr(self, "config", None), dict)
+                    else None)
+            )
+            actual_url = self._normalize_cdp_page_url(current_identity.get("href"))
+            if (
+                not current_geometry
+                or current_token != expected_token
+                or (
+                    expected_url
+                    and not self._cdp_urls_match(actual_url, expected_url)
+                )
+            ):
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={
+                        **(manual_context.get("evidence") or {}),
+                        "geometryError": geometry_error,
+                        "expectedGeometryToken": expected_token,
+                        "currentGeometryToken": current_token,
+                        "inputEvent": event_type,
+                    },
+                    message=(
+                        "Manual input was cancelled because the game page, "
+                        "frame or geometry changed before dispatch."
+                    ),
+                )
+                return None
+
+        return self._send_cdp_command(ws, command)
+
+    def _execute_cdp_manual_mouse_move(self, x, y, manual_context):
+        """Move within the verified game page without a screen-level fallback."""
+        if not self._manual_input_coordinate_is_safe(x, y, manual_context):
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_geometry_unknown",
+                retryable=False,
+                message="Manual mouse-move coordinates are outside the active viewport.",
+            )
+            return False
+        ws = None
+        try:
+            ws, manual_context, input_result = self._open_verified_manual_input_session(
+                manual_context
+            )
+            if not ws:
+                self._last_manual_input_result = input_result
                 return False
-            
-            ws = websocket.create_connection(ws_url, timeout=30)
-            
+            send_command = lambda current_ws, command: self._send_verified_manual_input_command(
+                current_ws,
+                command,
+                manual_context,
+            )
+            response = send_command(
+                ws,
+                {
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {
+                        "type": "mouseMoved",
+                        "x": float(x),
+                        "y": float(y),
+                    },
+                },
+            )
+            success = bool(response and "error" not in response)
+            self._last_manual_input_result = (
+                QualityGateResult.pass_result(
+                    evidence={
+                        **(manual_context.get("evidence") or {}),
+                        "x": float(x),
+                        "y": float(y),
+                        "inputType": "mouseMoved",
+                    },
+                    message="Manual CDP mouse movement was dispatched to the verified game page.",
+                )
+                if success
+                else QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="Manual CDP mouse movement delivery was inconclusive.",
+                )
+            )
+            return success
+        except Exception as error:
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"inputError": str(error)},
+                message="Manual CDP mouse movement failed on the verified game page.",
+            )
+            return False
+        finally:
+            if ws:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+    def _execute_cdp_single_click(self, click_x, click_y, manual_context=None):
+        """Execute a click; profile coordinates require an exact target session."""
+        ws = None
+        try:
+            if manual_context is not None:
+                if not self._manual_input_coordinate_is_safe(click_x, click_y, manual_context):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_geometry_unknown",
+                        retryable=False,
+                        message="Manual click coordinates are outside the active viewport.",
+                    )
+                    return False
+                ws, manual_context, input_result = self._open_verified_manual_input_session(
+                    manual_context
+                )
+                if not ws:
+                    self._last_manual_input_result = input_result
+                    return False
+
+            if manual_context is None:
+                ws_url = self._get_websocket_url()
+                if not ws_url:
+                    return False
+                ws = websocket.create_connection(ws_url, timeout=30)
+
+            send_command = (
+                (lambda current_ws, command: self._send_verified_manual_input_command(
+                    current_ws,
+                    command,
+                    manual_context,
+                ))
+                if manual_context is not None
+                else self._send_cdp_command
+            )
+
             print(f"ðŸ–±ï¸ Executing CDP single click at ({click_x}, {click_y})")
-            
+
             # Move and click
-            move_response = self._send_cdp_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": click_x, "y": click_y}})
+            move_response = send_command(ws, {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseMoved", "x": click_x, "y": click_y}})
             if not move_response or "error" in move_response:
+                if manual_context is not None and not isinstance(
+                    getattr(self, "_last_manual_input_result", None),
+                    QualityGateResult,
+                ):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            **(manual_context.get("evidence") or {}),
+                            "inputEvent": "mouseMoved",
+                        },
+                        message="Manual CDP click movement was inconclusive.",
+                    )
                 return False
             time.sleep(0.1)
-            click_success = self._simulate_click_via_cdp(ws, click_x, click_y)
+            click_success = self._simulate_click_via_cdp(
+                ws,
+                click_x,
+                click_y,
+                send_command=send_command,
+            )
 
             print("âœ… CDP single click completed" if click_success else "🛑 CDP single click inconclusive")
+            if manual_context:
+                self._last_manual_input_result = (
+                    QualityGateResult.pass_result(
+                        evidence={
+                            **(manual_context.get("evidence") or {}),
+                            "x": click_x,
+                            "y": click_y,
+                        },
+                        message="Manual CDP click was dispatched to the verified game page.",
+                    )
+                    if click_success else
+                    QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            **(manual_context.get("evidence") or {}),
+                            "x": click_x,
+                            "y": click_y,
+                        },
+                        message="Manual CDP click delivery was inconclusive.",
+                    )
+                )
             return bool(click_success)
-            
+
         except Exception as e:
             print(f"âŒ CDP single click failed: {e}")
+            if manual_context is not None:
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"inputError": str(e)},
+                    message="Manual CDP click failed on the verified game page.",
+                )
             return False
         finally:
             if ws:
@@ -12961,22 +14108,50 @@ class SprunkiGamePlayer:
         end_y,
         drag_duration_ms=0,
         hold_before_move_ms=0,
+        manual_context=None,
     ):
         """Replay one manually recorded drag with browser-native mouse events."""
         ws = None
 
         try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                # Manual replay has no safe blind-input fallback: a previous
-                # action may already have changed the game state.
-                return False
+            if manual_context is not None:
+                if not all(
+                    self._manual_input_coordinate_is_safe(x, y, manual_context)
+                    for x, y in ((start_x, start_y), (end_x, end_y))
+                ):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_geometry_unknown",
+                        retryable=False,
+                        message="Manual drag coordinates are outside the active viewport.",
+                    )
+                    return False
+                ws, manual_context, input_result = self._open_verified_manual_input_session(
+                    manual_context
+                )
+                if not ws:
+                    self._last_manual_input_result = input_result
+                    return False
 
-            ws = websocket.create_connection(ws_url, timeout=30)
-            self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+            if manual_context is None:
+                ws_url = self._get_websocket_url()
+                if not ws_url:
+                    # Manual replay has no safe blind-input fallback: a previous
+                    # action may already have changed the game state.
+                    return False
+                ws = websocket.create_connection(ws_url, timeout=30)
+                self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+            send_command = (
+                (lambda current_ws, command: self._send_verified_manual_input_command(
+                    current_ws,
+                    command,
+                    manual_context,
+                ))
+                if manual_context is not None
+                else self._send_cdp_command
+            )
             result = execute_cdp_gesture(
                 ws,
-                self._send_cdp_command,
+                send_command,
                 start_x,
                 start_y,
                 end_x,
@@ -12989,9 +14164,41 @@ class SprunkiGamePlayer:
             )
             if not result.success:
                 print(f"🛑 CDP manual drag inconclusive: {result.error}")
+            if manual_context:
+                self._last_manual_input_result = (
+                    QualityGateResult.pass_result(
+                        evidence={
+                            **(manual_context.get("evidence") or {}),
+                            "startX": start_x,
+                            "startY": start_y,
+                            "endX": end_x,
+                            "endY": end_y,
+                        },
+                        message="Manual CDP drag was dispatched to the verified game page.",
+                    )
+                    if result.success else
+                    QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            **(manual_context.get("evidence") or {}),
+                            "gestureError": result.error,
+                        },
+                        message="Manual CDP drag delivery was inconclusive.",
+                    )
+                )
             return bool(result.success)
         except Exception as drag_error:
             print(f"âŒ CDP manual drag failed: {drag_error}")
+            if manual_context is not None:
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"inputError": str(drag_error)},
+                    message="Manual CDP drag failed on the verified game page.",
+                )
             return False
         finally:
             if ws:
@@ -13010,18 +14217,47 @@ class SprunkiGamePlayer:
         click_interval_ms=300,
         first_click_duration_ms=100,
         hold_before_move_ms=200,
+        manual_context=None,
     ):
         """Replay one recorded compound double-click-and-drag gesture."""
         ws = None
         try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return False
-            ws = websocket.create_connection(ws_url, timeout=30)
-            self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+            if manual_context is not None:
+                if not all(
+                    self._manual_input_coordinate_is_safe(x, y, manual_context)
+                    for x, y in ((start_x, start_y), (end_x, end_y))
+                ):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_geometry_unknown",
+                        retryable=False,
+                        message="Manual double-drag coordinates are outside the active viewport.",
+                    )
+                    return False
+                ws, manual_context, input_result = self._open_verified_manual_input_session(
+                    manual_context
+                )
+                if not ws:
+                    self._last_manual_input_result = input_result
+                    return False
+
+            if manual_context is None:
+                ws_url = self._get_websocket_url()
+                if not ws_url:
+                    return False
+                ws = websocket.create_connection(ws_url, timeout=30)
+                self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+            send_command = (
+                (lambda current_ws, command: self._send_verified_manual_input_command(
+                    current_ws,
+                    command,
+                    manual_context,
+                ))
+                if manual_context is not None
+                else self._send_cdp_command
+            )
             result = execute_cdp_gesture(
                 ws,
-                self._send_cdp_command,
+                send_command,
                 start_x,
                 start_y,
                 end_x,
@@ -13035,9 +14271,41 @@ class SprunkiGamePlayer:
             )
             if not result.success:
                 print(f"🛑 CDP double-click drag inconclusive: {result.error}")
+            if manual_context:
+                self._last_manual_input_result = (
+                    QualityGateResult.pass_result(
+                        evidence={
+                            **(manual_context.get("evidence") or {}),
+                            "startX": start_x,
+                            "startY": start_y,
+                            "endX": end_x,
+                            "endY": end_y,
+                        },
+                        message="Manual CDP double-drag was dispatched to the verified game page.",
+                    )
+                    if result.success else
+                    QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={
+                            **(manual_context.get("evidence") or {}),
+                            "gestureError": result.error,
+                        },
+                        message="Manual CDP double-drag delivery was inconclusive.",
+                    )
+                )
             return bool(result.success)
         except Exception as gesture_error:
             print(f"❌ CDP manual double-click drag failed: {gesture_error}")
+            if manual_context is not None:
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"inputError": str(gesture_error)},
+                    message="Manual CDP double-drag failed on the verified game page.",
+                )
             return False
         finally:
             if ws:
@@ -13123,7 +14391,46 @@ class SprunkiGamePlayer:
         action_start_time = None
         drop_time = None
 
-        if use_cdp:
+        manual_context = getattr(self, "_active_manual_profile_context", None)
+        if isinstance(manual_context, dict):
+            # Manual coordinates must use the exact-target CDP transport.  Do
+            # not call the legacy dynamic transport (which selects a target
+            # from the current debugger list) and do not fall back to a
+            # screen-level PyAutoGUI gesture after an inconclusive dispatch.
+            cdp_attempted = True
+            timing_key = "first_icon" if is_first_icon else "normal_icon"
+            delays = self.DRAG_DELAYS[timing_key].copy()
+            active_control_type = str(
+                control_type_override or self.game_control_type or "click_drag"
+            ).lower()
+            total_drag_ms = int(round((delays["hold"] + delays["drag"]) * 1000))
+            hold_ms = int(round(delays["hold"] * 1000))
+            if "double" in active_control_type:
+                drag_executed = self._execute_cdp_double_click_drag(
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    drag_duration_ms=total_drag_ms,
+                    click_interval_ms=300,
+                    first_click_duration_ms=100,
+                    hold_before_move_ms=hold_ms,
+                    manual_context=manual_context,
+                )
+            else:
+                drag_executed = self._execute_cdp_single_drag(
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    drag_duration_ms=total_drag_ms,
+                    hold_before_move_ms=hold_ms,
+                    manual_context=manual_context,
+                )
+            if drag_executed:
+                action_start_time = time.monotonic()
+                drop_time = time.monotonic()
+        elif use_cdp:
             ws_url = self._get_websocket_url()
             if ws_url:
                 cdp_attempted = True
@@ -13194,9 +14501,12 @@ class SprunkiGamePlayer:
                 result,
                 "place",
                 allow_unstable=getattr(self, "verifier_accept_unstable_delta", True),
-            )
+        )
         self.last_operation_result = result
-        self.move_mouse_to_safe_position()
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            print("   - Manual profile active: keeping cursor under exact CDP control.")
+        else:
+            self.move_mouse_to_safe_position()
         return result
 
     def _find_optimal_drop_point(
@@ -13344,6 +14654,28 @@ class SprunkiGamePlayer:
         """Public coordinator entry point with a terminal exception guard."""
         context_before = getattr(self, "_active_operation_context", None)
         try:
+            manual_layout = self._resolve_manual_layout_for_input(icon, target_slot)
+            if manual_layout is False:
+                failure = getattr(self, "_last_manual_input_result", None)
+                if isinstance(failure, QualityGateResult):
+                    return OperationResult(
+                        OperationStatus.UNKNOWN
+                        if failure.status == "UNKNOWN"
+                        else OperationStatus.FAILED,
+                        direction="place",
+                        message=failure.failure_code or "manual_profile_layout_refresh_failed",
+                        details=failure.evidence,
+                    )
+                return OperationResult(
+                    OperationStatus.UNKNOWN,
+                    direction="place",
+                    message="manual_profile_layout_refresh_failed",
+                )
+            if manual_layout:
+                icon, target_slot, _manual_context = manual_layout
+                # The low-level path detects this context and forces exact
+                # CDP input regardless of a legacy caller's use_cdp flag.
+                use_cdp = True
             return self._corrected_drag_and_drop_bounded(
                 icon,
                 target_slot,
@@ -13399,7 +14731,13 @@ class SprunkiGamePlayer:
 
         if is_first_icon:
             print("   - First Icon: YES -> Ensuring focus and applying extended waits.")
-            self.ensure_game_focus()
+            if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                # Manual coordinates are dispatched only after the exact CDP
+                # page/session is verified.  A screen-level safe click here
+                # could focus a different Chrome window or frame.
+                print("   - Manual profile active: deferring focus to exact CDP input session.")
+            else:
+                self.ensure_game_focus()
 
         if target_slot_index == -1:
             return self._finish_operation(
@@ -13867,6 +15205,14 @@ class SprunkiGamePlayer:
         '''
 
     def _evaluate_entry_state_via_ws(self, ws, timeout_seconds=None):
+        """Read VM state in the frame selected by the readiness probe.
+
+        Counts and panel indicators are frame-local runtime evidence.  When
+        readiness selected a child frame, evaluating the parent document would
+        incorrectly report ``vm_not_found`` and could make a valid manual
+        profile look unplayable.  The fallback remains the historical root
+        evaluation only when no child frame was selected.
+        """
         command = {
             "method": "Runtime.evaluate",
             "params": {
@@ -13875,6 +15221,44 @@ class SprunkiGamePlayer:
                 "returnByValue": True
             }
         }
+        selected_frame_id = getattr(self, "_last_game_probe_frame_id", None)
+        if selected_frame_id:
+            try:
+                frame_tree = self._send_cdp_command(
+                    ws,
+                    {"method": "Page.getFrameTree", "params": {}},
+                    timeout_seconds=timeout_seconds,
+                )
+                frame_records = self._manual_frame_records(frame_tree)
+                root_frame_id = frame_records[0].get("id") if frame_records else None
+                if selected_frame_id != root_frame_id:
+                    if selected_frame_id not in {
+                        record.get("id") for record in frame_records
+                    }:
+                        return None
+                    world_response = self._send_cdp_command(
+                        ws,
+                        {
+                            "method": "Page.createIsolatedWorld",
+                            "params": {
+                                "frameId": selected_frame_id,
+                                "worldName": "sprunki-entry-state",
+                            },
+                        },
+                        timeout_seconds=timeout_seconds,
+                    )
+                    context_id = (
+                        world_response.get("result", {}).get("executionContextId")
+                        if isinstance(world_response, dict)
+                        else None
+                    )
+                    if not context_id:
+                        return None
+                    command["params"]["contextId"] = context_id
+            except Exception:
+                if selected_frame_id != getattr(self, "_last_game_probe_frame_id", None):
+                    return None
+                return None
         if timeout_seconds is None:
             response = self._send_cdp_command(ws, command)
         else:
@@ -13887,9 +15271,12 @@ class SprunkiGamePlayer:
             return response.get('result', {}).get('result', {}).get('value')
         return None
 
-    def verify_playable_runtime_entry(self):
+    def verify_playable_runtime_entry(self, manual_profile=None):
         """Verify playable entry through the shared stable-snapshot gate."""
-        return self._wait_for_playable_runtime_entry(stable_samples=2)
+        return self._wait_for_playable_runtime_entry(
+            stable_samples=2,
+            manual_profile=manual_profile,
+        )
 
     def _verify_playable_runtime_entry_once(self):
         """Verify that the selected runtime is a real playable Sprunki stage.
@@ -14494,38 +15881,1116 @@ class SprunkiGamePlayer:
         return {"selected": None, "tested": tested, "success": False, "reason": "no_playable_candidate"}
 
     def _resolve_manual_profile(self):
+        """Resolve the configured/manual profile without automatic bypasses."""
         self._manual_profile_resolution_error = None
+        self._manual_profile_resolution = None
         try:
             settings = (self.config or {}).get("settings", {}) or {}
-            manual_profile_path = settings.get("manualProfilePath")
-            current_url = (self.config or {}).get("currentUrl", "")
-
-            if manual_profile_path:
-                profile_data, resolved_path = load_profile_from_path(manual_profile_path)
-                is_valid, error_message = validate_profile(profile_data, expected_url=current_url)
-                if profile_data and is_valid:
-                    return profile_data, resolved_path
-                if error_message:
-                    print(f"⚠️ Manual profile at {manual_profile_path} is invalid: {error_message}")
-                    self._manual_profile_resolution_error = str(error_message)
-                    return None, None
-
-            if current_url:
-                profile_data, resolved_path = find_profile(current_url)
-                is_valid, error_message = validate_profile(profile_data, expected_url=current_url)
-                if profile_data and is_valid:
-                    return profile_data, resolved_path
-                if profile_data and error_message:
-                    print(f"⚠️ Manual profile lookup found invalid data for {current_url}: {error_message}")
-                    self._manual_profile_resolution_error = str(error_message)
+            explicit_path = settings.get("manualProfilePath")
+            current_url = (
+                (self.config or {}).get("currentUrl")
+                or getattr(self, "game_url", None)
+                or ""
+            )
+            resolution = resolve_profile_for_runtime(
+                current_url,
+                explicit_path=explicit_path,
+            )
+            self._manual_profile_resolution = resolution
+            if resolution.valid:
+                return resolution.profile, resolution.path
+            if resolution.status in {"INVALID", "AMBIGUOUS"}:
+                self._manual_profile_resolution_error = (
+                    f"{resolution.status.lower()}:{resolution.error or 'manual profile resolution failed'}"
+                )
+                print(
+                    "⚠️ Manual profile resolution rejected: "
+                    f"{self._manual_profile_resolution_error}"
+                )
         except Exception as e:
             print(f"⚠️ Could not resolve manual profile: {e}")
             self._manual_profile_resolution_error = str(e)
 
         return None, None
 
-    def _execute_cdp_key_press(self, key_name):
-        """Send a browser-native key press to the active game target via CDP."""
+    @staticmethod
+    def _manual_profile_geometry_js():
+        """Return a small DOM-only geometry probe for profile coordinates."""
+        return r'''
+        (() => {
+          try {
+            const finite = value => Number.isFinite(Number(value));
+            const visible = element => {
+              if (!element || !element.isConnected) return false;
+              const rect = element.getBoundingClientRect();
+              const style = window.getComputedStyle(element);
+              return rect.width > 0 && rect.height > 0 &&
+                style.display !== 'none' && style.visibility !== 'hidden' &&
+                Number(style.opacity || 1) > 0;
+            };
+            const rectOf = element => {
+              if (!element) return null;
+              const rect = element.getBoundingClientRect();
+              if (![rect.left, rect.top, rect.width, rect.height].every(finite)) return null;
+              if (!(rect.width > 0 && rect.height > 0)) return null;
+              return {
+                left: Number(rect.left),
+                top: Number(rect.top),
+                width: Number(rect.width),
+                height: Number(rect.height),
+                right: Number(rect.right),
+                bottom: Number(rect.bottom),
+                centerX: Number(rect.left + rect.width / 2),
+                centerY: Number(rect.top + rect.height / 2)
+              };
+            };
+            const selectors = [
+              '.ccw-stage-wrapper canvas',
+              '#stage-canvas-wrapper canvas',
+              '.gandi_stage_stage_1fD7k canvas',
+              '.style_stage-player__0Xy7d canvas',
+              'canvas'
+            ];
+            const candidates = [];
+            const seen = new Set();
+            for (const selector of selectors) {
+              let elements = [];
+              try { elements = Array.from(document.querySelectorAll(selector)); } catch (e) {}
+              for (const element of elements) {
+                if (seen.has(element) || !visible(element)) continue;
+                const rect = rectOf(element);
+                if (!rect) continue;
+                seen.add(element);
+                candidates.push({ element, rect, selector });
+              }
+            }
+            candidates.sort((a, b) =>
+              selectors.indexOf(a.selector) - selectors.indexOf(b.selector) ||
+              (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height)
+            );
+            const selected = candidates[0];
+            if (!selected) {
+              return { ok: false, reason: 'stage_canvas_not_found' };
+            }
+
+            const canvas = selected.element;
+            const wrapper = canvas.closest(
+              '.ccw-stage-wrapper, #stage-canvas-wrapper, .gandi_stage_stage_1fD7k, .style_stage-player__0Xy7d'
+            );
+            const canvasBounds = selected.rect;
+            const stageBounds = rectOf(wrapper) || canvasBounds;
+            const viewport = {
+              width: Number(window.innerWidth || document.documentElement.clientWidth || 0),
+              height: Number(window.innerHeight || document.documentElement.clientHeight || 0),
+              devicePixelRatio: Number(window.devicePixelRatio || 1)
+            };
+            if (!(viewport.width > 0 && viewport.height > 0)) {
+              return { ok: false, reason: 'viewport_is_invalid' };
+            }
+            const screenX = Number(window.screenX);
+            const screenY = Number(window.screenY);
+            if (!finite(screenX) || !finite(screenY)) {
+              return { ok: false, reason: 'screen_origin_unknown' };
+            }
+            return {
+              ok: true,
+              pageIdentity: {
+                href: window.location.href,
+                visibilityState: document.visibilityState,
+                hidden: !!document.hidden,
+                isTopFrame: window.top === window,
+                frameName: window.name || ''
+              },
+              viewport,
+              canvasBounds,
+              stageBounds,
+              screenOrigin: {
+                x: screenX,
+                y: screenY
+              },
+              scroll: {
+                x: Number(window.scrollX || 0),
+                y: Number(window.scrollY || 0)
+              },
+              selector: selected.selector
+            };
+          } catch (error) {
+            return { ok: false, reason: 'geometry_probe_error', error: String(error) };
+          }
+        })()
+        '''
+
+    @staticmethod
+    def _manual_bounds(value):
+        if not isinstance(value, dict):
+            return None
+        numbers = {}
+        for key in ("left", "top", "width", "height"):
+            try:
+                number = float(value.get(key))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(number):
+                return None
+            numbers[key] = number
+        if numbers["width"] <= 0 or numbers["height"] <= 0:
+            return None
+        numbers["right"] = numbers["left"] + numbers["width"]
+        numbers["bottom"] = numbers["top"] + numbers["height"]
+        return numbers
+
+    @staticmethod
+    def _manual_viewport(value):
+        if not isinstance(value, dict):
+            return None
+        try:
+            width = float(value.get("width"))
+            height = float(value.get("height"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(width) or not math.isfinite(height) or width <= 0 or height <= 0:
+            return None
+        try:
+            dpr = float(value.get("devicePixelRatio", 1) or 1)
+        except (TypeError, ValueError, OverflowError):
+            dpr = 1.0
+        if not math.isfinite(dpr) or dpr <= 0:
+            dpr = 1.0
+        return {"width": width, "height": height, "devicePixelRatio": dpr}
+
+    @staticmethod
+    def _manual_frame_records(frame_tree_response):
+        """Flatten a CDP frame tree without guessing a parent DOM frame."""
+        root = (
+            frame_tree_response.get("result", {}).get("frameTree")
+            if isinstance(frame_tree_response, dict)
+            else None
+        )
+        records = []
+
+        def visit(node):
+            if not isinstance(node, dict):
+                return
+            frame = node.get("frame")
+            if isinstance(frame, dict) and frame.get("id"):
+                records.append({
+                    "id": frame.get("id"),
+                    "url": frame.get("url"),
+                    "name": frame.get("name") or "",
+                    "parentId": frame.get("parentId"),
+                })
+            for child in node.get("childFrames") or []:
+                visit(child)
+
+        visit(root)
+        return records
+
+    @staticmethod
+    def _manual_quad_bounds(value):
+        if not isinstance(value, (list, tuple)) or len(value) < 8:
+            return None
+        try:
+            numbers = [float(number) for number in value]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not all(math.isfinite(number) for number in numbers):
+            return None
+        xs = numbers[0::2]
+        ys = numbers[1::2]
+        left, right = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        if right <= left or bottom <= top:
+            return None
+        return {
+            "left": left,
+            "top": top,
+            "width": right - left,
+            "height": bottom - top,
+            "right": right,
+            "bottom": bottom,
+        }
+
+    def _manual_frame_owner_bounds(self, ws, frame_id):
+        """Return an iframe's top-page content bounds when CDP exposes them."""
+        owner_response = self._send_cdp_command(
+            ws,
+            {"method": "DOM.getFrameOwner", "params": {"frameId": frame_id}},
+            timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+        )
+        backend_node_id = (
+            owner_response.get("result", {}).get("backendNodeId")
+            if isinstance(owner_response, dict)
+            else None
+        )
+        if not backend_node_id:
+            return None
+        box_response = self._send_cdp_command(
+            ws,
+            {
+                "method": "DOM.getBoxModel",
+                "params": {"backendNodeId": backend_node_id},
+            },
+            timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+        )
+        model = (
+            box_response.get("result", {}).get("model")
+            if isinstance(box_response, dict)
+            else None
+        )
+        if not isinstance(model, dict):
+            return None
+        return self._manual_quad_bounds(model.get("content") or model.get("border"))
+
+    @classmethod
+    def _map_frame_local_bounds(cls, bounds, frame_viewport, owner_bounds):
+        local = cls._manual_bounds(bounds)
+        viewport = cls._manual_viewport(frame_viewport)
+        owner = cls._manual_bounds(owner_bounds)
+        if not local or not viewport or not owner:
+            return None
+        scale_x = owner["width"] / viewport["width"]
+        scale_y = owner["height"] / viewport["height"]
+        return {
+            "left": owner["left"] + local["left"] * scale_x,
+            "top": owner["top"] + local["top"] * scale_y,
+            "width": local["width"] * scale_x,
+            "height": local["height"] * scale_y,
+            "right": owner["left"] + (local["left"] + local["width"]) * scale_x,
+            "bottom": owner["top"] + (local["top"] + local["height"]) * scale_y,
+        }
+
+    def _read_manual_profile_geometry(self, ws=None, target_id=None, target_url=None):
+        owns_ws = False
+        active_ws = ws
+        try:
+            if active_ws is None:
+                ws_url = self._get_websocket_url()
+                if not ws_url:
+                    return None, "cdp_target_unavailable"
+                active_ws = websocket.create_connection(
+                    ws_url,
+                    timeout=getattr(self, "game_probe_timeout", 3.0),
+                )
+                owns_ws = True
+
+            timeout_seconds = getattr(self, "game_probe_timeout", 3.0)
+            target_identity = self._read_cdp_page_identity(
+                active_ws,
+                timeout_seconds=timeout_seconds,
+            )
+            if not isinstance(target_identity, dict):
+                return None, "page_identity_unknown"
+
+            actual_target_id = target_id or getattr(self, "_cdp_target_id", None)
+            actual_target_url = target_url or getattr(self, "_cdp_target_url", None)
+            expected_url = self._normalize_cdp_page_url(
+                getattr(self, "game_url", None)
+                or ((self.config or {}).get("currentUrl")
+                    if isinstance(getattr(self, "config", None), dict)
+                    else None)
+            )
+            target_href = self._normalize_cdp_page_url(target_identity.get("href"))
+            if expected_url and not self._cdp_urls_match(target_href, expected_url):
+                return None, "page_identity_mismatch"
+            if target_identity.get("visibilityState") != "visible":
+                return None, "page_not_visible"
+
+            frame_tree_response = self._send_cdp_command(
+                active_ws,
+                {"method": "Page.getFrameTree", "params": {}},
+                timeout_seconds=timeout_seconds,
+            )
+            frame_records = self._manual_frame_records(frame_tree_response)
+            if not frame_records:
+                return None, "frame_identity_unknown"
+            root_frame_id = frame_records[0].get("id")
+
+            geometry_expression = self._manual_profile_geometry_js()
+
+            def evaluate_geometry(context_id=None):
+                params = {
+                    "expression": geometry_expression,
+                    "returnByValue": True,
+                }
+                if context_id:
+                    params["contextId"] = context_id
+                response = self._send_cdp_command(
+                    active_ws,
+                    {"method": "Runtime.evaluate", "params": params},
+                    timeout_seconds=timeout_seconds,
+                )
+                value = (
+                    response.get("result", {}).get("result", {}).get("value")
+                    if isinstance(response, dict)
+                    else None
+                )
+                return value if isinstance(value, dict) else None
+
+            selected_value = evaluate_geometry()
+            selected_frame = frame_records[0]
+            if not isinstance(selected_value, dict) or not selected_value.get("ok"):
+                selected_value = None
+                for frame in frame_records[1:]:
+                    try:
+                        world_response = self._send_cdp_command(
+                            active_ws,
+                            {
+                                "method": "Page.createIsolatedWorld",
+                                "params": {
+                                    "frameId": frame["id"],
+                                    "worldName": "sprunki-manual-profile-geometry",
+                                },
+                            },
+                            timeout_seconds=timeout_seconds,
+                        )
+                        context_id = (
+                            world_response.get("result", {}).get("executionContextId")
+                            if isinstance(world_response, dict)
+                            else None
+                        )
+                        candidate = evaluate_geometry(context_id)
+                    except Exception:
+                        context_id = None
+                        candidate = None
+                    if isinstance(candidate, dict) and candidate.get("ok"):
+                        selected_value = candidate
+                        selected_frame = frame
+                        break
+
+            if not isinstance(selected_value, dict) or not selected_value.get("ok"):
+                return None, str((selected_value or {}).get("reason") or "stage_canvas_not_found")
+
+            frame_id = selected_frame.get("id")
+            frame_viewport = self._manual_viewport(selected_value.get("viewport"))
+            canvas = self._manual_bounds(selected_value.get("canvasBounds"))
+            stage = self._manual_bounds(selected_value.get("stageBounds"))
+            if not frame_id or not frame_viewport or not (canvas or stage):
+                return None, "stage_geometry_invalid"
+
+            is_top_frame = frame_id == root_frame_id
+            if not is_top_frame:
+                owner_bounds = self._manual_frame_owner_bounds(active_ws, frame_id)
+                canvas = self._map_frame_local_bounds(canvas, frame_viewport, owner_bounds)
+                stage = self._map_frame_local_bounds(stage, frame_viewport, owner_bounds)
+                if not canvas and not stage:
+                    return None, "frame_geometry_unknown"
+                viewport = self._manual_viewport({
+                    "width": target_identity.get("innerWidth"),
+                    "height": target_identity.get("innerHeight"),
+                    "devicePixelRatio": target_identity.get("devicePixelRatio", 1),
+                })
+                if not viewport:
+                    return None, "viewport_unknown"
+                scroll = {
+                    "x": target_identity.get("scrollX", 0),
+                    "y": target_identity.get("scrollY", 0),
+                }
+                try:
+                    origin_x = float(target_identity.get("screenX"))
+                    origin_y = float(target_identity.get("screenY"))
+                except (TypeError, ValueError, OverflowError):
+                    return None, "screen_origin_unknown"
+                if not math.isfinite(origin_x) or not math.isfinite(origin_y):
+                    return None, "screen_origin_unknown"
+                source_screen_origin = {"x": origin_x, "y": origin_y}
+            else:
+                viewport = frame_viewport
+                scroll = selected_value.get("scroll") or {}
+                source_screen_origin = selected_value.get("screenOrigin")
+
+            screen_origin = source_screen_origin
+            if not isinstance(screen_origin, dict):
+                return None, "screen_origin_unknown"
+            try:
+                origin_x = float(screen_origin.get("x"))
+                origin_y = float(screen_origin.get("y"))
+            except (TypeError, ValueError, OverflowError):
+                return None, "screen_origin_unknown"
+            if not math.isfinite(origin_x) or not math.isfinite(origin_y):
+                return None, "screen_origin_unknown"
+
+            frame_identity = dict(selected_value.get("pageIdentity") or {})
+            identity = dict(target_identity)
+            identity.update({
+                "cdpTargetId": actual_target_id,
+                "cdpTargetUrl": actual_target_url,
+                "frameId": frame_id,
+                "frameHref": frame_identity.get("href"),
+                "frameName": frame_identity.get("frameName") or selected_frame.get("name") or "",
+                "isTopFrame": is_top_frame,
+            })
+            value = dict(selected_value)
+            value["pageIdentity"] = identity
+            value["viewport"] = viewport
+            value["canvasBounds"] = canvas
+            value["stageBounds"] = stage or canvas
+            value["screenOrigin"] = {"x": origin_x, "y": origin_y}
+            value["scroll"] = scroll
+            value["targetId"] = actual_target_id
+            value["targetUrl"] = actual_target_url
+            value["frameId"] = frame_id
+            return value, None
+        except Exception as error:
+            return None, str(error)
+        finally:
+            if owns_ws and active_ws:
+                try:
+                    active_ws.close()
+                except Exception:
+                    pass
+
+    def capture_manual_profile_geometry(self):
+        """Capture reference geometry in the same screen space as recorder points."""
+        geometry, error = self._read_manual_profile_geometry()
+        if not geometry:
+            return None, error
+        origin = geometry.get("screenOrigin") or {"x": 0.0, "y": 0.0}
+        try:
+            origin_x = float(origin.get("x", 0) or 0)
+            origin_y = float(origin.get("y", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None, "screen_origin_invalid"
+
+        def to_screen_bounds(value):
+            bounds = self._manual_bounds(value)
+            if not bounds:
+                return None
+            return {
+                "left": round(bounds["left"] + origin_x, 3),
+                "top": round(bounds["top"] + origin_y, 3),
+                "width": round(bounds["width"], 3),
+                "height": round(bounds["height"], 3),
+                "right": round(bounds["right"] + origin_x, 3),
+                "bottom": round(bounds["bottom"] + origin_y, 3),
+            }
+
+        canvas = to_screen_bounds(geometry.get("canvasBounds"))
+        stage = to_screen_bounds(geometry.get("stageBounds"))
+        if not canvas and not stage:
+            return None, "screen_canvas_bounds_invalid"
+        viewport = self._manual_viewport(geometry.get("viewport"))
+        return {
+            "pageViewport": viewport,
+            "canvasBounds": canvas or stage,
+            "stageBounds": stage or canvas,
+            "screenOrigin": {"x": origin_x, "y": origin_y},
+            "devicePixelRatio": (viewport or {}).get("devicePixelRatio", 1.0),
+            "targetId": geometry.get("targetId"),
+            "frameId": geometry.get("frameId"),
+            "pageIdentity": geometry.get("pageIdentity") or {},
+            "capturedAt": datetime.utcnow().isoformat() + "Z",
+        }, None
+
+    @staticmethod
+    def _manual_geometry_token(geometry):
+        if not isinstance(geometry, dict):
+            return None
+        viewport = geometry.get("viewport") or {}
+        canvas = geometry.get("canvasBounds") or geometry.get("stageBounds") or {}
+        stage = geometry.get("stageBounds") or canvas
+        identity = geometry.get("pageIdentity") or {}
+        token_data = {
+            "href": identity.get("href"),
+            "targetId": geometry.get("targetId") or identity.get("cdpTargetId"),
+            "frame": {
+                "isTopFrame": identity.get("isTopFrame"),
+                "frameName": identity.get("frameName"),
+                "frameId": geometry.get("frameId"),
+            },
+            "viewport": {
+                "width": round(float(viewport.get("width") or 0), 3),
+                "height": round(float(viewport.get("height") or 0), 3),
+                "devicePixelRatio": round(float(viewport.get("devicePixelRatio") or 1), 3),
+            },
+            "canvas": {
+                "left": round(float(canvas.get("left") or 0), 3),
+                "top": round(float(canvas.get("top") or 0), 3),
+                "width": round(float(canvas.get("width") or 0), 3),
+                "height": round(float(canvas.get("height") or 0), 3),
+            },
+            "stage": {
+                "left": round(float(stage.get("left") or 0), 3),
+                "top": round(float(stage.get("top") or 0), 3),
+                "width": round(float(stage.get("width") or 0), 3),
+                "height": round(float(stage.get("height") or 0), 3),
+            },
+            "scroll": geometry.get("scroll") or {},
+        }
+        return SprunkiGamePlayer._stable_watchdog_probe_token(token_data)
+
+    @classmethod
+    def _manual_profile_source_canvas(cls, profile):
+        capture = profile.get("captureGeometry") if isinstance(profile, dict) else None
+        if isinstance(capture, dict):
+            capture_canvas = cls._manual_bounds(
+                capture.get("canvasBounds") or capture.get("stageBounds")
+            )
+            if capture_canvas:
+                return capture_canvas
+
+        viewport = cls._manual_viewport((profile or {}).get("viewport"))
+        if not viewport:
+            return None
+        coordinate_space = str((profile or {}).get("coordinateSpace") or "").lower()
+        if coordinate_space.endswith("_with_menu"):
+            menu_width = 78.0
+            stage_width = 640.0
+            stage_height = 360.0
+            scale = min(
+                max((viewport["width"] - menu_width) / stage_width, 0.0),
+                max(viewport["height"] / stage_height, 0.0),
+            )
+            if scale > 0:
+                canvas_width = stage_width * scale
+                canvas_height = stage_height * scale
+                return {
+                    "left": menu_width,
+                    "top": (viewport["height"] - canvas_height) / 2.0,
+                    "width": canvas_width,
+                    "height": canvas_height,
+                    "right": menu_width + canvas_width,
+                    "bottom": (viewport["height"] - canvas_height) / 2.0 + canvas_height,
+                }
+        return {
+            "left": 0.0,
+            "top": 0.0,
+            "width": viewport["width"],
+            "height": viewport["height"],
+            "right": viewport["width"],
+            "bottom": viewport["height"],
+        }
+
+    @staticmethod
+    def _manual_capture_origin(profile):
+        capture = profile.get("captureGeometry") if isinstance(profile, dict) else None
+        origin = capture.get("screenOrigin") if isinstance(capture, dict) else None
+        if not isinstance(origin, dict):
+            origin = {"x": 0.0, "y": 0.0}
+        try:
+            x = float(origin.get("x", 0) or 0)
+            y = float(origin.get("y", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(x) or not math.isfinite(y):
+            return None
+        return {"x": x, "y": y}
+
+    @classmethod
+    def _map_manual_point(
+        cls,
+        x,
+        y,
+        source_canvas,
+        source_viewport,
+        source_origin,
+        current_geometry,
+        *,
+        require_canvas=False,
+    ):
+        try:
+            source_x = float(x)
+            source_y = float(y)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(source_x) or not math.isfinite(source_y):
+            return None
+
+        current_viewport = cls._manual_viewport(current_geometry.get("viewport"))
+        current_canvas = cls._manual_bounds(
+            current_geometry.get("canvasBounds") or current_geometry.get("stageBounds")
+        )
+        if not current_viewport or not current_canvas:
+            return None
+
+        within_canvas = (
+            source_canvas and
+            source_canvas["left"] - 2 <= source_x <= source_canvas["right"] + 2 and
+            source_canvas["top"] - 2 <= source_y <= source_canvas["bottom"] + 2
+        )
+        if within_canvas:
+            relative_x = (source_x - source_canvas["left"]) / source_canvas["width"]
+            relative_y = (source_y - source_canvas["top"]) / source_canvas["height"]
+            current_x = current_canvas["left"] + relative_x * current_canvas["width"]
+            current_y = current_canvas["top"] + relative_y * current_canvas["height"]
+        else:
+            if require_canvas:
+                return None
+            if not source_viewport or not source_origin:
+                return None
+            client_x = source_x - source_origin["x"]
+            client_y = source_y - source_origin["y"]
+            current_x = client_x / source_viewport["width"] * current_viewport["width"]
+            current_y = client_y / source_viewport["height"] * current_viewport["height"]
+
+        if not (
+            -1 <= current_x <= current_viewport["width"] + 1 and
+            -1 <= current_y <= current_viewport["height"] + 1
+        ):
+            return None
+        return {
+            "x": round(min(max(current_x, 0.0), current_viewport["width"]), 2),
+            "y": round(min(max(current_y, 0.0), current_viewport["height"]), 2),
+        }
+
+    @classmethod
+    def _transform_manual_layout_entries(
+        cls,
+        entries,
+        source_canvas,
+        source_viewport,
+        source_origin,
+        current_geometry,
+        label,
+    ):
+        transformed = copy.deepcopy(entries or [])
+        for position, entry in enumerate(transformed, start=1):
+            if not isinstance(entry, dict):
+                return None, f"invalid {label} entry:{position}"
+            mapped = cls._map_manual_point(
+                entry.get("x"),
+                entry.get("y"),
+                source_canvas,
+                source_viewport,
+                source_origin,
+                current_geometry,
+                require_canvas=True,
+            )
+            if not mapped:
+                return None, f"{label} coordinate is outside the active canvas:{position}"
+            entry["x"] = mapped["x"]
+            entry["y"] = mapped["y"]
+        return transformed, None
+
+    @classmethod
+    def _transform_manual_prepare_actions(
+        cls,
+        actions,
+        source_canvas,
+        source_viewport,
+        source_origin,
+        current_geometry,
+    ):
+        transformed = copy.deepcopy(actions or [])
+        for position, action in enumerate(transformed, start=1):
+            if not isinstance(action, dict):
+                return None, f"invalid prepare action:{position}"
+            action_type = str(action.get("type") or "").strip().lower()
+            coordinate_fields = (
+                (("x", "y"),)
+                if action_type == "click" else
+                (("startX", "startY"), ("endX", "endY"))
+                if action_type in {"drag", DOUBLE_CLICK_DRAG_TYPE} else
+                ()
+            )
+            for x_field, y_field in coordinate_fields:
+                mapped = cls._map_manual_point(
+                    action.get(x_field),
+                    action.get(y_field),
+                    source_canvas,
+                    source_viewport,
+                    source_origin,
+                    current_geometry,
+                    require_canvas=False,
+                )
+                if not mapped:
+                    return None, f"prepare action coordinate is outside active viewport:{position}"
+                action[x_field] = mapped["x"]
+                action[y_field] = mapped["y"]
+        return transformed, None
+
+    def _resolve_manual_profile_runtime_context(self, profile, profile_path, ws=None):
+        """Bind and normalize one profile for the current page geometry."""
+        expected_url = (
+            getattr(self, "game_url", None)
+            or ((self.config or {}).get("currentUrl") if isinstance(getattr(self, "config", None), dict) else None)
+            or ""
+        )
+        valid, validation_reason = validate_runtime_profile(profile, expected_url=expected_url)
+        if not valid:
+            result = QualityGateResult.failure(
+                "manual_profile_invalid",
+                retryable=False,
+                evidence={"profilePath": profile_path, "profileError": validation_reason},
+                message=f"Manual profile is invalid: {validation_reason}",
+            )
+            self._last_manual_profile_runtime_result = result
+            return None, result
+
+        # A captureGeometry object is a promise that the profile was recorded
+        # in a concrete screen/canvas space.  Do not silently reinterpret a
+        # malformed object as the older synthetic 640x360 geometry: doing so
+        # can move every manual coordinate to a plausible but wrong target.
+        capture_geometry = profile.get("captureGeometry")
+        if capture_geometry is not None:
+            capture_error = None
+            if not isinstance(capture_geometry, dict):
+                capture_error = "captureGeometry is not an object"
+            elif not self._manual_bounds(
+                capture_geometry.get("canvasBounds") or capture_geometry.get("stageBounds")
+            ):
+                capture_error = "captureGeometry canvas/stage bounds are invalid"
+            else:
+                capture_origin = capture_geometry.get("screenOrigin")
+                if not isinstance(capture_origin, dict):
+                    capture_error = "captureGeometry screen origin is missing"
+                else:
+                    try:
+                        origin_x = float(capture_origin.get("x"))
+                        origin_y = float(capture_origin.get("y"))
+                    except (TypeError, ValueError, OverflowError):
+                        capture_error = "captureGeometry screen origin is invalid"
+                    if (
+                        capture_error is None and
+                        (not math.isfinite(origin_x) or not math.isfinite(origin_y))
+                    ):
+                        capture_error = "captureGeometry screen origin is invalid"
+                if capture_error is None and "pageViewport" in capture_geometry:
+                    if not self._manual_viewport(capture_geometry.get("pageViewport")):
+                        capture_error = "captureGeometry page viewport is invalid"
+                if capture_error is None and "devicePixelRatio" in capture_geometry:
+                    try:
+                        capture_dpr = float(capture_geometry.get("devicePixelRatio"))
+                    except (TypeError, ValueError, OverflowError):
+                        capture_error = "captureGeometry device pixel ratio is invalid"
+                    if capture_error is None and (
+                        not math.isfinite(capture_dpr) or capture_dpr <= 0
+                    ):
+                        capture_error = "captureGeometry device pixel ratio is invalid"
+            if capture_error:
+                result = QualityGateResult.failure(
+                    "manual_profile_geometry_unknown",
+                    retryable=False,
+                    evidence={
+                        "profilePath": profile_path,
+                        "geometryError": capture_error,
+                    },
+                    message=f"Manual profile capture geometry is invalid: {capture_error}",
+                )
+                self._last_manual_profile_runtime_result = result
+                return None, result
+
+        geometry_samples = []
+        geometry_error = None
+        for sample_index in range(3):
+            geometry, geometry_error = self._read_manual_profile_geometry(ws=ws)
+            if geometry:
+                geometry_samples.append(geometry)
+                if len(geometry_samples) >= 2:
+                    first_token = self._manual_geometry_token(geometry_samples[-2])
+                    current_token = self._manual_geometry_token(geometry_samples[-1])
+                    if first_token == current_token:
+                        break
+                if sample_index < 2:
+                    time.sleep(0.25)
+            elif sample_index < 2:
+                time.sleep(0.25)
+
+        if len(geometry_samples) < 2:
+            result = QualityGateResult.failure(
+                "manual_profile_geometry_unknown",
+                retryable=True,
+                evidence={
+                    "profilePath": profile_path,
+                    "geometryError": geometry_error,
+                    "geometrySamples": len(geometry_samples),
+                },
+                message="Active canvas geometry was not stable enough for manual coordinates.",
+            )
+            self._last_manual_profile_runtime_result = result
+            return None, result
+
+        geometry = geometry_samples[-1]
+        if self._manual_geometry_token(geometry_samples[-2]) != self._manual_geometry_token(geometry):
+            result = QualityGateResult.failure(
+                "manual_profile_geometry_unknown",
+                retryable=True,
+                evidence={
+                    "profilePath": profile_path,
+                    "geometryError": "geometry_changed_during_binding",
+                    "lastGeometry": geometry,
+                },
+                message="Active canvas geometry kept changing while binding the manual profile.",
+            )
+            self._last_manual_profile_runtime_result = result
+            return None, result
+
+        page_identity = geometry.get("pageIdentity") or {}
+        if not geometry.get("targetId") or not geometry.get("frameId") or not page_identity.get("href"):
+            result = QualityGateResult.failure(
+                "manual_profile_geometry_unknown",
+                retryable=True,
+                evidence={
+                    "profilePath": profile_path,
+                    "targetId": geometry.get("targetId"),
+                    "frameId": geometry.get("frameId"),
+                    "pageIdentity": page_identity,
+                },
+                message="Manual profile binding lacks a safe page/target/frame identity.",
+            )
+            self._last_manual_profile_runtime_result = result
+            return None, result
+
+        source_viewport = self._manual_viewport(profile.get("viewport"))
+        source_canvas = self._manual_profile_source_canvas(profile)
+        source_origin = self._manual_capture_origin(profile)
+        if not source_viewport or not source_canvas or source_origin is None:
+            result = QualityGateResult.failure(
+                "manual_profile_geometry_unknown",
+                retryable=False,
+                evidence={"profilePath": profile_path},
+                message="Manual profile reference geometry is incomplete.",
+            )
+            self._last_manual_profile_runtime_result = result
+            return None, result
+
+        resolved_profile = copy.deepcopy(profile)
+        layout = resolved_profile.setdefault("layout", {})
+        for key in ("icons", "slots", "bonus"):
+            if key not in layout:
+                continue
+            entries, transform_error = self._transform_manual_layout_entries(
+                layout.get(key),
+                source_canvas,
+                source_viewport,
+                source_origin,
+                geometry,
+                key,
+            )
+            if transform_error:
+                result = QualityGateResult.failure(
+                    "manual_profile_geometry_unknown",
+                    retryable=False,
+                    evidence={"profilePath": profile_path, "coordinateError": transform_error},
+                    message=f"Manual profile {key} could not be mapped to the active canvas.",
+                )
+                self._last_manual_profile_runtime_result = result
+                return None, result
+            layout[key] = entries
+
+        if isinstance(layout.get("returnControls"), dict):
+            # Return controls are optional.  Only transform direct coordinate
+            # records; unknown live-control metadata is left untouched and is
+            # never treated as a valid Remove proof by this resolver.
+            controls = copy.deepcopy(layout.get("returnControls"))
+            if all(field in controls for field in ("x", "y")):
+                mapped = self._map_manual_point(
+                    controls.get("x"),
+                    controls.get("y"),
+                    source_canvas,
+                    source_viewport,
+                    source_origin,
+                    geometry,
+                    require_canvas=False,
+                )
+                if not mapped:
+                    result = QualityGateResult.failure(
+                        "manual_profile_geometry_unknown",
+                        retryable=False,
+                        evidence={"profilePath": profile_path, "coordinateError": "returnControls"},
+                        message="Manual profile return-control coordinates are outside the active viewport.",
+                    )
+                    self._last_manual_profile_runtime_result = result
+                    return None, result
+                controls["x"], controls["y"] = mapped["x"], mapped["y"]
+            layout["returnControls"] = controls
+
+        transformed_actions, transform_error = self._transform_manual_prepare_actions(
+            resolved_profile.get("prepareActions"),
+            source_canvas,
+            source_viewport,
+            source_origin,
+            geometry,
+        )
+        if transform_error:
+            result = QualityGateResult.failure(
+                "manual_profile_geometry_unknown",
+                retryable=False,
+                evidence={"profilePath": profile_path, "coordinateError": transform_error},
+                message="Manual profile prepare coordinates could not be mapped to the active viewport.",
+            )
+            self._last_manual_profile_runtime_result = result
+            return None, result
+        resolved_profile["prepareActions"] = transformed_actions
+
+        evidence = {
+            "profilePath": profile_path,
+            "layoutSource": "manual_profile",
+            "profileIconCount": len(layout.get("icons") or []),
+            "profileSlotCount": len(layout.get("slots") or []),
+            "sourceViewport": source_viewport,
+            "currentViewport": geometry.get("viewport"),
+            "sourceCanvas": source_canvas,
+            "currentCanvas": geometry.get("canvasBounds") or geometry.get("stageBounds"),
+            "sourceOrigin": source_origin,
+            "currentScreenOrigin": geometry.get("screenOrigin"),
+            "pageIdentity": geometry.get("pageIdentity") or {},
+            "targetId": geometry.get("targetId"),
+            "frame": (geometry.get("pageIdentity") or {}).get("frameName"),
+            "frameId": geometry.get("frameId"),
+            "geometryToken": self._manual_geometry_token(geometry),
+            "boardGeneration": int(getattr(self, "_board_generation", 0) or 0),
+        }
+        context = {
+            "sourceProfile": profile,
+            "profile": resolved_profile,
+            "path": profile_path,
+            "geometry": geometry,
+            "geometryToken": evidence["geometryToken"],
+            "evidence": evidence,
+            "boardGeneration": evidence["boardGeneration"],
+        }
+        self._active_manual_profile_context = context
+        result = QualityGateResult.pass_result(
+            evidence=evidence,
+            message="Manual profile coordinates are bound to the active game canvas.",
+        )
+        self._last_manual_profile_runtime_result = result
+        return context, result
+
+    def _refresh_manual_profile_context_if_needed(self, context=None):
+        active_context = context or getattr(self, "_active_manual_profile_context", None)
+        if not isinstance(active_context, dict):
+            return None, QualityGateResult.failure(
+                "manual_profile_invalid",
+                retryable=False,
+                message="No active manual profile context is available.",
+            )
+        geometry, geometry_error = self._read_manual_profile_geometry()
+        if not geometry:
+            result = QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                evidence={"geometryError": geometry_error, **(active_context.get("evidence") or {})},
+                message="The active game target could not be revalidated before manual input.",
+            )
+            return None, result
+        current_token = self._manual_geometry_token(geometry)
+        current_identity = geometry.get("pageIdentity") or {}
+        bound_identity = (active_context.get("geometry") or {}).get("pageIdentity") or {}
+        same_target = (
+            geometry.get("targetId") == (active_context.get("geometry") or {}).get("targetId") and
+            self._cdp_urls_match(
+                self._normalize_cdp_page_url(current_identity.get("href")),
+                self._normalize_cdp_page_url(bound_identity.get("href")),
+            )
+        )
+        if current_token == active_context.get("geometryToken") and same_target:
+            return active_context, QualityGateResult.pass_result(
+                evidence=active_context.get("evidence") or {},
+                message="Manual profile geometry remains current.",
+            )
+        return self._resolve_manual_profile_runtime_context(
+            active_context.get("sourceProfile"),
+            active_context.get("path"),
+        )
+
+    @staticmethod
+    def _manual_layout_entry_by_index(layout, key, index):
+        if not isinstance(layout, dict):
+            return None
+        entries = layout.get(key)
+        if not isinstance(entries, list):
+            return None
+        try:
+            expected_index = int(index)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                if int(entry.get("index")) == expected_index:
+                    return entry
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return None
+
+    def _resolve_manual_layout_for_input(self, icon, target_slot, icon_key="icons"):
+        """Return fresh profile coordinates for one placement gesture.
+
+        The returned entries are resolved against the geometry token that is
+        current at call time.  Automatic/live layout callers keep their
+        historical objects unchanged by returning ``None`` when no manual
+        profile is active.
+        """
+        active_context = getattr(self, "_active_manual_profile_context", None)
+        if not isinstance(active_context, dict):
+            return None
+
+        refreshed_context, refresh_result = self._refresh_manual_profile_context_if_needed(
+            active_context
+        )
+        if not refreshed_context:
+            self._last_manual_input_result = refresh_result
+            return False
+
+        profile_layout = (refreshed_context.get("profile") or {}).get("layout") or {}
+        icon_index = icon.get("index") if isinstance(icon, dict) else None
+        slot_index = target_slot.get("index") if isinstance(target_slot, dict) else None
+        resolved_icon = self._manual_layout_entry_by_index(
+            profile_layout,
+            icon_key,
+            icon_index,
+        )
+        resolved_slot = self._manual_layout_entry_by_index(
+            profile_layout,
+            "slots",
+            slot_index,
+        )
+        if resolved_icon is None or resolved_slot is None:
+            result = QualityGateResult.failure(
+                "manual_profile_invalid",
+                retryable=False,
+                evidence={
+                    **(refreshed_context.get("evidence") or {}),
+                    "iconIndex": icon_index,
+                    "slotIndex": slot_index,
+                },
+                message="Manual profile does not contain the requested icon/slot index.",
+            )
+            self._last_manual_input_result = result
+            return False
+
+        self._active_manual_profile_context = refreshed_context
+        return copy.deepcopy(resolved_icon), copy.deepcopy(resolved_slot), refreshed_context
+
+    def _refresh_active_manual_layout_in_config(self):
+        """Refresh configured layout after viewport/session changes.
+
+        Cleanup and recording-area code still read ``self.config['layout']``.
+        Keep that compatibility surface synchronized with the same resolved
+        profile context, while never writing the transformed values back to
+        the profile file.
+        """
+        active_context = getattr(self, "_active_manual_profile_context", None)
+        if not isinstance(active_context, dict):
+            return None, None
+        refreshed_context, refresh_result = self._refresh_manual_profile_context_if_needed(
+            active_context
+        )
+        if not refreshed_context:
+            self._last_manual_input_result = refresh_result
+            return None, refresh_result
+        self._active_manual_profile_context = refreshed_context
+        resolved_layout = copy.deepcopy(
+            (refreshed_context.get("profile") or {}).get("layout") or {}
+        )
+        if isinstance(getattr(self, "config", None), dict):
+            self.config["layout"] = resolved_layout
+            settings = self.config.setdefault("settings", {})
+            settings["layoutSource"] = "manual_profile"
+            settings["manualProfileResolution"] = copy.deepcopy(
+                refreshed_context.get("evidence") or {}
+            )
+        return refreshed_context, None
+
+    def _execute_cdp_key_press(self, key_name, manual_context=None):
+        """Send a key to the active game target via CDP.
+
+        Manual-profile key actions use the same exact-target binding as mouse
+        actions.  Automatic intro skipping keeps its existing transport.
+        """
         normalized = str(key_name or "").strip().lower()
         if not normalized:
             return False
@@ -14568,13 +17033,29 @@ class SprunkiGamePlayer:
 
         ws = None
         try:
-            ws_url = self._get_websocket_url()
-            if not ws_url:
-                return False
+            if manual_context is not None:
+                ws, manual_context, input_result = self._open_verified_manual_input_session(
+                    manual_context
+                )
+                if not ws:
+                    self._last_manual_input_result = input_result
+                    return False
+            else:
+                ws_url = self._get_websocket_url()
+                if not ws_url:
+                    return False
+                ws = websocket.create_connection(ws_url, timeout=30)
+                self._send_cdp_command(ws, {"method": "Page.bringToFront"})
 
-            ws = websocket.create_connection(ws_url, timeout=30)
-            # Keep the same page target that receives the manual click in front.
-            self._send_cdp_command(ws, {"method": "Page.bringToFront"})
+            send_command = (
+                (lambda current_ws, command: self._send_verified_manual_input_command(
+                    current_ws,
+                    command,
+                    manual_context,
+                ))
+                if manual_context is not None
+                else self._send_cdp_command
+            )
 
             key_down = {
                 "method": "Input.dispatchKeyEvent",
@@ -14592,9 +17073,9 @@ class SprunkiGamePlayer:
                 key_down["params"]["text"] = text_value
                 key_down["params"]["unmodifiedText"] = text_value
 
-            down_response = self._send_cdp_command(ws, key_down)
+            down_response = send_command(ws, key_down)
             time.sleep(0.05)
-            up_response = self._send_cdp_command(ws, {
+            up_response = send_command(ws, {
                 "method": "Input.dispatchKeyEvent",
                 "params": {
                     "type": "keyUp",
@@ -14607,11 +17088,41 @@ class SprunkiGamePlayer:
             })
 
             if not down_response or not up_response:
+                if manual_context is not None and not isinstance(
+                    getattr(self, "_last_manual_input_result", None),
+                    QualityGateResult,
+                ):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={"key": key_name},
+                        message="Manual CDP key delivery was inconclusive.",
+                    )
                 return False
             if "error" in down_response or "error" in up_response:
+                if manual_context is not None and not isinstance(
+                    getattr(self, "_last_manual_input_result", None),
+                    QualityGateResult,
+                ):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        evidence={"key": key_name},
+                        message="Manual CDP key delivery returned an error.",
+                    )
                 return False
 
             print(f"   ✅ CDP keyDown/keyUp completed: {key_name}")
+            if manual_context:
+                self._last_manual_input_result = QualityGateResult.pass_result(
+                    evidence={
+                        **(manual_context.get("evidence") or {}),
+                        "key": key_name,
+                    },
+                    message="Manual CDP key input was dispatched to the verified game page.",
+                )
             return True
         except Exception as key_error:
             print(f"   ⚠️ CDP key press failed for {key_name}: {key_error}")
@@ -14628,6 +17139,7 @@ class SprunkiGamePlayer:
         actions,
         profile_or_timing=None,
         operation_context=None,
+        manual_profile_context=None,
     ):
         """Replay one validated manual timeline without a blind fallback.
 
@@ -14637,13 +17149,39 @@ class SprunkiGamePlayer:
         changed game state.
         """
         actions = list(actions or [])
-        if not actions:
+        # Do not let a successful action from an earlier replay mask the
+        # failure of this timeline when a caller inspects the last result.
+        self._last_manual_input_result = None
+        if manual_profile_context and isinstance(manual_profile_context, dict):
+            context_profile = manual_profile_context.get("profile") or {}
+            context_actions = context_profile.get("prepareActions")
+            if isinstance(context_actions, list):
+                actions_for_validation = list(context_actions)
+            else:
+                actions_for_validation = actions
+        else:
+            actions_for_validation = actions
+        if not actions_for_validation:
             print("⚠️ Manual profile has no prepare actions to replay.")
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_invalid",
+                retryable=False,
+                message="Manual profile has no prepare actions to replay.",
+            )
             return False
 
-        is_valid, validation_reason = validate_prepare_timeline(actions, profile_or_timing)
+        is_valid, validation_reason = validate_prepare_timeline(
+            actions_for_validation,
+            profile_or_timing,
+        )
         if not is_valid:
             print(f"🛑 Manual profile replay rejected before input: {validation_reason}")
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_invalid",
+                retryable=False,
+                evidence={"profileError": validation_reason},
+                message="Manual profile prepare timeline is invalid.",
+            )
             return False
 
         prepare_gate = self._check_prepare_ready_for_input()
@@ -14678,41 +17216,85 @@ class SprunkiGamePlayer:
                 self._finish_operation(context, result)
             return bool(result)
 
-        print(f"🎯 Replaying {len(actions)} manual prepare actions...")
+        print(f"🎯 Replaying {len(actions_for_validation)} manual prepare actions...")
 
         def execute_action(index, action):
+            nonlocal manual_profile_context
             try:
+                input_action = action
+                if manual_profile_context:
+                    refreshed_context, refresh_result = self._refresh_manual_profile_context_if_needed(
+                        manual_profile_context
+                    )
+                    if not refreshed_context:
+                        self._last_manual_input_result = refresh_result
+                        return False
+                    manual_profile_context = refreshed_context
+                    refreshed_actions = (
+                        (manual_profile_context.get("profile") or {}).get("prepareActions")
+                        or []
+                    )
+                    if index <= 0 or index > len(refreshed_actions):
+                        self._last_manual_input_result = QualityGateResult.failure(
+                            "manual_profile_invalid",
+                            retryable=False,
+                            message=f"Manual prepare action index is unavailable: {index}",
+                        )
+                        return False
+                    input_action = refreshed_actions[index - 1]
+
                 # Recovery replay is allowed to send its own bounded inputs,
                 # but no caller can silently send an extra input after this
                 # callback returns False.
                 if not self._check_prepare_ready_for_input():
+                    self._last_manual_input_result = getattr(
+                        self,
+                        "_last_prepare_ready_result",
+                        None,
+                    )
                     return False
                 if not context.can_send_input(
                     stop_requested=self.stop_event.is_set(),
                     allow_recovery_input=True,
                 ):
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        message="Manual prepare input budget or deadline was exhausted.",
+                    )
                     return False
                 if not context.register_input():
+                    self._last_manual_input_result = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        message="Manual prepare input could not be registered.",
+                    )
                     return False
 
-                action_type = (action.get("type") or "").lower()
+                action_type = (input_action.get("type") or "").lower()
                 if action_type == "click":
-                    x = int(action.get("x"))
-                    y = int(action.get("y"))
+                    x = int(input_action.get("x"))
+                    y = int(input_action.get("y"))
                     print(f"   {index}. Click @ ({x}, {y})")
-                    return bool(self._execute_cdp_single_click(x, y))
+                    return bool(self._execute_cdp_single_click(
+                        x,
+                        y,
+                        manual_context=manual_profile_context,
+                    ))
                 if action_type == DOUBLE_CLICK_DRAG_TYPE:
-                    start_x = int(action.get("startX"))
-                    start_y = int(action.get("startY"))
-                    end_x = int(action.get("endX"))
-                    end_y = int(action.get("endY"))
-                    drag_duration_ms = coerce_delay_ms(action.get("dragDurationMs", 0))
-                    click_interval_ms = coerce_delay_ms(action.get("clickIntervalMs", 300))
+                    start_x = int(input_action.get("startX"))
+                    start_y = int(input_action.get("startY"))
+                    end_x = int(input_action.get("endX"))
+                    end_y = int(input_action.get("endY"))
+                    drag_duration_ms = coerce_delay_ms(input_action.get("dragDurationMs", 0))
+                    click_interval_ms = coerce_delay_ms(input_action.get("clickIntervalMs", 300))
                     first_click_duration_ms = coerce_delay_ms(
-                        action.get("firstClickDurationMs", 100)
+                        input_action.get("firstClickDurationMs", 100)
                     )
                     hold_before_move_ms = coerce_delay_ms(
-                        action.get("holdBeforeMoveMs", 200)
+                        input_action.get("holdBeforeMoveMs", 200)
                     )
                     print(
                         f"   {index}. Double-click drag @ ({start_x}, {start_y}) -> "
@@ -14728,15 +17310,16 @@ class SprunkiGamePlayer:
                         click_interval_ms,
                         first_click_duration_ms,
                         hold_before_move_ms,
+                        manual_context=manual_profile_context,
                     ))
                 if action_type == "drag":
-                    start_x = int(action.get("startX"))
-                    start_y = int(action.get("startY"))
-                    end_x = int(action.get("endX"))
-                    end_y = int(action.get("endY"))
-                    drag_duration_ms = coerce_delay_ms(action.get("dragDurationMs", 0))
+                    start_x = int(input_action.get("startX"))
+                    start_y = int(input_action.get("startY"))
+                    end_x = int(input_action.get("endX"))
+                    end_y = int(input_action.get("endY"))
+                    drag_duration_ms = coerce_delay_ms(input_action.get("dragDurationMs", 0))
                     hold_before_move_ms = coerce_delay_ms(
-                        action.get("holdBeforeMoveMs", 0)
+                        input_action.get("holdBeforeMoveMs", 0)
                     )
                     print(
                         f"   {index}. Drag @ ({start_x}, {start_y}) -> "
@@ -14749,11 +17332,15 @@ class SprunkiGamePlayer:
                         end_y,
                         drag_duration_ms,
                         hold_before_move_ms,
+                        manual_context=manual_profile_context,
                     ))
                 if action_type == "key":
-                    key_name = action.get("key")
+                    key_name = input_action.get("key")
                     print(f"   {index}. Key {key_name} (CDP native input)")
-                    if not self._execute_cdp_key_press(key_name):
+                    if not self._execute_cdp_key_press(
+                        key_name,
+                        manual_context=manual_profile_context,
+                    ):
                         print(
                             f"   🛑 CDP key input was inconclusive; refusing a duplicate "
                             f"PyAutoGUI key: {key_name}"
@@ -14779,7 +17366,7 @@ class SprunkiGamePlayer:
 
         try:
             replay_success = replay_prepare_timeline(
-                actions,
+                actions_for_validation,
                 profile_or_timing,
                 execute_action,
                 sleep_fn=bounded_sleep,
@@ -14799,6 +17386,15 @@ class SprunkiGamePlayer:
     def intro_skip_via_cdp(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using CDP with smart detection + blind clicks"""
         try:
+            if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="Automatic Skip Intro is disabled while a manual profile is active.",
+                )
+                print("🛑 Skip Intro rejected: manual profile owns entry input.")
+                return False
             prepare_gate = self._check_prepare_ready_for_input()
             if not prepare_gate:
                 print(
@@ -14964,12 +17560,31 @@ class SprunkiGamePlayer:
             return True
             
         except Exception as e:
+            if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"error": str(e)},
+                    message="Automatic Skip Intro failed while a manual profile was active.",
+                )
+                print(f"❌ CDP intro skipping stopped without PyAutoGUI fallback: {e}")
+                return False
             print(f"âŒ CDP intro skipping failed: {e}, falling back to pyautogui")
             return self.intro_skip_via_pyautogui(operation_context=operation_context)
 
     def intro_skip_via_pyautogui(self, operation_context=None):
         """ENHANCED: Multi-target Skip intro using PyAutoGUI with smart detection + blind drags"""
         try:
+            if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    message="PyAutoGUI Skip Intro is disabled while a manual profile is active.",
+                )
+                print("🛑 PyAutoGUI Skip Intro rejected: manual profile owns entry input.")
+                return False
             prepare_gate = self._check_prepare_ready_for_input()
             if not prepare_gate:
                 print(
@@ -15303,6 +17918,13 @@ class SprunkiGamePlayer:
                 if operation_context is None:
                     context.end_recovery()
                 return self._finish_operation(context, result) if owns_context else result
+
+            # The previous generation's transformed profile is no longer a
+            # valid source of coordinates after Re-Run.  Clear it before
+            # resolving the original profile so an invalid/missing profile can
+            # never accidentally reuse generation-old manual input.
+            self._active_manual_profile_context = None
+            self._last_manual_input_result = None
             
             # Re-enter the game using the same manual profile that was used
             # during the initial setup. A restart does not call
@@ -15311,36 +17933,97 @@ class SprunkiGamePlayer:
             manual_profile, manual_profile_path = self._resolve_manual_profile()
             profile_resolution_error = getattr(self, "_manual_profile_resolution_error", None)
             if profile_resolution_error:
+                resolution = getattr(self, "_manual_profile_resolution", None)
+                failure_code = (
+                    "manual_profile_ambiguous"
+                    if getattr(resolution, "status", None) == "AMBIGUOUS"
+                    else "manual_profile_invalid"
+                )
                 result = self._operation_result(
                     context,
                     OperationStatus.FAILED,
-                    f"manual_profile_invalid:{profile_resolution_error}",
+                    f"{failure_code}:{profile_resolution_error}",
+                    details={
+                        "manualProfileResolution": (
+                            resolution.as_dict()
+                            if isinstance(resolution, ManualProfileResolution)
+                            else {}
+                        ),
+                    },
                 )
                 return self._finish_operation(context, result) if owns_context else result
+            manual_profile_context = None
+            resolved_manual_profile = manual_profile
             manual_actions = (manual_profile or {}).get("prepareActions", [])
             prepare_success = False
 
             if manual_profile:
                 print(f"   Manual profile detected for restart: {manual_profile_path}")
-                if not manual_actions:
-                    print("   Manual profile has no prepare actions; automatic fallback is disabled")
-                    result = self._operation_result(context, OperationStatus.FAILED, "manual_profile_has_no_actions")
+                manual_profile_context, profile_runtime_result = (
+                    self._resolve_manual_profile_runtime_context(
+                        manual_profile,
+                        manual_profile_path,
+                    )
+                )
+                if not manual_profile_context:
+                    result = self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN
+                        if profile_runtime_result.status == "UNKNOWN"
+                        else OperationStatus.FAILED,
+                        profile_runtime_result.failure_code
+                        or "manual_profile_geometry_unknown",
+                        details={
+                            "manualProfileResolution": (
+                                profile_runtime_result.as_dict()
+                                if isinstance(profile_runtime_result, QualityGateResult)
+                                else {}
+                            ),
+                        },
+                    )
                     return self._finish_operation(context, result) if owns_context else result
+                resolved_manual_profile = manual_profile_context.get("profile") or manual_profile
+                self._active_manual_profile_context = manual_profile_context
+                if isinstance(self.config, dict):
+                    self.config["layout"] = copy.deepcopy(
+                        resolved_manual_profile.get("layout") or {}
+                    )
+                    settings = self.config.setdefault("settings", {})
+                    settings["layoutSource"] = "manual_profile"
+                    settings["manualProfileResolution"] = copy.deepcopy(
+                        manual_profile_context.get("evidence") or {}
+                    )
+                manual_actions = manual_profile.get("prepareActions", [])
 
                 print(f"   Replaying {len(manual_actions)} manual prepare actions...")
                 prepare_success = self.replay_manual_prepare_actions(
                     manual_actions,
-                    manual_profile,
+                    resolved_manual_profile,
                     operation_context=context,
+                    manual_profile_context=manual_profile_context,
                 )
                 if prepare_success:
                     print("   Manual profile prepare replay completed after restart")
                 else:
                     print("   Manual profile replay failed; automatic fallback is disabled")
-                    result = self._operation_result(context, OperationStatus.FAILED, "manual_prepare_replay_failed")
+                    replay_result = getattr(self, "_last_manual_input_result", None)
+                    result = self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN
+                        if getattr(replay_result, "status", None) == "UNKNOWN"
+                        else OperationStatus.FAILED,
+                        getattr(replay_result, "failure_code", None)
+                        or "manual_profile_input_target_mismatch",
+                        details={
+                            "manualProfileResolution": copy.deepcopy(
+                                manual_profile_context.get("evidence") or {}
+                            ),
+                        },
+                    )
                     return self._finish_operation(context, result) if owns_context else result
             else:
                 print("   No manual profile detected; using automatic intro skip")
+                self._active_manual_profile_context = None
                 # Legacy intro helpers issue several physical inputs internally.
                 # Scope the same recovery context around them so those inputs
                 # cannot bypass the recovery budget.  Do not scope manual
@@ -15362,6 +18045,39 @@ class SprunkiGamePlayer:
             # Additional stabilization wait
             print("   Game restart stabilization (2s)...")
             time.sleep(2.0)
+
+            if manual_profile_context:
+                # Re-enter actions can change the viewport (notably F11 and
+                # scroll).  Resolve the original profile once more before the
+                # post-Re-Run reader is rebound so no generation-old layout
+                # is retained in the config.
+                refreshed_context, refreshed_result = (
+                    self._refresh_manual_profile_context_if_needed(
+                        manual_profile_context
+                    )
+                )
+                if not refreshed_context:
+                    result = self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN,
+                        "manual_profile_geometry_unknown",
+                        details={
+                            "manualProfileResolution": (
+                                refreshed_result.as_dict()
+                                if isinstance(refreshed_result, QualityGateResult)
+                                else {}
+                            ),
+                        },
+                    )
+                    if operation_context is None:
+                        context.end_recovery()
+                    return self._finish_operation(context, result) if owns_context else result
+                manual_profile_context = refreshed_context
+                self._active_manual_profile_context = refreshed_context
+                if isinstance(self.config, dict):
+                    self.config["layout"] = copy.deepcopy(
+                        (refreshed_context.get("profile") or {}).get("layout") or {}
+                    )
             
             # Rebind the VM/session before reading the post-restart state.
             self._refresh_after_recovery()
@@ -15499,6 +18215,9 @@ class SprunkiGamePlayer:
             self._session_recovery_count = 0
             self._batch_reconnect_attempts = 0
             self._active_operation_context = None
+            self._manual_profile_resolution = None
+            self._manual_profile_resolution_error = None
+            self._active_manual_profile_context = None
             self._board_generation = 0
             self._board_contamination_carried_forward = False
             self._cleanup_boundary_history = []
@@ -15642,28 +18361,91 @@ class SprunkiGamePlayer:
                     "🛑 Manual profile is invalid; refusing automatic intro fallback: "
                     f"{profile_resolution_error}"
                 )
+                resolution = getattr(self, "_manual_profile_resolution", None)
+                failure_code = (
+                    "manual_profile_ambiguous"
+                    if getattr(resolution, "status", None) == "AMBIGUOUS"
+                    else "manual_profile_invalid"
+                )
                 self.last_setup_result = QualityGateResult.failure(
-                    "manual_json_invalid",
-                    evidence={"profileError": profile_resolution_error},
+                    failure_code,
+                    retryable=False,
+                    evidence={
+                        "profileError": profile_resolution_error,
+                        "manualProfileResolution": (
+                            resolution.as_dict()
+                            if isinstance(resolution, ManualProfileResolution)
+                            else {}
+                        ),
+                    },
                     message="Manual entry profile is invalid.",
                 )
                 return False
             if manual_profile:
+                manual_profile_context, profile_runtime_result = (
+                    self._resolve_manual_profile_runtime_context(
+                        manual_profile,
+                        manual_profile_path,
+                    )
+                )
+                if not manual_profile_context:
+                    self.last_setup_result = profile_runtime_result
+                    print(
+                        "🛑 Manual profile runtime binding failed: "
+                        f"{profile_runtime_result.failure_code or profile_runtime_result.status}"
+                    )
+                    return False
+                resolved_manual_profile = manual_profile_context.get("profile") or manual_profile
+                self._active_manual_profile_context = manual_profile_context
+                self.config["layout"] = copy.deepcopy(
+                    resolved_manual_profile.get("layout") or {}
+                )
+                self.config.setdefault("settings", {})[
+                    "layoutSource"
+                ] = "manual_profile"
+                self.config["settings"][
+                    "manualProfileResolution"
+                ] = copy.deepcopy(manual_profile_context.get("evidence") or {})
                 self.entry_strategy.setdefault("tested", []).append(
-                    {"strategy": "manual_profile", "path": manual_profile_path}
+                    {
+                        "strategy": "manual_profile",
+                        "path": manual_profile_path,
+                        "layoutSource": "manual_profile",
+                    }
                 )
                 if progress_callback:
                     progress_callback("🧭 Replaying manual profile prepare actions...")
                 print(f"🧭 Using manual profile: {manual_profile_path}")
                 replay_success = self.replay_manual_prepare_actions(
                     manual_profile.get("prepareActions", []),
-                    manual_profile,
+                    resolved_manual_profile,
+                    manual_profile_context=manual_profile_context,
                 )
                 if not replay_success:
                     print("🛑 Manual profile replay failed; refusing blind automatic input on a partially prepared game")
+                    replay_result = getattr(self, "_last_manual_input_result", None)
+                    replay_failure_code = getattr(
+                        replay_result,
+                        "failure_code",
+                        None,
+                    ) or "manual_profile_input_target_mismatch"
                     self.last_setup_result = QualityGateResult.failure(
-                        "manual_json_invalid",
-                        evidence={"profilePath": manual_profile_path},
+                        replay_failure_code,
+                        status=(
+                            "UNKNOWN"
+                            if getattr(replay_result, "status", None) == "UNKNOWN"
+                            else "FAIL"
+                        ),
+                        retryable=replay_failure_code not in {
+                            "manual_profile_invalid",
+                            "manual_profile_ambiguous",
+                        },
+                        evidence={
+                            "profilePath": manual_profile_path,
+                            "manualProfileResolution": copy.deepcopy(
+                                manual_profile_context.get("evidence") or {}
+                            ),
+                        },
                         message="Manual entry profile replay failed.",
                     )
                     return False
@@ -15704,12 +18486,37 @@ class SprunkiGamePlayer:
             else:
                 print("⚠️ Batch session failed, using individual verification")
 
-            # 🎮 FINAL GAME PREPARATION (existing logic, keep as-is)
-            self.prepare_game_for_playing()
+            # 🎮 FINAL GAME PREPARATION
+            # Automatic mode keeps the historical best-effort warm-up.  A
+            # manual profile must fail closed when an exact-coordinate input
+            # is not verified; it must not continue on a partially prepared
+            # page through an automatic/PyAutoGUI path.
+            prepare_result = self.prepare_game_for_playing()
+            if (
+                prepare_result is False and
+                isinstance(getattr(self, "_active_manual_profile_context", None), dict)
+            ):
+                manual_failure = getattr(self, "_last_manual_input_result", None)
+                if not isinstance(manual_failure, QualityGateResult):
+                    manual_failure = QualityGateResult.failure(
+                        "manual_profile_input_target_mismatch",
+                        status="UNKNOWN",
+                        retryable=True,
+                        message="Manual profile warm-up input was not verified.",
+                    )
+                self.last_setup_result = manual_failure
+                print(
+                    "🛑 SETUP FAILED: manual profile warm-up was not verified: "
+                    f"{manual_failure.failure_code or manual_failure.status}"
+                )
+                self.cleanup_chrome_complete()
+                return False
             # Containers and a Run button are only structural evidence.  The
             # VM must expose real icons and slots in two stable snapshots
             # before any recording starts; no fixed layout sleep is used.
-            runtime_entry = self._wait_for_playable_runtime_entry()
+            runtime_entry = self._wait_for_playable_runtime_entry(
+                manual_profile=getattr(self, "_active_manual_profile_context", None),
+            )
             if not runtime_entry:
                 self.last_setup_result = runtime_entry
                 print(
@@ -15750,6 +18557,11 @@ class SprunkiGamePlayer:
     
     def ensure_mouse_released(self):
         """IMPROVED: Ensure mouse is released before starting new drag"""
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            # A screen-level release can target another window or tab. Manual
+            # profile gestures own their release inside the verified CDP session.
+            print("   - Manual profile active: screen-level mouse release blocked.")
+            return False
         try:
             print("🔄 IMPROVED: Cleaning mouse state with verification...")
             
@@ -15774,6 +18586,14 @@ class SprunkiGamePlayer:
     
     def ensure_game_focus(self):
         """ðŸ”§ ENHANCED: Ensure game focus vá»›i service mode support - SAFE CLICK VERSION"""
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                message="Window-level focus click is disabled while a manual profile is active.",
+            )
+            return False
         try:
             print("ðŸŽ¯ Ensuring game focus for service mode...")
             
@@ -15941,6 +18761,11 @@ class SprunkiGamePlayer:
 
     def move_mouse_to_safe_position(self):
         """Move mouse to bottom right corner as required by game"""
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            # Do not move the OS cursor after a profile gesture; the foreground
+            # window is not the input target identity used by CDP.
+            print("   - Manual profile active: screen-level safe move blocked.")
+            return False
         try:
             screen_width, screen_height = pyautogui.size()
             
@@ -15959,6 +18784,45 @@ class SprunkiGamePlayer:
 
     def _execute_cdp_drag(self, start_x, start_y, end_x, end_y, delays, domain_adj):
         """Execute drag using CDP WebSocket commands"""
+        manual_context = getattr(self, "_active_manual_profile_context", None)
+        if isinstance(manual_context, dict):
+            # This legacy helper chooses its own debugger target. Manual
+            # coordinates must use the verified-session primitives instead.
+            try:
+                total_drag_ms = int(
+                    round((float(delays["hold"]) + float(delays["drag"])) * 1000)
+                )
+                hold_ms = int(round(float(delays["hold"]) * 1000))
+                if domain_adj.get("requires_double_click"):
+                    return self._execute_cdp_double_click_drag(
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y,
+                        drag_duration_ms=total_drag_ms,
+                        click_interval_ms=300,
+                        first_click_duration_ms=100,
+                        hold_before_move_ms=hold_ms,
+                        manual_context=manual_context,
+                    )
+                return self._execute_cdp_single_drag(
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    drag_duration_ms=total_drag_ms,
+                    hold_before_move_ms=hold_ms,
+                    manual_context=manual_context,
+                )
+            except Exception as error:
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"error": str(error)},
+                    message="The manual-profile drag could not use the verified CDP session.",
+                )
+                return False
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:
@@ -16008,6 +18872,14 @@ class SprunkiGamePlayer:
 
     def _execute_pyautogui_drag(self, start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon):
         """Execute drag using PyAutoGUI (IMPROVED with stability enhancements)"""
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                message="PyAutoGUI drag is disabled while a manual profile is active.",
+            )
+            return False
         # 🔥 KIỂM TRA AN TOÀN TỌA ĐỘ TRƯỚC KHI THỰC HIỆN
         if not self._are_coords_safe(start_x, start_y, end_x, end_y):
             print("   ❌ PyAutoGUI drag bị hủy do tọa độ không an toàn.")
@@ -16188,6 +19060,28 @@ class SprunkiGamePlayer:
         """
         Return one icon with a single bounded precision/batch/recovery chain.
         """
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            _manual_context, manual_layout_result = self._refresh_active_manual_layout_in_config()
+            if not _manual_context:
+                return OperationResult(
+                    OperationStatus.UNKNOWN,
+                    direction="return",
+                    message=(
+                        getattr(manual_layout_result, "failure_code", None)
+                        or "manual_profile_input_target_mismatch"
+                    ),
+                )
+            target_slot = self._manual_layout_entry_by_index(
+                (self._active_manual_profile_context.get("profile") or {}).get("layout") or {},
+                "slots",
+                target_slot.get("index") if isinstance(target_slot, dict) else None,
+            )
+            if not target_slot:
+                return OperationResult(
+                    OperationStatus.UNKNOWN,
+                    direction="return",
+                    message="manual_profile_slot_index_unavailable",
+                )
         return_process_start_time = time.monotonic()
         obs_controller = self.obs_controller
         target_slot_index = target_slot.get("index", -1)
@@ -16576,6 +19470,16 @@ class SprunkiGamePlayer:
                 operation_context=context,
             )
             if not executed:
+                manual_result = getattr(self, "_last_manual_input_result", None)
+                if isinstance(manual_result, QualityGateResult):
+                    return self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN
+                        if manual_result.status == "UNKNOWN"
+                        else OperationStatus.FAILED,
+                        manual_result.failure_code or "precision_click_execution_failed",
+                        details={"manualInput": manual_result.as_dict()},
+                    )
                 return self._operation_result(context, OperationStatus.FAILED, "precision_click_execution_failed")
 
             observed_result = observe_until_verified(
@@ -16784,6 +19688,14 @@ class SprunkiGamePlayer:
         return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
 
     def _execute_pyautogui_single_click(self, click_x, click_y, domain_adj):
+        if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+            self._last_manual_input_result = QualityGateResult.failure(
+                "manual_profile_input_target_mismatch",
+                status="UNKNOWN",
+                retryable=True,
+                message="PyAutoGUI click is disabled while a manual profile is active.",
+            )
+            return False
         # 🔥 KIỂM TRA AN TOÀN TỌA ĐỘ TRƯỚC KHI THỰC HIỆN
         if not self._are_coords_safe(click_x, click_y):
             print("   ❌ PyAutoGUI click bị hủy do tọa độ không an toàn.")
@@ -16836,6 +19748,18 @@ class SprunkiGamePlayer:
             target_slot = self._find_slot_by_index(center_slot_index)
             if not target_slot:
                 return False
+
+            manual_layout = self._resolve_manual_layout_for_input(
+                current_icon,
+                target_slot,
+            )
+            if manual_layout is False:
+                print(
+                    f"🛑 Manual layout could not be refreshed for showcase icon {icon_index}."
+                )
+                return False
+            if manual_layout:
+                current_icon, target_slot, _manual_context = manual_layout
 
             showcase_context = {"operation": "icon_showcase", "icon_index": icon_index, "mode": mode}
 
@@ -17586,28 +20510,85 @@ class SprunkiGamePlayer:
         """Prepare game for playing with enhanced setup"""
         try:
             print("ðŸŽ¯ Preparing game for enhanced workflow...")
-            
-            # Clean mouse state
-            self.ensure_mouse_released()
+
+            manual_context = getattr(
+                self,
+                "_active_manual_profile_context",
+                None,
+            )
+            # Do not send OS-level mouse events while a manual profile is
+            # active.  The exact CDP session owns all profile-coordinate
+            # input; the input wrapper itself verifies/release-bounds the
+            # gesture on that page.
+            if isinstance(manual_context, dict):
+                print("   - Manual profile active: skipping screen-level mouse cleanup.")
+            else:
+                self.ensure_mouse_released()
             
             # Warm-up first icon
             if self.config is not None:  # âœ… Kiá»ƒm tra config khÃ´ng None
                 layout = self.config['layout']
                 if layout['icons']:
                     first_icon = layout['icons'][0]
+                    if isinstance(manual_context, dict):
+                        refreshed_context, refresh_result = (
+                            self._refresh_manual_profile_context_if_needed(
+                                manual_context
+                            )
+                        )
+                        if not refreshed_context:
+                            self._last_manual_input_result = refresh_result
+                            print(
+                                "🛑 Manual profile warm-up blocked: active geometry "
+                                "could not be verified."
+                            )
+                            return False
+                        manual_context = refreshed_context
+                        first_icon = self._manual_layout_entry_by_index(
+                            (manual_context.get("profile") or {}).get("layout") or {},
+                            "icons",
+                            first_icon.get("index"),
+                        )
+                        if not first_icon:
+                            print("🛑 Manual profile warm-up icon index is unavailable.")
+                            return False
                     print("ðŸŽ¯ Warming up first icon...")
                     
                     # âœ… DI CHUYá»‚N Táº¤T Cáº¢ CODE VÃ€O TRONG KHá»I IF
                     warm_x, warm_y = first_icon['x'], first_icon['y']  # â† BÃ¢y giá» an toÃ n
                     
-                    pyautogui.moveTo(warm_x, warm_y, duration=random.uniform(0.3, 0.5))
+                    if isinstance(manual_context, dict):
+                        if not self._execute_cdp_manual_mouse_move(
+                            warm_x,
+                            warm_y,
+                            manual_context,
+                        ):
+                            return False
+                    else:
+                        pyautogui.moveTo(warm_x, warm_y, duration=random.uniform(0.3, 0.5))
                     self.smart_delay(0.3, 0.1)
                     
                     # Micro-movement - CÅ¨NG CHÃNH XÃC
                     offset_x, offset_y = warm_x + 8, warm_y + 8  # â† BÃ¢y giá» an toÃ n
-                    pyautogui.moveTo(offset_x, offset_y, duration=0.15)
+                    if isinstance(manual_context, dict):
+                        if not self._execute_cdp_manual_mouse_move(
+                            offset_x,
+                            offset_y,
+                            manual_context,
+                        ):
+                            return False
+                    else:
+                        pyautogui.moveTo(offset_x, offset_y, duration=0.15)
                     self.smart_delay(0.2, 0.05)
-                    pyautogui.moveTo(warm_x, warm_y, duration=0.15)  # â† BÃ¢y giá» an toÃ n
+                    if isinstance(manual_context, dict):
+                        if not self._execute_cdp_manual_mouse_move(
+                            warm_x,
+                            warm_y,
+                            manual_context,
+                        ):
+                            return False
+                    else:
+                        pyautogui.moveTo(warm_x, warm_y, duration=0.15)  # â† BÃ¢y giá» an toÃ n
                     self.smart_delay(0.3, 0.1)
                 else:
                     print("âš ï¸ No icons available for warm-up")
@@ -17618,6 +20599,18 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print("Error in game preparation: " + str(e))
+            if isinstance(getattr(self, "_active_manual_profile_context", None), dict):
+                self._last_manual_input_result = QualityGateResult.failure(
+                    "manual_profile_input_target_mismatch",
+                    status="UNKNOWN",
+                    retryable=True,
+                    evidence={"error": str(e)},
+                    message="Manual profile warm-up raised before input was verified.",
+                )
+                return False
+            # Preserve the legacy automatic-flow contract: callers that do
+            # not use a manual profile may continue to the live runtime gate.
+            return None
 
     # ================================================================
     # == WORKFLOW METHODS (redirected to enhanced versions) ==
@@ -17768,6 +20761,18 @@ class SprunkiGamePlayer:
                 
                 current_icon = icons[icon_index]
                 target_slot = slots[slot_position]
+
+                manual_layout = self._resolve_manual_layout_for_input(
+                    current_icon,
+                    target_slot,
+                )
+                if manual_layout is False:
+                    print(
+                        f"🛑 Manual layout could not be refreshed for remix icon {icon_index}."
+                    )
+                    return False
+                if manual_layout:
+                    current_icon, target_slot, _manual_context = manual_layout
 
                 drag_result = self.corrected_drag_and_drop(
                     current_icon,
@@ -18956,6 +21961,16 @@ class SprunkiGamePlayer:
             target_slot = self._find_slot_by_index(3)
             if not target_slot:
                 return False
+
+            manual_layout = self._resolve_manual_layout_for_input(
+                bonus_chars[0],
+                target_slot,
+                icon_key="bonus",
+            )
+            if manual_layout is False:
+                return False
+            if manual_layout:
+                _first_bonus, target_slot, _manual_context = manual_layout
             
             emoji = "🌟" if mode == "Normal" else "👻"
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} BONUS SHOWCASE")
@@ -18970,6 +21985,16 @@ class SprunkiGamePlayer:
             for bonus_index, bonus_char in enumerate(bonus_chars):
                 if self.stop_event.is_set():
                     break
+
+                manual_layout = self._resolve_manual_layout_for_input(
+                    bonus_char,
+                    target_slot,
+                    icon_key="bonus",
+                )
+                if manual_layout is False:
+                    return False
+                if manual_layout:
+                    bonus_char, target_slot, _manual_context = manual_layout
                 
                 if progress_callback:
                     progress_callback(f"{emoji} Showcasing {mode} bonus {bonus_index + 1}")
@@ -19237,6 +22262,15 @@ class SprunkiGamePlayer:
             target_slot = self._find_slot_by_index(center_slot_index)
             if not target_slot:
                 return False
+
+            manual_layout = self._resolve_manual_layout_for_input(
+                horror_icon,
+                target_slot,
+            )
+            if manual_layout is False:
+                return False
+            if manual_layout:
+                horror_icon, target_slot, _manual_context = manual_layout
             
             if progress_callback:
                 progress_callback("ðŸ‘» Triggering Horror Mode with verification...")
