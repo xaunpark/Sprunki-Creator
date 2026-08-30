@@ -1,0 +1,261 @@
+{
+  "version": 2,
+  "sourceUrl": "https://www.cocrea.world/@mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered",
+  "canonicalUrl": "https://www.cocrea.world/@mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered",
+  "urlKey": "mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "coordinateSpace": "screen_1920x1080_with_menu",
+  "prepareActions": [
+    {
+      "type": "click",
+      "x": 1093,
+      "y": 557,
+      "delayMs": 2015,
+      "pressDurationMs": 94
+    }
+  ],
+  "prepareTiming": {
+    "endDelayMs": 4547,
+    "durationMs": 6562
+  },
+  "layout": {
+    "icons": [
+      {
+        "index": 0,
+        "label": "n-1",
+        "x": 343,
+        "y": 810
+      },
+      {
+        "index": 1,
+        "label": "n-2",
+        "x": 469,
+        "y": 818
+      },
+      {
+        "index": 2,
+        "label": "n-3",
+        "x": 580,
+        "y": 821
+      },
+      {
+        "index": 3,
+        "label": "n-4",
+        "x": 697,
+        "y": 818
+      },
+      {
+        "index": 4,
+        "label": "n-5",
+        "x": 813,
+        "y": 819
+      },
+      {
+        "index": 5,
+        "label": "n-6",
+        "x": 961,
+        "y": 818
+      },
+      {
+        "index": 6,
+        "label": "n-7",
+        "x": 1077,
+        "y": 817
+      },
+      {
+        "index": 7,
+        "label": "n-8",
+        "x": 1187,
+        "y": 820
+      },
+      {
+        "index": 8,
+        "label": "n-9",
+        "x": 1306,
+        "y": 813
+      },
+      {
+        "index": 9,
+        "label": "n-10",
+        "x": 1414,
+        "y": 814
+      },
+      {
+        "index": 10,
+        "label": "n-11",
+        "x": 349,
+        "y": 929
+      },
+      {
+        "index": 11,
+        "label": "n-12",
+        "x": 471,
+        "y": 927
+      },
+      {
+        "index": 12,
+        "label": "n-13",
+        "x": 583,
+        "y": 933
+      },
+      {
+        "index": 13,
+        "label": "n-14",
+        "x": 696,
+        "y": 924
+      },
+      {
+        "index": 14,
+        "label": "n-15",
+        "x": 807,
+        "y": 929
+      },
+      {
+        "index": 15,
+        "label": "n-16",
+        "x": 958,
+        "y": 928
+      },
+      {
+        "index": 16,
+        "label": "n-17",
+        "x": 1067,
+        "y": 922
+      },
+      {
+        "index": 17,
+        "label": "n-18",
+        "x": 1187,
+        "y": 929
+      },
+      {
+        "index": 18,
+        "label": "n-19",
+        "x": 1304,
+        "y": 932
+      },
+      {
+        "index": 19,
+        "label": "n-20",
+        "x": 1425,
+        "y": 929
+      }
+    ],
+    "slots": [
+      {
+        "index": 0,
+        "x": 171,
+        "y": 560
+      },
+      {
+        "index": 1,
+        "x": 334,
+        "y": 539
+      },
+      {
+        "index": 2,
+        "x": 505,
+        "y": 537
+      },
+      {
+        "index": 3,
+        "x": 668,
+        "y": 533
+      },
+      {
+        "index": 4,
+        "x": 831,
+        "y": 535
+      },
+      {
+        "index": 5,
+        "x": 999,
+        "y": 531
+      },
+      {
+        "index": 6,
+        "x": 1170,
+        "y": 518
+      },
+      {
+        "index": 7,
+        "x": 1333,
+        "y": 520
+      },
+      {
+        "index": 8,
+        "x": 1497,
+        "y": 520
+      },
+      {
+        "index": 9,
+        "x": 1664,
+        "y": 524
+      },
+      {
+        "index": 10,
+        "x": 1835,
+        "y": 525
+      }
+    ]
+  },
+  "settings": {
+    "gameControlType": "unknown"
+  },
+  "notes": "",
+  "captureGeometry": {
+    "pageViewport": {
+      "width": 1920.0,
+      "height": 1079.0,
+      "devicePixelRatio": 1.0
+    },
+    "canvasBounds": {
+      "left": 86.0,
+      "top": 29.438,
+      "width": 1842.0,
+      "height": 1036.125,
+      "right": 1928.0,
+      "bottom": 1065.562
+    },
+    "stageBounds": {
+      "left": 86.0,
+      "top": 29.438,
+      "width": 1842.0,
+      "height": 1036.125,
+      "right": 1928.0,
+      "bottom": 1065.562
+    },
+    "screenOrigin": {
+      "x": 8.0,
+      "y": 8.0
+    },
+    "devicePixelRatio": 1.0,
+    "targetId": "99C893FE45692E125D0CBF2EBF676486",
+    "frameId": "99C893FE45692E125D0CBF2EBF676486",
+    "pageIdentity": {
+      "href": "https://www.cocrea.world/@mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered",
+      "visibilityState": "visible",
+      "hidden": false,
+      "readyState": "complete",
+      "innerWidth": 1920,
+      "innerHeight": 1079,
+      "devicePixelRatio": 1,
+      "screenX": 8,
+      "screenY": 8,
+      "scrollX": 0,
+      "scrollY": 0,
+      "cdpTargetId": "99C893FE45692E125D0CBF2EBF676486",
+      "cdpTargetUrl": "https://www.cocrea.world/@mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered",
+      "frameId": "99C893FE45692E125D0CBF2EBF676486",
+      "frameHref": "https://www.cocrea.world/@mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered",
+      "frameName": "",
+      "isTopFrame": true
+    },
+    "capturedAt": "2026-08-30T09:03:20.721416Z"
+  },
+  "createdAt": "2026-08-30T09:03:20.721416Z",
+  "updatedAt": "2026-08-30T09:03:20.721416Z"
+}

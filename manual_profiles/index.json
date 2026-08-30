@@ -1,11 +1,13 @@
 {
   "version": 1,
-  "updatedAt": "2026-08-24T15:20:20.786909Z",
+  "updatedAt": "2026-08-30T09:03:20.959925Z",
   "canonicalUrls": {
     "https://www.cocrea.world/@Lucad0510/MyProject2cd": "profiles/1e3ebdafde41.json",
     "https://www.cocrea.world/@lucad0510/myproject2cd": "profiles/1e3ebdafde41.json",
     "https://www.cocrea.world/@arthur_blueyboy/TheFinalBrawl": "profiles/58943d451375.json",
     "https://www.cocrea.world/@arthur_blueyboy/thefinalbrawl": "profiles/58943d451375.json",
+    "https://www.cocrea.world/@SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas": "profiles/5e0206481bb8.json",
+    "https://www.cocrea.world/@sprunkisimontimeya/hyper-shiftedphase5tripleswappedthechoas": "profiles/5e0206481bb8.json",
     "https://www.cocrea.world/@Niki/SprunkeColorshifted": "profiles/a10022d7f785.json",
     "https://www.cocrea.world/@niki/sprunkecolorshifted": "profiles/a10022d7f785.json",
     "https://www.cocrea.world/@Lucad0510/MyProject2bb": "profiles/b0a88fb04dff.json",
@@ -18,14 +20,16 @@
     "https://www.cocrea.world/@arthur_blueyboy/jevintreatphase6": "profiles/d86c3486b0f2.json",
     "https://www.cocrea.world/@TheReal_AlexRuby/UntitledProject44": "profiles/f9df772bd1a3.json",
     "https://www.cocrea.world/@thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json",
-    "https://www.cocrea.world/@SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas": "profiles/5e0206481bb8.json",
-    "https://www.cocrea.world/@sprunkisimontimeya/hyper-shiftedphase5tripleswappedthechoas": "profiles/5e0206481bb8.json"
+    "https://www.cocrea.world/@mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered": "profiles/84fa3aa459f7.json",
+    "https://www.cocrea.world/@mellyied/spr-nkiantishiftedmellysretakeremastered": "profiles/84fa3aa459f7.json"
   },
   "urlKeys": {
     "Lucad0510/MyProject2cd": "profiles/1e3ebdafde41.json",
     "lucad0510/myproject2cd": "profiles/1e3ebdafde41.json",
     "arthur_blueyboy/TheFinalBrawl": "profiles/58943d451375.json",
     "arthur_blueyboy/thefinalbrawl": "profiles/58943d451375.json",
+    "SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas": "profiles/5e0206481bb8.json",
+    "sprunkisimontimeya/hyper-shiftedphase5tripleswappedthechoas": "profiles/5e0206481bb8.json",
     "Niki/SprunkeColorshifted": "profiles/a10022d7f785.json",
     "niki/sprunkecolorshifted": "profiles/a10022d7f785.json",
     "Lucad0510/MyProject2bb": "profiles/b0a88fb04dff.json",
@@ -38,7 +42,7 @@
     "arthur_blueyboy/jevintreatphase6": "profiles/d86c3486b0f2.json",
     "TheReal_AlexRuby/UntitledProject44": "profiles/f9df772bd1a3.json",
     "thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json",
-    "SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas": "profiles/5e0206481bb8.json",
-    "sprunkisimontimeya/hyper-shiftedphase5tripleswappedthechoas": "profiles/5e0206481bb8.json"
+    "mellyied/Spr-nkiAntiShiftedMELLYSRETAKERemastered": "profiles/84fa3aa459f7.json",
+    "mellyied/spr-nkiantishiftedmellysretakeremastered": "profiles/84fa3aa459f7.json"
   }
 }
