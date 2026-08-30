@@ -2180,30 +2180,11 @@ class SprunkiJSONGenerator:
                         )
                     return False, None, None
 
-                # ``navigate_and_prepare_game`` proves the stage transition;
-                # this shared gate is the explicit PREPARE_READY boundary for
-                # manual profiles and Skip Intro.  It never sends input.
-                prepare_ready = self.game_player.wait_for_prepare_ready()
-                if not prepare_ready:
-                    self.last_generation_result = prepare_ready
-                    self.game_player.cleanup_chrome_complete()
-                    return False, None, None
-
-                self._touch_watchdog_progress(
-                    "entry_ready",
-                    progress_token={"url": url, "stage": "game_entry_ready"},
-                    progress_source="json_generator",
-                )
-
-                # 🔧 SERVICE MODE FIX: Ensure window activation after game setup
-                print("🔧 Ensuring window activation after game setup...")
-                self.ensure_window_activation("post-game-setup")
-                self._touch_watchdog_progress(
-                    "window_ready",
-                    progress_token={"stage": "window_activation_completed"},
-                    progress_source="json_generator",
-                )
-
+                # Resolve the profile before the second, no-input readiness
+                # gate.  A valid manual profile must be visible in the entry
+                # evidence even when a post-Run probe needs the manual
+                # stale-loader exception; the profile still cannot send any
+                # input until the stage guard passes below.
                 manual_profile = None
                 manual_profile_source = None
                 manual_profile_context = None
@@ -2244,6 +2225,37 @@ class SprunkiJSONGenerator:
                     manual_profile_source = manual_resolution.profile
                     manual_profile_path = manual_resolution.path
                     print(f"🧭 Manual profile detected for this URL: {manual_profile_path}")
+
+                # ``navigate_and_prepare_game`` proves the stage transition;
+                # this shared gate is the explicit PREPARE_READY boundary for
+                # manual profiles and Skip Intro.  It never sends input.
+                try:
+                    prepare_ready = self.game_player.wait_for_prepare_ready(
+                        manual_profile=bool(manual_profile_source),
+                    )
+                except TypeError:
+                    # Compatibility with older player adapters used by
+                    # integrations/tests that still expose the old signature.
+                    prepare_ready = self.game_player.wait_for_prepare_ready()
+                if not prepare_ready:
+                    self.last_generation_result = prepare_ready
+                    self.game_player.cleanup_chrome_complete()
+                    return False, None, None
+
+                self._touch_watchdog_progress(
+                    "entry_ready",
+                    progress_token={"url": url, "stage": "game_entry_ready"},
+                    progress_source="json_generator",
+                )
+
+                # 🔧 SERVICE MODE FIX: Ensure window activation after game setup
+                print("🔧 Ensuring window activation after game setup...")
+                self.ensure_window_activation("post-game-setup")
+                self._touch_watchdog_progress(
+                    "window_ready",
+                    progress_token={"stage": "window_activation_completed"},
+                    progress_source="json_generator",
+                )
 
                 # OPTIMIZED: Single WebSocket approach like original working code
                 ws_url = self._get_websocket_url()

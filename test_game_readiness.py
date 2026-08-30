@@ -280,6 +280,28 @@ def test_stage_gate_requires_two_active_samples_before_prepare():
     assert player._read_game_readiness_probe.call_count == 3
 
 
+def test_manual_prepare_gate_ignores_completed_loader_text_after_stage_activation():
+    player = make_player([])
+    player._game_readiness_state = "STAGE_ACTIVE"
+    stale_loader_probe = readiness_probe(loading=True, percent=98)
+    stale_loader_probe["loading"].update({
+        "visibleIndicatorCount": 0,
+        "spinnerCount": 0,
+        "textSignal": True,
+    })
+    stale_loader_probe["stageActive"] = False
+    player._read_game_readiness_probe = Mock(side_effect=[
+        stale_loader_probe,
+        stale_loader_probe,
+    ])
+    with patch("sprunki_game_player.time.sleep", return_value=None):
+        result = player.wait_for_prepare_ready(manual_profile=True)
+
+    assert result.passed
+    assert result.evidence["manualProfileLoadingTextSuppressed"] is True
+    assert player._game_readiness_state == "PREPARE_READY"
+
+
 def test_playable_runtime_waits_for_late_icons_and_slots():
     player = make_player([])
     player._read_game_readiness_probe = Mock(side_effect=[

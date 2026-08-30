@@ -6231,7 +6231,53 @@ class SprunkiGamePlayer:
             print(f"âŒ Error in continuous monitoring: {e}")
             return False
 
-    def _wait_for_stage_active(self, timeout=None, stable_samples=2):
+    def _manual_profile_loading_text_is_stale(self, probe):
+        """Allow a post-Run manual path to ignore stale loader text only.
+
+        Some Cocrea players keep a completed ``Loading xx%`` label in the
+        stage DOM.  A validated manual profile may proceed when the stage is
+        already visible, the Run control is gone, the page is still bound to
+        the requested target, and no actual loading indicator is visible.
+        This is deliberately limited to a post-Run readiness state; initial
+        page loading continues to block input.
+        """
+        if not isinstance(probe, dict) or not self._game_probe_matches_current_page(probe):
+            return False
+        phase = str(getattr(self, "_game_readiness_state", "") or "").upper()
+        run_result = getattr(self, "_last_run_click_result", None)
+        run_transition_verified = bool(
+            isinstance(run_result, QualityGateResult) and run_result.passed
+        )
+        if (
+            phase not in {"RUN_CLICKED", "STAGE_ACTIVE", "PREPARE_READY", "PLAYABLE_RUNTIME"}
+            and not run_transition_verified
+        ):
+            return False
+        error_page = probe.get("errorPage") if isinstance(probe.get("errorPage"), dict) else {}
+        if error_page.get("detected"):
+            return False
+        stage = probe.get("stage") if isinstance(probe.get("stage"), dict) else {}
+        run = probe.get("runButton") if isinstance(probe.get("runButton"), dict) else {}
+        loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
+        runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+        try:
+            visible_indicators = int(
+                loading.get("visibleIndicatorCount", loading.get("spinnerCount", 0)) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            visible_indicators = 0
+        has_loader_signal = bool(
+            loading.get("textSignal") or loading.get("percent") is not None
+        )
+        return bool(
+            visible_indicators == 0 and
+            has_loader_signal and
+            stage.get("visible") and
+            not run.get("visible") and
+            (runtime.get("responding") or runtime.get("canvasReady"))
+        )
+
+    def _wait_for_stage_active(self, timeout=None, stable_samples=2, manual_profile=False):
         """Wait for the post-Run stage without sending premature input."""
         started_at = time.monotonic()
         configured_budget = getattr(self, "game_load_phase_timeout", 60.0)
@@ -6274,10 +6320,15 @@ class SprunkiGamePlayer:
                 run = probe.get("runButton") if isinstance(probe.get("runButton"), dict) else {}
                 loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
                 runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+                stale_loading_text = bool(
+                    manual_profile and self._manual_profile_loading_text_is_stale(probe)
+                )
                 active = bool(
                     self._game_probe_matches_current_page(probe) and
-                    probe.get("stageActive") and stage.get("visible") and
-                    not loading.get("active") and not run.get("visible") and
+                    (probe.get("stageActive") or stale_loading_text) and
+                    stage.get("visible") and
+                    (not loading.get("active") or stale_loading_text) and
+                    not run.get("visible") and
                     (runtime.get("responding") or runtime.get("canvasReady"))
                 )
                 signature = self._stable_watchdog_probe_token({
@@ -6286,7 +6337,7 @@ class SprunkiGamePlayer:
                     "canvasReady": runtime.get("canvasReady"),
                     "runtimeResponding": runtime.get("responding"),
                     "runFound": run.get("found"),
-                    "loading": loading.get("active"),
+                    "loading": bool(loading.get("active") and not stale_loading_text),
                 })
                 if active:
                     stable_count = stable_count + 1 if signature == last_signature else 1
@@ -6303,6 +6354,7 @@ class SprunkiGamePlayer:
                             load_status="stage_active",
                         )
                         evidence["stageStableSamples"] = stable_count
+                        evidence["manualProfileLoadingTextSuppressed"] = stale_loading_text
                         return QualityGateResult.pass_result(
                             evidence=evidence,
                             message="Post-Run stage is active and stable.",
@@ -6333,14 +6385,18 @@ class SprunkiGamePlayer:
             message="Run was dispatched, but the active game stage was not verified.",
         )
 
-    def wait_for_prepare_ready(self, timeout=None):
+    def wait_for_prepare_ready(self, timeout=None, manual_profile=False):
         """Public entry gate for manual profiles and Skip Intro actions."""
-        result = self._wait_for_stage_active(timeout=timeout, stable_samples=2)
+        result = self._wait_for_stage_active(
+            timeout=timeout,
+            stable_samples=2,
+            manual_profile=manual_profile,
+        )
         if result:
             self._game_readiness_state = "PREPARE_READY"
         return result
 
-    def _check_prepare_ready_for_input(self):
+    def _check_prepare_ready_for_input(self, manual_profile=False):
         """Perform one no-input guard immediately before prepare actions."""
         probe = self._read_game_readiness_probe()
         if isinstance(probe, dict):
@@ -6348,14 +6404,31 @@ class SprunkiGamePlayer:
             run = probe.get("runButton") if isinstance(probe.get("runButton"), dict) else {}
             loading = probe.get("loading") if isinstance(probe.get("loading"), dict) else {}
             runtime = probe.get("runtime") if isinstance(probe.get("runtime"), dict) else {}
+            stale_loading_text = bool(
+                manual_profile and self._manual_profile_loading_text_is_stale(probe)
+            )
+            stage_active = bool(
+                probe.get("stageActive") or
+                (
+                    stale_loading_text and
+                    stage.get("visible") and
+                    not run.get("visible") and
+                    (runtime.get("responding") or runtime.get("canvasReady"))
+                )
+            )
             if (
                 self._game_probe_matches_current_page(probe) and
-                probe.get("stageActive") and stage.get("visible") and
-                not run.get("visible") and not loading.get("active") and
+                stage_active and stage.get("visible") and
+                not run.get("visible") and
+                (not loading.get("active") or stale_loading_text) and
                 (runtime.get("responding") or runtime.get("canvasReady"))
             ):
                 result = QualityGateResult.pass_result(
-                    evidence={"prepareReady": True, "probe": probe},
+                    evidence={
+                        "prepareReady": True,
+                        "probe": probe,
+                        "manualProfileLoadingTextSuppressed": stale_loading_text,
+                    },
                     message="Prepare input is allowed on the active game stage.",
                 )
                 self._last_prepare_ready_result = result
@@ -6379,8 +6452,8 @@ class SprunkiGamePlayer:
 
         Without a manual profile, live VM icon/slot classification remains the
         authoritative gate.  With a validated runtime context, the profile is
-        authoritative for coordinates while the live VM is still required to
-        prove that the correct stage/runtime is responding.
+        authoritative for coordinates; only the exact page/stage readiness
+        probe remains required before using those coordinates.
         """
         manual_context = (
             manual_profile
@@ -6434,6 +6507,10 @@ class SprunkiGamePlayer:
         runtime_stable_observed = False
         previous_runtime_signature = None
         runtime_stable_count = 0
+        manual_runtime_observed = False
+        manual_runtime_stable_count = 0
+        manual_runtime_stable_observed = False
+        previous_manual_runtime_signature = None
 
         while time.monotonic() < deadline:
             if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
@@ -6450,6 +6527,10 @@ class SprunkiGamePlayer:
 
             probe_stage = (readiness_probe or {}).get("stage") if isinstance(readiness_probe, dict) else {}
             probe_runtime = (readiness_probe or {}).get("runtime") if isinstance(readiness_probe, dict) else {}
+            if not isinstance(probe_stage, dict):
+                probe_stage = {}
+            if not isinstance(probe_runtime, dict):
+                probe_runtime = {}
             probe_identity = (
                 (readiness_probe or {}).get("pageIdentity")
                 if isinstance(readiness_probe, dict)
@@ -6465,32 +6546,100 @@ class SprunkiGamePlayer:
                 "stageIdentity": probe_stage.get("identity"),
             })
 
+            # A validated manual profile is the coordinate/layout source.  A
+            # mod can legitimately expose a different Scratch VM shape (or
+            # no readable Icons/Polo targets) while its page and canvas are
+            # already playable.  Keep the safety boundary here, but do not
+            # make the name-based live layout detector a prerequisite for the
+            # manual path.
+            stale_loading_text = bool(
+                manual_layout_enabled and
+                self._manual_profile_loading_text_is_stale(readiness_probe)
+            )
+            effective_loading_active = bool(
+                loading.get("active") and not stale_loading_text
+            )
+            stage_runtime_ready = bool(
+                isinstance(readiness_probe, dict) and
+                self._game_probe_matches_current_page(readiness_probe) and
+                (
+                    readiness_probe.get("stageActive") or
+                    stale_loading_text
+                ) and
+                probe_stage.get("visible") and
+                (probe_runtime.get("responding") or probe_runtime.get("canvasReady"))
+            )
+            manual_runtime_signature = self._stable_watchdog_probe_token({
+                "pageIdentity": {
+                    "href": probe_identity.get("href") if isinstance(probe_identity, dict) else None,
+                    "targetId": probe_identity.get("cdpTargetId") if isinstance(probe_identity, dict) else None,
+                    "frameId": probe_identity.get("frameId") if isinstance(probe_identity, dict) else None,
+                },
+                "stageBounds": probe_stage.get("bounds"),
+                "stageIdentity": probe_stage.get("identity"),
+                "runtimeResponding": probe_runtime.get("responding"),
+                "canvasReady": probe_runtime.get("canvasReady"),
+                "runVisible": ((readiness_probe or {}).get("runButton") or {}).get("visible")
+                if isinstance(readiness_probe, dict)
+                else None,
+                "loadingActive": effective_loading_active,
+                "geometryToken": (manual_context or {}).get("geometryToken"),
+                "probeGeometryToken": probe_geometry_token,
+            })
+            manual_sample_ready = bool(
+                manual_layout_enabled and
+                stage_runtime_ready and
+                not effective_loading_active
+            )
+            if manual_layout_enabled:
+                if manual_sample_ready:
+                    manual_runtime_observed = True
+                    manual_runtime_stable_count = (
+                        manual_runtime_stable_count + 1
+                        if manual_runtime_signature == previous_manual_runtime_signature
+                        else 1
+                    )
+                    previous_manual_runtime_signature = manual_runtime_signature
+                    manual_runtime_stable_observed = (
+                        manual_runtime_stable_count >= required_samples
+                    )
+                else:
+                    manual_runtime_stable_count = 0
+                    previous_manual_runtime_signature = None
+                    manual_runtime_stable_observed = False
+
             ws = None
             state = None
-            try:
-                ws_url = self._get_websocket_url()
-                if ws_url:
-                    ws = websocket.create_connection(
-                        ws_url,
-                        timeout=getattr(self, "game_probe_timeout", 3.0),
-                    )
-                    try:
-                        state = self._evaluate_entry_state_via_ws(
-                            ws,
-                            timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
-                        )
-                    except TypeError:
-                        # Compatibility with older adapters exposing the
-                        # original one-argument runtime-state reader.
-                        state = self._evaluate_entry_state_via_ws(ws)
-            except Exception:
-                state = None
-            finally:
+            # Manual coordinates do not depend on the live VM's icon/slot
+            # naming.  Avoid repeatedly probing that optional detector here;
+            # it can be unavailable on otherwise playable mods and used to
+            # turn a coordinate fallback into a false failure.  Automatic
+            # mode keeps the historical VM probe and its strict counts.
+            if not manual_layout_enabled:
                 try:
-                    if ws:
-                        ws.close()
+                    ws_url = self._get_websocket_url()
+                    if ws_url:
+                        ws = websocket.create_connection(
+                            ws_url,
+                            timeout=getattr(self, "game_probe_timeout", 3.0),
+                        )
+                        try:
+                            state = self._evaluate_entry_state_via_ws(
+                                ws,
+                                timeout_seconds=getattr(self, "game_probe_timeout", 3.0),
+                            )
+                        except TypeError:
+                            # Compatibility with older adapters exposing the
+                            # original one-argument runtime-state reader.
+                            state = self._evaluate_entry_state_via_ws(ws)
                 except Exception:
-                    pass
+                    state = None
+                finally:
+                    try:
+                        if ws:
+                            ws.close()
+                    except Exception:
+                        pass
 
             if isinstance(state, dict):
                 last_state = state
@@ -6514,36 +6663,38 @@ class SprunkiGamePlayer:
                     else 1
                 )
                 previous_runtime_signature = runtime_signature
-                if not loading.get("active") and runtime_stable_count >= 2:
+                if not effective_loading_active and runtime_stable_count >= 2:
                     runtime_stable_observed = True
-                stage_runtime_ready = bool(
-                    isinstance(readiness_probe, dict) and
-                    self._game_probe_matches_current_page(readiness_probe) and
-                    readiness_probe.get("stageActive") and
-                    probe_stage.get("visible") and
-                    (probe_runtime.get("responding") or probe_runtime.get("canvasReady"))
-                )
-                playable = bool(
-                    state.get("ok") and
-                    stage_runtime_ready and
-                    not loading.get("active") and
-                    not open_indicators and
-                    (manual_layout_enabled or (icons > 0 and slots > 0))
-                )
-                signature = self._stable_watchdog_probe_token({
-                    "icons": icons,
-                    "slots": slots,
-                    "targetCount": state.get("targetCount"),
-                    "openIndicators": len(open_indicators),
-                    "loadingPercent": loading.get("percent"),
-                    "layoutSource": "manual_profile" if manual_layout_enabled else "runtime_detection",
-                    "geometryToken": (manual_context or {}).get("geometryToken"),
-                    "probeGeometryToken": probe_geometry_token,
-                })
-                if playable:
-                    stable_count = stable_count + 1 if signature == previous_signature else 1
-                    previous_signature = signature
-                    if stable_count >= required_samples:
+                if manual_layout_enabled:
+                    # Live state is optional evidence only.  The manual path
+                    # is accepted from the two stable, same-page stage
+                    # snapshots collected above plus its validated layout.
+                    playable = manual_sample_ready
+                    signature = manual_runtime_signature
+                    stable_count = manual_runtime_stable_count
+                else:
+                    playable = bool(
+                        state.get("ok") and
+                        stage_runtime_ready and
+                        not effective_loading_active and
+                        not open_indicators and
+                        icons > 0 and slots > 0
+                    )
+                    signature = self._stable_watchdog_probe_token({
+                        "icons": icons,
+                        "slots": slots,
+                        "targetCount": state.get("targetCount"),
+                        "openIndicators": len(open_indicators),
+                        "loadingPercent": loading.get("percent"),
+                        "layoutSource": "runtime_detection",
+                        "geometryToken": (manual_context or {}).get("geometryToken"),
+                        "probeGeometryToken": probe_geometry_token,
+                    })
+                    if playable:
+                        stable_count = stable_count + 1 if signature == previous_signature else 1
+                        previous_signature = signature
+
+                if playable and stable_count >= required_samples:
                         self._game_readiness_state = "PLAYABLE_RUNTIME"
                         evidence = {
                             "icons": icons,
@@ -6556,6 +6707,10 @@ class SprunkiGamePlayer:
                             "playButtons": int(state.get("playButtonCount") or 0),
                             "openIndicators": len(open_indicators),
                             "stableSamples": stable_count,
+                            "manualRuntimeProof": manual_layout_enabled,
+                            "runtimeStateAvailable": True,
+                            "stageRuntimeReady": stage_runtime_ready,
+                            "loadingTextSuppressed": stale_loading_text,
                             "probeAttempts": attempts,
                             "entryAttemptId": getattr(self, "_entry_attempt_id", None),
                             "pageIdentity": (last_probe or {}).get("pageIdentity", {}),
@@ -6591,8 +6746,64 @@ class SprunkiGamePlayer:
                             }
                         return result
                 else:
-                    stable_count = 0
-                    previous_signature = None
+                    if not manual_layout_enabled and not playable:
+                        stable_count = 0
+                        previous_signature = None
+
+            elif manual_layout_enabled and manual_sample_ready:
+                # The live VM/layout reader is intentionally optional for a
+                # manual profile.  A responsive, stable stage is sufficient
+                # to proceed with the profile's validated coordinates.
+                stable_count = manual_runtime_stable_count
+                if stable_count >= required_samples:
+                    self._game_readiness_state = "PLAYABLE_RUNTIME"
+                    evidence = {
+                        "icons": None,
+                        "slots": None,
+                        "liveIconCount": None,
+                        "liveSlotCount": None,
+                        "profileIconCount": profile_icons,
+                        "profileSlotCount": profile_slots,
+                        "layoutSource": "manual_profile",
+                        "playButtons": None,
+                        "openIndicators": None,
+                        "stableSamples": stable_count,
+                        "manualRuntimeProof": True,
+                        "runtimeStateAvailable": False,
+                        "stageRuntimeReady": stage_runtime_ready,
+                        "loadingTextSuppressed": stale_loading_text,
+                        "runtimeProofSource": "readiness_probe",
+                        "probeAttempts": attempts,
+                        "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+                        "pageIdentity": (last_probe or {}).get("pageIdentity", {}),
+                    }
+                    if manual_context:
+                        evidence["manualProfileResolution"] = manual_context.get("evidence") or {}
+                        evidence["geometryToken"] = manual_context.get("geometryToken")
+                        evidence["boardGeneration"] = manual_context.get(
+                            "boardGeneration",
+                            int(getattr(self, "_board_generation", 0) or 0),
+                        )
+                    entry_strategy = getattr(self, "entry_strategy", None)
+                    if not isinstance(entry_strategy, dict):
+                        entry_strategy = {"selected": None, "tested": [], "verification": UNKNOWN}
+                        self.entry_strategy = entry_strategy
+                    entry_strategy["runtimeState"] = evidence
+                    result = QualityGateResult.pass_result(
+                        evidence=evidence,
+                        message=(
+                            "Playable stage verified by stable page/canvas snapshots; "
+                            "manual profile supplies icon and slot coordinates."
+                        ),
+                    )
+                    entry_strategy["verification"] = result.status
+                    entry_strategy["verificationResult"] = result.as_dict()
+                    if not entry_strategy.get("selected"):
+                        entry_strategy["selected"] = {
+                            "strategy": "manual_profile",
+                            "reason": "stable_stage_runtime_with_manual_layout",
+                        }
+                    return result
 
             now = time.monotonic()
             if now >= deadline:
@@ -6600,17 +6811,22 @@ class SprunkiGamePlayer:
             delay = float(intervals[min(attempts - 1, len(intervals) - 1)])
             time.sleep(min(delay, max(0.0, deadline - now)))
 
-        last_icons = 0
-        last_slots = 0
+        last_icons = None if manual_layout_enabled else 0
+        last_slots = None if manual_layout_enabled else 0
         if isinstance(last_state, dict) and last_state.get("ok"):
             try:
                 last_icons = int(last_state.get("iconCount") or 0)
             except (TypeError, ValueError, OverflowError):
-                last_icons = 0
+                last_icons = None if manual_layout_enabled else 0
             try:
                 last_slots = int(last_state.get("slotCount") or 0)
             except (TypeError, ValueError, OverflowError):
-                last_slots = 0
+                last_slots = None if manual_layout_enabled else 0
+        if manual_layout_enabled:
+            runtime_observed = runtime_observed or manual_runtime_observed
+            runtime_stable_observed = (
+                runtime_stable_observed or manual_runtime_stable_observed
+            )
         evidence = {
             "icons": last_icons,
             "slots": last_slots,
@@ -6623,6 +6839,10 @@ class SprunkiGamePlayer:
             "runtimeObserved": runtime_observed,
             "runtimeStableObserved": runtime_stable_observed,
             "runtimeStableCount": runtime_stable_count,
+            "manualRuntimeObserved": manual_runtime_observed,
+            "manualRuntimeStableCount": manual_runtime_stable_count,
+            "manualRuntimeStableObserved": manual_runtime_stable_observed,
+            "runtimeProofSource": "readiness_probe" if manual_layout_enabled else "runtime_vm",
             "entryAttemptId": getattr(self, "_entry_attempt_id", None),
             "pageIdentity": (last_probe or {}).get("pageIdentity", {}) if isinstance(last_probe, dict) else {},
             "readinessProbe": last_probe or {},
@@ -6634,16 +6854,26 @@ class SprunkiGamePlayer:
                 "boardGeneration",
                 int(getattr(self, "_board_generation", 0) or 0),
             )
-        if not runtime_observed or not isinstance(last_state, dict):
+        if manual_layout_enabled:
+            if not manual_runtime_observed:
+                code = "post_run_runtime_not_ready"
+                message = "The manual-profile stage was not verified as active."
+            elif not manual_runtime_stable_observed:
+                code = "post_run_runtime_not_ready"
+                message = "The manual-profile stage did not provide stable snapshots."
+            else:
+                code = "post_run_runtime_not_ready"
+                message = "Manual-profile runtime signals did not produce two stable snapshots."
+        elif not runtime_observed or not isinstance(last_state, dict):
             code = "post_run_runtime_not_ready"
             message = "Playable runtime did not respond within the bounded budget."
         elif not runtime_stable_observed:
             code = "post_run_runtime_not_ready"
             message = "Runtime did not provide a stable post-prepare snapshot."
-        elif not manual_layout_enabled and last_icons <= 0:
+        elif last_icons <= 0:
             code = "no_icons"
             message = "Runtime became stable but exposed no playable icons."
-        elif not manual_layout_enabled and last_slots <= 0:
+        elif last_slots <= 0:
             code = "no_slots"
             message = "Runtime became stable but exposed no playable slots."
         else:
@@ -17294,7 +17524,10 @@ class SprunkiGamePlayer:
             )
             return False
 
-        prepare_gate = self._check_prepare_ready_for_input()
+        manual_profile_active = isinstance(manual_profile_context, dict)
+        prepare_gate = self._check_prepare_ready_for_input(
+            manual_profile=manual_profile_active,
+        )
         if not prepare_gate:
             print(
                 "🛑 Manual profile replay blocked before input: "
@@ -17356,7 +17589,9 @@ class SprunkiGamePlayer:
                 # Recovery replay is allowed to send its own bounded inputs,
                 # but no caller can silently send an extra input after this
                 # callback returns False.
-                if not self._check_prepare_ready_for_input():
+                if not self._check_prepare_ready_for_input(
+                    manual_profile=manual_profile_active,
+                ):
                     self._last_manual_input_result = getattr(
                         self,
                         "_last_prepare_ready_result",
@@ -18621,9 +18856,10 @@ class SprunkiGamePlayer:
                 )
                 self.cleanup_chrome_complete()
                 return False
-            # Containers and a Run button are only structural evidence.  The
-            # VM must expose real icons and slots in two stable snapshots
-            # before any recording starts; no fixed layout sleep is used.
+            # Containers and a Run button are only structural evidence.  In
+            # automatic mode the VM must expose real icons and slots in two
+            # stable snapshots; a validated manual profile supplies that
+            # layout source for manual mode.  No fixed layout sleep is used.
             runtime_entry = self._wait_for_playable_runtime_entry(
                 manual_profile=getattr(self, "_active_manual_profile_context", None),
             )

@@ -270,8 +270,96 @@ def test_manual_playable_gate_does_not_require_live_icon_slot_counts():
         )
 
     assert result.passed
-    assert result.evidence["liveIconCount"] == 0
-    assert result.evidence["liveSlotCount"] == 0
+    assert result.evidence["liveIconCount"] is None
+    assert result.evidence["liveSlotCount"] is None
+    assert result.evidence["profileIconCount"] == 1
+    assert result.evidence["profileSlotCount"] == 1
+
+
+def test_manual_playable_gate_does_not_fail_when_live_vm_state_is_unavailable():
+    player = object.__new__(SprunkiGamePlayer)
+    player.game_url = GAME_URL
+    player.game_load_phase_timeout = 0.1
+    player.game_entry_deadline = None
+    player._game_entry_deadline = None
+    player.game_readiness_poll_intervals = (0.001,)
+    player.stop_event = Mock(is_set=lambda: False)
+    player._entry_attempt_id = "entry-manual-no-live-state"
+    player.entry_strategy = {"selected": None, "tested": [], "verification": "UNKNOWN"}
+    player._last_game_readiness_probe = {}
+    player._get_websocket_url = Mock(return_value="ws://test")
+    player._read_game_readiness_probe = Mock(return_value={
+        "pageReady": True,
+        "pageIdentity": {"href": GAME_URL, "cdpTargetId": "target-1", "frameId": "frame-1"},
+        "stage": {
+            "visible": True,
+            "bounds": {"left": 0, "top": 0, "width": 640, "height": 360},
+            "identity": {"className": "game-stage"},
+        },
+        "stageActive": True,
+        "runButton": {"visible": False},
+        "loading": {"active": False},
+        "runtime": {"responding": False, "canvasReady": True},
+    })
+    player._evaluate_entry_state_via_ws = Mock(return_value=None)
+    context = {
+        "sourceProfile": make_profile(),
+        "profile": make_profile(),
+        "geometryToken": "stable",
+        "boardGeneration": 0,
+        "evidence": {"layoutSource": "manual_profile"},
+    }
+
+    with patch("sprunki_game_player.websocket.create_connection") as create_connection, \
+            patch("sprunki_game_player.time.sleep", return_value=None):
+        result = player._wait_for_playable_runtime_entry(
+            timeout=0.05,
+            manual_profile=context,
+        )
+
+    assert result.passed
+    assert result.evidence["layoutSource"] == "manual_profile"
+    assert result.evidence["runtimeProofSource"] == "readiness_probe"
+    assert result.evidence["runtimeStateAvailable"] is False
+    create_connection.assert_not_called()
+    player._evaluate_entry_state_via_ws.assert_not_called()
+
+
+def test_manual_playable_gate_ignores_name_based_live_panel_indicators():
+    player = object.__new__(SprunkiGamePlayer)
+    player.game_url = GAME_URL
+    player.game_load_phase_timeout = 0.1
+    player.game_entry_deadline = None
+    player._game_entry_deadline = None
+    player.game_readiness_poll_intervals = (0.001,)
+    player.stop_event = Mock(is_set=lambda: False)
+    player._entry_attempt_id = "entry-manual-panel-names"
+    player.entry_strategy = {"selected": None, "tested": [], "verification": "UNKNOWN"}
+    player._last_game_readiness_probe = {}
+    player._read_game_readiness_probe = Mock(return_value={
+        "pageReady": True,
+        "pageIdentity": {"href": GAME_URL},
+        "stage": {"visible": True, "bounds": {"left": 0, "top": 0, "width": 640, "height": 360}},
+        "stageActive": True,
+        "runButton": {"visible": False},
+        "loading": {"active": False},
+        "runtime": {"responding": True, "canvasReady": True},
+    })
+    context = {
+        "sourceProfile": make_profile(),
+        "profile": make_profile(),
+        "geometryToken": "stable",
+        "boardGeneration": 0,
+        "evidence": {"layoutSource": "manual_profile"},
+    }
+
+    with patch("sprunki_game_player.time.sleep", return_value=None):
+        result = player._wait_for_playable_runtime_entry(
+            timeout=0.05,
+            manual_profile=context,
+        )
+
+    assert result.passed
     assert result.evidence["profileIconCount"] == 1
     assert result.evidence["profileSlotCount"] == 1
 
