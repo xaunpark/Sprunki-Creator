@@ -2226,16 +2226,37 @@ class SprunkiJSONGenerator:
                     manual_profile_path = manual_resolution.path
                     print(f"🧭 Manual profile detected for this URL: {manual_profile_path}")
 
-                # ``navigate_and_prepare_game`` proves the stage transition;
-                # this shared gate is the explicit PREPARE_READY boundary for
-                # manual profiles and Skip Intro.  It never sends input.
-                try:
-                    prepare_ready = self.game_player.wait_for_prepare_ready(
-                        manual_profile=bool(manual_profile_source),
+                # ``navigate_and_prepare_game`` has already verified the
+                # exact Run transition, active stage and fullscreen boundary.
+                # A manual profile owns the next entry action; do not put it
+                # behind a second generic readiness probe that may not
+                # understand this mod's runtime shape.  The profile context
+                # and exact CDP input guard below still have to pass before
+                # any prepare coordinate is dispatched.
+                if manual_profile_source:
+                    prepare_ready = QualityGateResult.pass_result(
+                        evidence={
+                            "prepareReady": True,
+                            "prepareReadySource": "verified_game_entry_deferred_to_manual_profile",
+                            "entryEvidence": (
+                                self.game_player.last_setup_result.as_dict()
+                                if isinstance(
+                                    getattr(self.game_player, "last_setup_result", None),
+                                    QualityGateResult,
+                                )
+                                else {}
+                            ),
+                        },
+                        message=(
+                            "Manual profile owns post-Run entry; generic prepare "
+                            "readiness is deferred to its exact geometry guard."
+                        ),
                     )
-                except TypeError:
-                    # Compatibility with older player adapters used by
-                    # integrations/tests that still expose the old signature.
+                    print(
+                        "🧭 Manual profile owns post-Run entry; "
+                        "deferring generic PREPARE_READY probe."
+                    )
+                else:
                     prepare_ready = self.game_player.wait_for_prepare_ready()
                 if not prepare_ready:
                     self.last_generation_result = prepare_ready

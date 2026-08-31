@@ -325,6 +325,75 @@ def test_manual_playable_gate_does_not_fail_when_live_vm_state_is_unavailable():
     player._evaluate_entry_state_via_ws.assert_not_called()
 
 
+def test_manual_playable_gate_accepts_verified_prepare_context_without_readiness_probe():
+    player = object.__new__(SprunkiGamePlayer)
+    player.game_url = GAME_URL
+    player._cdp_target_id = "target-1"
+    player._entry_attempt_id = "entry-manual-context-proof"
+    player._board_generation = 0
+    player.entry_strategy = {"selected": None, "tested": [], "verification": "UNKNOWN"}
+    player._last_manual_input_result = QualityGateResult.pass_result(
+        message="manual prepare completed"
+    )
+    player._read_game_readiness_probe = Mock(side_effect=AssertionError("probe must not run"))
+    profile = make_profile()
+    context = {
+        "sourceProfile": profile,
+        "profile": profile,
+        "geometryToken": "stable",
+        "boardGeneration": 0,
+        "geometry": make_geometry(target_id="target-1"),
+        "evidence": {
+            "layoutSource": "manual_profile",
+            "pageIdentity": make_geometry(target_id="target-1")["pageIdentity"],
+        },
+    }
+    player._active_manual_profile_context = context
+
+    with patch.object(
+        player,
+        "_refresh_manual_profile_context_if_needed",
+        return_value=(context, QualityGateResult.pass_result()),
+    ):
+        result = player._wait_for_playable_runtime_entry(
+            timeout=0.05,
+            manual_profile=context,
+        )
+
+    assert result.passed
+    assert result.evidence["runtimeProofSource"] == "manual_profile_context_after_prepare"
+    assert result.evidence["liveIconCount"] is None
+    assert result.evidence["liveSlotCount"] is None
+
+
+def test_manual_prepare_guard_uses_entry_and_geometry_when_probe_is_inconclusive():
+    player = object.__new__(SprunkiGamePlayer)
+    player.game_url = GAME_URL
+    player._cdp_target_id = "target-1"
+    player.last_setup_result = QualityGateResult.pass_result(
+        message="Run and stage were verified"
+    )
+    player._read_game_readiness_probe = Mock(return_value=None)
+    player._last_prepare_ready_result = None
+    profile = make_profile()
+    context = {
+        "sourceProfile": profile,
+        "profile": profile,
+        "geometryToken": "stable",
+        "geometry": make_geometry(target_id="target-1"),
+        "evidence": {
+            "layoutSource": "manual_profile",
+            "pageIdentity": make_geometry(target_id="target-1")["pageIdentity"],
+        },
+    }
+    player._active_manual_profile_context = context
+
+    result = player._check_prepare_ready_for_input(manual_profile=True)
+
+    assert result.passed
+    assert result.evidence["prepareReadySource"] == "manual_profile_entry_and_geometry"
+
+
 def test_manual_playable_gate_ignores_name_based_live_panel_indicators():
     player = object.__new__(SprunkiGamePlayer)
     player.game_url = GAME_URL

@@ -3835,6 +3835,7 @@ class SprunkiGamePlayer:
         self._last_game_probe_context_id = None
         self._last_run_click_result = None
         self._last_prepare_ready_result = None
+        self._last_manual_input_result = None
         self._last_game_weak_token = None
         self._game_readiness_state = "PAGE_READY"
         self._invalidate_cdp_target()
@@ -6396,6 +6397,48 @@ class SprunkiGamePlayer:
             self._game_readiness_state = "PREPARE_READY"
         return result
 
+    def _manual_profile_context_is_current(self, context=None):
+        """Check the already-bound manual context without reading live VM state."""
+        if not isinstance(context, dict):
+            return False
+        geometry = context.get("geometry") if isinstance(context.get("geometry"), dict) else {}
+        identity = geometry.get("pageIdentity") if isinstance(geometry.get("pageIdentity"), dict) else {}
+        target_id = geometry.get("targetId")
+        frame_id = geometry.get("frameId")
+        href = identity.get("href")
+        expected_url = self._normalize_cdp_page_url(
+            getattr(self, "game_url", None)
+            or ((self.config or {}).get("currentUrl")
+                if isinstance(getattr(self, "config", None), dict)
+                else None)
+        )
+        if not target_id or not frame_id or not href:
+            return False
+        if expected_url and not self._cdp_urls_match(href, expected_url):
+            return False
+        if identity.get("visibilityState") is not None and identity.get("visibilityState") != "visible":
+            return False
+        if bool(identity.get("hidden")):
+            return False
+        bound_target_id = getattr(self, "_cdp_target_id", None)
+        if bound_target_id and bound_target_id != target_id:
+            return False
+        return bool(
+            self._manual_bounds(
+                geometry.get("canvasBounds") or geometry.get("stageBounds")
+            )
+        )
+
+    def _manual_profile_entry_proof_available(self):
+        """Return whether the current entry already passed Run/stage setup."""
+        for candidate in (
+            getattr(self, "last_setup_result", None),
+            getattr(self, "_last_run_click_result", None),
+        ):
+            if isinstance(candidate, QualityGateResult) and candidate.passed:
+                return True
+        return False
+
     def _check_prepare_ready_for_input(self, manual_profile=False):
         """Perform one no-input guard immediately before prepare actions."""
         probe = self._read_game_readiness_probe()
@@ -6433,6 +6476,52 @@ class SprunkiGamePlayer:
                 )
                 self._last_prepare_ready_result = result
                 return result
+
+        # A validated manual profile has already been bound to the current
+        # stage/canvas and exact CDP target.  Some mods expose no usable
+        # readiness/runtime signal after Run (or leave stale loader text), so
+        # the generic DOM gate can be inconclusive even though the recorded
+        # prepare action is the correct next input.  Accept that narrow path
+        # only after the entry itself passed and the manual geometry remains
+        # current; never use it for automatic input.
+        if manual_profile:
+            manual_context = getattr(self, "_active_manual_profile_context", None)
+            probe_error = bool(
+                isinstance(probe, dict) and
+                (probe.get("errorPage") or {}).get("detected")
+            )
+            loading = probe.get("loading") if isinstance(probe, dict) and isinstance(
+                probe.get("loading"), dict
+            ) else {}
+            try:
+                visible_indicators = max(
+                    int(loading.get("visibleIndicatorCount", 0) or 0),
+                    int(loading.get("spinnerCount", 0) or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                visible_indicators = 0
+            if (
+                not probe_error and
+                visible_indicators == 0 and
+                self._manual_profile_entry_proof_available() and
+                self._manual_profile_context_is_current(manual_context)
+            ):
+                context_evidence = dict(manual_context.get("evidence") or {})
+                result = QualityGateResult.pass_result(
+                    evidence={
+                        "prepareReady": True,
+                        "prepareReadySource": "manual_profile_entry_and_geometry",
+                        "probe": probe or {},
+                        **context_evidence,
+                    },
+                    message=(
+                        "Manual prepare input is allowed by the verified entry "
+                        "boundary and current profile geometry."
+                    ),
+                )
+                self._last_prepare_ready_result = result
+                return result
+
         result = QualityGateResult.failure(
             "post_run_runtime_not_ready",
             retryable=True,
@@ -6440,6 +6529,68 @@ class SprunkiGamePlayer:
             message="Prepare input was blocked because the game stage is still loading or unknown.",
         )
         self._last_prepare_ready_result = result
+        return result
+
+    def _manual_profile_runtime_context_pass(
+        self,
+        manual_context,
+        profile_icons,
+        profile_slots,
+    ):
+        """Accept a completed manual prepare without requiring live VM layout."""
+        evidence = {
+            "icons": None,
+            "slots": None,
+            "liveIconCount": None,
+            "liveSlotCount": None,
+            "profileIconCount": profile_icons,
+            "profileSlotCount": profile_slots,
+            "layoutSource": "manual_profile",
+            "playButtons": None,
+            "openIndicators": None,
+            "stableSamples": 1,
+            "manualRuntimeProof": True,
+            "runtimeStateAvailable": False,
+            "stageRuntimeReady": True,
+            "loadingTextSuppressed": False,
+            "runtimeProofSource": "manual_profile_context_after_prepare",
+            "manualPrepareVerified": True,
+            "probeAttempts": 0,
+            "entryAttemptId": getattr(self, "_entry_attempt_id", None),
+            "pageIdentity": (manual_context.get("evidence") or {}).get(
+                "pageIdentity", {}
+            ),
+        }
+        evidence["manualProfileResolution"] = manual_context.get("evidence") or {}
+        evidence["geometryToken"] = manual_context.get("geometryToken")
+        evidence["boardGeneration"] = manual_context.get(
+            "boardGeneration",
+            int(getattr(self, "_board_generation", 0) or 0),
+        )
+        self._game_readiness_state = "PLAYABLE_RUNTIME"
+        entry_strategy = getattr(self, "entry_strategy", None)
+        if not isinstance(entry_strategy, dict):
+            entry_strategy = {"selected": None, "tested": [], "verification": UNKNOWN}
+            self.entry_strategy = entry_strategy
+        entry_strategy["runtimeState"] = evidence
+        result = QualityGateResult.pass_result(
+            evidence=evidence,
+            message=(
+                "Manual prepare completed; profile coordinates are used because "
+                "live icon/slot layout is unavailable."
+            ),
+        )
+        entry_strategy["verification"] = result.status
+        entry_strategy["verificationResult"] = result.as_dict()
+        if not entry_strategy.get("selected"):
+            entry_strategy["selected"] = {
+                "strategy": "manual_profile",
+                "reason": "manual_prepare_with_profile_layout",
+            }
+        print(
+            "✅ Manual profile runtime accepted: using profile icon/slot coordinates; "
+            "live VM icon/slot detection is optional."
+        )
         return result
 
     def _wait_for_playable_runtime_entry(
@@ -6482,6 +6633,45 @@ class SprunkiGamePlayer:
                 },
                 message="Manual profile does not contain a playable icon/slot layout.",
             )
+
+        # Once the manual prepare timeline has completed, the exact profile
+        # input session and its stable canvas geometry are the authoritative
+        # entry proof.  Do not spend another bounded wait on a live VM
+        # icon/slot detector that this mod does not expose.
+        manual_prepare_result = getattr(self, "_last_manual_input_result", None)
+        if (
+            manual_layout_enabled and
+            manual_context and
+            isinstance(manual_prepare_result, QualityGateResult) and
+            manual_prepare_result.passed
+        ):
+            refreshed_context, refresh_result = (
+                self._refresh_manual_profile_context_if_needed(manual_context)
+            )
+            if not refreshed_context:
+                return refresh_result
+            refreshed_profile = refreshed_context.get("profile") or {}
+            refreshed_layout = refreshed_profile.get("layout") or {}
+            refreshed_icons = len(refreshed_layout.get("icons") or [])
+            refreshed_slots = len(refreshed_layout.get("slots") or [])
+            if refreshed_icons <= 0 or refreshed_slots <= 0:
+                return QualityGateResult.failure(
+                    "manual_profile_invalid",
+                    retryable=False,
+                    evidence={
+                        "layoutSource": "manual_profile",
+                        "profileIconCount": refreshed_icons,
+                        "profileSlotCount": refreshed_slots,
+                        "manualProfileResolution": refreshed_context.get("evidence") or {},
+                    },
+                    message="Manual profile layout became invalid after prepare.",
+                )
+            return self._manual_profile_runtime_context_pass(
+                refreshed_context,
+                refreshed_icons,
+                refreshed_slots,
+            )
+
         started_at = time.monotonic()
         configured_budget = getattr(self, "game_load_phase_timeout", 60.0)
         try:
