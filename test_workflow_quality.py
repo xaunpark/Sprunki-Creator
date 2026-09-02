@@ -622,7 +622,10 @@ class WorkflowQualityTests(unittest.TestCase):
             }
         }
         player.stop_event = threading.Event()
-        player.empty_board_baseline = {"characters": None, "putted": None}
+        # This fixture has no setup-time anchor, so use an explicit zero
+        # baseline.  Production learns potentially non-zero values from the
+        # trusted post-setup anchor.
+        player.empty_board_baseline = {"characters": 0, "putted": 0}
         player.verifier_targeted_cleanup_recovery_enabled = True
         player.verifier_targeted_cleanup_recovery_rounds = 1
         player.verifier_targeted_cleanup_radius_px = 24
@@ -864,16 +867,94 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertTrue(clean_verified)
         self.assertTrue(all(check["clean"] for check in clean_checks.values()))
 
-    def test_nonzero_empty_board_baseline_can_never_make_board_clean(self):
+    def test_nonzero_empty_board_baseline_is_used_for_board_clean(self):
+        from placement_verifier import PlacementSnapshot
         from sprunki_game_player import SprunkiGamePlayer
 
         player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
         player.empty_board_baseline = {"characters": None, "putted": None}
 
-        player._remember_empty_board_baseline(1, 1)
-
+        self.assertFalse(player._remember_empty_board_baseline(155, 1, 0, True))
         self.assertEqual(player.empty_board_baseline, {"characters": None, "putted": None})
+
+        self.assertTrue(
+            player._remember_empty_board_baseline(
+                155,
+                3,
+                1,
+                False,
+                known_empty=True,
+                source="test_anchor",
+            )
+        )
+        self.assertEqual(player.empty_board_baseline, {"characters": 155, "putted": 3})
+
+        clean_state = PlacementSnapshot(
+            1.0,
+            characters_count=155,
+            putted_count=3,
+            # Polos is intentionally noisy/advisory for calibrated boards.
+            polos=("0", "1"),
+            characters=("1",) * 155 + ("0",),
+        )
+        occupied_state = PlacementSnapshot(
+            2.0,
+            characters_count=156,
+            putted_count=4,
+            polos=("0", "0"),
+            characters=("1",) * 156,
+        )
+
+        self.assertTrue(player._is_board_state_clean(clean_state))
+        self.assertFalse(player._is_board_state_clean(occupied_state))
         self.assertFalse(player._is_board_count_clean(0, 1))
+
+    def test_empty_board_requires_an_anchor_when_baseline_values_are_unknown(self):
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.empty_board_baseline = {"characters": None, "putted": None}
+        state = PlacementSnapshot(
+            1.0,
+            characters_count=155,
+            putted_count=3,
+            polos=("0", "0"),
+        )
+
+        self.assertFalse(player._is_board_state_clean(state))
+        self.assertIsNone(player._get_board_progress_count(state))
+
+    def test_progress_count_is_relative_to_nonzero_baseline_and_ignores_polos(self):
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.empty_board_baseline = {"characters": 155, "putted": 3}
+
+        self.assertEqual(
+            player._get_board_progress_count(
+                PlacementSnapshot(
+                    1.0,
+                    characters_count=155,
+                    putted_count=3,
+                    polos=("1",) * 20,
+                )
+            ),
+            0,
+        )
+        self.assertEqual(
+            player._get_board_progress_count(
+                PlacementSnapshot(1.0, characters_count=156, putted_count=3)
+            ),
+            1,
+        )
+        self.assertEqual(
+            player._get_board_progress_count(
+                PlacementSnapshot(1.0, characters_count=155, putted_count=4)
+            ),
+            1,
+        )
 
     def test_carpet_click_firewall_allows_only_polo_hitbox(self):
         from sprunki_game_player import SprunkiGamePlayer
@@ -1244,6 +1325,79 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual(
             [call.args[2]["return_method"] for call in calls],
             [method for _, method in methods],
+        )
+
+    def test_aggregate_return_is_final_without_board_clean_gate(self):
+        import threading
+
+        from placement_verifier import OperationContext, OperationResult, OperationStatus
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.stop_event = threading.Event()
+        context = OperationContext.begin("return", 4, max_input_attempts=10)
+        aggregate_result = OperationResult(
+            OperationStatus.VERIFIED,
+            operation_id=context.operation_id,
+            direction="return",
+            message="soft_aggregate_transition_verified",
+            evidence=("putted_characters",),
+            details={
+                "targetSpecific": False,
+                "aggregateFallback": True,
+                "softVerified": True,
+                "aggregateSignals": ["putted"],
+            },
+        )
+
+        result = player._finalize_target_return_boundary(
+            context,
+            aggregate_result,
+            baseline=None,
+            use_cdp=False,
+            current_snapshot=None,
+            extra_details={"returnPhase": 1, "returnMethod": "precision"},
+        )
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertTrue(result.details["returnTransitionVerified"])
+        self.assertEqual(result.details["cleanupVerificationScope"], "aggregate")
+        self.assertEqual(result.details["returnMethod"], "precision")
+        self.assertTrue(result.details["boardCleanupDeferred"])
+
+    def test_board_progress_count_prefers_occupancy_signals_over_characters_inventory(self):
+        from placement_verifier import PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+
+        self.assertEqual(
+            player._get_board_progress_count(
+                PlacementSnapshot(
+                    1.0,
+                    characters_count=155,
+                    putted_count=0,
+                    polos=("0", "0"),
+                )
+            ),
+            0,
+        )
+        self.assertEqual(
+            player._get_board_progress_count(
+                PlacementSnapshot(
+                    1.0,
+                    characters_count=156,
+                    putted_count=1,
+                    polos=("0", "0"),
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            player._get_board_progress_count(
+                PlacementSnapshot(1.0, characters_count=155)
+            ),
+            155,
         )
 
     def test_final_empty_evaluation_rejects_residual_polos_or_characters(self):

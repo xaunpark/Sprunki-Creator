@@ -67,6 +67,121 @@ class PlacementVerifierTests(unittest.TestCase):
         self.assertEqual(evaluation.details["polosChangedIndices"], [1])
         self.assertEqual(evaluation.details["targetSlot"], 0)
 
+    def test_return_transition_accepts_any_one_aggregate_signal(self):
+        cases = (
+            (
+                "characters",
+                _snapshot(1, 1, characters_count=156, putted_characters=1),
+                _snapshot(2, 2, characters_count=155, putted_characters=1),
+                "characters",
+            ),
+            (
+                "putted",
+                _snapshot(1, 1, characters_count=156, putted_characters=1),
+                _snapshot(2, 2, characters_count=156, putted_characters=0),
+                "putted",
+            ),
+            (
+                "polos",
+                _snapshot(1, 1, polos_array=["0", "1"]),
+                _snapshot(2, 2, polos_array=["0", "0"]),
+                "polos_occupied_count",
+            ),
+        )
+
+        for name, before, after, expected_signal in cases:
+            with self.subTest(signal=name):
+                evaluation = evaluate_transition(before, after, "return", 0)
+
+                self.assertEqual(evaluation.status, OperationStatus.VERIFIED)
+                self.assertFalse(evaluation.target_specific)
+                self.assertTrue(evaluation.aggregate_fallback)
+                self.assertIn(expected_signal, evaluation.details["aggregateSignals"])
+                self.assertEqual(
+                    evaluation.details["verificationPolicy"],
+                    "any_valid_aggregate_signal",
+                )
+
+    def test_noisy_polos_can_be_excluded_from_transition_proof(self):
+        before = _snapshot(1, 1, polos_array=["0"])
+        after = _snapshot(2, 2, polos_array=["1"])
+
+        evaluation = evaluate_transition(
+            before,
+            after,
+            "place",
+            0,
+            allow_polos=False,
+        )
+
+        self.assertNotEqual(evaluation.status, OperationStatus.VERIFIED)
+        self.assertFalse(evaluation.aggregate_fallback)
+        self.assertNotIn("polos_aggregate_delta", evaluation.evidence)
+        self.assertFalse(evaluation.details["polosSignalAllowed"])
+
+    def test_stability_key_can_ignore_noisy_polos(self):
+        clock = FakeClock()
+        snapshots = iter(
+            [
+                _snapshot(1, 1, characters_count=155, polos_array=["0"]),
+                _snapshot(2, 2, characters_count=155, polos_array=["0", "1"]),
+            ]
+        )
+
+        stable = wait_for_stable_snapshot(
+            lambda: next(snapshots),
+            timeout_ms=500,
+            poll_ms=50,
+            stable_samples=2,
+            stability_key_fn=lambda snapshot: snapshot.characters_count,
+            clock=clock.now,
+            sleep_fn=clock.sleep,
+        )
+
+        self.assertIsNotNone(stable)
+        self.assertEqual(stable.sequence, 2)
+
+    def test_return_transition_keeps_all_matching_signals_as_diagnostics(self):
+        before = _snapshot(
+            1,
+            1,
+            characters_count=156,
+            putted_characters=1,
+            polos_array=["0", "0", "1"],
+        )
+        after = _snapshot(
+            2,
+            2,
+            characters_count=155,
+            putted_characters=0,
+            polos_array=["0", "0", "0"],
+        )
+
+        evaluation = evaluate_transition(before, after, "return", 0)
+
+        self.assertEqual(evaluation.status, OperationStatus.VERIFIED)
+        self.assertEqual(
+            set(evaluation.details["aggregateSignals"]),
+            {"characters", "putted", "polos_occupied_count"},
+        )
+        self.assertEqual(
+            set(evaluation.evidence),
+            {"characters_count", "putted_characters", "polos_aggregate_delta"},
+        )
+
+    def test_progress_verifier_accepts_canonical_aggregate_signal_metadata(self):
+        result = OperationResult(
+            OperationStatus.VERIFIED,
+            direction="return",
+            details={
+                "targetSpecific": False,
+                "aggregateSignals": ["putted"],
+                "verificationPolicy": "any_valid_aggregate_signal",
+            },
+        )
+
+        self.assertTrue(is_progress_verified(result))
+
     def test_polos_summary_normalizes_supported_tokens_and_rejects_unknown(self):
         summary = summarize_polos([0, False, "", 1, True])
 
@@ -478,6 +593,46 @@ class PlacementVerifierTests(unittest.TestCase):
         self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
         self.assertIn("atomic_empty_after_return_transition", result.message)
         self.assertIn("characters_empty_after_return", result.evidence)
+
+    def test_late_return_read_timeout_accepts_one_transition_with_other_signal_residual(self):
+        clock = FakeClock()
+        baseline = _snapshot(
+            1,
+            1,
+            characters_count=156,
+            putted_characters=1,
+            polos_array=["0", "1"],
+        )
+        reads = iter([
+            _snapshot(
+                2,
+                2,
+                characters_count=156,
+                putted_characters=0,
+                polos_array=["0", "1"],
+            ),
+            None,
+            None,
+            None,
+        ])
+
+        result = observe_until_verified(
+            baseline,
+            lambda: next(reads),
+            "return",
+            4,
+            timeout_ms=3000,
+            poll_ms=50,
+            clock=clock.now,
+            sleep_fn=clock.sleep,
+        )
+
+        self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
+        self.assertIn("putted", result.details["aggregateSignals"])
+        self.assertEqual(
+            result.details["verificationPolicy"],
+            "any_valid_aggregate_signal",
+        )
 
     def test_failure_signature_and_no_progress_stop_after_two_cycles(self):
         context = OperationContext.begin("place", 0, max_input_attempts=5)

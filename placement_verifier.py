@@ -691,6 +691,7 @@ def evaluate_transition(
     target_slot: Optional[int] = None,
     *,
     allow_aggregate_fallback: bool = True,
+    allow_polos: bool = True,
 ) -> TransitionEvaluation:
     """Evaluate one before/after pair without issuing input.
 
@@ -717,11 +718,23 @@ def evaluate_transition(
         and after_snapshot.characters_count is not None
         and after_snapshot.characters_count - before_snapshot.characters_count == delta
     )
-    polos_transition = compare_polos_transition(
-        before_snapshot.polos,
-        after_snapshot.polos,
-        direction,
-    )
+    if allow_polos:
+        polos_transition = compare_polos_transition(
+            before_snapshot.polos,
+            after_snapshot.polos,
+            direction,
+        )
+    else:
+        # A Polos array may be present but noisy for a particular mod.  Keep
+        # its raw values in the snapshot diagnostics, but do not let a random
+        # bit flip prove or disprove a physical operation.
+        polos_transition = PolosTransition(
+            "ignored",
+            delta,
+            before_snapshot.polos_occupied_count,
+            after_snapshot.polos_occupied_count,
+            reason="signal_untrusted",
+        )
     details: Dict[str, Any] = {
         "before": before_snapshot.semantic_key(),
         "after": after_snapshot.semantic_key(),
@@ -735,6 +748,7 @@ def evaluate_transition(
             before_snapshot.polos_signal_valid is True
             and after_snapshot.polos_signal_valid is True
         ),
+        "polosSignalAllowed": bool(allow_polos),
         "beforePolosLength": before_snapshot.polos_length,
         "afterPolosLength": after_snapshot.polos_length,
         "polosChangedIndices": list(polos_transition.changed_indices),
@@ -764,25 +778,30 @@ def evaluate_transition(
         "single_return",
     }
 
-    # Prefer target-specific evidence whenever it exists.  Putted remains the
-    # first aggregate signal, followed by Characters and then the strict
-    # one-bit Polos aggregate transition.
+    aggregate_evidence = []
+    aggregate_signals = []
+    if putted_changed:
+        aggregate_evidence.append("putted_characters")
+        aggregate_signals.append("putted")
+    if characters_changed:
+        aggregate_evidence.append("characters_count")
+        aggregate_signals.append("characters")
+    if polos_aggregate_changed:
+        aggregate_evidence.append("polos_aggregate_delta")
+        aggregate_signals.append("polos_occupied_count")
+
+    # Prefer target-specific evidence whenever it exists.  The aggregate
+    # signals are alternatives, not three predicates that must all be true:
+    # one exact counter/Polos transition is enough to prove one-icon progress.
     if target_evidence:
         evidence = list(target_evidence)
-        if putted_changed:
-            evidence.insert(0, "putted_characters")
+        evidence = aggregate_evidence + evidence
         target_specific = True
         aggregate_fallback = False
-    elif putted_changed and allow_aggregate_fallback:
-        evidence = ["putted_characters"]
-        target_specific = False
-        aggregate_fallback = True
-    elif characters_changed and allow_aggregate_fallback:
-        evidence = ["characters_count"]
-        target_specific = False
-        aggregate_fallback = True
-    elif polos_aggregate_changed and allow_aggregate_fallback:
-        evidence = ["polos_aggregate_delta"]
+    elif aggregate_evidence and allow_aggregate_fallback:
+        # Any one of the exact aggregate transitions is sufficient.  Keep all
+        # matching evidence for diagnostics when more than one signal moved.
+        evidence = aggregate_evidence
         target_specific = False
         aggregate_fallback = True
     else:
@@ -795,6 +814,8 @@ def evaluate_transition(
             "targetSpecific": target_specific,
             "aggregateFallback": aggregate_fallback,
             "softVerified": bool(aggregate_fallback and not target_specific),
+            "aggregateSignals": aggregate_signals,
+            "verificationPolicy": "any_valid_aggregate_signal",
             "verificationConfidence": "strong" if target_specific else "soft",
         }
     )
@@ -958,7 +979,15 @@ def is_progress_verified(result: Optional[OperationResult], *, allow_soft: bool 
     if not allow_soft:
         return False
     details = result.details or {}
-    return bool(details.get("softVerified") or details.get("aggregateFallback"))
+    # ``aggregateSignals`` is the canonical diagnostic record for the
+    # one-of-three policy.  The explicit soft flags remain supported for
+    # legacy callers, but a valid aggregate result must not be rejected just
+    # because an older wrapper omitted one of those flags.
+    return bool(
+        details.get("softVerified")
+        or details.get("aggregateFallback")
+        or details.get("aggregateSignals")
+    )
 
 
 def classify_precondition(
@@ -1003,6 +1032,7 @@ def wait_for_stable_snapshot(
     poll_ms: int = 50,
     stable_samples: int = 2,
     stop_requested: Optional[Callable[[], bool]] = None,
+    stability_key_fn: Optional[Callable[[PlacementSnapshot], Any]] = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> Optional[PlacementSnapshot]:
@@ -1012,6 +1042,7 @@ def wait_for_stable_snapshot(
     deadline = clock() + safe_timeout_ms / 1000.0
     max_polls = max(3, int(math.ceil(safe_timeout_ms / safe_poll_ms)) + 3)
     previous: Optional[PlacementSnapshot] = None
+    key_fn = stability_key_fn or (lambda snapshot: snapshot.stability_key())
     stable = 0
     consecutive_failures = 0
     polls = 0
@@ -1025,7 +1056,7 @@ def wait_for_stable_snapshot(
             current = None
         if current is not None and current.has_known_signal and not current.read_error:
             consecutive_failures = 0
-            if previous is not None and current.stability_key() == previous.stability_key():
+            if previous is not None and key_fn(current) == key_fn(previous):
                 stable += 1
             else:
                 stable = 1
@@ -1085,19 +1116,51 @@ def _confirmed_empty_return_result(
         if before_value is None and after_value is None:
             continue
         if before_value is None or after_value is None:
-            return None
+            # A missing signal is not a veto.  The verifier intentionally
+            # accepts a complete transition from any other available signal.
+            continue
         signal_pairs.append((before_value, after_value, name))
 
-    if not signal_pairs or not any(before_value > 0 for before_value, _, _ in signal_pairs):
-        return None
-    if any(after_value != 0 for _, after_value, _ in signal_pairs):
+    expected_delta = _expected_delta(direction)
+    matched_signals = [
+        name
+        for before_value, after_value, name in signal_pairs
+        if after_value - before_value == expected_delta
+    ]
+    # Polos is validated as a strict one-bit transition; its position is
+    # never treated as the requested layout slot.
+    if (
+        details.get("polosTransition") == "single_return"
+        and details.get("polosSignalValid") is True
+        and "polos" not in matched_signals
+    ):
+        before_value = _optional_int(details.get("beforePolosOccupiedCount"))
+        after_value = _optional_int(details.get("afterPolosOccupiedCount"))
+        if (
+            before_value is not None
+            and after_value is not None
+            and after_value - before_value == expected_delta
+        ):
+            matched_signals.append("polos")
+
+    if not matched_signals:
         return None
 
     details["targetSpecific"] = last_eval.target_specific
     details["aggregateFallback"] = last_eval.aggregate_fallback
+    details["aggregateSignals"] = matched_signals
+    details["verificationPolicy"] = "any_valid_aggregate_signal"
     details["stabilityFallback"] = "atomic_empty_after_return"
+    after_by_signal = {
+        name: after_value for _, after_value, name in signal_pairs
+    }
     empty_evidence = tuple(
-        f"{name}_empty_after_return" for _, _, name in signal_pairs
+        (
+            f"{name}_empty_after_return"
+            if after_by_signal.get(name) == 0
+            else f"{name}_transition_after_return"
+        )
+        for name in matched_signals
     )
     return OperationResult(
         OperationStatus.ALREADY_EMPTY,
@@ -1121,6 +1184,8 @@ def observe_until_verified(
     poll_ms: int = 50,
     stable_samples: int = 2,
     stop_requested: Optional[Callable[[], bool]] = None,
+    allow_polos: bool = True,
+    stability_key_fn: Optional[Callable[[PlacementSnapshot], Any]] = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     context: Optional[OperationContext] = None,
@@ -1261,10 +1326,20 @@ def observe_until_verified(
                 current,
                 direction,
                 target_slot,
+                allow_polos=allow_polos,
             )
             if last_eval.status == OperationStatus.VERIFIED:
                 transition_seen = True
-                current_key = current.stability_key()
+                # Polos-only evidence must stabilize on its own raw array;
+                # other evidence can use the caller's core signal key, which
+                # intentionally tolerates noisy Polos updates.
+                if set(last_eval.evidence or ()) <= {"polos_aggregate_delta"}:
+                    current_key = current.stability_key()
+                else:
+                    key_fn = stability_key_fn or (
+                        lambda snapshot: snapshot.stability_key()
+                    )
+                    current_key = key_fn(current)
                 if current_key == previous_key:
                     stable += 1
                 else:

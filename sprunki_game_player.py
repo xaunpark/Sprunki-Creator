@@ -319,6 +319,14 @@ class SprunkiGamePlayer:
         self._last_cleanup_boundary_result = None
         self._board_contamination_carried_forward = False
         self._active_remix_final_cleanup_optional = False
+        self._polos_signal_profile = {
+            "status": "UNKNOWN",
+            "windows": 0,
+            "stableWindows": 0,
+            "noisyWindows": 0,
+            "unknownWindows": 0,
+        }
+        self._polos_signal_window_status = "UNKNOWN"
         self._physical_input_context = None
         self._batch_reconnect_attempts = 0
         self._batch_snapshot_sequence = 0
@@ -336,12 +344,15 @@ class SprunkiGamePlayer:
         self._workflow_placement_transactions: List[Dict[str, Any]] = []
 
         # Some mods keep permanent entries in the monitored Scratch arrays even
-        # when every visible slot is empty.  Learn that per-mod empty state from
-        # a verified return instead of assuming that an empty board means zero.
+        # when every visible slot is empty.  Learn that per-mod empty state
+        # from stable occupancy evidence instead of assuming that an empty
+        # board means Characters=0.
         self.empty_board_baseline = {
             'characters': None,
             'putted': None,
         }
+        self._empty_board_baseline_trusted = False
+        self._empty_board_baseline_source = None
 
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
@@ -727,6 +738,8 @@ class SprunkiGamePlayer:
             "message": getattr(result, "message", ""),
             "targetVerified": bool(getattr(result, "target_verified", False)),
             "cleanupVerificationScope": details.get("cleanupVerificationScope"),
+            "aggregateSignals": list(details.get("aggregateSignals") or []),
+            "verificationPolicy": details.get("verificationPolicy"),
             "operationId": context.operation_id,
         }
         try:
@@ -923,6 +936,21 @@ class SprunkiGamePlayer:
         if snapshot is None:
             return False
 
+        # A return operation is proven by one exact before/after transition
+        # from the available aggregate signals.  Do this before interpreting
+        # the post-action snapshot as an empty board: Characters can remain
+        # non-zero because it is also the icon-list/inventory signal.
+        if before_state is not None:
+            transition = evaluate_transition(
+                before_state,
+                snapshot,
+                "return",
+                target_slot_index,
+                allow_polos=self._polos_aggregate_allowed(),
+            )
+            if transition.status == OperationStatus.VERIFIED:
+                return True
+
         try:
             if self._is_board_state_clean(snapshot):
                 return True
@@ -960,6 +988,19 @@ class SprunkiGamePlayer:
         if before is None or after is None:
             return "unknown"
 
+        transition = evaluate_transition(
+            before,
+            after,
+            "return",
+            target_slot_index,
+            allow_polos=self._polos_aggregate_allowed(),
+        )
+        if transition.status == OperationStatus.VERIFIED:
+            if transition.target_specific:
+                return "target"
+            if transition.aggregate_fallback:
+                return "aggregate"
+
         before_target = self._return_target_occupancy(before, target_slot_index)
         after_target = self._return_target_occupancy(after, target_slot_index)
         if before_target == "occupied" and after_target == "empty":
@@ -983,11 +1024,28 @@ class SprunkiGamePlayer:
         if result.target_verified:
             return True
         details = result.details or {}
-        return bool(details.get("softVerified") or details.get("aggregateFallback"))
+        return bool(
+            details.get("softVerified")
+            or details.get("aggregateFallback")
+            or details.get("aggregateSignals")
+        )
+
+    @staticmethod
+    def _target_return_result_has_aggregate_evidence(result) -> bool:
+        """Return whether a result proves a return through aggregate telemetry."""
+        if result is None:
+            return False
+        details = result.details or {}
+        return bool(
+            details.get("aggregateSignals")
+            or details.get("softVerified")
+            or details.get("aggregateFallback")
+            or details.get("cleanupVerificationScope") == "aggregate"
+        )
 
     @staticmethod
     def _target_return_result_is_final(result) -> bool:
-        """Accept a return early only with target or whole-board proof."""
+        """Accept a return with target, board, or one aggregate proof."""
         if result is None or result.status not in {
             OperationStatus.VERIFIED,
             OperationStatus.ALREADY_EMPTY,
@@ -998,6 +1056,7 @@ class SprunkiGamePlayer:
             result.target_verified
             or details.get("cleanupVerificationScope") == "board"
             or details.get("boardEmptyVerified") is True
+            or SprunkiGamePlayer._target_return_result_has_aggregate_evidence(result)
         )
 
     def _remove_controls_config(self):
@@ -1235,6 +1294,9 @@ class SprunkiGamePlayer:
 
             if self._return_result_proves_completion(result):
                 details = dict(result.details or {})
+                aggregate_proof = self._target_return_result_has_aggregate_evidence(
+                    result
+                )
                 details.update({
                     "removeFirst": True,
                     "removeButtonAttempts": attempts,
@@ -1243,8 +1305,18 @@ class SprunkiGamePlayer:
                         "target" if result.target_verified else "unknown"
                     ),
                 })
+                if aggregate_proof and not result.target_verified:
+                    details.update(
+                        {
+                            "aggregateFallback": True,
+                            "softVerified": True,
+                            "cleanupVerificationScope": "aggregate",
+                        }
+                    )
                 if result.status == OperationStatus.ALREADY_EMPTY and not result.target_verified:
-                    details["cleanupVerificationScope"] = "board"
+                    details["cleanupVerificationScope"] = (
+                        "aggregate" if aggregate_proof else "board"
+                    )
                 return self._operation_result(
                     context,
                     result.status,
@@ -1317,6 +1389,8 @@ class SprunkiGamePlayer:
                         "removeFirst": True,
                         "removeButtonAttempts": attempts,
                         "targetSpecific": empty_scope == "target",
+                        "aggregateFallback": empty_scope == "aggregate",
+                        "softVerified": empty_scope == "aggregate",
                         "cleanupVerificationScope": empty_scope,
                     },
                     reads=context.read_count,
@@ -1526,16 +1600,114 @@ class SprunkiGamePlayer:
             return None
         return state
 
+    @staticmethod
+    def _placement_core_stability_key(snapshot):
+        """Return a settled-state key that tolerates noisy Polos arrays."""
+        snapshot = PlacementSnapshot.from_mapping(snapshot)
+        if snapshot is None:
+            return None
+        if any(
+            value is not None
+            for value in (
+                snapshot.characters_count,
+                snapshot.putted_count,
+                snapshot.characters,
+            )
+        ):
+            return (
+                "core",
+                snapshot.characters_count,
+                snapshot.putted_count,
+                snapshot.characters,
+                snapshot.read_error,
+            )
+        # A Polos-only mod still needs its sole signal to stabilize.
+        return ("polos_only", snapshot.stability_key())
+
+    def _reset_polos_signal_profile(self):
+        """Reset per-page Polos reliability without touching empty baselines."""
+        self._polos_signal_profile = {
+            "status": "UNKNOWN",
+            "windows": 0,
+            "stableWindows": 0,
+            "noisyWindows": 0,
+            "unknownWindows": 0,
+        }
+        self._polos_signal_window_status = "UNKNOWN"
+
+    def _record_polos_observation_window(self, samples):
+        """Classify Polos as stable or noisy for the latest read window."""
+        summaries = []
+        for sample in samples or []:
+            snapshot = PlacementSnapshot.from_mapping(sample)
+            if snapshot is None or snapshot.polos is None:
+                continue
+            summary = snapshot.polos_summary
+            summaries.append(
+                (summary.valid, summary.length, summary.occupied_count)
+            )
+
+        if len(summaries) < 2:
+            self._polos_signal_window_status = "UNKNOWN"
+            return
+
+        valid_summaries = all(
+            item[0] is True and item[2] is not None for item in summaries
+        )
+        window_status = (
+            "UNKNOWN"
+            if not valid_summaries
+            else "STABLE"
+            if all(item == summaries[0] for item in summaries)
+            else "NOISY"
+        )
+        profile = dict(getattr(self, "_polos_signal_profile", {}) or {})
+        profile["windows"] = int(profile.get("windows", 0) or 0) + 1
+        if window_status == "STABLE":
+            profile["stableWindows"] = int(profile.get("stableWindows", 0) or 0) + 1
+        elif window_status == "NOISY":
+            profile["noisyWindows"] = int(profile.get("noisyWindows", 0) or 0) + 1
+        else:
+            profile["unknownWindows"] = int(profile.get("unknownWindows", 0) or 0) + 1
+        profile["status"] = window_status
+        profile["lastSignature"] = list(summaries[-1])
+        self._polos_signal_profile = profile
+        self._polos_signal_window_status = window_status
+
+    def _polos_aggregate_allowed(self):
+        """Return whether Polos may participate in this operation's verifier."""
+        return getattr(self, "_polos_signal_window_status", "UNKNOWN") == "STABLE"
+
+    def _polos_reliability(self):
+        """Return Polos reliability as ``True``, ``False`` or ``None``.
+
+        ``UNKNOWN`` is different from ``NOISY``: an unclassified signal must
+        preserve legacy diagnostics, while a signal observed changing inside
+        one stable-read window is explicitly excluded from board proof.
+        """
+        status = str(
+            getattr(self, "_polos_signal_window_status", "UNKNOWN") or "UNKNOWN"
+        ).upper()
+        if status == "STABLE":
+            return True
+        if status == "NOISY":
+            return False
+        return None
+
     def _capture_stable_placement_snapshot(
         self,
         timeout_ms=None,
         context=None,
         stable_samples=None,
+        learn_empty_baseline=False,
+        baseline_source=None,
     ):
         if timeout_ms is None:
             timeout_ms = getattr(self, "verifier_snapshot_timeout_ms", 1500)
         if stable_samples is None:
             stable_samples = 2
+
+        samples = []
 
         def read_snapshot():
             # A state reader gets at most three consecutive failures for the
@@ -1544,20 +1716,31 @@ class SprunkiGamePlayer:
             if context is not None and not context.can_read_again():
                 return None
             snapshot = self._capture_placement_snapshot()
+            if snapshot is not None:
+                samples.append(snapshot)
             if context is not None:
                 context.register_read(snapshot)
             return snapshot
 
-        return wait_for_stable_snapshot(
+        snapshot = wait_for_stable_snapshot(
             read_snapshot,
             timeout_ms=timeout_ms,
             poll_ms=50,
             stable_samples=stable_samples,
+            stability_key_fn=self._placement_core_stability_key,
             stop_requested=lambda: getattr(self, "stop_event", None) is not None
             and self.stop_event.is_set() or (
                 context is not None and context.expired()
             ),
         )
+        self._record_polos_observation_window(samples)
+        if learn_empty_baseline:
+            self._learn_empty_board_baseline(
+                snapshot,
+                trusted_anchor=True,
+                source=baseline_source or "explicit_empty_anchor",
+            )
+        return snapshot
 
     def _cleanup_stable_sample_count(self):
         """Return the minimum stable-read count required by cleanup policy."""
@@ -1575,7 +1758,10 @@ class SprunkiGamePlayer:
         self.slot_offset_lookup.clear()
         self.working_systems = {"characters": None, "putted": None}
         self.last_operation_working_systems.clear()
-        self.empty_board_baseline = {"characters": None, "putted": None}
+        # Re-Run reloads the same mod.  Preserve the trusted empty anchor so
+        # non-zero Characters/Putted baselines can be checked after recovery;
+        # only the per-page Polos noise profile must be recalibrated.
+        self._reset_polos_signal_profile()
         self.last_target_slot_index = None
         self.last_successful_drag_details = {}
         self.last_operation_result = None
@@ -1659,9 +1845,24 @@ class SprunkiGamePlayer:
                 "reason": "snapshot_unavailable",
             }
 
-        _verified, checks = self._evaluate_empty_snapshot(snapshot)
+        _verified, checks = self._evaluate_empty_snapshot(
+            snapshot,
+            empty_board_baseline=getattr(self, "empty_board_baseline", None),
+            polos_reliable=self._polos_reliability(),
+        )
+        required_checks = self._required_empty_signal_checks(checks)
         baseline_snapshot = PlacementSnapshot.from_mapping(baseline)
-        required_signals = self._occupancy_signal_presence(baseline_snapshot)
+        # Polos is a diagnostic/advisory signal for calibrated boards.  Its
+        # temporary disappearance after recovery must not invalidate a clean
+        # Characters/Putted result; the calibrated core counters remain part
+        # of the boundary contract.
+        required_signals = {
+            name: present
+            for name, present in self._occupancy_signal_presence(
+                baseline_snapshot
+            ).items()
+            if name != "polos"
+        }
         missing_signals = [
             name
             for name, present in required_signals.items()
@@ -1678,19 +1879,19 @@ class SprunkiGamePlayer:
                 "reason": "post_restart_signal_missing",
             }
 
-        if not checks:
+        if not required_checks:
             return "UNKNOWN", {
                 "readable": True,
                 "checks": checks,
-                "reason": "cleanup_signal_unavailable",
+                "reason": "cleanup_calibration_unavailable",
             }
-        if any(check.get("clean") is None for check in checks.values()):
+        if any(check.get("clean") is None for check in required_checks.values()):
             return "UNKNOWN", {
                 "readable": True,
                 "checks": checks,
                 "reason": "cleanup_signal_unknown",
             }
-        clean_values = [check.get("clean") for check in checks.values()]
+        clean_values = [check.get("clean") for check in required_checks.values()]
         has_clean_signal = any(value is True for value in clean_values)
         has_dirty_signal = any(value is False for value in clean_values)
         if has_clean_signal and has_dirty_signal:
@@ -2222,18 +2423,55 @@ class SprunkiGamePlayer:
         current_snapshot=None,
         extra_details=None,
     ):
-        """Finish a target return through the board-level cleanup boundary.
+        """Finish a target return through the appropriate verification boundary.
 
-        Target transition proof is preserved in ``targetResult``.  It is not
-        sufficient to close a cleanup boundary by itself: the final board
-        snapshot still has to be CLEAN, otherwise targeted recovery and the
-        single Re-Run are owned by the same context.
+        A one-icon return can finish on an exact aggregate transition from
+        any one of Characters/Putted/Polos.  That proves the requested
+        physical return, but it does not prove that the whole board is empty,
+        so aggregate return success is returned without entering the
+        board-cleanup/Re-Run boundary.  Whole-board cleanup keeps its separate
+        strict verdict.
         """
         if context is None:
             return target_result or OperationResult(
                 OperationStatus.UNKNOWN,
                 direction="return",
                 message="return_cleanup_boundary_missing_context",
+            )
+
+        target_is_final = self._target_return_result_is_final(target_result)
+        aggregate_return_verified = bool(
+            target_is_final
+            and target_result is not None
+            and not target_result.target_verified
+            and self._target_return_result_has_aggregate_evidence(target_result)
+        )
+        if aggregate_return_verified:
+            # Do not reinterpret a valid one-icon transition as a failed
+            # whole-board cleanup merely because Characters remains non-zero.
+            # Preserve the method/phase metadata supplied by the caller so the
+            # completion event identifies the actual successful fallback.
+            aggregate_details = dict(target_result.details or {})
+            if extra_details:
+                aggregate_details.update(dict(extra_details))
+            aggregate_details.update(
+                {
+                    "targetSpecific": False,
+                    "aggregateFallback": True,
+                    "softVerified": True,
+                    "returnTransitionVerified": True,
+                    "verificationPolicy": "any_valid_aggregate_signal",
+                    "cleanupVerificationScope": "aggregate",
+                    "boardCleanupDeferred": True,
+                }
+            )
+            return self._operation_result(
+                context,
+                target_result.status,
+                target_result.message,
+                evidence=target_result.evidence,
+                details=aggregate_details,
+                reads=context.read_count,
             )
 
         final_snapshot = PlacementSnapshot.from_mapping(current_snapshot)
@@ -2257,7 +2495,6 @@ class SprunkiGamePlayer:
                 **state_evidence,
                 "reason": "rerun_not_verified_for_boundary",
             }
-        target_is_final = self._target_return_result_is_final(target_result)
         details = {
             "cleanupBoundaryId": self._ensure_cleanup_boundary(context),
             "boardGeneration": int(
@@ -8173,6 +8410,21 @@ class SprunkiGamePlayer:
                                 details={"attempts": attempts},
                             )
 
+                        # The nested return verifier already applies the
+                        # one-of-three aggregate policy.  Do not discard a
+                        # valid Characters/Putted/Polos transition merely
+                        # because this recovery loop has not yet observed a
+                        # globally clean board.
+                        if is_progress_verified(result, allow_soft=True):
+                            attempt["aggregateSignals"] = list(
+                                (result.details or {}).get("aggregateSignals") or []
+                            )
+                            attempt["verificationPolicy"] = (
+                                result.details or {}
+                            ).get("verificationPolicy")
+                            progressed = True
+                            break
+
                         after_state = self.get_comprehensive_slot_state()
                         if not after_state:
                             return self._operation_result(
@@ -9852,6 +10104,7 @@ class SprunkiGamePlayer:
                 state_after,
                 "return",
                 target_slot_index,
+                allow_polos=self._polos_aggregate_allowed(),
             )
             details = dict(evaluation.details)
             details.update({
@@ -9860,7 +10113,8 @@ class SprunkiGamePlayer:
                 "aggregate_fallback": evaluation.aggregate_fallback,
             })
             return (
-                evaluation.status == OperationStatus.VERIFIED and evaluation.target_specific,
+                evaluation.status == OperationStatus.VERIFIED
+                and (evaluation.target_specific or evaluation.aggregate_fallback),
                 evaluation.message,
                 details,
             )
@@ -10194,7 +10448,9 @@ class SprunkiGamePlayer:
     def validate_workflow_completion(self):
         """
         âœ… NEW: Validate workflow completion - UPDATED for Characters Array
-        FIXED: Chá»‰ sá»­ dá»¥ng Characters count validation
+        Characters is compared with the learned per-mod empty baseline when
+        available; Putted is compared with its own learned baseline and Polos
+        is advisory unless its latest read window is trusted.
         Returns: (is_complete, remaining_issues, recommendations)
         """
         try:
@@ -10211,22 +10467,37 @@ class SprunkiGamePlayer:
             if final_snapshot is None:
                 return False, ["Final placement state is UNKNOWN"], ["Retry cleanup and read the board again"]
 
-            is_complete, signal_checks = self._evaluate_empty_snapshot(final_snapshot)
-            if not signal_checks:
+            is_complete, signal_checks = self._evaluate_empty_snapshot(
+                final_snapshot,
+                empty_board_baseline=getattr(self, "empty_board_baseline", None),
+                polos_reliable=self._polos_reliability(),
+            )
+            required_checks = self._required_empty_signal_checks(signal_checks)
+            if not required_checks:
                 return False, ["Final placement state is UNKNOWN"], ["Manual verification needed"]
 
             issues = []
             recommendations = []
             if not is_complete:
-                for signal_name, check in signal_checks.items():
+                for signal_name, check in required_checks.items():
                     if check.get("clean") is False:
                         value = check.get("value")
+                        expected = check.get("expected")
                         if value is not None:
-                            issues.append(f"{signal_name} = {value} (expected empty)")
+                            if expected is not None:
+                                issues.append(
+                                    f"{signal_name} = {value} (expected {expected})"
+                                )
+                            else:
+                                issues.append(
+                                    f"{signal_name} = {value} (expected empty)"
+                                )
                         else:
                             issues.append(f"{signal_name} still reports occupied slots")
                     elif check.get("clean") is None:
                         issues.append(f"{signal_name} state is UNKNOWN")
+                if not issues:
+                    issues.append("No calibrated placement signal proves the board is empty")
                 recommendations.append("Run additional return operations")
             else:
                 print("âœ… All available placement signals report an empty board")
@@ -11536,6 +11807,8 @@ class SprunkiGamePlayer:
             poll_ms=50,
             stable_samples=getattr(self, "verifier_post_action_stable_samples", 1),
             stop_requested=lambda: self.stop_event.is_set(),
+            allow_polos=self._polos_aggregate_allowed(),
+            stability_key_fn=self._placement_core_stability_key,
             context=context,
         )
         result = self._operation_result(
@@ -12349,44 +12622,187 @@ class SprunkiGamePlayer:
             summary += f" [{'; '.join(indicator_names)}]"
         return summary
 
-    def _remember_empty_board_baseline(self, characters_count, putted_count):
-        """Record only an explicitly empty count for diagnostics.
+    @staticmethod
+    def _normalized_nonnegative_count(value):
+        """Return one safe non-negative integer count, or ``None``."""
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return normalized if normalized >= 0 else None
 
-        A successful *single-icon* return is not an empty-board observation.
-        Learning its remaining count (for example ``Putted=1``) made every
-        later board with one icon look clean.  Baselines are therefore never
-        allowed to contain a non-zero value, and the actual cleanup gate uses
-        exact zero independently of this diagnostic cache.
-        """
-        if characters_count == 0:
-            self.empty_board_baseline['characters'] = 0
-        if putted_count == 0:
-            self.empty_board_baseline['putted'] = 0
-        print(
-            "   Empty-board baseline updated: "
-            f"Characters={self.empty_board_baseline['characters']}, "
-            f"Putted={self.empty_board_baseline['putted']}"
+    @staticmethod
+    def _snapshot_has_calibratable_counts(snapshot):
+        """Return whether a snapshot exposes at least one valid counter."""
+        snapshot = PlacementSnapshot.from_mapping(snapshot)
+        if snapshot is None or snapshot.read_error:
+            return False
+        return any(
+            SprunkiGamePlayer._normalized_nonnegative_count(value) is not None
+            for value in (snapshot.characters_count, snapshot.putted_count)
         )
 
+    def _learn_empty_board_baseline(
+        self,
+        state,
+        *,
+        trusted_anchor=False,
+        source=None,
+    ):
+        """Learn per-signal empty values from an explicitly trusted anchor.
+
+        The caller must know that the board is empty from workflow state (for
+        example, the fresh post-setup page).  Runtime counters alone cannot
+        establish that fact because both Characters and Putted may have
+        non-zero empty baselines and Polos may be noisy.
+        """
+        if not trusted_anchor:
+            return False
+        snapshot = PlacementSnapshot.from_mapping(state)
+        if not self._snapshot_has_calibratable_counts(snapshot):
+            return False
+
+        baseline = getattr(self, "empty_board_baseline", None)
+        if not isinstance(baseline, dict):
+            baseline = {"characters": None, "putted": None}
+            self.empty_board_baseline = baseline
+        else:
+            baseline.setdefault("characters", None)
+            baseline.setdefault("putted", None)
+
+        changed = False
+        characters = self._normalized_nonnegative_count(snapshot.characters_count)
+        if characters is not None and baseline.get("characters") is None:
+            baseline["characters"] = characters
+            changed = True
+        putted = self._normalized_nonnegative_count(snapshot.putted_count)
+        if putted is not None and baseline.get("putted") is None:
+            baseline["putted"] = putted
+            changed = True
+
+        if changed or any(
+            baseline.get(name) is not None for name in ("characters", "putted")
+        ):
+            self._empty_board_baseline_trusted = True
+            if source:
+                self._empty_board_baseline_source = str(source)
+
+        if changed:
+            print(
+                "   Empty-board baseline learned from trusted empty anchor: "
+                f"Characters={baseline['characters']}, "
+                f"Putted={baseline['putted']}"
+                + (f", source={source}" if source else "")
+            )
+        return changed
+
+    def _remember_empty_board_baseline(
+        self,
+        characters_count,
+        putted_count,
+        polos_occupied_count=None,
+        polos_signal_valid=None,
+        *,
+        known_empty=False,
+        source=None,
+    ):
+        """Remember counter baselines only with explicit empty-board proof.
+
+        The optional Polos arguments are retained for compatibility but are
+        deliberately not used as proof: a noisy Polos value must never create
+        or reject an anchor.  A successful single-icon return is not by
+        itself a whole-board-empty observation.
+        """
+        if not known_empty:
+            return False
+
+        baseline = getattr(self, "empty_board_baseline", None)
+        if not isinstance(baseline, dict):
+            baseline = {"characters": None, "putted": None}
+            self.empty_board_baseline = baseline
+        else:
+            baseline.setdefault("characters", None)
+            baseline.setdefault("putted", None)
+
+        changed = False
+        characters = self._normalized_nonnegative_count(characters_count)
+        if characters is not None and baseline.get("characters") is None:
+            baseline["characters"] = characters
+            changed = True
+        putted = self._normalized_nonnegative_count(putted_count)
+        if putted is not None and baseline.get("putted") is None:
+            baseline["putted"] = putted
+            changed = True
+        if changed or any(
+            baseline.get(name) is not None for name in ("characters", "putted")
+        ):
+            self._empty_board_baseline_trusted = True
+            if source:
+                self._empty_board_baseline_source = str(source)
+        if changed:
+            print(
+                "   Empty-board baseline learned from trusted empty anchor: "
+                f"Characters={baseline['characters']}, "
+                f"Putted={baseline['putted']}"
+                + (f", source={source}" if source else "")
+            )
+        return changed
+
     def _get_board_progress_count(self, state):
-        """Return a conservative aggregate count, or None when unknown."""
+        """Return an occupancy count for bounded cleanup input.
+
+        When a trusted empty anchor exists, counts are measured relative to
+        that anchor.  Polos is intentionally excluded because its aggregate
+        value is not stable enough to bound a cleanup input.  Objects created
+        by legacy callers without an anchor retain the old compatibility
+        fallback.
+        """
         snapshot = PlacementSnapshot.from_mapping(state)
         if snapshot is None:
             return None
-        counts = [
+
+        baseline = getattr(self, "empty_board_baseline", None)
+        if isinstance(baseline, dict):
+            relative_counts = []
+            for name, current in (
+                ("characters", snapshot.characters_count),
+                ("putted", snapshot.putted_count),
+            ):
+                expected = self._normalized_nonnegative_count(baseline.get(name))
+                value = self._normalized_nonnegative_count(current)
+                if expected is None or value is None:
+                    continue
+                delta = value - expected
+                if delta >= 0:
+                    relative_counts.append(delta)
+            if not relative_counts:
+                return None
+            return max(relative_counts)
+
+        occupancy_counts = [
             count
             for count in (
-                snapshot.characters_count,
                 snapshot.putted_count,
                 snapshot.polos_occupied_count,
             )
             if count is not None and not isinstance(count, bool)
         ]
+        if occupancy_counts:
+            counts = occupancy_counts
+        elif snapshot.characters_count is not None and not isinstance(
+            snapshot.characters_count, bool
+        ):
+            counts = [snapshot.characters_count]
+        else:
+            counts = []
         if not counts:
             return None
         try:
-            # A stale lower signal must not hide an occupied icon during
-            # cleanup.  The highest known count is the safe bound.
+            # Among occupancy signals, the highest known count remains the
+            # safe bound.  Characters is used only when both occupancy
+            # signals are unavailable.
             return max(int(count) for count in counts)
         except (TypeError, ValueError, OverflowError):
             return None
@@ -12525,7 +12941,7 @@ class SprunkiGamePlayer:
                     break
 
             residual_values = []
-            for check in checks.values() if isinstance(checks, dict) else []:
+            for check in self._required_empty_signal_checks(checks).values():
                 if not isinstance(check, dict):
                     continue
                 for value_key in ("value", "active"):
@@ -12534,10 +12950,10 @@ class SprunkiGamePlayer:
                         continue
                     try:
                         normalized = int(value)
+                        expected = int(check.get("expected", 0))
                     except (TypeError, ValueError, OverflowError):
                         continue
-                    if normalized >= 0:
-                        residual_values.append(normalized)
+                    residual_values.append(abs(normalized - expected))
             residual_count = max(residual_values) if residual_values else None
             board_state = str(boundary.get("boardState") or "UNKNOWN").upper()
             if self._cleanup_boundary_result_is_verified(boundary):
@@ -12578,8 +12994,15 @@ class SprunkiGamePlayer:
                 "reason": "cleanup_state_read_error",
             }
 
-        verified_empty, checks = self._evaluate_empty_snapshot(snapshot)
-        if not checks or any(check.get("clean") is None for check in checks.values()):
+        verified_empty, checks = self._evaluate_empty_snapshot(
+            snapshot,
+            empty_board_baseline=getattr(self, "empty_board_baseline", None),
+            polos_reliable=self._polos_reliability(),
+        )
+        required_checks = self._required_empty_signal_checks(checks)
+        if not required_checks or any(
+            check.get("clean") is None for check in required_checks.values()
+        ):
             return {
                 **base_evidence,
                 "policyAccepted": False,
@@ -12589,77 +13012,39 @@ class SprunkiGamePlayer:
                 "reason": "cleanup_signal_unknown",
             }
 
-        signal_counts = {}
-        for name, value in (
-            ("characters", snapshot.characters_count),
-            ("putted", snapshot.putted_count),
-        ):
-            if value is None:
+        signal_residuals = {}
+        for name, check in required_checks.items():
+            values = [
+                check.get(value_key)
+                for value_key in ("value", "active")
+                if check.get(value_key) is not None
+                and not isinstance(check.get(value_key), bool)
+            ]
+            expected = check.get("expected")
+            if not values or expected is None:
                 continue
-            if isinstance(value, bool):
-                return {
-                    **base_evidence,
-                    "policyAccepted": False,
-                    "emptyVerified": False,
-                    "residualCount": None,
-                    "checks": checks,
-                    "reason": f"{name}_count_unknown",
-                }
             try:
-                normalized = int(value)
+                signal_residuals[name] = max(
+                    abs(int(value) - int(expected)) for value in values
+                )
             except (TypeError, ValueError, OverflowError):
-                normalized = None
-            if normalized is None or normalized < 0:
-                return {
-                    **base_evidence,
-                    "policyAccepted": False,
-                    "emptyVerified": False,
-                    "residualCount": None,
-                    "checks": checks,
-                    "reason": f"{name}_count_unknown",
-                }
-            signal_counts[name] = normalized
-
-        for name, values in (
-            ("polos", snapshot.polos),
-            ("characters_array", snapshot.characters),
-        ):
-            count = (
-                snapshot.polos_occupied_count
-                if name == "polos"
-                else self._occupancy_count_from_signal(values)
-            )
-            if count is None:
                 continue
-            signal_counts[name] = count
 
-        if not signal_counts:
-            return {
-                **base_evidence,
-                "policyAccepted": False,
-                "emptyVerified": False,
-                "residualCount": None,
-                "checks": checks,
-                "reason": "cleanup_signal_unavailable",
-            }
-
-        # Use the highest consistent signal as the safety bound.  A stale
-        # lower counter must never hide a still-occupied slot.
-        residual_count = max(signal_counts.values())
-        empty_verified = bool(verified_empty and residual_count == 0)
+        residual_count = max(signal_residuals.values()) if signal_residuals else None
+        empty_verified = bool(verified_empty)
         accepted = empty_verified
         return {
             **base_evidence,
             "policyAccepted": accepted,
             "emptyVerified": empty_verified,
             "residualCount": residual_count,
-            "signalCounts": signal_counts,
+            "signalResiduals": signal_residuals,
             "checks": checks,
             "reason": (
                 "cleanup_verified"
                 if empty_verified
                 else "residual_present"
-                if residual_count > 0
+                if residual_count is not None and residual_count > 0
                 else "cleanup_state_unknown"
             ),
         }
@@ -12689,16 +13074,36 @@ class SprunkiGamePlayer:
         return False
 
     @classmethod
-    def _evaluate_empty_snapshot(cls, snapshot):
+    def _evaluate_empty_snapshot(
+        cls,
+        snapshot,
+        empty_board_baseline=None,
+        polos_reliable=None,
+    ):
         """Evaluate all reliable occupancy signals in one snapshot.
 
         Missing signals are ignored because mods expose different subsets.
         A signal that is present but malformed is reported as UNKNOWN rather
-        than being silently treated as empty.
+        than being silently treated as empty.  Characters is compared with
+        the learned per-mod empty baseline when one is available; it is not
+        universally required to be zero.
         """
         snapshot = PlacementSnapshot.from_mapping(snapshot)
         if snapshot is None:
             return False, {}
+
+        baseline_supplied = isinstance(empty_board_baseline, dict)
+        baseline = (
+            empty_board_baseline
+            if baseline_supplied
+            else {}
+        )
+        expected_characters = cls._normalized_nonnegative_count(
+            baseline.get("characters")
+        )
+        expected_putted = cls._normalized_nonnegative_count(
+            baseline.get("putted")
+        )
 
         checks = {}
         for name, value in (
@@ -12707,17 +13112,49 @@ class SprunkiGamePlayer:
         ):
             if value is None:
                 continue
+            expected = (
+                expected_characters
+                if name == "characters"
+                else expected_putted
+            ) if baseline_supplied else 0
+            calibrated = expected is not None
+            # Once the active player has a baseline container, a currently
+            # visible core signal without a learned baseline is UNKNOWN, not
+            # an implicit zero-based signal.  Otherwise a calibrated
+            # Characters result could incorrectly hide a non-zero Putted
+            # value from a mod whose Putted anchor was not read.
+            required = True
             if isinstance(value, bool):
-                checks[name] = {"clean": None, "value": value}
+                checks[name] = {
+                    "clean": None,
+                    "value": value,
+                    "expected": expected,
+                    "required": required,
+                    "reliability": "calibrated" if calibrated else "uncalibrated",
+                }
                 continue
             try:
                 normalized = int(value)
             except (TypeError, ValueError, OverflowError):
-                checks[name] = {"clean": None, "value": value}
+                checks[name] = {
+                    "clean": None,
+                    "value": value,
+                    "expected": expected,
+                    "required": required,
+                    "reliability": "calibrated" if calibrated else "uncalibrated",
+                }
             else:
                 checks[name] = {
-                    "clean": None if normalized < 0 else normalized == 0,
+                    "clean": (
+                        None
+                        if normalized < 0 or not calibrated
+                        else normalized == expected
+                    ),
                     "value": normalized,
+                    "expected": expected,
+                    "required": required,
+                    "reliability": "calibrated" if calibrated else "uncalibrated",
+                    "usesBaseline": baseline_supplied and calibrated,
                 }
 
         for name, values in (
@@ -12737,32 +13174,99 @@ class SprunkiGamePlayer:
                 )
             else:
                 clean = cls._empty_signal_status(values)
+            active = (
+                polos_summary.occupied_count
+                if polos_summary is not None
+                else cls._occupancy_count_from_signal(values)
+            )
+            if (
+                name == "characters_array"
+                and expected_characters is not None
+            ):
+                # The Characters list can contain persistent inventory entries
+                # rather than visible board slots.  Compare its occupied
+                # cardinality with the same learned baseline as Characters.
+                clean = (
+                    None
+                    if active is None
+                    else active == expected_characters
+                )
+            elif name == "characters_array" and baseline_supplied:
+                # The array's zero token is not enough to establish the
+                # empty value when the setup anchor did not calibrate the
+                # corresponding Characters signal.
+                clean = None
+            if name == "polos" and polos_reliable is False:
+                clean = None
+
+            if name == "polos":
+                required = not baseline_supplied and polos_reliable is not False
+                reliability = (
+                    "noisy"
+                    if polos_reliable is False
+                    else "advisory_stable"
+                    if polos_reliable is True
+                    else "advisory_unknown"
+                    if baseline_supplied
+                    else "legacy"
+                )
+            else:
+                calibrated = expected_characters is not None
+                required = True
+                reliability = "calibrated" if calibrated else "uncalibrated"
             checks[name] = {
                 "clean": clean,
-                "active": (
-                    polos_summary.occupied_count
-                    if polos_summary is not None
-                    else sum(
-                        1 for value in values
-                        if str(value).strip().lower() in {"1", "true"}
-                    )
-                ),
+                "active": active,
+                "value": active,
                 "length": len(values),
                 "signalValid": (
                     polos_summary.valid
                     if polos_summary is not None
                     else None
                 ),
+                "required": required,
+                "reliability": reliability,
+                "expected": (
+                    expected_characters
+                    if name == "characters_array"
+                    and expected_characters is not None
+                    else 0
+                ),
+                "usesBaseline": (
+                    baseline_supplied
+                    and name == "characters_array"
+                    and expected_characters is not None
+                ),
             }
 
-        verified = bool(checks) and all(
-            check.get("clean") is True for check in checks.values()
+        required_checks = [
+            check
+            for check in checks.values()
+            if check.get("required", True)
+        ]
+        verified = bool(required_checks) and all(
+            check.get("clean") is True for check in required_checks
         )
         return verified, checks
 
+    @staticmethod
+    def _required_empty_signal_checks(checks):
+        """Return only calibrated signals allowed to decide board cleanliness."""
+        if not isinstance(checks, dict):
+            return {}
+        return {
+            name: check
+            for name, check in checks.items()
+            if isinstance(check, dict) and check.get("required", True)
+        }
+
     def _is_board_state_clean(self, state):
         """Return whether all available occupancy signals report empty."""
-        verified, _checks = self._evaluate_empty_snapshot(state)
+        verified, _checks = self._evaluate_empty_snapshot(
+            state,
+            empty_board_baseline=getattr(self, "empty_board_baseline", None),
+            polos_reliable=self._polos_reliability(),
+        )
         return verified
 
     def _rollback_open_entry_panel_via_ws(self, ws, state):
@@ -13412,12 +13916,21 @@ class SprunkiGamePlayer:
             return False
 
     @staticmethod
-    def _evaluate_restart_state(post_state, baseline_state=None):
+    def _evaluate_restart_state(
+        post_state,
+        baseline_state=None,
+        empty_board_baseline=None,
+        polos_reliable=None,
+    ):
         """Evaluate a fresh post-Re-Run snapshot without trusting one signal."""
         snapshot = PlacementSnapshot.from_mapping(post_state)
         if snapshot is None:
             return False, {}
-        verified, signal_checks = SprunkiGamePlayer._evaluate_empty_snapshot(snapshot)
+        verified, signal_checks = SprunkiGamePlayer._evaluate_empty_snapshot(
+            snapshot,
+            empty_board_baseline=empty_board_baseline,
+            polos_reliable=polos_reliable,
+        )
         # Keep the historical ``counters`` key for diagnostics and tests while
         # still evaluating Characters and Putted independently.
         counter_checks = [
@@ -13435,7 +13948,13 @@ class SprunkiGamePlayer:
             }
         baseline = PlacementSnapshot.from_mapping(baseline_state)
         if baseline is not None:
-            baseline_presence = SprunkiGamePlayer._occupancy_signal_presence(baseline)
+            baseline_presence = {
+                name: present
+                for name, present in SprunkiGamePlayer._occupancy_signal_presence(
+                    baseline
+                ).items()
+                if name != "polos"
+            }
             post_presence = SprunkiGamePlayer._occupancy_signal_presence(snapshot)
             missing = [
                 name
@@ -13683,6 +14202,10 @@ class SprunkiGamePlayer:
             restart_verified, signal_checks = self._evaluate_restart_state(
                 post_state,
                 baseline_state=getattr(context, "baseline", None),
+                empty_board_baseline=getattr(
+                    self, "empty_board_baseline", None
+                ),
+                polos_reliable=self._polos_reliability(),
             )
             board_state, board_evidence = self._classify_cleanup_board(
                 post_state,
@@ -13798,6 +14321,13 @@ class SprunkiGamePlayer:
             self._cleanup_boundary_states = {}
             self._last_cleanup_boundary_evidence = {}
             self._last_cleanup_boundary_result = None
+            # A new setup creates a new runtime page.  Do not carry a prior
+            # session's counter baseline into that page; the trusted anchor
+            # below will learn the current mod's actual empty values.
+            self.empty_board_baseline = {"characters": None, "putted": None}
+            self._empty_board_baseline_trusted = False
+            self._empty_board_baseline_source = None
+            self._reset_polos_signal_profile()
             self._reset_cleanup_guard()
 
             # 🆕 ENHANCED INDIVIDUAL MODE CLEANUP
@@ -14000,6 +14530,29 @@ class SprunkiGamePlayer:
                 )
                 self.cleanup_chrome_complete()
                 return False
+
+            # The setup flow starts from the freshly prepared game page.  Use
+            # that workflow precondition as the empty anchor for every
+            # counter, including non-zero Putted/Characters values.  Polos is
+            # sampled for diagnostics only and is not required to establish
+            # the anchor.
+            anchor_snapshot = self._capture_stable_placement_snapshot(
+                timeout_ms=getattr(self, "verifier_final_snapshot_timeout_ms", 2500),
+                stable_samples=max(3, self._cleanup_stable_sample_count()),
+                learn_empty_baseline=True,
+                baseline_source="setup_initial_page",
+            )
+            if anchor_snapshot is None or not any(
+                value is not None
+                for value in (
+                    self.empty_board_baseline.get("characters"),
+                    self.empty_board_baseline.get("putted"),
+                )
+            ):
+                print(
+                    "   ⚠️ Empty-board anchor unavailable; cleanup will remain "
+                    "UNKNOWN until a trusted anchor is established"
+                )
 
             if progress_callback:
                 progress_callback("✅ Enhanced game environment ready!")
@@ -14591,9 +15144,10 @@ class SprunkiGamePlayer:
                 print(f"   🛑 Precision result is {precision_result.status.value}; stopping return")
                 return self._finish_operation(context, precision_result)
 
-            # Always inspect the board after the precision action.  An
-            # aggregate-only VERIFIED result is not enough to finish a
-            # target-specific return, but it must not cause an early failure.
+            # Always inspect the board after the precision action when the
+            # transition was not already accepted.  Aggregate evidence is
+            # valid return progress, but it must not be relabeled as
+            # target-specific occupancy proof.
             current_state = self._capture_stable_placement_snapshot(
                 timeout_ms=500,
                 context=context,
@@ -14630,6 +15184,8 @@ class SprunkiGamePlayer:
                         "precision": precision_result.as_dict(),
                         "postActionState": self._return_state_evidence(current_state, target_slot_index),
                         "targetSpecific": empty_scope == "target",
+                        "aggregateFallback": empty_scope == "aggregate",
+                        "softVerified": empty_scope == "aggregate",
                         "cleanupVerificationScope": empty_scope,
                     },
                 )
@@ -14868,6 +15424,8 @@ class SprunkiGamePlayer:
                 poll_ms=50,
                 stable_samples=getattr(self, "verifier_post_action_stable_samples", 1),
                 stop_requested=lambda: self.stop_event.is_set(),
+                allow_polos=self._polos_aggregate_allowed(),
+                stability_key_fn=self._placement_core_stability_key,
                 context=context,
             )
             result = self._operation_result(
@@ -14886,21 +15444,23 @@ class SprunkiGamePlayer:
                 )
             result_details = dict(result.details or {})
             result_details.setdefault("targetSpecific", result.target_verified)
+            aggregate_proof = self._target_return_result_has_aggregate_evidence(
+                result
+            )
             if result.status == OperationStatus.ALREADY_EMPTY and not result.target_verified:
-                result_details["cleanupVerificationScope"] = "board"
+                result_details["cleanupVerificationScope"] = (
+                    "aggregate" if aggregate_proof else "board"
+                )
             elif result.status == OperationStatus.VERIFIED:
                 result_details.setdefault(
                     "cleanupVerificationScope",
-                    "target" if result.target_verified else "unknown",
+                    "target"
+                    if result.target_verified
+                    else "aggregate"
+                    if aggregate_proof
+                    else "unknown",
                 )
             result.details = result_details
-            if result.status == OperationStatus.VERIFIED:
-                self._remember_empty_board_baseline(
-                    result.details.get("after", (None, None))[0]
-                    if result.details.get("after") else None,
-                    result.details.get("after", (None, None))[1]
-                    if result.details.get("after") else None,
-                )
             return result
         except Exception as e:
             print(f"âŒ Error in precision return click: {e}")
@@ -14980,6 +15540,7 @@ class SprunkiGamePlayer:
                 after_snapshot,
                 "return",
                 context.target_slot,
+                allow_polos=self._polos_aggregate_allowed(),
             )
             if evaluation.status == OperationStatus.VERIFIED:
                 result = self._operation_result(
@@ -14991,6 +15552,17 @@ class SprunkiGamePlayer:
                         **evaluation.details,
                         "targetSpecific": evaluation.target_specific,
                         "aggregateFallback": evaluation.aggregate_fallback,
+                        "softVerified": bool(
+                            evaluation.aggregate_fallback
+                            and not evaluation.target_specific
+                        ),
+                        "cleanupVerificationScope": (
+                            "target"
+                            if evaluation.target_specific
+                            else "aggregate"
+                            if evaluation.aggregate_fallback
+                            else "unknown"
+                        ),
                     },
                 )
                 return result
@@ -15000,9 +15572,10 @@ class SprunkiGamePlayer:
                 context.target_slot,
                 before_snapshot,
             ):
-                target_cleared = (
-                    self._return_target_occupancy(after_snapshot, context.target_slot)
-                    == "empty"
+                empty_scope = self._return_empty_scope(
+                    before_snapshot,
+                    after_snapshot,
+                    context.target_slot,
                 )
                 return self._operation_result(
                     context,
@@ -15010,10 +15583,10 @@ class SprunkiGamePlayer:
                     "target_empty_after_bounded_carpet",
                     evidence=("target_empty_after_bounded_carpet",),
                     details={
-                        "targetSpecific": target_cleared,
-                        "cleanupVerificationScope": (
-                            "target" if target_cleared else "board"
-                        ),
+                        "targetSpecific": empty_scope == "target",
+                        "aggregateFallback": empty_scope == "aggregate",
+                        "softVerified": empty_scope == "aggregate",
+                        "cleanupVerificationScope": empty_scope,
                     },
                 )
             if not success:
@@ -18352,6 +18925,9 @@ class SprunkiGamePlayer:
                 # Baselines are specific to the loaded mod and must never leak
                 # into the next configuration handled by the same player.
                 self.empty_board_baseline = {'characters': None, 'putted': None}
+                self._empty_board_baseline_trusted = False
+                self._empty_board_baseline_source = None
+                self._reset_polos_signal_profile()
                 self.entry_strategy = {"selected": None, "tested": [], "verification": "UNKNOWN"}
                 self._workflow_placement_transactions = []
                 self.last_workflow_report = None
