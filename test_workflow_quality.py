@@ -875,6 +875,377 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual(player.empty_board_baseline, {"characters": None, "putted": None})
         self.assertFalse(player._is_board_count_clean(0, 1))
 
+    def test_carpet_click_firewall_allows_only_polo_hitbox(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        runtime_layout = {
+            "ok": True,
+            "targets": [
+                {
+                    "name": "Polo 1",
+                    "currentCostumeName": "13",
+                    "visible": True,
+                    "pixelX": 120,
+                    "pixelY": 120,
+                    "boundsX": 90,
+                    "boundsY": 100,
+                    "boundsWidth": 60,
+                    "boundsHeight": 40,
+                    "sizePercent": 55,
+                },
+                {
+                    "name": "Settings",
+                    "currentCostumeName": "1",
+                    "visible": False,
+                    "pixelX": 300,
+                    "pixelY": 120,
+                    "boundsX": 275,
+                    "boundsY": 95,
+                    "boundsWidth": 50,
+                    "boundsHeight": 50,
+                    "sizePercent": 100,
+                },
+            ],
+        }
+
+        allowed = player._carpet_click_safety(
+            120,
+            120,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=runtime_layout,
+        )
+        self.assertTrue(allowed["allowed"])
+
+        outside = player._carpet_click_safety(
+            170,
+            170,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=runtime_layout,
+        )
+        self.assertFalse(outside["allowed"])
+        self.assertEqual(outside["reason"], "outside_slot_hitbox")
+
+    def test_carpet_click_firewall_blocks_settings_and_open_panels(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        control_layout = {
+            "ok": True,
+            "targets": [
+                {
+                    "name": "Polo 1",
+                    "visible": True,
+                    "pixelX": 120,
+                    "pixelY": 120,
+                    "boundsX": 90,
+                    "boundsY": 90,
+                    "boundsWidth": 60,
+                    "boundsHeight": 60,
+                },
+                {
+                    "name": "Settings",
+                    "visible": True,
+                    "pixelX": 120,
+                    "pixelY": 120,
+                    "boundsX": 100,
+                    "boundsY": 100,
+                    "boundsWidth": 40,
+                    "boundsHeight": 40,
+                },
+            ],
+        }
+        blocked_control = player._carpet_click_safety(
+            120,
+            120,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=control_layout,
+        )
+        self.assertFalse(blocked_control["allowed"])
+        self.assertEqual(blocked_control["reason"], "control_hitbox")
+
+        control_layout["targets"][1]["visible"] = False
+        control_layout["targets"].append(
+            {
+                "name": "Reset button",
+                "visible": True,
+                "pixelX": 120,
+                "pixelY": 120,
+                "boundsX": 100,
+                "boundsY": 100,
+                "boundsWidth": 40,
+                "boundsHeight": 40,
+            }
+        )
+        blocked_control = player._carpet_click_safety(
+            120,
+            120,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=control_layout,
+        )
+        self.assertFalse(blocked_control["allowed"])
+        self.assertEqual(blocked_control["reason"], "control_hitbox")
+
+        control_layout["targets"].append(
+            {
+                "name": "Close button",
+                "visible": True,
+                "pixelX": 120,
+                "pixelY": 120,
+                "boundsX": 100,
+                "boundsY": 100,
+                "boundsWidth": 40,
+                "boundsHeight": 40,
+            }
+        )
+        blocked_panel = player._carpet_click_safety(
+            120,
+            120,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=control_layout,
+        )
+        self.assertFalse(blocked_panel["allowed"])
+        self.assertEqual(blocked_panel["reason"], "panel_open")
+
+    def test_carpet_click_firewall_uses_bounded_fallback_without_polo_bounds(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        unknown_layout = {"ok": False, "error": "bounds_unavailable"}
+
+        inside = player._carpet_click_safety(
+            140,
+            120,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=unknown_layout,
+        )
+        self.assertTrue(inside["allowed"])
+        self.assertEqual(inside["reason"], "fallback_radius_layout_unknown")
+
+        outside = player._carpet_click_safety(
+            150,
+            150,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=unknown_layout,
+        )
+        self.assertFalse(outside["allowed"])
+        self.assertEqual(outside["reason"], "runtime_layout_unknown")
+
+        no_bounds_layout = {
+            "ok": True,
+            "targets": [
+                {
+                    "name": "Polo 1",
+                    "visible": True,
+                    "pixelX": 120,
+                    "pixelY": 120,
+                },
+                {
+                    "name": "Menu screen",
+                    "visible": True,
+                    "boundsX": 0,
+                    "boundsY": 0,
+                    "boundsWidth": 640,
+                    "boundsHeight": 360,
+                },
+            ],
+        }
+        live_center_fallback = player._carpet_click_safety(
+            120,
+            120,
+            slot_index=0,
+            slot_center=(120, 120),
+            runtime_layout=no_bounds_layout,
+        )
+        self.assertTrue(live_center_fallback["allowed"])
+        self.assertEqual(live_center_fallback["reason"], "fallback_polo_radius")
+
+    def test_carpet_live_coordinate_layers_stay_inside_polo_bounds(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        runtime_layout = {
+            "ok": True,
+            "targets": [
+                {
+                    "name": "Polo 1",
+                    "visible": True,
+                    "boundsX": 100,
+                    "boundsY": 100,
+                    "boundsWidth": 100,
+                    "boundsHeight": 80,
+                    "boundsCenterX": 150,
+                    "boundsCenterY": 140,
+                }
+            ],
+        }
+        original = [
+            {
+                "x": 110,
+                "y": 110,
+                "slot_index": 0,
+                "slot_center": (150, 140),
+            }
+            for _ in range(7)
+        ]
+        planned = player._prepare_carpet_slot_coordinates(
+            original,
+            slot_index=0,
+            set_num=3,
+            runtime_layout=runtime_layout,
+        )
+        self.assertEqual(len(planned), 7)
+        for coord in planned:
+            self.assertGreaterEqual(coord["x"], 104)
+            self.assertLessEqual(coord["x"], 196)
+            self.assertGreaterEqual(coord["y"], 104)
+            self.assertLessEqual(coord["y"], 176)
+
+    def test_menu_screen_background_is_not_a_panel_or_control_hitbox(self):
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        runtime_layout = {
+            "ok": True,
+            "targets": [
+                {
+                    "name": "Polo 1",
+                    "visible": True,
+                    "boundsX": 100,
+                    "boundsY": 100,
+                    "boundsWidth": 80,
+                    "boundsHeight": 60,
+                },
+                {
+                    "name": "Menu screen",
+                    "visible": True,
+                    "boundsX": 0,
+                    "boundsY": 0,
+                    "boundsWidth": 640,
+                    "boundsHeight": 360,
+                },
+            ],
+        }
+        result = player._carpet_click_safety(
+            140,
+            130,
+            slot_index=0,
+            slot_center=(140, 130),
+            runtime_layout=runtime_layout,
+        )
+        self.assertTrue(result["allowed"])
+
+    def test_carpet_set_replays_once_after_panel_recovery(self):
+        import threading
+        from unittest.mock import patch
+
+        from placement_verifier import OperationContext, PlacementSnapshot
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.stop_event = threading.Event()
+        player.carpet_bombing_config = {"max_sets": 1}
+        player.config = {"layout": {"slots": [{"index": 0, "x": 100, "y": 100}]}}
+        context = OperationContext.begin("cleanup", 0, max_input_attempts=20)
+        player._active_operation_context = context
+        before = PlacementSnapshot(
+            1.0,
+            characters_count=1,
+            putted_count=1,
+            polos=("1",),
+            characters=("1",),
+        )
+        after = PlacementSnapshot(
+            2.0,
+            characters_count=0,
+            putted_count=0,
+            polos=("0",),
+            characters=("0",),
+        )
+        context.set_baseline(before)
+        states = iter((before, after))
+        attempts = []
+
+        player._read_comprehensive_state = lambda _context: next(states)
+        player._get_board_progress_count = lambda state: state.characters_count
+        player._is_board_state_clean = lambda state: state.characters_count == 0
+        player.generate_simple_coordinate_set = lambda *args: [
+            {"x": 100, "y": 100, "slot_index": 0, "slot_center": (100, 100)}
+        ]
+
+        def fake_set(*args, **kwargs):
+            attempts.append(True)
+            if len(attempts) == 1:
+                player._last_carpet_set_abort_reason = "panel_opened_during_set"
+                return False
+            player._last_carpet_set_abort_reason = None
+            return True
+
+        player.execute_sequential_clicking_set = fake_set
+        with patch("sprunki_game_player.time.sleep"):
+            result = player.execute_sequential_carpet_bombing_sets(
+                [{"index": 0, "x": 100, "y": 100}],
+                1,
+                operation_context=context,
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(len(attempts), 2)
+
+    def test_return_completion_event_is_emitted_for_every_success_method(self):
+        from unittest.mock import Mock
+
+        from placement_verifier import OperationContext, OperationResult, OperationStatus
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.obs_controller = Mock()
+        player._close_remove_cdp_session = Mock()
+
+        methods = (
+            (0, "remove_first"),
+            (1, "precision"),
+            (2, "carpet_bombing"),
+            (3, "restart_recovery"),
+        )
+        for phase, method in methods:
+            context = OperationContext.begin(
+                "return",
+                4,
+                max_input_attempts=20,
+            )
+            player._active_operation_context = context
+            result = OperationResult(
+                OperationStatus.ALREADY_EMPTY,
+                operation_id=context.operation_id,
+                direction="return",
+                message=f"verified via {method}",
+                details={
+                    "returnPhase": phase,
+                    "returnMethod": method,
+                    "cleanupVerificationScope": "target",
+                },
+            )
+            player._finish_operation(context, result)
+
+        calls = player.obs_controller.log_event_timestamp.call_args_list
+        self.assertEqual(len(calls), len(methods))
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            ["return_completed_successfully"] * len(methods),
+        )
+        self.assertEqual(
+            [call.args[2]["return_method"] for call in calls],
+            [method for _, method in methods],
+        )
+
     def test_final_empty_evaluation_rejects_residual_polos_or_characters(self):
         from placement_verifier import PlacementSnapshot
         from sprunki_game_player import SprunkiGamePlayer

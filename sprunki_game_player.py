@@ -201,6 +201,26 @@ class SprunkiGamePlayer:
     REMOVE_BUTTON_MAX_ATTEMPTS = len(REMOVE_BUTTON_OFFSETS)
     REMOVE_BUTTON_SCHEMA_VERSION = 1
 
+    # Carpet bombing is deliberately conservative.  A slot coordinate is
+    # allowed to reach only a visible Polo target; controls are protected even
+    # when their hitbox overlaps the configured slot area.  This is especially
+    # important for mods whose Settings/Options panel is drawn by the Scratch
+    # project itself rather than by an HTML overlay.
+    CARPET_CONTROL_RE = re.compile(
+        r"\b(?:settings?|options?|more|reset|gallery|credits?|close|back|exit)\b",
+        re.IGNORECASE,
+    )
+    CARPET_PANEL_RE = re.compile(
+        r"\b(?:settings?|options?)\b\s+(?:panel|screen)\b"
+        r"|\b(?:panel|screen)\b\s+(?:settings?|options?)\b",
+        re.IGNORECASE,
+    )
+    CARPET_CONTROL_PADDING_PX = 8.0
+    CARPET_SLOT_PADDING_PX = 4.0
+    CARPET_PANEL_SURFACE_MIN_AREA_PX = 120000.0
+    CARPET_FALLBACK_RADIUS_PX = 26.0
+    CARPET_SET_RERUN_LIMIT = 1
+
     def __init__(self, stop_event=None): # [MODIFIED] Nhận stop_event
         # [NEW] Initialize logger for this class
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -634,6 +654,9 @@ class SprunkiGamePlayer:
         except (TypeError, ValueError, AttributeError):
             max_sets = 3
         carpet_inputs = slot_count * sum(2 + set_index for set_index in range(max_sets))
+        # A panel may open after a valid click.  The recovered set is replayed
+        # once, so reserve a second bounded carpet pass in the shared budget.
+        carpet_inputs *= 1 + int(getattr(self, "CARPET_SET_RERUN_LIMIT", 1) > 0)
         try:
             recovery_rounds = max(
                 1, int(getattr(self, "verifier_targeted_cleanup_recovery_rounds", 2))
@@ -668,7 +691,61 @@ class SprunkiGamePlayer:
             self._recovery_budget_scope = scope
         return scope
 
+    def _log_return_completed_successfully(self, context, result):
+        """Emit one completion event for every verified return strategy.
+
+        Return completion is a property of the final operation result, not of
+        Remove-first, precision, carpet bombing, or restart recovery.  Keeping
+        the event here prevents a successful fallback branch from being
+        silently omitted and prevents an intermediate result from being
+        reported as final before boundary validation finishes.
+        """
+        if context is None or getattr(context, "direction", None) != "return":
+            return
+        status = getattr(result, "status", None)
+        if status not in {OperationStatus.VERIFIED, OperationStatus.ALREADY_EMPTY}:
+            return
+        if getattr(context, "return_completion_event_logged", False):
+            return
+
+        details = dict(getattr(result, "details", {}) or {})
+        obs_controller = getattr(self, "obs_controller", None)
+        if obs_controller is None:
+            return
+
+        return_phase = details.get("returnPhase")
+        return_method = details.get("returnMethod") or "return_cascade"
+        message = (
+            f"Return completed successfully for slot {context.target_slot} "
+            f"via {return_method}"
+        )
+        event_details = {
+            "slot_index": context.target_slot,
+            "return_phase": return_phase,
+            "return_method": return_method,
+            "status": status.value,
+            "message": getattr(result, "message", ""),
+            "targetVerified": bool(getattr(result, "target_verified", False)),
+            "cleanupVerificationScope": details.get("cleanupVerificationScope"),
+            "operationId": context.operation_id,
+        }
+        try:
+            obs_controller.log_event_timestamp(
+                "return_completed_successfully",
+                message,
+                event_details,
+            )
+        except Exception as error:
+            # Event telemetry must never turn an already verified return into
+            # a failed physical operation.
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.debug("Unable to log return completion: %s", error)
+        finally:
+            context.return_completion_event_logged = True
+
     def _finish_operation(self, context, result):
+        self._log_return_completed_successfully(context, result)
         self._close_remove_cdp_session()
         if context is not None:
             context.close()
@@ -4901,23 +4978,49 @@ class SprunkiGamePlayer:
               return null;
             }
 
-            const screenW = 1920;
-            const screenH = 1080;
             const stageW = 640;
             const stageH = 360;
-            const menuWidth = 78;
-            const viewportW = screenW - menuWidth;
-            const scale = Math.min(viewportW / stageW, screenH / stageH);
-            const canvasW = stageW * scale;
-            const canvasH = stageH * scale;
-            const leftOffset = menuWidth;
-            const topOffset = (screenH - canvasH) / 2;
-            const canvasCenterX = leftOffset + (canvasW / 2);
-            const canvasCenterY = topOffset + (canvasH / 2);
+
+            function findStageCanvas() {
+              const selectors = [
+                '.ccw-stage-wrapper canvas',
+                '#stage-canvas-wrapper canvas',
+                '.gandi_stage_stage_1fD7k canvas',
+                'canvas'
+              ];
+              const candidates = [];
+              const seen = new Set();
+              selectors.forEach((selector, priority) => {
+                document.querySelectorAll(selector).forEach((element) => {
+                  if (seen.has(element)) return;
+                  const rect = element.getBoundingClientRect();
+                  if (!(rect.width > 0 && rect.height > 0)) return;
+                  seen.add(element);
+                  candidates.push({element, priority, area: rect.width * rect.height});
+                });
+              });
+              candidates.sort((a, b) => a.priority - b.priority || b.area - a.area);
+              return candidates[0]?.element || null;
+            }
+
+            const canvas = findStageCanvas();
+            if (!canvas) {
+              resolve({ ok: false, error: 'Stage canvas not found' });
+              return;
+            }
+            const canvasRect = canvas.getBoundingClientRect();
+            const scaleX = canvasRect.width / stageW;
+            const scaleY = canvasRect.height / stageH;
+            if (!(scaleX > 0 && scaleY > 0)) {
+              resolve({ ok: false, error: 'Stage canvas has invalid geometry' });
+              return;
+            }
+            const canvasCenterX = canvasRect.left + (canvasRect.width / 2);
+            const canvasCenterY = canvasRect.top + (canvasRect.height / 2);
 
             function toPixel(logicX, logicY) {
               if (logicX === null || logicY === null || logicX === undefined || logicY === undefined) return { x: null, y: null };
-              return { x: canvasCenterX + (logicX * scale), y: canvasCenterY - (logicY * scale) };
+              return { x: canvasCenterX + (logicX * scaleX), y: canvasCenterY - (logicY * scaleY) };
             }
 
             function boundsToPixels(bounds) {
@@ -4927,12 +5030,18 @@ class SprunkiGamePlayer:
               const top = Number(bounds.top);
               const bottom = Number(bounds.bottom);
               if (![left, right, top, bottom].every(Number.isFinite)) return null;
-              const pTopLeft = toPixel(left, top);
-              const pBottomRight = toPixel(right, bottom);
-              const x = Math.min(pTopLeft.x, pBottomRight.x);
-              const y = Math.min(pTopLeft.y, pBottomRight.y);
-              const width = Math.abs(pBottomRight.x - pTopLeft.x);
-              const height = Math.abs(pBottomRight.y - pTopLeft.y);
+              const points = [
+                toPixel(left, top),
+                toPixel(left, bottom),
+                toPixel(right, top),
+                toPixel(right, bottom)
+              ];
+              const x = Math.min(...points.map(point => point.x));
+              const y = Math.min(...points.map(point => point.y));
+              const rightPixel = Math.max(...points.map(point => point.x));
+              const bottomPixel = Math.max(...points.map(point => point.y));
+              const width = rightPixel - x;
+              const height = bottomPixel - y;
               return {
                 x, y, width, height,
                 topPixelY: y,
@@ -4979,6 +5088,7 @@ class SprunkiGamePlayer:
               .map((target, runtimeIndex) => {
                 const sprite = target.sprite || {};
                 const name = sprite.name || target.getName?.() || '';
+                const costume = sprite.costumes?.[target.currentCostume] || {};
                 const pixel = toPixel(target.x, target.y);
                 const candidates = boundsCandidates(target, renderer);
                 const primary = candidates.find(c => c.pixelBounds)?.pixelBounds || null;
@@ -4992,6 +5102,8 @@ class SprunkiGamePlayer:
                   sizePercent: target.size,
                   direction: target.direction,
                   currentCostumeIndex: target.currentCostume,
+                  currentCostumeName: costume.name || '',
+                  layerOrder: target.getLayerOrder ? target.getLayerOrder() : null,
                   pixelX: pixel.x,
                   pixelY: pixel.y,
                   boundsTopY: primary?.topPixelY ?? null,
@@ -5009,8 +5121,23 @@ class SprunkiGamePlayer:
             resolve({
               ok: true,
               capturedAt: new Date().toISOString(),
-              screen: { width: screenW, height: screenH },
-              canvas: { stageW, stageH, menuWidth, scale, canvasW, canvasH, leftOffset, topOffset },
+              screen: {
+                width: window.innerWidth,
+                height: window.innerHeight,
+                devicePixelRatio: window.devicePixelRatio || 1
+              },
+              canvas: {
+                stageW,
+                stageH,
+                left: canvasRect.left,
+                top: canvasRect.top,
+                width: canvasRect.width,
+                height: canvasRect.height,
+                scaleX,
+                scaleY,
+                centerX: canvasCenterX,
+                centerY: canvasCenterY
+              },
               targets,
               muteButtons: targets.filter(t => /mute buttons/i.test(t.name))
             });
@@ -5092,6 +5219,588 @@ class SprunkiGamePlayer:
         if isinstance(target.get("boundsCenterX"), (int, float)) and isinstance(target.get("boundsCenterY"), (int, float)):
             distances.append(math.hypot(float(target["boundsCenterX"]) - x, float(target["boundsCenterY"]) - y))
         return min(distances) if distances else math.inf
+
+    @classmethod
+    def _carpet_target_label(cls, target):
+        """Return the name/costume label used by the carpet input firewall."""
+        if not isinstance(target, dict):
+            return ""
+        name = str(target.get("name") or "").strip()
+        costume = str(
+            target.get("currentCostumeName")
+            or target.get("costumeName")
+            or ""
+        ).strip()
+        return f"{name}/{costume}".strip("/")
+
+    @classmethod
+    def _carpet_is_control_target(cls, target):
+        """Identify visible controls that must never receive a slot click."""
+        return bool(cls.CARPET_CONTROL_RE.search(cls._carpet_target_label(target)))
+
+    @classmethod
+    def _carpet_panel_targets(cls, runtime_layout):
+        """Return visible targets indicating that a modal/panel is open.
+
+        ``Menu screen`` and other Scratch UI sprites can remain visible while
+        hidden behind the normal stage, so they are not treated as an open
+        panel by name alone.  A visible Settings/Options target, a close/back
+        control, or an explicitly named panel/screen is strong evidence that
+        the next stage click would be unsafe.
+        """
+        if not isinstance(runtime_layout, dict):
+            return []
+
+        visible_targets = [
+            target
+            for target in runtime_layout.get("targets") or []
+            if isinstance(target, dict) and target.get("visible") is not False
+        ]
+        has_close_control = any(
+            re.search(r"\b(?:close|back|exit)\b", cls._carpet_target_label(target), re.IGNORECASE)
+            for target in visible_targets
+        )
+
+        indicators = []
+        for target in visible_targets:
+            if not isinstance(target, dict) or target.get("visible") is False:
+                continue
+            name = str(target.get("name") or "").strip().lower()
+            label = cls._carpet_target_label(target).lower()
+            if re.search(r"\b(?:close|back|exit)\b", label):
+                indicators.append(target)
+                continue
+            if cls.CARPET_PANEL_RE.search(label):
+                indicators.append(target)
+                continue
+            if re.fullmatch(r"(?:settings?|options?)", name):
+                bounds = (
+                    target.get("boundsWidth"),
+                    target.get("boundsHeight"),
+                )
+                area = (
+                    float(bounds[0]) * float(bounds[1])
+                    if all(isinstance(value, (int, float)) and value > 0 for value in bounds)
+                    else 0.0
+                )
+                # A small visible Settings/Options sprite is normally just the
+                # button itself. Treat it as an open panel only when a close
+                # control is also visible or the target is large enough to be
+                # the panel surface rather than a button.
+                if has_close_control or area >= cls.CARPET_PANEL_SURFACE_MIN_AREA_PX:
+                    indicators.append(target)
+        return indicators
+
+    @staticmethod
+    def _carpet_point_in_target(target, x, y, padding=0.0, inset=0.0):
+        """Test a screen point against a live target bounds/center."""
+        if not isinstance(target, dict):
+            return False
+
+        bounds = (
+            target.get("boundsX"),
+            target.get("boundsY"),
+            target.get("boundsWidth"),
+            target.get("boundsHeight"),
+        )
+        if all(isinstance(value, (int, float)) for value in bounds):
+            left, top, width, height = (float(value) for value in bounds)
+            if width > 0 and height > 0:
+                return (
+                    left - float(padding) + float(inset)
+                    <= float(x)
+                    <= left + width + float(padding) - float(inset)
+                    and top - float(padding) + float(inset)
+                    <= float(y)
+                    <= top + height + float(padding) - float(inset)
+                )
+
+        centers = (
+            (target.get("boundsCenterX"), target.get("boundsCenterY")),
+            (target.get("pixelX"), target.get("pixelY")),
+        )
+        center = next(
+            (
+                (float(center_x), float(center_y))
+                for center_x, center_y in centers
+                if isinstance(center_x, (int, float))
+                and isinstance(center_y, (int, float))
+            ),
+            None,
+        )
+        if center is None:
+            return False
+
+        # Scratch ``size`` is a percentage, not a pixel width.  This fallback
+        # is intentionally conservative when renderer bounds are unavailable.
+        radius = max(
+            24.0,
+            min(70.0, float(target.get("sizePercent") or 55.0) * 0.5),
+        )
+        radius += float(padding)
+        radius = max(1.0, radius - float(inset))
+        return math.hypot(center[0] - float(x), center[1] - float(y)) <= radius
+
+    def _find_runtime_carpet_slot(self, runtime_layout, slot_index, slot_center=None):
+        """Find the live Polo target corresponding to a configured slot."""
+        if not isinstance(runtime_layout, dict):
+            return None
+
+        slot_targets = [
+            target
+            for target in runtime_layout.get("targets") or []
+            if isinstance(target, dict)
+            and target.get("visible") is not False
+            and re.match(r"^Polo\s+\d+", str(target.get("name") or ""), re.IGNORECASE)
+        ]
+        if not slot_targets:
+            return None
+
+        try:
+            expected_name = f"Polo {int(slot_index) + 1}"
+            exact = [
+                target
+                for target in slot_targets
+                if str(target.get("name") or "").strip().lower()
+                == expected_name.lower()
+            ]
+            if exact:
+                return exact[0]
+        except (TypeError, ValueError):
+            pass
+
+        if slot_center and len(slot_center) >= 2:
+            center_x, center_y = float(slot_center[0]), float(slot_center[1])
+            return min(
+                slot_targets,
+                key=lambda target: self._runtime_target_distance(
+                    target, center_x, center_y
+                ),
+            )
+        return None
+
+    @staticmethod
+    def _carpet_target_has_live_bounds(target):
+        """Return True when a target has a usable renderer rectangle."""
+        if not isinstance(target, dict):
+            return False
+        values = (
+            target.get("boundsX"),
+            target.get("boundsY"),
+            target.get("boundsWidth"),
+            target.get("boundsHeight"),
+        )
+        return all(
+            isinstance(value, (int, float))
+            for value in values
+        ) and values[2] > 0 and values[3] > 0
+
+    @staticmethod
+    def _carpet_target_center(target, fallback=None):
+        """Return the best available screen center for a runtime target."""
+        if isinstance(target, dict):
+            if SprunkiGamePlayer._carpet_target_has_live_bounds(target):
+                return (
+                    float(target["boundsX"]) + float(target["boundsWidth"]) / 2.0,
+                    float(target["boundsY"]) + float(target["boundsHeight"]) / 2.0,
+                )
+            for key_x, key_y in (
+                ("boundsCenterX", "boundsCenterY"),
+                ("pixelX", "pixelY"),
+            ):
+                if isinstance(target.get(key_x), (int, float)) and isinstance(
+                    target.get(key_y), (int, float)
+                ):
+                    return float(target[key_x]), float(target[key_y])
+        if fallback is not None and len(fallback) >= 2:
+            return float(fallback[0]), float(fallback[1])
+        return None
+
+    @classmethod
+    def _carpet_inner_bounds(cls, target):
+        """Return Polo bounds after the small edge inset, if available."""
+        if not cls._carpet_target_has_live_bounds(target):
+            return None
+        left = float(target["boundsX"]) + cls.CARPET_SLOT_PADDING_PX
+        top = float(target["boundsY"]) + cls.CARPET_SLOT_PADDING_PX
+        right = (
+            float(target["boundsX"])
+            + float(target["boundsWidth"])
+            - cls.CARPET_SLOT_PADDING_PX
+        )
+        bottom = (
+            float(target["boundsY"])
+            + float(target["boundsHeight"])
+            - cls.CARPET_SLOT_PADDING_PX
+        )
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
+
+    @classmethod
+    def _carpet_fallback_points(cls, center, count):
+        """Generate a small deterministic fallback pattern around Polo."""
+        if center is None or count <= 0:
+            return []
+
+        cx, cy = float(center[0]), float(center[1])
+        # Every offset is within CARPET_FALLBACK_RADIUS_PX.  The pattern is
+        # intentionally finite and deterministic so an unknown hitbox cannot
+        # turn into an unrestricted screen sweep.
+        offsets = [
+            (0.0, 0.0),
+            (-12.0, 0.0),
+            (12.0, 0.0),
+            (0.0, -12.0),
+            (0.0, 12.0),
+            (-16.0, -16.0),
+            (16.0, -16.0),
+            (-16.0, 16.0),
+            (16.0, 16.0),
+            (-22.0, 0.0),
+            (22.0, 0.0),
+            (0.0, -22.0),
+            (0.0, 22.0),
+        ]
+        points = []
+        seen = set()
+        for offset_x, offset_y in offsets:
+            point = (int(round(cx + offset_x)), int(round(cy + offset_y)))
+            if math.hypot(point[0] - cx, point[1] - cy) > cls.CARPET_FALLBACK_RADIUS_PX:
+                continue
+            if point in seen:
+                continue
+            seen.add(point)
+            points.append(point)
+            if len(points) >= count:
+                break
+        return points
+
+    @classmethod
+    def _carpet_live_bounds_points(cls, target, count, original_coords=None):
+        """Generate several concentric layers while staying inside Polo."""
+        bounds = cls._carpet_inner_bounds(target)
+        if bounds is None or count <= 0:
+            return []
+
+        left, top, right, bottom = bounds
+        center_x = (left + right) / 2.0
+        center_y = (top + bottom) / 2.0
+        half_width = (right - left) / 2.0
+        half_height = (bottom - top) / 2.0
+        # Inner cross, inner diagonals, then an outer cross/diagonal layer.
+        # Fractions are strictly inside the inset bounds.
+        fractions = [
+            (0.0, 0.0),
+            (-0.34, 0.0),
+            (0.34, 0.0),
+            (0.0, -0.34),
+            (0.0, 0.34),
+            (-0.34, -0.34),
+            (0.34, -0.34),
+            (-0.34, 0.34),
+            (0.34, 0.34),
+            (-0.70, 0.0),
+            (0.70, 0.0),
+            (0.0, -0.70),
+            (0.0, 0.70),
+        ]
+        points = []
+        seen = set()
+
+        def add_point(point_x, point_y):
+            point = (int(round(point_x)), int(round(point_y)))
+            if not (
+                left <= point[0] <= right
+                and top <= point[1] <= bottom
+            ):
+                return False
+            if point in seen:
+                return False
+            seen.add(point)
+            points.append(point)
+            return True
+
+        # Keep any originally requested point that is already safe, then fill
+        # the rest with the live concentric pattern.
+        for coord in original_coords or []:
+            if isinstance(coord, dict):
+                point_x, point_y = coord.get("x"), coord.get("y")
+            else:
+                point_x, point_y = coord
+            if isinstance(point_x, (int, float)) and isinstance(point_y, (int, float)):
+                add_point(point_x, point_y)
+                if len(points) >= count:
+                    return points[:count]
+
+        for fraction_x, fraction_y in fractions:
+            add_point(
+                center_x + (fraction_x * half_width),
+                center_y + (fraction_y * half_height),
+            )
+            if len(points) >= count:
+                break
+        return points[:count]
+
+    def _prepare_carpet_slot_coordinates(
+        self,
+        slot_coords,
+        slot_index,
+        set_num,
+        runtime_layout,
+    ):
+        """Constrain a slot's click layers to live bounds or a small fallback."""
+        if not slot_coords:
+            return []
+
+        configured_center = next(
+            (
+                coord.get("slot_center")
+                for coord in slot_coords
+                if isinstance(coord, dict)
+                and isinstance(coord.get("slot_center"), (tuple, list))
+                and len(coord.get("slot_center")) >= 2
+            ),
+            None,
+        )
+        layout_ok = isinstance(runtime_layout, dict) and runtime_layout.get("ok") is True
+        slot_target = (
+            self._find_runtime_carpet_slot(
+                runtime_layout,
+                slot_index,
+                configured_center,
+            )
+            if layout_ok
+            else None
+        )
+        if self._carpet_target_has_live_bounds(slot_target):
+            points = self._carpet_live_bounds_points(
+                slot_target,
+                len(slot_coords),
+                original_coords=slot_coords,
+            )
+            mode = "live_bounds"
+        else:
+            center = self._carpet_target_center(slot_target, configured_center)
+            points = self._carpet_fallback_points(center, len(slot_coords))
+            mode = "fallback_radius"
+
+        return [
+            {
+                "x": point_x,
+                "y": point_y,
+                "slot_index": slot_index,
+                "slot_center": configured_center,
+                "coordinate_mode": mode,
+                "set_num": set_num,
+            }
+            for point_x, point_y in points
+        ]
+
+    def _carpet_click_safety(
+        self,
+        x,
+        y,
+        slot_index=None,
+        slot_center=None,
+        runtime_layout=None,
+    ):
+        """Keep carpet input inside Polo, with a bounded geometry fallback."""
+        layout = runtime_layout
+        if layout is None:
+            layout = self._inspect_runtime_layout_bounds()
+
+        layout_ok = isinstance(layout, dict) and layout.get("ok") is True
+        if not layout_ok:
+            # We cannot prove the live hitbox or the panel state, but a return
+            # still gets a tightly bounded chance around its configured Polo
+            # center.  Callers without slot metadata remain fail-closed.
+            fallback_center = self._carpet_target_center(None, slot_center)
+            if (
+                slot_index is not None
+                and fallback_center is not None
+                and math.hypot(
+                    float(x) - fallback_center[0],
+                    float(y) - fallback_center[1],
+                ) <= self.CARPET_FALLBACK_RADIUS_PX
+            ):
+                return {
+                    "allowed": True,
+                    "reason": "fallback_radius_layout_unknown",
+                    "target": None,
+                }
+            return {
+                "allowed": False,
+                "reason": "runtime_layout_unknown",
+                "target": None,
+            }
+
+        panel_targets = self._carpet_panel_targets(layout)
+        if panel_targets:
+            return {
+                "allowed": False,
+                "reason": "panel_open",
+                "target": self._carpet_target_label(panel_targets[0]),
+            }
+
+        for target in layout.get("targets") or []:
+            if not isinstance(target, dict) or target.get("visible") is False:
+                continue
+            if not self._carpet_is_control_target(target):
+                continue
+            if self._carpet_point_in_target(
+                target,
+                x,
+                y,
+                padding=self.CARPET_CONTROL_PADDING_PX,
+            ):
+                return {
+                    "allowed": False,
+                    "reason": "control_hitbox",
+                    "target": self._carpet_target_label(target),
+                }
+
+        if slot_index is not None:
+            slot_target = self._find_runtime_carpet_slot(
+                layout,
+                slot_index,
+                slot_center,
+            )
+            if slot_target is not None:
+                if self._carpet_target_has_live_bounds(slot_target):
+                    if not self._carpet_point_in_target(
+                        slot_target,
+                        x,
+                        y,
+                        inset=self.CARPET_SLOT_PADDING_PX,
+                    ):
+                        return {
+                            "allowed": False,
+                            "reason": "outside_slot_hitbox",
+                            "target": self._carpet_target_label(slot_target),
+                        }
+                else:
+                    fallback_center = self._carpet_target_center(
+                        slot_target,
+                        slot_center,
+                    )
+                    if (
+                        fallback_center is None
+                        or math.hypot(
+                            float(x) - fallback_center[0],
+                            float(y) - fallback_center[1],
+                        ) > self.CARPET_FALLBACK_RADIUS_PX
+                    ):
+                        return {
+                            "allowed": False,
+                            "reason": "outside_fallback_polo_radius",
+                            "target": self._carpet_target_label(slot_target),
+                        }
+                    return {
+                        "allowed": True,
+                        "reason": "fallback_polo_radius",
+                        "target": self._carpet_target_label(slot_target),
+                    }
+            elif slot_center and len(slot_center) >= 2:
+                distance = math.hypot(
+                    float(x) - float(slot_center[0]),
+                    float(y) - float(slot_center[1]),
+                )
+                if distance > self.CARPET_FALLBACK_RADIUS_PX:
+                    return {
+                        "allowed": False,
+                        "reason": "outside_fallback_slot_radius",
+                        "target": None,
+                    }
+                return {
+                    "allowed": True,
+                    "reason": "fallback_configured_slot_radius",
+                    "target": None,
+                }
+
+        return {"allowed": True, "reason": "slot_safe", "target": None}
+
+    def _close_carpet_panel_if_open(self, runtime_layout=None, use_cdp=True):
+        """Close a Scratch Settings/Options panel before resuming slot input."""
+        layout = runtime_layout
+        if not isinstance(layout, dict) or layout.get("ok") is not True:
+            layout = self._inspect_runtime_layout_bounds()
+        if not isinstance(layout, dict) or layout.get("ok") is not True:
+            print("   🛑 Cannot inspect runtime before closing a carpet panel")
+            return False
+
+        indicators = self._carpet_panel_targets(layout)
+        if not indicators:
+            return True
+
+        print(
+            "   ⚠️ Carpet input guard detected an open panel: "
+            + ", ".join(self._carpet_target_label(target) for target in indicators[:3])
+        )
+
+        if use_cdp:
+            closed = self._execute_cdp_key_press("escape")
+        else:
+            try:
+                pyautogui.press("esc")
+                closed = True
+            except Exception:
+                closed = False
+        if closed:
+            time.sleep(0.25)
+
+        refreshed = self._inspect_runtime_layout_bounds()
+        if isinstance(refreshed, dict) and refreshed.get("ok") is True:
+            if not self._carpet_panel_targets(refreshed):
+                print("   ✅ Settings/Options panel closed with Escape")
+                return True
+            layout = refreshed
+
+        # Some mods do not bind Escape.  Use only a live close/back/exit
+        # target; never guess a screen coordinate for the close action.
+        close_targets = [
+            target
+            for target in layout.get("targets") or []
+            if re.search(
+                r"\b(?:close|back|exit)\b",
+                self._carpet_target_label(target),
+                re.IGNORECASE,
+            )
+        ]
+        close_targets.sort(
+            key=lambda target: (
+                target.get("layerOrder")
+                if isinstance(target.get("layerOrder"), (int, float))
+                else -1
+            ),
+            reverse=True,
+        )
+        for target in close_targets:
+            center_x = target.get("boundsCenterX") or target.get("pixelX")
+            center_y = target.get("boundsCenterY") or target.get("pixelY")
+            if not isinstance(center_x, (int, float)) or not isinstance(center_y, (int, float)):
+                continue
+            try:
+                if use_cdp:
+                    closed = self._execute_cdp_single_click(
+                        int(round(center_x)), int(round(center_y))
+                    )
+                else:
+                    pyautogui.click(int(round(center_x)), int(round(center_y)))
+                    closed = True
+            except Exception:
+                closed = False
+            if not closed:
+                continue
+            time.sleep(0.25)
+            refreshed = self._inspect_runtime_layout_bounds()
+            if isinstance(refreshed, dict) and refreshed.get("ok") is True:
+                if not self._carpet_panel_targets(refreshed):
+                    print("   ✅ Settings/Options panel closed with live close control")
+                    return True
+
+        print("   🛑 Settings/Options panel is still open; refusing more carpet clicks")
+        return False
 
     def _find_runtime_character_candidate(self, before_layout, after_layout, target_slot, radius=360.0):
         before_by_id = {target.get("id"): target for target in (before_layout or {}).get("targets", [])}
@@ -8055,11 +8764,43 @@ class SprunkiGamePlayer:
             print(f"   âŒ Wave execution error: {e}")
             return False, 0
 
-    def _execute_carpet_click(self, x, y, use_cdp):
+    def _execute_carpet_click(
+        self,
+        x,
+        y,
+        use_cdp,
+        *,
+        slot_index=None,
+        slot_center=None,
+        runtime_layout=None,
+    ):
         """
         ðŸ‘† NEW: Execute single carpet bombing click
+
+        Every carpet click passes through the runtime input firewall.  The
+        caller may provide one live layout snapshot for a whole bounded set;
+        callers without one trigger a fresh inspection before input is sent.
         """
         try:
+            safety = self._carpet_click_safety(
+                x,
+                y,
+                slot_index=slot_index,
+                slot_center=slot_center,
+                runtime_layout=runtime_layout,
+            )
+            if not safety.get("allowed"):
+                print(
+                    f"      🛑 Carpet click blocked at ({x},{y}): "
+                    f"{safety.get('reason')}"
+                    + (
+                        f" [{safety.get('target')}]"
+                        if safety.get("target")
+                        else ""
+                    )
+                )
+                return False
+
             active_context = getattr(self, "_active_operation_context", None)
             if active_context is None:
                 print("      🛑 Carpet click rejected without an active OperationContext")
@@ -8702,13 +9443,37 @@ class SprunkiGamePlayer:
                 
                 print(f"   ðŸ“Š Generated {len(coordinate_set)} total coordinates")
                 
-                # Execute sequential clicking for this set
-                set_success = self.execute_sequential_clicking_set(
-                    coordinate_set,
-                    set_num,
-                    use_cdp,
-                    operation_context=context,
-                )
+                # Execute sequential clicking for this set.  If a click
+                # opened a panel and the guard closed it, replay this same
+                # bounded set once; moving directly to the next progressive
+                # set would otherwise skip the coordinates that were blocked.
+                set_success = False
+                set_attempt = 0
+                while True:
+                    set_attempt += 1
+                    set_success = self.execute_sequential_clicking_set(
+                        coordinate_set,
+                        set_num,
+                        use_cdp,
+                        operation_context=context,
+                    )
+                    set_abort_reason = getattr(
+                        self,
+                        "_last_carpet_set_abort_reason",
+                        None,
+                    )
+                    if (
+                        not set_success
+                        and set_abort_reason == "panel_opened_during_set"
+                        and set_attempt <= self.CARPET_SET_RERUN_LIMIT
+                    ):
+                        print(
+                            f"      🔁 Panel recovery succeeded; re-running "
+                            f"carpet set {set_num} ({set_attempt}/{self.CARPET_SET_RERUN_LIMIT})"
+                        )
+                        time.sleep(0.25)
+                        continue
+                    break
                 
                 # Check progress after set
                 after_state = self._read_comprehensive_state(context)
@@ -8854,6 +9619,7 @@ class SprunkiGamePlayer:
         ðŸ‘† NEW: Execute clicking in sequential order (slot 0 â†’ slot 1 â†’ slot 2...)
         """
         try:
+            self._last_carpet_set_abort_reason = None
             print(f"   ðŸ‘† Executing sequential clicking for set {set_num}")
             context = operation_context or getattr(self, "_active_operation_context", None)
             if context is None or getattr(self, "_active_operation_context", None) is not context:
@@ -8870,6 +9636,26 @@ class SprunkiGamePlayer:
             
             # Sort slots for sequential processing
             sorted_slot_indices = sorted(slots_coords.keys())
+
+            # Take one live runtime snapshot before sending any input.  This
+            # both detects a panel left open by a previous action and gives
+            # every click in this bounded set the real Polo/control hitboxes.
+            runtime_layout = self._inspect_runtime_layout_bounds()
+            if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
+                print(
+                    "      ⚠️ Runtime layout unavailable; using bounded fallback "
+                    f"within {self.CARPET_FALLBACK_RADIUS_PX:.0f}px of each Polo"
+                )
+            elif self._carpet_panel_targets(runtime_layout):
+                if not self._close_carpet_panel_if_open(runtime_layout, use_cdp):
+                    self._last_carpet_set_abort_reason = "panel_recovery_failed"
+                    return False
+                runtime_layout = self._inspect_runtime_layout_bounds()
+                if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
+                    print(
+                        "      ⚠️ Runtime layout unavailable after panel recovery; "
+                        "continuing with bounded fallback"
+                    )
             
             total_clicks = 0
             successful_clicks = 0
@@ -8879,7 +9665,12 @@ class SprunkiGamePlayer:
                 if self.stop_event.is_set():
                     break
                 
-                slot_coords = slots_coords[slot_index]
+                slot_coords = self._prepare_carpet_slot_coordinates(
+                    slots_coords[slot_index],
+                    slot_index,
+                    set_num,
+                    runtime_layout,
+                )
                 print(f"      ðŸŽ¯ Processing slot {slot_index}: {len(slot_coords)} clicks")
                 
                 # Execute all coordinates for this slot
@@ -8889,11 +9680,74 @@ class SprunkiGamePlayer:
                     ):
                         print("      🛑 Carpet input budget exhausted")
                         return False
-                    click_success = self._execute_carpet_click(coord['x'], coord['y'], use_cdp)
+
+                    safety = self._carpet_click_safety(
+                        coord['x'],
+                        coord['y'],
+                        slot_index=slot_index,
+                        slot_center=coord.get('slot_center'),
+                        runtime_layout=runtime_layout,
+                    )
+                    if not safety.get("allowed"):
+                        print(
+                            f"      🛑 Skipping unsafe carpet coordinate "
+                            f"({coord['x']},{coord['y']}): {safety.get('reason')}"
+                            + (
+                                f" [{safety.get('target')}]"
+                                if safety.get("target")
+                                else ""
+                            )
+                        )
+                        if safety.get("reason") == "panel_open":
+                            if not self._close_carpet_panel_if_open(runtime_layout, use_cdp):
+                                self._last_carpet_set_abort_reason = "panel_recovery_failed"
+                                return False
+                            runtime_layout = self._inspect_runtime_layout_bounds()
+                            if not isinstance(runtime_layout, dict):
+                                runtime_layout = {"ok": False, "error": "panel_recovery_layout_unknown"}
+                        continue
+
+                    click_success = self._execute_carpet_click(
+                        coord['x'],
+                        coord['y'],
+                        use_cdp,
+                        slot_index=slot_index,
+                        slot_center=coord.get('slot_center'),
+                        runtime_layout=runtime_layout,
+                    )
                     
                     total_clicks += 1
                     if click_success:
                         successful_clicks += 1
+
+                    # Do not send the next coordinate while a Settings or
+                    # Options panel may be covering the stage.  If an
+                    # unexpected control still opened, close it and abort the
+                    # remainder of this set so the outer verifier can re-read
+                    # the board before deciding whether to retry.
+                    post_layout = self._inspect_runtime_layout_bounds()
+                    if not isinstance(post_layout, dict) or post_layout.get("ok") is not True:
+                        print(
+                            "      ⚠️ Post-click runtime layout unknown; "
+                            "continuing only within bounded fallback coordinates"
+                        )
+                        runtime_layout = (
+                            post_layout
+                            if isinstance(post_layout, dict)
+                            else {"ok": False, "error": "post_click_layout_unknown"}
+                        )
+                        time.sleep(0.03)
+                        continue
+                    if self._carpet_panel_targets(post_layout):
+                        print("      ⚠️ A panel opened during carpet bombing; closing and stopping this set")
+                        closed = self._close_carpet_panel_if_open(post_layout, use_cdp)
+                        self._last_carpet_set_abort_reason = (
+                            "panel_opened_during_set"
+                            if closed
+                            else "panel_recovery_failed"
+                        )
+                        return False
+                    runtime_layout = post_layout
                     
                     # Small delay between clicks within same slot
                     time.sleep(0.03)
@@ -8902,6 +9756,8 @@ class SprunkiGamePlayer:
                 if slot_index != sorted_slot_indices[-1]:  # Not last slot
                     time.sleep(0.1)
             
+            if successful_clicks == 0:
+                self._last_carpet_set_abort_reason = "no_successful_clicks"
             print(f"   âœ… Set {set_num} executed: {successful_clicks}/{total_clicks} clicks successful")
             
             return successful_clicks > 0
@@ -13685,21 +14541,6 @@ class SprunkiGamePlayer:
             )
             if self._target_return_result_is_final(remove_result):
                 print("REMOVE-FIRST SUCCESS!")
-                if obs_controller:
-                    obs_controller.log_event_timestamp(
-                        "return_completed_successfully",
-                        f"Return successful (Remove button) for slot {target_slot_index}",
-                        {
-                            "slot_index": target_slot_index,
-                            "return_phase": 0,
-                            "status": remove_result.status.value,
-                            "removeButtonAttempts": (remove_result.details or {}).get(
-                                "removeButtonAttempts",
-                                (remove_result.details or {}).get("attempts", []),
-                            ),
-                            "operationId": context.operation_id,
-                        },
-                    )
                 result = self._finalize_target_return_boundary(
                     context,
                     remove_result,
@@ -13707,7 +14548,11 @@ class SprunkiGamePlayer:
                     use_cdp,
                     obs_controller=obs_controller,
                     reason="remove_return_left_board_unverified",
-                    extra_details={"targetSlotIndex": target_slot_index},
+                    extra_details={
+                        "targetSlotIndex": target_slot_index,
+                        "returnPhase": 0,
+                        "returnMethod": "remove_first",
+                    },
                 )
                 return self._finish_operation(context, result)
             if remove_result.status == OperationStatus.STOPPED:
@@ -13727,17 +14572,6 @@ class SprunkiGamePlayer:
             )
             if self._target_return_result_is_final(precision_result):
                 print("ðŸŽ‰ PHASE 1 SUCCESS!")
-                if obs_controller:
-                    obs_controller.log_event_timestamp(
-                        "return_completed_successfully",
-                        f"Return successful (Phase 1) for slot {target_slot_index}",
-                        {
-                            "slot_index": target_slot_index,
-                            "return_phase": 1,
-                            "status": precision_result.status.value,
-                            "operationId": context.operation_id,
-                        },
-                    )
                 result = self._finalize_target_return_boundary(
                     context,
                     precision_result,
@@ -13745,7 +14579,11 @@ class SprunkiGamePlayer:
                     use_cdp,
                     obs_controller=obs_controller,
                     reason="precision_return_left_board_unverified",
-                    extra_details={"targetSlotIndex": target_slot_index},
+                    extra_details={
+                        "targetSlotIndex": target_slot_index,
+                        "returnPhase": 1,
+                        "returnMethod": "precision",
+                    },
                 )
                 return self._finish_operation(context, result)
 
@@ -13771,7 +14609,11 @@ class SprunkiGamePlayer:
                     reason="post_precision_state_unknown",
                     success_status=OperationStatus.ALREADY_EMPTY,
                     success_message="return_verified_after_rerun",
-                    extra_details={"targetSlotIndex": target_slot_index},
+                    extra_details={
+                        "targetSlotIndex": target_slot_index,
+                        "returnPhase": 3,
+                        "returnMethod": "restart_recovery",
+                    },
                 )
                 return self._finish_operation(context, result)
             if self._return_state_is_empty(current_state, target_slot_index, baseline):
@@ -13799,7 +14641,11 @@ class SprunkiGamePlayer:
                     obs_controller=obs_controller,
                     reason="precision_return_left_board_unverified",
                     current_snapshot=current_state,
-                    extra_details={"targetSlotIndex": target_slot_index},
+                    extra_details={
+                        "targetSlotIndex": target_slot_index,
+                        "returnPhase": 1,
+                        "returnMethod": "precision",
+                    },
                 )
                 return self._finish_operation(context, result)
 
@@ -13819,18 +14665,6 @@ class SprunkiGamePlayer:
             )
             if self._target_return_result_is_final(carpet_result):
                 print("ðŸŽ‰ PHASE 2 SUCCESS!")
-                if obs_controller:
-                    obs_controller.log_event_timestamp(
-                        "return_completed_successfully",
-                        f"Return successful (Phase 2) for slot {target_slot_index}",
-                        {
-                            "slot_index": target_slot_index,
-                            "return_phase": 2,
-                            "status": carpet_result.status.value,
-                            "aggregateFallback": bool(carpet_result.details.get("aggregateFallback")),
-                            "operationId": context.operation_id,
-                        },
-                    )
                 result = self._finalize_target_return_boundary(
                     context,
                     carpet_result,
@@ -13838,7 +14672,11 @@ class SprunkiGamePlayer:
                     use_cdp,
                     obs_controller=obs_controller,
                     reason="carpet_return_left_board_unverified",
-                    extra_details={"targetSlotIndex": target_slot_index},
+                    extra_details={
+                        "targetSlotIndex": target_slot_index,
+                        "returnPhase": 2,
+                        "returnMethod": "carpet_bombing",
+                    },
                 )
                 return self._finish_operation(context, result)
 
@@ -13882,7 +14720,11 @@ class SprunkiGamePlayer:
                     obs_controller=obs_controller,
                     reason="carpet_return_left_board_unverified",
                     current_snapshot=post_carpet_state,
-                    extra_details={"targetSlotIndex": target_slot_index},
+                    extra_details={
+                        "targetSlotIndex": target_slot_index,
+                        "returnPhase": 2,
+                        "returnMethod": "carpet_bombing",
+                    },
                 )
                 return self._finish_operation(context, result)
             if post_carpet_state is None:
@@ -13893,7 +14735,11 @@ class SprunkiGamePlayer:
                     use_cdp,
                     obs_controller=obs_controller,
                     reason="post_carpet_state_unknown",
-                    extra_details={"targetSlotIndex": target_slot_index},
+                    extra_details={
+                        "targetSlotIndex": target_slot_index,
+                        "returnPhase": 3,
+                        "returnMethod": "restart_recovery",
+                    },
                 )
                 return self._finish_operation(context, result)
 
@@ -13912,6 +14758,8 @@ class SprunkiGamePlayer:
                     "targetSlotIndex": target_slot_index,
                     "carpet": carpet_result.as_dict(),
                     "postCarpetState": self._snapshot_to_mapping(post_carpet_state),
+                    "returnPhase": 3,
+                    "returnMethod": "restart_recovery",
                 },
             )
             return self._finish_operation(context, result)
@@ -13940,6 +14788,8 @@ class SprunkiGamePlayer:
                         success_message="return_verified_after_rerun",
                         extra_details={
                             "targetSlotIndex": target_slot_index,
+                            "returnPhase": 3,
+                            "returnMethod": "restart_recovery",
                             "strategyException": str(e),
                         },
                     )
