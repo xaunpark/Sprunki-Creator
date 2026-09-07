@@ -148,6 +148,37 @@ class TrackerCallbackDeliveryTests(unittest.TestCase):
             self.assertEqual(client.last_callback_metrics["http_status"], 201)
             self.assertEqual(client.last_callback_metrics["retry_count"], 0)
 
+    def test_completed_terminal_status_is_downgraded_for_failed_quality_report(self):
+        """Do not reproduce Tracker's 422 for a stale completed callback."""
+
+        with tempfile.TemporaryDirectory() as outbox:
+            session = FakeSession([FakeResponse(200, {"accepted": True})])
+            client = make_client(session, outbox)
+            report = diagnostic()
+            # This mirrors the pre-fix payload: the outer status was completed
+            # even though the required quality gate had failed.
+            report["status"] = "completed"
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = client.update_job_status(
+                    3118,
+                    "completed",
+                    diagnostic_report=report,
+                    report_id="report-3118",
+                    attempt_nonce="nonce-3118",
+                    sequence=10,
+                    final=True,
+                )
+
+            self.assertTrue(result)
+            payload = session.calls[-1][2]
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["diagnostic_report"]["status"], "failed")
+            self.assertFalse(payload["diagnostic_report"]["quality_gate"]["passed"])
+            self.assertEqual(payload["video_files"], {})
+            self.assertEqual(payload["diagnostic_report"]["outputs"]["video_files"], {})
+            self.assertFalse(os.path.exists(client._tracker_outbox_path(3118)))
+
     def test_http_413_compacts_again_and_retries_with_same_identity_and_sequence(self):
         with tempfile.TemporaryDirectory() as outbox:
             session = FakeSession(
@@ -186,6 +217,31 @@ class TrackerCallbackDeliveryTests(unittest.TestCase):
             self.assertEqual(client.last_callback_metrics["http_status"], 202)
             self.assertEqual(client.last_callback_metrics["retry_count"], 1)
             self.assertFalse(os.path.exists(client._tracker_outbox_path(3118)))
+
+    def test_replay_repairs_pre_fix_completed_quality_failure(self):
+        with tempfile.TemporaryDirectory() as outbox:
+            session = FakeSession([FakeResponse(200, {"accepted": True})])
+            client = make_client(session, outbox)
+            report = diagnostic()
+            report["status"] = "completed"
+            replay_payload = {
+                "status": "completed",
+                "schema_version": SCHEMA_VERSION,
+                "report_id": "report-3118",
+                "attempt_nonce": "nonce-3118",
+                "sequence": 10,
+                "final": True,
+                "diagnostic_report": report,
+            }
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = client.resend_terminal_callback(3118, replay_payload)
+
+            self.assertTrue(result)
+            payload = session.calls[-1][2]
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["diagnostic_report"]["status"], "failed")
+            self.assertEqual(payload["sequence"], 10)
 
     def test_large_nested_evidence_is_bounded_before_terminal_send(self):
         with tempfile.TemporaryDirectory() as outbox:

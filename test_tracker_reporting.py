@@ -1045,6 +1045,117 @@ class TrackerReportingTests(unittest.TestCase):
         self.assertTrue(payload["diagnostic_report"]["quality_gate"]["passed"])
         self.assertEqual(payload["diagnostic_report"]["outputs"]["video_files"], {})
 
+    def test_creator_finalizer_uses_diagnostic_status_when_gate_is_stale(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            from creator_api_client import CreatorService
+
+        import threading
+
+        class Logger:
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                pass
+
+            def error(self, *args, **kwargs):
+                pass
+
+        class Capture:
+            log_path = None
+
+            def start(self):
+                return True
+
+            def stop(self):
+                pass
+
+            def snapshot(self):
+                return {
+                    "upload_status": "not_available",
+                    "full_log_ref": {"exists": False, "path": None},
+                    "excerpt": "",
+                    "truncated": False,
+                    "line_count": 0,
+                    "redactions": [],
+                }
+
+        class API:
+            service_name = "creator-test"
+
+            def __init__(self):
+                self.final_calls = []
+
+            def update_job_status(self, *args, **kwargs):
+                if kwargs.get("final"):
+                    self.final_calls.append(kwargs)
+                return True
+
+            def update_job_progress(self, *args, **kwargs):
+                return True
+
+        class Manager:
+            config = SimpleNamespace(max_retries=2)
+
+            def _generate_manifest_for_item(self, current_item):
+                return {"projectInfo": {"outputDirectory": tempfile.gettempdir()}}
+
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/stale-gate",
+            project_slug="stale-gate",
+            mode="master",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/stale-gate",
+                # The workflow report below is stale and says PASS, but the
+                # diagnostic contract must still reject this empty layout.
+                "layout": {"icons": [], "slots": []},
+            },
+            status="processing",
+            failure_code=None,
+            error_message=None,
+            output_files=[],
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=None,
+            workflow_report=passing_report(),
+            recorded_identity_status="verified",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+        )
+
+        service = CreatorService.__new__(CreatorService)
+        service.logger = Logger()
+        service.service_stop_event = threading.Event()
+        service.processing_manager = Manager()
+        service.api_client = API()
+        service.performance_analyzer = SimpleNamespace(
+            record_job_start=lambda *args, **kwargs: None,
+            record_job_completion=lambda *args, **kwargs: None,
+        )
+        service._create_job_log_capture = lambda queue_id: Capture()
+        service._convert_job_to_processing_item = lambda job: item
+
+        def process_success(current_item, queue_id):
+            current_item.status = "completed"
+            return True
+
+        service._process_with_smart_retry = process_success
+        service._organize_output_files = lambda files: {}
+        service.obs_controller = None
+        service.game_player = None
+        service.config_manager = SimpleNamespace(get=lambda *args, **kwargs: 60)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = service._process_job({"id": 3032, "production_mode": "master"})
+
+        self.assertFalse(result)
+        self.assertEqual(len(service.api_client.final_calls), 1)
+        payload = service.api_client.final_calls[0]
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["diagnostic_report"]["status"], "failed")
+        self.assertFalse(payload["diagnostic_report"]["quality_gate"]["passed"])
+        self.assertEqual(payload["diagnostic_report"]["outputs"]["video_files"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

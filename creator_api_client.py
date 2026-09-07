@@ -1226,6 +1226,49 @@ class TrackerAPIClient:
         compact["attempt_nonce"] = replay["attempt_nonce"]
         compact["diagnostic_report"]["report_id"] = replay["report_id"]
         compact["diagnostic_report"]["attempt_nonce"] = replay["attempt_nonce"]
+        replay_diagnostic = compact.get("diagnostic_report")
+        replay_summary = (
+            replay_diagnostic.get("summary")
+            if isinstance(replay_diagnostic, dict)
+            else None
+        )
+        replay_gate = (
+            replay_diagnostic.get("quality_gate")
+            if isinstance(replay_diagnostic, dict)
+            else None
+        )
+        replay_failed = (
+            isinstance(replay_diagnostic, dict)
+            and (
+                str(replay_diagnostic.get("status") or "").lower() == "failed"
+                or (
+                    isinstance(replay_summary, dict)
+                    and str(replay_summary.get("status") or "").lower() == "failed"
+                )
+                or (
+                    isinstance(replay_gate, dict)
+                    and replay_gate.get("passed") is False
+                )
+            )
+        )
+        if str(compact.get("status") or "").lower() == "completed" and replay_failed:
+            # Repair terminal outbox files written by the pre-fix client. They
+            # may have top-level status=completed even though the diagnostic
+            # already contained a failed required quality check.
+            print(
+                f"⚠️ Repairing queued terminal callback for {queue_id}: "
+                "completed -> failed."
+            )
+            compact["status"] = "failed"
+            if isinstance(replay_diagnostic, dict):
+                replay_diagnostic["status"] = "failed"
+                outputs = replay_diagnostic.get("outputs")
+                if isinstance(outputs, dict):
+                    outputs["video_files"] = {}
+            compact["video_files"] = {}
+            if isinstance(replay_summary, dict):
+                replay_summary["status"] = "failed"
+                replay_summary["outcome"] = "failed"
         self._ensure_attempt(
             queue_id,
             report_id=str(replay["report_id"]),
@@ -1345,6 +1388,41 @@ class TrackerAPIClient:
                 )
                 return False
             if final and isinstance(normalized_diagnostic, dict):
+                # The diagnostic builder is allowed to downgrade a stale or
+                # inconsistent completion decision after checking all required
+                # evidence. Never send ``completed`` with a failed report:
+                # Tracker correctly rejects that terminal combination with
+                # HTTP 422 (quality_gate_failed).
+                requested_status = str(status or "").strip().lower()
+                diagnostic_status = str(
+                    normalized_diagnostic.get("status") or ""
+                ).strip().lower()
+                diagnostic_summary = normalized_diagnostic.get("summary")
+                diagnostic_gate = normalized_diagnostic.get("quality_gate")
+                diagnostic_failed = (
+                    diagnostic_status == "failed"
+                    or (
+                        isinstance(diagnostic_summary, dict)
+                        and str(diagnostic_summary.get("status") or "").lower() == "failed"
+                    )
+                    or (
+                        isinstance(diagnostic_gate, dict)
+                        and diagnostic_gate.get("passed") is False
+                    )
+                )
+                if requested_status == "completed" and diagnostic_failed:
+                    print(
+                        f"⚠️ Terminal status for queue {queue_id} downgraded "
+                        "from completed to failed to match diagnostic_report."
+                    )
+                    status = "failed"
+                    video_files = {}
+                    outputs = normalized_diagnostic.get("outputs")
+                    if isinstance(outputs, dict):
+                        outputs["video_files"] = {}
+                    if isinstance(diagnostic_summary, dict):
+                        diagnostic_summary["status"] = "failed"
+                        diagnostic_summary["outcome"] = "failed"
                 normalized_diagnostic["status"] = status
             effective_sequence = self._reserve_callback_sequence(queue_id, sequence)
             raw_payload = {
@@ -2954,17 +3032,16 @@ class CreatorService:
 
             if item:
                 workflow_report_obj = getattr(item, "workflow_report", None)
-                quality_passed = (
-                    workflow_report_obj is not None
-                    and getattr(getattr(workflow_report_obj, "quality_gate", None), "passed", False) is True
+                requested_final_status = (
+                    "completed"
+                    if job_successful and item.status != "failed"
+                    else "failed"
                 )
-                final_status = "completed" if job_successful and quality_passed and item.status != "failed" else "failed"
-                final_success = final_status == "completed"
+                final_status = requested_final_status
                 if final_status != "completed":
                     # Failed attempts remain on disk for diagnostics, but are
                     # never published as Tracker video_files.
                     video_files_payload = self._organize_output_files([])
-                self.logger.info(f"Finalizing job {queue_id} with status: {final_status.upper()}")
 
                 diagnostic_report = build_tracker_diagnostic_report(
                     job,
@@ -2979,6 +3056,46 @@ class CreatorService:
                     terminal_status=final_status,
                     terminal_error=terminal_error,
                 )
+
+                # The diagnostic builder re-evaluates the required checks and
+                # may downgrade a stale workflow-level completion. Use that
+                # authoritative result for the actual Tracker callback so the
+                # top-level status and quality_gate cannot contradict each
+                # other.
+                diagnostic_status = str(
+                    diagnostic_report.get("status") or final_status
+                ).strip().lower()
+                if diagnostic_status not in {"completed", "failed"}:
+                    diagnostic_status = "failed"
+                if diagnostic_status != final_status:
+                    self.logger.warning(
+                        "⚠️ Diagnostic report changed queue %s terminal status "
+                        "from %s to %s.",
+                        queue_id,
+                        final_status.upper(),
+                        diagnostic_status.upper(),
+                    )
+                    final_status = diagnostic_status
+                    if final_status != "completed":
+                        # Do not publish outputs when the authoritative report
+                        # says the required quality gate failed. Rebuild the
+                        # report so its output section matches the status too.
+                        video_files_payload = self._organize_output_files([])
+                        diagnostic_report = build_tracker_diagnostic_report(
+                            job,
+                            item,
+                            workflow_report_obj,
+                            manifest_data=manifest_data,
+                            log_snapshot=self._snapshot_job_log(job_log_capture),
+                            output_files_payload=video_files_payload,
+                            report_id=report_id,
+                            attempt_nonce=attempt_nonce,
+                            max_attempts=getattr(getattr(self.processing_manager, "config", None), "max_retries", None),
+                            terminal_status=final_status,
+                            terminal_error=terminal_error,
+                        )
+                final_success = final_status == "completed"
+                self.logger.info(f"Finalizing job {queue_id} with status: {final_status.upper()}")
                 terminal_callback_ok = bool(self.api_client.update_job_status(
                     queue_id,
                     status=final_status,
