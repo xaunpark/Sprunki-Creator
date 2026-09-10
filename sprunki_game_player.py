@@ -21,6 +21,7 @@ import pygetwindow as gw
 from pathlib import Path
 from datetime import datetime
 import math
+import hashlib
 import psutil
 import gc
 import weakref
@@ -55,6 +56,15 @@ from placement_verifier import (
     promote_aggregate_transition,
     summarize_polos,
     wait_for_stable_snapshot,
+)
+from visual_placement_verifier import (
+    VISUAL_INCONCLUSIVE,
+    VisualROI,
+    VisualThresholds,
+    VisualVerificationResult,
+    decode_cdp_screenshot,
+    normalize_visual_captures,
+    verify_transition as verify_visual_transition,
 )
 from workflow_quality import (
     UNKNOWN,
@@ -364,6 +374,25 @@ class SprunkiGamePlayer:
         }
         self._empty_board_baseline_trusted = False
         self._empty_board_baseline_source = None
+
+        # Visual verification is a final observer-only fallback.  It never
+        # changes the primary semantic verifier, click strategy, or board
+        # cleanliness policy.  References are transient and scoped to the
+        # current board generation plus the current canvas geometry.
+        self._visual_empty_references = {}
+        self._visual_active_geometry_fingerprint = None
+        self._visual_last_result = None
+        self._visual_carpet_visual_evidence = {}
+        self._visual_fallback_config = {}
+        self.visual_fallback_enabled = True
+        self.visual_roi_inner_ratio = 0.60
+        self.visual_fallback_roi_css_px = 64
+        self.visual_pre_frames = 2
+        self.visual_post_frames = 2
+        self.visual_frame_interval_ms = 80
+        self.visual_settle_ms = 120
+        self.visual_max_capture_ms = 900
+        self.visual_thresholds = VisualThresholds()
 
         # Drag operation statistics (enhanced)
         self.drag_stats = DragOperationStats()
@@ -751,6 +780,9 @@ class SprunkiGamePlayer:
             "cleanupVerificationScope": details.get("cleanupVerificationScope"),
             "aggregateSignals": list(details.get("aggregateSignals") or []),
             "verificationPolicy": details.get("verificationPolicy"),
+            "verificationMethod": details.get("verificationMethod"),
+            "visualFallback": bool(details.get("visualFallback")),
+            "visualEvidence": details.get("visualEvidence"),
             "operationId": context.operation_id,
         }
         try:
@@ -1278,6 +1310,7 @@ class SprunkiGamePlayer:
                 target_slot_index=target_slot_index,
                 timeout_ms=verify_timeout_ms,
                 remove_button_input=True,
+                visual_target_slot=target_slot,
             )
             delivery = dict(getattr(self, "_last_remove_click_delivery", {}) or {})
             attempt = {
@@ -1974,6 +2007,10 @@ class SprunkiGamePlayer:
         """Advance the board generation before any Re-Run input is dispatched."""
         generation = int(getattr(self, "_board_generation", 0) or 0) + 1
         self._board_generation = generation
+        self._visual_clear_references()
+        self._visual_carpet_progress_slots = set()
+        self._visual_carpet_candidates = []
+        self._visual_carpet_visual_evidence = {}
         if context is not None:
             context.board_generation = generation
         self._invalidate_transactions_for_rerun(boundary_id, generation)
@@ -2534,6 +2571,23 @@ class SprunkiGamePlayer:
         }
         if extra_details:
             details.update(dict(extra_details))
+        target_details = dict(getattr(target_result, "details", {}) or {})
+        # A Re-Run is a separate recovery proof.  Preserve its method if this
+        # boundary later succeeds through restart; do not relabel that final
+        # success as if the pre-restart image observation proved it.
+        if (
+            target_details.get("visualFallback")
+            and details.get("returnMethod") != "restart_recovery"
+        ):
+            details.update(
+                {
+                    "visualFallback": True,
+                    "verificationMethod": "image_fallback",
+                    "verificationConfidence": "visual",
+                    "visualEvidence": target_details.get("visualEvidence"),
+                    "returnMethod": "visual_fallback",
+                }
+            )
 
         if board_state == "CLEAN":
             details.update(
@@ -2651,7 +2705,17 @@ class SprunkiGamePlayer:
 
         # The central recovery helper performs the one and only Re-Run.  It
         # reuses the newest post-targeted snapshot, so an unresolved targeted
-        # attempt cannot create another cleanup barrage before recovery.
+        # attempt cannot create another cleanup barrage before recovery.  Any
+        # earlier image observation is retained only as history; the final
+        # success method must identify the restart recovery itself.
+        recovery_details = dict(details)
+        if recovery_details.get("visualFallback"):
+            recovery_details["priorVisualEvidence"] = recovery_details.get(
+                "visualEvidence"
+            )
+            recovery_details["visualFallback"] = False
+            recovery_details["verificationMethod"] = "restart_recovery"
+            recovery_details["returnMethod"] = "restart_recovery"
         return self._run_cleanup_boundary_recovery(
             context,
             use_cdp,
@@ -2661,7 +2725,7 @@ class SprunkiGamePlayer:
             reason=reason,
             success_status=OperationStatus.ALREADY_EMPTY,
             success_message="return_verified_after_restart",
-            extra_details=details,
+            extra_details=recovery_details,
         )
 
     def _run_cleanup_once(
@@ -2993,6 +3057,26 @@ class SprunkiGamePlayer:
             "targeted_cleanup_radius_px": 24,
             "targeted_cleanup_backend_fallback": True,
             "targeted_cleanup_timeout_ms": 1500,
+            "visual_fallback": {
+                "enabled": True,
+                "roi_inner_ratio": 0.60,
+                "fallback_roi_css_px": 64,
+                "pre_frames": 2,
+                "post_frames": 2,
+                "frame_interval_ms": 80,
+                "settle_ms": 120,
+                "max_capture_ms": 900,
+                "pixel_delta": 20.0,
+                "changed_ratio": 0.15,
+                "mean_abs_diff": 10.0,
+                "transition_ssim_max": 0.85,
+                "post_stability_ssim_min": 0.92,
+                "empty_reference_ssim_min": 0.90,
+                "target_vs_control_ratio": 1.5,
+                "global_change_ratio_max": 0.30,
+                "dynamic_pixel_delta": 12.0,
+                "min_stable_pixels": 64,
+            },
         }
         self.verifier_policy = "lenient"
         self.verifier_accept_aggregate_progress = True
@@ -3011,6 +3095,18 @@ class SprunkiGamePlayer:
         self.verifier_targeted_cleanup_radius_px = 24
         self.verifier_targeted_cleanup_backend_fallback = True
         self.verifier_targeted_cleanup_timeout_ms = 1500
+        self._visual_fallback_config = dict(
+            self.placement_verification_config["visual_fallback"]
+        )
+        self.visual_fallback_enabled = True
+        self.visual_roi_inner_ratio = 0.60
+        self.visual_fallback_roi_css_px = 64
+        self.visual_pre_frames = 2
+        self.visual_post_frames = 2
+        self.visual_frame_interval_ms = 80
+        self.visual_settle_ms = 120
+        self.visual_max_capture_ms = 900
+        self.visual_thresholds = VisualThresholds()
 
     def load_placement_verification_config(self):
         """Load the relaxed operation evidence policy from config.json."""
@@ -3128,6 +3224,71 @@ class SprunkiGamePlayer:
                     self.placement_verification_config.get(
                         "targeted_cleanup_timeout_ms", 1500
                     )
+                ),
+            )
+            visual_config = self.placement_verification_config.get(
+                "visual_fallback", {}
+            )
+            if not isinstance(visual_config, dict):
+                visual_config = {}
+            self._visual_fallback_config = {
+                **dict(self.placement_verification_config.get("visual_fallback", {}) or {}),
+                **visual_config,
+            }
+            self.visual_fallback_enabled = bool(visual_config.get("enabled", True))
+            self.visual_roi_inner_ratio = min(
+                0.90,
+                max(0.40, float(visual_config.get("roi_inner_ratio", 0.60))),
+            )
+            self.visual_fallback_roi_css_px = max(
+                32,
+                int(visual_config.get("fallback_roi_css_px", 64)),
+            )
+            self.visual_pre_frames = max(
+                2,
+                int(visual_config.get("pre_frames", 2)),
+            )
+            self.visual_post_frames = max(
+                2,
+                int(visual_config.get("post_frames", 2)),
+            )
+            self.visual_frame_interval_ms = max(
+                20,
+                int(visual_config.get("frame_interval_ms", 80)),
+            )
+            self.visual_settle_ms = max(
+                0,
+                int(visual_config.get("settle_ms", 120)),
+            )
+            self.visual_max_capture_ms = max(
+                250,
+                int(visual_config.get("max_capture_ms", 900)),
+            )
+            self.visual_thresholds = VisualThresholds(
+                pixel_delta=float(visual_config.get("pixel_delta", 20.0)),
+                changed_ratio=float(visual_config.get("changed_ratio", 0.15)),
+                mean_abs_diff=float(visual_config.get("mean_abs_diff", 10.0)),
+                transition_ssim_max=float(
+                    visual_config.get("transition_ssim_max", 0.85)
+                ),
+                post_stability_ssim_min=float(
+                    visual_config.get("post_stability_ssim_min", 0.92)
+                ),
+                empty_reference_ssim_min=float(
+                    visual_config.get("empty_reference_ssim_min", 0.90)
+                ),
+                target_vs_control_ratio=float(
+                    visual_config.get("target_vs_control_ratio", 1.5)
+                ),
+                global_change_ratio_max=float(
+                    visual_config.get("global_change_ratio_max", 0.30)
+                ),
+                dynamic_pixel_delta=float(
+                    visual_config.get("dynamic_pixel_delta", 12.0)
+                ),
+                min_stable_pixels=max(
+                    16,
+                    int(visual_config.get("min_stable_pixels", 64)),
                 ),
             )
             print(
@@ -5418,6 +5579,525 @@ class SprunkiGamePlayer:
                     ws.close()
             except Exception:
                 pass
+
+    # ================================================================
+    # == VISUAL PLACEMENT FALLBACK ===================================
+    # ================================================================
+
+    @staticmethod
+    def _visual_numeric(value, default=None):
+        try:
+            number = float(value)
+            if math.isfinite(number):
+                return number
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return default
+
+    def _visual_geometry_fingerprint(self, runtime_layout):
+        """Return a stable fingerprint for one page/canvas geometry."""
+        if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
+            return None
+        canvas = runtime_layout.get("canvas") or {}
+        screen = runtime_layout.get("screen") or {}
+        canvas_values = (
+            canvas.get("left"),
+            canvas.get("top"),
+            canvas.get("width"),
+            canvas.get("height"),
+            canvas.get("scaleX"),
+            canvas.get("scaleY"),
+        )
+        screen_values = (
+            screen.get("width"),
+            screen.get("height"),
+            screen.get("devicePixelRatio"),
+        )
+        if any(
+            self._visual_numeric(value) is None
+            for value in (*canvas_values, *screen_values)
+        ):
+            return None
+        if any(self._visual_numeric(value) <= 0 for value in canvas_values[2:]):
+            return None
+        if any(self._visual_numeric(value) <= 0 for value in screen_values):
+            return None
+        payload = {
+            "canvas": [round(float(value), 3) for value in canvas_values],
+            "screen": [round(float(value), 3) for value in screen_values],
+        }
+        return hashlib.sha1(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:20]
+
+    def _visual_reference_screen_to_viewport(self, runtime_layout, x, y):
+        """Map legacy 1920x1080 coordinates into the live CSS viewport."""
+        if not isinstance(runtime_layout, dict):
+            return None
+        canvas = runtime_layout.get("canvas") or {}
+        screen = runtime_layout.get("screen") or {}
+        canvas_left = self._visual_numeric(canvas.get("left"))
+        canvas_top = self._visual_numeric(canvas.get("top"))
+        canvas_width = self._visual_numeric(canvas.get("width"))
+        canvas_height = self._visual_numeric(canvas.get("height"))
+        viewport_width = self._visual_numeric(screen.get("width"))
+        viewport_height = self._visual_numeric(screen.get("height"))
+        ref_x = self._visual_numeric(x)
+        ref_y = self._visual_numeric(y)
+        if any(value is None for value in (
+            canvas_left,
+            canvas_top,
+            canvas_width,
+            canvas_height,
+            viewport_width,
+            viewport_height,
+            ref_x,
+            ref_y,
+        )):
+            return None
+
+        reference_scale = min((1920.0 - 78.0) / 640.0, 1080.0 / 360.0)
+        reference_center_x = 78.0 + ((640.0 * reference_scale) / 2.0)
+        reference_center_y = ((1080.0 - (360.0 * reference_scale)) / 2.0) + (
+            (360.0 * reference_scale) / 2.0
+        )
+        logic_x = (ref_x - reference_center_x) / reference_scale
+        logic_y = (reference_center_y - ref_y) / reference_scale
+        return (
+            canvas_left + (canvas_width / 2.0) + (
+                logic_x * (canvas_width / 640.0)
+            ),
+            canvas_top + (canvas_height / 2.0) - (
+                logic_y * (canvas_height / 360.0)
+            ),
+        )
+
+    def _visual_slot_center(self, runtime_layout, target_slot):
+        if not isinstance(target_slot, dict):
+            return None
+        x = self._visual_numeric(target_slot.get("x"))
+        y = self._visual_numeric(target_slot.get("y"))
+        if x is None or y is None:
+            return None
+        coordinate_space = str(
+            target_slot.get("coordinateSpace")
+            or target_slot.get("coordinate_space")
+            or "reference-screen-1920x1080"
+        ).strip().lower()
+        if coordinate_space in {"page-viewport-css", "viewport-css", "live-viewport"}:
+            canvas = runtime_layout.get("canvas") or {}
+            left = self._visual_numeric(canvas.get("left"))
+            top = self._visual_numeric(canvas.get("top"))
+            width = self._visual_numeric(canvas.get("width"))
+            height = self._visual_numeric(canvas.get("height"))
+            if (
+                left is not None
+                and top is not None
+                and width is not None
+                and height is not None
+                and left <= x <= left + width
+                and top <= y <= top + height
+            ):
+                return x, y
+            return None
+        return self._visual_reference_screen_to_viewport(runtime_layout, x, y)
+
+    def _visual_resolve_roi(self, runtime_layout, target_slot):
+        """Resolve one fixed outer ROI without changing input safety rules."""
+        if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
+            return None
+        fingerprint = self._visual_geometry_fingerprint(runtime_layout)
+        canvas = runtime_layout.get("canvas") or {}
+        canvas_left = self._visual_numeric(canvas.get("left"))
+        canvas_top = self._visual_numeric(canvas.get("top"))
+        canvas_width = self._visual_numeric(canvas.get("width"))
+        canvas_height = self._visual_numeric(canvas.get("height"))
+        if fingerprint is None or any(value is None for value in (
+            canvas_left,
+            canvas_top,
+            canvas_width,
+            canvas_height,
+        )) or canvas_width <= 0 or canvas_height <= 0:
+            return None
+
+        slot_index = None
+        try:
+            slot_index = int((target_slot or {}).get("index"))
+        except (AttributeError, TypeError, ValueError):
+            slot_index = None
+        slot_center = self._visual_slot_center(runtime_layout, target_slot)
+        live_target = None
+        if slot_index is not None:
+            live_target = self._find_runtime_carpet_slot(
+                runtime_layout,
+                slot_index,
+                slot_center,
+            )
+
+        if self._carpet_target_has_live_bounds(live_target):
+            x = self._visual_numeric(live_target.get("boundsX"))
+            y = self._visual_numeric(live_target.get("boundsY"))
+            width = self._visual_numeric(live_target.get("boundsWidth"))
+            height = self._visual_numeric(live_target.get("boundsHeight"))
+            source = "live_bounds"
+        else:
+            if slot_center is None:
+                return None
+            x = slot_center[0] - (self.visual_fallback_roi_css_px / 2.0)
+            y = slot_center[1] - (self.visual_fallback_roi_css_px / 2.0)
+            width = float(self.visual_fallback_roi_css_px)
+            height = float(self.visual_fallback_roi_css_px)
+            source = "fixed_slot_roi"
+
+        if any(value is None for value in (x, y, width, height)):
+            return None
+        width = max(float(width), 8.0)
+        height = max(float(height), 8.0)
+        x = max(canvas_left, min(float(x), canvas_left + canvas_width - 8.0))
+        y = max(canvas_top, min(float(y), canvas_top + canvas_height - 8.0))
+        width = min(width, canvas_left + canvas_width - x)
+        height = min(height, canvas_top + canvas_height - y)
+        if width < 8.0 or height < 8.0:
+            return None
+        return VisualROI(
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            source=source,
+            slot_index=slot_index,
+            geometry_fingerprint=fingerprint,
+        )
+
+    def _visual_capture_frame(self, runtime_layout, geometry_fingerprint):
+        """Capture one cursor-free page screenshot through the game CDP page."""
+        if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
+            return None
+        ws = None
+        started = time.monotonic()
+        try:
+            ws_url = self._get_websocket_url()
+            if not ws_url:
+                return None
+            ws = websocket.create_connection(ws_url, timeout=5)
+            identity = self._read_cdp_page_identity(ws)
+            if not isinstance(identity, dict):
+                return None
+            if identity.get("visibilityState") != "visible" or identity.get("hidden"):
+                return None
+            if identity.get("readyState") not in {"interactive", "complete"}:
+                return None
+            expected_url = self._normalize_cdp_page_url(getattr(self, "game_url", None))
+            actual_url = self._normalize_cdp_page_url(identity.get("href"))
+            if not actual_url or (expected_url and actual_url != expected_url):
+                return None
+            screen = runtime_layout.get("screen") or {}
+            for key in ("width", "height", "devicePixelRatio"):
+                expected = self._visual_numeric(screen.get(key))
+                actual = self._visual_numeric(
+                    identity.get(
+                        {"width": "innerWidth", "height": "innerHeight", "devicePixelRatio": "devicePixelRatio"}[key]
+                    )
+                )
+                if expected is None or actual is None or abs(expected - actual) > 1e-3:
+                    return None
+            response = self._send_cdp_command(
+                ws,
+                {
+                    "method": "Page.captureScreenshot",
+                    "params": {
+                        "format": "png",
+                        "fromSurface": True,
+                        "captureBeyondViewport": False,
+                    },
+                },
+            )
+            if time.monotonic() - started > (self.visual_max_capture_ms / 1000.0):
+                return None
+            return decode_cdp_screenshot(
+                response or {},
+                viewport_width=float(identity.get("innerWidth")),
+                viewport_height=float(identity.get("innerHeight")),
+                device_pixel_ratio=float(identity.get("devicePixelRatio") or 1.0),
+                page_url=str(identity.get("href") or ""),
+                geometry_fingerprint=geometry_fingerprint,
+            )
+        except Exception as error:
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.debug("Visual screenshot capture failed: %s", error)
+            return None
+        finally:
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
+
+    def _visual_arm_action(self, direction, target_slot, operation_context=None):
+        """Capture a small pre-action window without running CV analysis."""
+        if not getattr(self, "visual_fallback_enabled", True):
+            return None
+        started = time.monotonic()
+        runtime_layout = self._inspect_runtime_layout_bounds()
+        roi = self._visual_resolve_roi(runtime_layout, target_slot)
+        fingerprint = self._visual_geometry_fingerprint(runtime_layout)
+        if roi is None or fingerprint is None:
+            return None
+        if (
+            self._visual_active_geometry_fingerprint
+            and self._visual_active_geometry_fingerprint != fingerprint
+        ):
+            self._visual_clear_references()
+        self._visual_active_geometry_fingerprint = fingerprint
+        frames = []
+        for index in range(max(2, int(self.visual_pre_frames))):
+            if index:
+                time.sleep(self.visual_frame_interval_ms / 1000.0)
+            if time.monotonic() - started > (self.visual_max_capture_ms / 1000.0):
+                return None
+            frame = self._visual_capture_frame(runtime_layout, fingerprint)
+            if frame is None or frame.geometry_fingerprint != fingerprint:
+                return None
+            frames.append(frame)
+        visual_target_index = None
+        if isinstance(target_slot, dict):
+            try:
+                visual_target_index = int(target_slot.get("index"))
+            except (TypeError, ValueError):
+                visual_target_index = None
+        if visual_target_index is None:
+            visual_target_index = getattr(operation_context, "target_slot", None)
+        return {
+            "direction": str(direction),
+            # For a carpet slot-group this must be the group slot, not the
+            # coordinator's target slot.  Otherwise an empty reference from
+            # one Polo can be used to validate a different Polo on return.
+            "targetSlot": visual_target_index,
+            "slot": dict(target_slot or {}),
+            "roi": roi,
+            "geometryFingerprint": fingerprint,
+            "beforeFrames": tuple(frames),
+            "armedAt": time.monotonic(),
+            "operationId": getattr(operation_context, "operation_id", None),
+        }
+
+    @staticmethod
+    def _visual_fallback_eligible(result, action_attempted):
+        """Allow visual fallback only for an attempted, unresolved action."""
+        if not action_attempted or result is None:
+            return False
+        if result.status in {
+            OperationStatus.VERIFIED,
+            OperationStatus.ALREADY_PLACED,
+            OperationStatus.ALREADY_EMPTY,
+            OperationStatus.STOPPED,
+        }:
+            return False
+        details = dict(getattr(result, "details", {}) or {})
+        if details.get("aggregateFallback"):
+            return False
+        message = str(getattr(result, "message", "") or "").lower()
+        if message in {
+            "invalid_target_slot",
+            "input_budget_exhausted",
+            "input_budget_or_deadline_exhausted",
+            "drag_execution_failed",
+            "precision_click_execution_failed",
+            "remove_button_input_budget_exhausted",
+            "runtime_layout_unknown",
+            "panel_opened_during_set",
+            "panel_recovery_failed",
+            "slot_hitbox_unknown",
+            "slot_target_unknown",
+            "slot_bounds_unknown",
+        }:
+            return False
+        if result.status == OperationStatus.UNKNOWN:
+            return True
+        return message in {
+            "expected_transition_not_observed",
+            "transition_not_observed",
+            "no_comparable_signal",
+            "transition_seen_but_not_stable",
+            "stale_snapshot_stream",
+            "cdp_drag_inconclusive",
+            "carpet_result_not_target_specific",
+            "post_carpet_state_unknown",
+            "post_precision_state_unknown",
+        }
+
+    def _visual_capture_after_frames(self, arm):
+        """Capture post-action frames for a previously armed ROI."""
+        if not isinstance(arm, dict):
+            return ()
+        roi = arm.get("roi")
+        fingerprint = arm.get("geometryFingerprint")
+        if not isinstance(roi, VisualROI) or not fingerprint:
+            return ()
+        started = time.monotonic()
+        if self.visual_settle_ms:
+            time.sleep(self.visual_settle_ms / 1000.0)
+        after_frames = []
+        for index in range(max(2, int(self.visual_post_frames))):
+            if index:
+                time.sleep(self.visual_frame_interval_ms / 1000.0)
+            if time.monotonic() - started > (self.visual_max_capture_ms / 1000.0):
+                break
+            runtime_layout = self._inspect_runtime_layout_bounds()
+            if self._visual_geometry_fingerprint(runtime_layout) != fingerprint:
+                break
+            frame = self._visual_capture_frame(runtime_layout, fingerprint)
+            if frame is None or frame.geometry_fingerprint != fingerprint:
+                break
+            after_frames.append(frame)
+        return tuple(after_frames)
+
+    def _visual_classify_after_frames(self, arm, after_frames):
+        """Classify already captured frames without issuing any input."""
+        if not isinstance(arm, dict):
+            return VisualVerificationResult(
+                VISUAL_INCONCLUSIVE,
+                "",
+                "visual_arm_missing",
+                {},
+            )
+        target_slot_index = arm.get("targetSlot")
+        reference = None
+        if str(arm.get("direction")).lower() == "return":
+            reference = self._visual_empty_reference_for(
+                target_slot_index,
+                arm.get("geometryFingerprint"),
+            )
+        return verify_visual_transition(
+            arm.get("beforeFrames") or (),
+            tuple(after_frames or ()),
+            arm.get("roi"),
+            str(arm.get("direction") or ""),
+            empty_reference_captures=reference,
+            thresholds=self.visual_thresholds,
+            inner_ratio=getattr(self, "visual_roi_inner_ratio", 0.60),
+        )
+
+    def _visual_reference_key(self, target_slot_index):
+        try:
+            slot_index = int(target_slot_index)
+        except (TypeError, ValueError):
+            return None
+        return int(getattr(self, "_board_generation", 0) or 0), slot_index
+
+    def _visual_remember_empty_reference(self, arm):
+        if not isinstance(arm, dict):
+            return
+        key = self._visual_reference_key(arm.get("targetSlot"))
+        roi = arm.get("roi")
+        frames = arm.get("beforeFrames") or ()
+        if key is None or not isinstance(roi, VisualROI) or len(frames) < 2:
+            return
+        normalized = normalize_visual_captures(frames, roi)
+        if len(normalized) < 2:
+            return
+        self._visual_empty_references[key] = {
+            "frames": tuple(normalized),
+            "geometryFingerprint": arm.get("geometryFingerprint"),
+            "roi": roi.as_dict(),
+            "capturedAt": time.time(),
+        }
+
+    def _visual_empty_reference_for(
+        self,
+        target_slot_index,
+        geometry_fingerprint,
+    ):
+        key = self._visual_reference_key(target_slot_index)
+        reference = self._visual_empty_references.get(key) if key is not None else None
+        if not isinstance(reference, dict):
+            return None
+        if reference.get("geometryFingerprint") != geometry_fingerprint:
+            return None
+        frames = reference.get("frames") or ()
+        return tuple(frames) if len(frames) >= 2 else None
+
+    def _visual_clear_references(self):
+        references = getattr(self, "_visual_empty_references", None)
+        if isinstance(references, dict):
+            references.clear()
+        else:
+            self._visual_empty_references = {}
+        self._visual_active_geometry_fingerprint = None
+
+    def _visual_complete_fallback(self, arm, result, *, action_attempted):
+        """Run the final visual check and preserve the primary result on miss."""
+        if not isinstance(arm, dict):
+            return result
+        if not self._visual_fallback_eligible(result, action_attempted):
+            primary_details = dict(getattr(result, "details", {}) or {}) if result is not None else {}
+            primary_proves_target = bool(
+                result is not None
+                and result.status in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_PLACED,
+                }
+                and not primary_details.get("aggregateFallback")
+                and not primary_details.get("softVerified")
+                and bool(getattr(result, "target_verified", False))
+                and str(arm.get("direction") or "").lower() == "place"
+            )
+            if primary_proves_target:
+                self._visual_remember_empty_reference(arm)
+            return result
+        roi = arm.get("roi")
+        fingerprint = arm.get("geometryFingerprint")
+        if not isinstance(roi, VisualROI) or not fingerprint:
+            return result
+        after_frames = self._visual_capture_after_frames(arm)
+        target_slot_index = arm.get("targetSlot")
+        visual_result = self._visual_classify_after_frames(arm, after_frames)
+        self._visual_last_result = visual_result
+        diagnostic = {
+            "visualFallback": True,
+            "visualFallbackStatus": visual_result.status,
+            "visualFallbackReason": visual_result.message,
+            "visualEvidence": dict(visual_result.details or {}),
+        }
+        if not visual_result.verified:
+            if result is not None:
+                result.details = {**(result.details or {}), **diagnostic}
+            return result
+
+        details = {
+            **(getattr(result, "details", {}) or {}),
+            **diagnostic,
+            "visualFallback": True,
+            "verificationMethod": "image_fallback",
+            "verificationConfidence": "visual",
+            "targetSpecific": True,
+            "aggregateFallback": False,
+            "softVerified": False,
+            "visualReferenceKey": str(self._visual_reference_key(target_slot_index)),
+        }
+        if str(arm.get("direction")).lower() == "return":
+            details.update({
+                "cleanupVerificationScope": "target",
+                "returnMethod": "visual_fallback",
+            })
+            visual_status = OperationStatus.ALREADY_EMPTY
+            visual_message = "return_verified_by_image_fallback"
+        else:
+            visual_status = OperationStatus.VERIFIED
+            visual_message = "placement_verified_by_image_fallback"
+            self._visual_remember_empty_reference(arm)
+        return OperationResult(
+            visual_status,
+            operation_id=getattr(result, "operation_id", ""),
+            direction=getattr(result, "direction", str(arm.get("direction") or "")),
+            message=visual_message,
+            evidence=tuple(getattr(result, "evidence", ()) or ()) + ("visual_transition",),
+            details=details,
+            attempts=getattr(result, "attempts", 0),
+            reads=getattr(result, "reads", 0),
+            recovery_attempts=getattr(result, "recovery_attempts", 0),
+        )
 
     def _median(self, values):
         if not values:
@@ -9992,6 +10672,9 @@ class SprunkiGamePlayer:
             )
             base_coords_per_slot = 2  # Start with 2 coordinates per slot
             no_progress_sets = 0
+            self._visual_carpet_progress_slots = set()
+            self._visual_carpet_candidates = []
+            self._visual_carpet_visual_evidence = {}
 
             if context is not None and context.baseline is None:
                 baseline = self._capture_stable_placement_snapshot(
@@ -10114,13 +10797,78 @@ class SprunkiGamePlayer:
                     print("   ⚠️ Post-set board state is UNKNOWN; stopping without another set")
                     return False
                 progress = current_count - after_count
-                
+
+                # The semantic verifier remains primary.  ``progress`` is a
+                # bounded cleanup count and may stay unchanged even when one
+                # of the primary aggregate signals made the exact expected
+                # transition (for example, the other relative counter still
+                # remains the larger max).  In that case the primary result is
+                # already an accepted aggregateFallback and image evidence
+                # must not be spent or attributed to a slot.
+                aggregate_evaluation = self._carpet_aggregate_transition_evaluation(
+                    current_state,
+                    after_state,
+                )
+                aggregate_primary_success = bool(
+                    aggregate_evaluation.status == OperationStatus.VERIFIED
+                    and aggregate_evaluation.aggregate_fallback
+                )
+
+                # Only when this set produced no aggregate progress and no
+                # aggregateFallback result do we spend the final visual
+                # fallback on the slot-group candidates captured above.  A
+                # whole-set image is never attributed to an individual slot.
+                visual_progress = 0
+                if aggregate_primary_success:
+                    self._visual_carpet_candidates = []
+                    print(
+                        "   ✅ Primary aggregateFallback verified this set; "
+                        "skipping image fallback"
+                    )
+                elif progress <= 0 and self._visual_carpet_candidates:
+                    for candidate in list(self._visual_carpet_candidates):
+                        if not candidate.get("actionAttempted"):
+                            continue
+                        visual_result = self._visual_classify_after_frames(
+                            candidate.get("arm"),
+                            candidate.get("afterFrames") or (),
+                        )
+                        self._visual_last_result = visual_result
+                        if visual_result.verified:
+                            slot_index = candidate.get("slotIndex")
+                            try:
+                                normalized_slot_index = int(slot_index)
+                                self._visual_carpet_progress_slots.add(
+                                    normalized_slot_index
+                                )
+                                self._visual_carpet_visual_evidence[
+                                    normalized_slot_index
+                                ] = dict(visual_result.details or {})
+                                visual_progress += 1
+                            except (TypeError, ValueError):
+                                pass
+                        else:
+                            candidate["visualResult"] = {
+                                "status": visual_result.status,
+                                "message": visual_result.message,
+                                "details": dict(visual_result.details or {}),
+                            }
+                    self._visual_carpet_candidates = []
+                elif progress > 0:
+                    # Aggregate progress is already an accepted primary
+                    # result; do not run or retain a visual candidate for it.
+                    self._visual_carpet_candidates = []
+
                 print(f"   ðŸ“Š Set {set_num} result: {current_count} â†’ {after_count} (cleared: {progress})")
+                if visual_progress:
+                    print(
+                        f"   👁️ Visual fallback verified {visual_progress} slot-group(s)"
+                    )
                 
                 if self._is_board_state_clean(after_state):
                     print(f"ðŸŽ‰ SUCCESS! All icons cleared after set {set_num}")
                     return True
-                elif progress > 0:
+                elif progress > 0 or visual_progress > 0:
                     no_progress_sets = 0
                     print(f"   ðŸ“ˆ Progress made, continuing to next set...")
                 else:
@@ -10257,6 +11005,12 @@ class SprunkiGamePlayer:
             if context is None or getattr(self, "_active_operation_context", None) is not context:
                 print("      🛑 Sequential clicks require the active OperationContext")
                 return False
+
+            # A panel-recovery replay is a new bounded set attempt.  Discard
+            # partial slot-group candidates from the interrupted attempt so a
+            # later set cannot attribute an old before/after pair to the new
+            # physical click sequence.
+            self._visual_carpet_candidates = []
             
             # Group coordinates by slot for sequential processing
             slots_coords = {}
@@ -10323,6 +11077,27 @@ class SprunkiGamePlayer:
                         "probe configured coordinates"
                     )
                     return False
+
+                configured_center = next(
+                    (
+                        coord.get("slot_center")
+                        for coord in slot_coords
+                        if isinstance(coord, dict)
+                        and isinstance(coord.get("slot_center"), (tuple, list))
+                    ),
+                    None,
+                )
+                visual_slot = {
+                    "index": slot_index,
+                    "x": configured_center[0] if configured_center else slot_coords[0].get("x"),
+                    "y": configured_center[1] if configured_center else slot_coords[0].get("y"),
+                }
+                visual_arm = self._visual_arm_action(
+                    "return",
+                    visual_slot,
+                    operation_context=context,
+                )
+                group_input_start = context.input_attempts
                 
                 # Execute all coordinates for this slot
                 for i, coord in enumerate(slot_coords):
@@ -10411,6 +11186,24 @@ class SprunkiGamePlayer:
                     
                     # Small delay between clicks within same slot
                     time.sleep(0.03)
+
+                if (
+                    visual_arm is not None
+                    and context.input_attempts > group_input_start
+                ):
+                    after_frames = self._visual_capture_after_frames(visual_arm)
+                    candidates = getattr(self, "_visual_carpet_candidates", None)
+                    if not isinstance(candidates, list):
+                        candidates = []
+                        self._visual_carpet_candidates = candidates
+                    candidates.append(
+                        {
+                            "slotIndex": slot_index,
+                            "arm": visual_arm,
+                            "afterFrames": after_frames,
+                            "actionAttempted": True,
+                        }
+                    )
                 
                 # Slightly longer delay between slots for visual feedback
                 if slot_index != sorted_slot_indices[-1]:  # Not last slot
@@ -12138,6 +12931,7 @@ class SprunkiGamePlayer:
         use_cdp,
         control_type_override,
         operation_context=None,
+        visual_target_slot=None,
     ):
         """Execute one drag and observe it without issuing a hidden retry."""
         start_x, start_y = start_coord
@@ -12156,6 +12950,21 @@ class SprunkiGamePlayer:
         if before_snapshot is None:
             result = self._operation_result(context, OperationStatus.UNKNOWN, "missing_stable_baseline")
             return result
+        if not context.can_send_input(coordinates, stop_requested=self.stop_event.is_set()):
+            status = OperationStatus.STOPPED if self.stop_event.is_set() else OperationStatus.FAILED
+            result = self._operation_result(context, status, "input_budget_or_deadline_exhausted")
+            return result
+
+        visual_slot = visual_target_slot or {
+            "index": context.target_slot,
+            "x": end_x,
+            "y": end_y,
+        }
+        visual_arm = self._visual_arm_action(
+            "place",
+            visual_slot,
+            operation_context=context,
+        )
         if not context.can_send_input(coordinates, stop_requested=self.stop_event.is_set()):
             status = OperationStatus.STOPPED if self.stop_event.is_set() else OperationStatus.FAILED
             result = self._operation_result(context, status, "input_budget_or_deadline_exhausted")
@@ -12188,6 +12997,13 @@ class SprunkiGamePlayer:
         # ambiguous state; the verifier will classify the resulting state.
         if cdp_attempted and not drag_executed:
             result = self._operation_result(context, OperationStatus.UNKNOWN, "cdp_drag_inconclusive")
+            result = self._visual_complete_fallback(
+                visual_arm,
+                result,
+                action_attempted=cdp_attempted,
+            )
+            self.last_operation_result = result
+            self.move_mouse_to_safe_position()
             return result
 
         if not use_cdp or not cdp_attempted:
@@ -12241,6 +13057,11 @@ class SprunkiGamePlayer:
                 "place",
                 allow_unstable=getattr(self, "verifier_accept_unstable_delta", True),
             )
+        result = self._visual_complete_fallback(
+            visual_arm,
+            result,
+            action_attempted=bool(drag_executed or cdp_attempted),
+        )
         self.last_operation_result = result
         self.move_mouse_to_safe_position()
         return result
@@ -12316,6 +13137,7 @@ class SprunkiGamePlayer:
                 use_cdp,
                 control_type_override,
                 operation_context=context,
+                visual_target_slot=target_slot,
             )
             result.details = with_coordinate_evidence(result.details, icon_idx, slot_idx)
 
@@ -12493,6 +13315,7 @@ class SprunkiGamePlayer:
                     use_cdp,
                     active_control_type,
                     operation_context=context,
+                    visual_target_slot=target_slot,
                 )
             else:
                 cache_result = self._operation_result(context, OperationStatus.FAILED, "invalid_cached_offset")
@@ -12509,10 +13332,29 @@ class SprunkiGamePlayer:
                     "dropY": end_coord[1] if end_coord else None,
                 }
                 cache_result.details = details
-                if cache_result.status == OperationStatus.VERIFIED and cache_result.target_verified:
+                if (
+                    cache_result.status == OperationStatus.VERIFIED
+                    and cache_result.target_verified
+                    and not (cache_result.details or {}).get("visualFallback")
+                ):
                     self._handle_successful_drag(icon, target_slot, details, context.input_attempts, "cache_hit")
                 elif cache_result.status == OperationStatus.VERIFIED:
-                    self._record_aggregate_drag_progress(icon, target_slot, details, context.input_attempts, "cache_hit_aggregate")
+                    if (cache_result.details or {}).get("visualFallback"):
+                        self._handle_successful_drag(
+                            icon,
+                            target_slot,
+                            details,
+                            context.input_attempts,
+                            "cache_hit_visual_fallback",
+                        )
+                    else:
+                        self._record_aggregate_drag_progress(
+                            icon,
+                            target_slot,
+                            details,
+                            context.input_attempts,
+                            "cache_hit_aggregate",
+                        )
                 return self._finish_operation(context, cache_result)
 
             if cache_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
@@ -12569,7 +13411,12 @@ class SprunkiGamePlayer:
         if result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_PLACED}:
             details = (search_result or {}).get("details") or result.details or {}
             result.details = details
-            if result.status == OperationStatus.VERIFIED and result.target_verified and not details.get("aggregateFallback"):
+            if (
+                result.status == OperationStatus.VERIFIED
+                and result.target_verified
+                and not details.get("aggregateFallback")
+                and not details.get("visualFallback")
+            ):
                 self.slot_offset_lookup[target_slot_index] = {
                     'icon_idx': search_result['icon_idx'],
                     'slot_idx': search_result['slot_idx'],
@@ -12583,14 +13430,24 @@ class SprunkiGamePlayer:
                     "search_mode",
                 )
             elif result.status == OperationStatus.VERIFIED:
-                print("   [LEARNED] Aggregate fallback verified; coordinate cache unchanged.")
-                self._record_aggregate_drag_progress(
-                    icon,
-                    target_slot,
-                    details,
-                    context.input_attempts,
-                    "search_mode_aggregate_fallback",
-                )
+                if details.get("visualFallback"):
+                    print("   [VISUAL] Image fallback verified; coordinate cache unchanged.")
+                    self._handle_successful_drag(
+                        icon,
+                        target_slot,
+                        details,
+                        context.input_attempts,
+                        "search_mode_visual_fallback",
+                    )
+                else:
+                    print("   [LEARNED] Aggregate fallback verified; coordinate cache unchanged.")
+                    self._record_aggregate_drag_progress(
+                        icon,
+                        target_slot,
+                        details,
+                        context.input_attempts,
+                        "search_mode_aggregate_fallback",
+                    )
             elif result.status == OperationStatus.ALREADY_PLACED:
                 # This is a precondition result, not a new physical drag.
                 # Keep the timestamp anchor from a previous icon from leaking
@@ -13214,6 +14071,22 @@ class SprunkiGamePlayer:
             return max(int(count) for count in counts)
         except (TypeError, ValueError, OverflowError):
             return None
+
+    def _carpet_aggregate_transition_evaluation(self, before, after):
+        """Evaluate only the primary aggregate policy for one carpet set.
+
+        Carpet image candidates are slot-group observations, so an aggregate
+        transition must be recognized before visual fallback is considered.
+        Passing ``None`` as the target deliberately prevents this helper from
+        turning any per-slot evidence into a target-specific result.
+        """
+        return evaluate_transition(
+            before,
+            after,
+            "return",
+            None,
+            allow_polos=self._polos_aggregate_allowed(),
+        )
 
     @staticmethod
     def _transition_count_from_details(details, side):
@@ -14724,6 +15597,10 @@ class SprunkiGamePlayer:
             self._batch_reconnect_attempts = 0
             self._active_operation_context = None
             self._board_generation = 0
+            self._visual_clear_references()
+            self._visual_carpet_progress_slots = set()
+            self._visual_carpet_candidates = []
+            self._visual_carpet_visual_evidence = {}
             self._board_contamination_carried_forward = False
             self._cleanup_boundary_history = []
             self._cleanup_boundary_states = {}
@@ -15790,6 +16667,7 @@ class SprunkiGamePlayer:
         target_slot_index=None,
         timeout_ms=None,
         remove_button_input=False,
+        visual_target_slot=None,
     ):
         """Execute exactly one precision click and observe its transition."""
         try:
@@ -15809,6 +16687,14 @@ class SprunkiGamePlayer:
                 context.target_slot
                 if target_slot_index is None
                 else target_slot_index
+            )
+            if not context.can_send_input(stop_requested=self.stop_event.is_set()):
+                return self._operation_result(context, OperationStatus.FAILED, "input_budget_exhausted")
+
+            visual_arm = self._visual_arm_action(
+                "return",
+                visual_target_slot or target_slot,
+                operation_context=context,
             )
             if not context.can_send_input(stop_requested=self.stop_event.is_set()):
                 return self._operation_result(context, OperationStatus.FAILED, "input_budget_exhausted")
@@ -15857,6 +16743,11 @@ class SprunkiGamePlayer:
                     "return",
                     allow_unstable=getattr(self, "verifier_accept_unstable_delta", True),
                 )
+            result = self._visual_complete_fallback(
+                visual_arm,
+                result,
+                action_attempted=bool(executed),
+            )
             result_details = dict(result.details or {})
             result_details.setdefault("targetSpecific", result.target_verified)
             aggregate_proof = self._target_return_result_has_aggregate_evidence(
@@ -15943,11 +16834,42 @@ class SprunkiGamePlayer:
                 use_cdp,
                 operation_context=context,
             )
+            visual_slots = {
+                int(slot)
+                for slot in (getattr(self, "_visual_carpet_progress_slots", set()) or set())
+                if str(slot).lstrip("-").isdigit()
+            }
+            visual_target_verified = context.target_slot in visual_slots
+            visual_evidence = dict(
+                (getattr(self, "_visual_carpet_visual_evidence", {}) or {}).get(
+                    context.target_slot,
+                    {},
+                )
+                or {}
+            )
             after_snapshot = self._capture_stable_placement_snapshot(
                 timeout_ms=1000,
                 context=context,
             )
             if after_snapshot is None:
+                if visual_target_verified:
+                    return self._operation_result(
+                        context,
+                        OperationStatus.ALREADY_EMPTY,
+                        "return_verified_by_image_fallback",
+                        evidence=("visual_transition",),
+                        details={
+                            "visualFallback": True,
+                            "verificationMethod": "image_fallback",
+                            "verificationConfidence": "visual",
+                            "targetSpecific": True,
+                            "aggregateFallback": False,
+                            "cleanupVerificationScope": "target",
+                            "returnMethod": "visual_fallback",
+                            "visualSlotsVerified": sorted(visual_slots),
+                            "visualEvidence": visual_evidence,
+                        },
+                    )
                 return self._operation_result(context, OperationStatus.UNKNOWN, "post_carpet_state_unknown")
 
             evaluation = evaluate_transition(
@@ -15981,6 +16903,25 @@ class SprunkiGamePlayer:
                     },
                 )
                 return result
+
+            if visual_target_verified:
+                return self._operation_result(
+                    context,
+                    OperationStatus.ALREADY_EMPTY,
+                    "return_verified_by_image_fallback",
+                    evidence=("visual_transition",),
+                    details={
+                        "visualFallback": True,
+                        "verificationMethod": "image_fallback",
+                        "verificationConfidence": "visual",
+                        "targetSpecific": True,
+                        "aggregateFallback": False,
+                        "cleanupVerificationScope": "target",
+                        "returnMethod": "visual_fallback",
+                        "visualSlotsVerified": sorted(visual_slots),
+                        "visualEvidence": visual_evidence,
+                    },
+                )
 
             if self._return_state_is_empty(
                 after_snapshot,
