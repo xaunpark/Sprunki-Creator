@@ -1,0 +1,199 @@
+{
+  "version": 2,
+  "sourceUrl": "https://www.cocrea.world/@arthur_blueyboy/JTAftermath",
+  "canonicalUrl": "https://www.cocrea.world/@arthur_blueyboy/JTAftermath",
+  "urlKey": "arthur_blueyboy/JTAftermath",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "coordinateSpace": "screen_1920x1080_with_menu",
+  "prepareActions": [
+    {
+      "type": "drag",
+      "startX": 917,
+      "startY": 0,
+      "endX": 839,
+      "endY": 0,
+      "dragDurationMs": 734,
+      "delayMs": 1641,
+      "holdBeforeMoveMs": 546
+    },
+    {
+      "type": "key",
+      "key": "s",
+      "delayMs": 2266
+    }
+  ],
+  "prepareTiming": {
+    "endDelayMs": 5546,
+    "durationMs": 10187
+  },
+  "layout": {
+    "icons": [
+      {
+        "index": 0,
+        "label": "n-1",
+        "x": 451,
+        "y": 776
+      },
+      {
+        "index": 1,
+        "label": "n-2",
+        "x": 564,
+        "y": 780
+      },
+      {
+        "index": 2,
+        "label": "n-3",
+        "x": 683,
+        "y": 773
+      },
+      {
+        "index": 3,
+        "label": "n-4",
+        "x": 798,
+        "y": 772
+      },
+      {
+        "index": 4,
+        "label": "n-5",
+        "x": 910,
+        "y": 770
+      },
+      {
+        "index": 5,
+        "label": "n-6",
+        "x": 1029,
+        "y": 772
+      },
+      {
+        "index": 6,
+        "label": "n-7",
+        "x": 1145,
+        "y": 767
+      },
+      {
+        "index": 7,
+        "label": "n-8",
+        "x": 1259,
+        "y": 767
+      },
+      {
+        "index": 8,
+        "label": "n-9",
+        "x": 1376,
+        "y": 770
+      },
+      {
+        "index": 9,
+        "label": "n-10",
+        "x": 1489,
+        "y": 767
+      },
+      {
+        "index": 10,
+        "label": "n-11",
+        "x": 510,
+        "y": 883
+      },
+      {
+        "index": 11,
+        "label": "n-12",
+        "x": 619,
+        "y": 890
+      },
+      {
+        "index": 12,
+        "label": "n-13",
+        "x": 737,
+        "y": 892
+      },
+      {
+        "index": 13,
+        "label": "n-14",
+        "x": 852,
+        "y": 888
+      },
+      {
+        "index": 14,
+        "label": "n-15",
+        "x": 969,
+        "y": 887
+      },
+      {
+        "index": 15,
+        "label": "n-16",
+        "x": 1085,
+        "y": 885
+      },
+      {
+        "index": 16,
+        "label": "n-17",
+        "x": 1191,
+        "y": 892
+      },
+      {
+        "index": 17,
+        "label": "n-18",
+        "x": 1313,
+        "y": 890
+      },
+      {
+        "index": 18,
+        "label": "n-19",
+        "x": 1435,
+        "y": 884
+      },
+      {
+        "index": 19,
+        "label": "n-20",
+        "x": 1547,
+        "y": 889
+      }
+    ],
+    "slots": [
+      {
+        "index": 0,
+        "x": 440,
+        "y": 501
+      },
+      {
+        "index": 1,
+        "x": 625,
+        "y": 512
+      },
+      {
+        "index": 2,
+        "x": 815,
+        "y": 510
+      },
+      {
+        "index": 3,
+        "x": 1002,
+        "y": 513
+      },
+      {
+        "index": 4,
+        "x": 1183,
+        "y": 495
+      },
+      {
+        "index": 5,
+        "x": 1377,
+        "y": 499
+      },
+      {
+        "index": 6,
+        "x": 1558,
+        "y": 498
+      }
+    ]
+  },
+  "settings": {
+    "gameControlType": "unknown"
+  },
+  "notes": "",
+  "createdAt": "2026-09-10T03:46:05.802989Z",
+  "updatedAt": "2026-09-10T03:46:05.802989Z"
+}
