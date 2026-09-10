@@ -313,6 +313,7 @@ class WorkflowQualityTests(unittest.TestCase):
         player._workflow_placement_transactions = []
         player._active_remix_final_cleanup_optional = False
         player.set_return_mode_explicit = lambda *args, **kwargs: None
+        player._inspect_runtime_layout_bounds = lambda: {"ok": True, "targets": []}
         player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
             timestamp=1.0,
             characters_count=2,
@@ -409,6 +410,7 @@ class WorkflowQualityTests(unittest.TestCase):
         player._workflow_placement_transactions = []
         player._active_remix_final_cleanup_optional = True
         player.set_return_mode_explicit = lambda *args, **kwargs: None
+        player._inspect_runtime_layout_bounds = lambda: {"ok": True, "targets": []}
         player._capture_stable_placement_snapshot = lambda **kwargs: PlacementSnapshot(
             timestamp=1.0,
             characters_count=6,
@@ -1093,7 +1095,76 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(blocked_panel["allowed"])
         self.assertEqual(blocked_panel["reason"], "panel_open")
 
-    def test_carpet_click_firewall_uses_bounded_fallback_without_polo_bounds(self):
+    def test_panel_without_live_close_control_never_clicks_a_fallback_coordinate(self):
+        from unittest.mock import Mock
+
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        layout = {
+            "ok": True,
+            "targets": [
+                {
+                    "name": "Settings",
+                    "visible": True,
+                    "boundsX": 0,
+                    "boundsY": 0,
+                    "boundsWidth": 640,
+                    "boundsHeight": 360,
+                }
+            ],
+        }
+        player._inspect_runtime_layout_bounds = lambda: layout
+        player._execute_cdp_single_click = Mock(return_value=True)
+
+        result = player._close_carpet_panel_if_open(
+            layout,
+            use_cdp=True,
+            phase="test_panel_close",
+        )
+
+        self.assertFalse(result)
+        player._execute_cdp_single_click.assert_not_called()
+        self.assertEqual(
+            player._last_panel_recovery["reason"],
+            "close_control_unavailable",
+        )
+
+    def test_showcase_panel_close_failure_delegates_to_existing_rerun_boundary(self):
+        import threading
+
+        from placement_verifier import OperationResult, OperationStatus
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player._guard_runtime_panel = lambda **kwargs: {
+            "phase": kwargs["phase"],
+            "status": "FAILED",
+            "reason": "close_control_unavailable",
+            "indicators": ["Settings/Panel"],
+        }
+        player._rerun_after_panel_failure = lambda *args, **kwargs: OperationResult(
+            OperationStatus.RECOVERED,
+            details={"reRunVerified": True},
+        )
+
+        result = player._prepare_showcase_panel_retry(
+            {"index": 0, "x": 10, "y": 20},
+            0,
+            "showcase_pre_listen",
+        )
+
+        self.assertTrue(result["retry"])
+        self.assertFalse(result["fatal"])
+        self.assertFalse(getattr(player, "_safety_stop", False))
+        self.assertEqual(
+            player._last_showcase_retry_request["reason"],
+            "panel_recovered_before_end_listen",
+        )
+
+    def test_carpet_click_firewall_stops_without_proven_live_polo_bounds(self):
         from sprunki_game_player import SprunkiGamePlayer
 
         player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
@@ -1106,8 +1177,8 @@ class WorkflowQualityTests(unittest.TestCase):
             slot_center=(120, 120),
             runtime_layout=unknown_layout,
         )
-        self.assertTrue(inside["allowed"])
-        self.assertEqual(inside["reason"], "fallback_radius_layout_unknown")
+        self.assertFalse(inside["allowed"])
+        self.assertEqual(inside["reason"], "runtime_layout_unknown")
 
         outside = player._carpet_click_safety(
             150,
@@ -1145,8 +1216,8 @@ class WorkflowQualityTests(unittest.TestCase):
             slot_center=(120, 120),
             runtime_layout=no_bounds_layout,
         )
-        self.assertTrue(live_center_fallback["allowed"])
-        self.assertEqual(live_center_fallback["reason"], "fallback_polo_radius")
+        self.assertFalse(live_center_fallback["allowed"])
+        self.assertEqual(live_center_fallback["reason"], "slot_bounds_unknown")
 
     def test_carpet_live_coordinate_layers_stay_inside_polo_bounds(self):
         from sprunki_game_player import SprunkiGamePlayer
@@ -1727,6 +1798,46 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertTrue(
             player._workflow_placement_transactions[0]["cleanupVerified"]
         )
+
+    def test_post_playback_cleanup_failure_never_replays_remix_content(self):
+        import threading
+
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "icons": [{"index": 0}],
+                "slots": [{"index": 0}],
+            }
+        }
+        player.remix_max_attempts = 2
+        player.remix_retry_delay_seconds = 0
+        player.stop_event = threading.Event()
+        player.should_stop = False
+        player._workflow_placement_transactions = []
+        play_calls = []
+
+        def fake_play(*args, **kwargs):
+            play_calls.append(True)
+            player._last_remix_content_committed = True
+            player._last_remix_failure_phase = "post_playback_cleanup"
+            return False
+
+        player.play_complete_remix_corrected = fake_play
+
+        success, attempts = player._play_remix_with_retry(
+            {"name": "Committed fixture", "icons": [0]}
+        )
+
+        self.assertFalse(success)
+        self.assertEqual(len(play_calls), 1)
+        self.assertTrue(attempts[0]["contentCommitted"])
+        self.assertEqual(
+            attempts[0]["retryBlockedReason"],
+            "post_playback_cleanup_failure_no_content_replay",
+        )
+        self.assertTrue(getattr(player, "_safety_stop", False))
 
     def test_remix_retry_stops_when_partial_cleanup_is_not_verified(self):
         import contextlib
