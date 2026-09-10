@@ -5975,26 +5975,21 @@ class SprunkiGamePlayer:
             + ", ".join(self._carpet_target_label(target) for target in indicators[:3])
         )
 
-        if use_cdp:
-            closed = self._execute_cdp_key_press("escape")
-        else:
-            try:
-                pyautogui.press("esc")
-                closed = True
-            except Exception:
-                closed = False
-        if closed:
-            time.sleep(0.25)
-
+        # Do not send Escape here.  This cleanup runs while Chrome may be in
+        # browser/game fullscreen, where Escape exits fullscreen instead of
+        # closing the Scratch panel.  Refresh the runtime and use only a
+        # live in-game close target below; otherwise fail closed.
         refreshed = self._inspect_runtime_layout_bounds()
         if isinstance(refreshed, dict) and refreshed.get("ok") is True:
             if not self._carpet_panel_targets(refreshed):
-                print("   ✅ Settings/Options panel closed with Escape")
+                print("   ✅ Settings/Options panel closed during runtime refresh")
                 return True
             layout = refreshed
 
-        # Some mods do not bind Escape.  Use only a live close/back/exit
-        # target; never guess a screen coordinate for the close action.
+        # Some mods do not expose a panel state transition until their live
+        # close control is clicked.  Always use the validated CDP page target
+        # here, even when the surrounding cleanup uses PyAutoGUI, so a stale
+        # screen coordinate cannot hit Chrome's fullscreen UI.
         close_targets = [
             target
             for target in layout.get("targets") or []
@@ -6018,13 +6013,9 @@ class SprunkiGamePlayer:
             if not isinstance(center_x, (int, float)) or not isinstance(center_y, (int, float)):
                 continue
             try:
-                if use_cdp:
-                    closed = self._execute_cdp_single_click(
-                        int(round(center_x)), int(round(center_y))
-                    )
-                else:
-                    pyautogui.click(int(round(center_x)), int(round(center_y)))
-                    closed = True
+                closed = self._execute_cdp_single_click(
+                    int(round(center_x)), int(round(center_y))
+                )
             except Exception:
                 closed = False
             if not closed:
