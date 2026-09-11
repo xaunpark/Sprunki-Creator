@@ -899,6 +899,11 @@ def build_tracker_diagnostic_report(
             "cleanup",
             cleanup_status,
             failure_code=None,
+            # Cleanup can remain operationally unverified after a completed
+            # content-only decision.  Keep the raw FAIL/verified=false
+            # evidence, but mark the narrow policy exception explicitly so
+            # Tracker can distinguish it from a real blocking cleanup failure.
+            accepted_by_policy=cleanup_accepted_by_policy,
             evidence={
                 "reason": "cleanup_not_verified" if cleanup_status != PASS else None,
                 "cleanup_verified": report.get("cleanup_verified"),
@@ -970,7 +975,19 @@ def build_tracker_diagnostic_report(
             ),
         ]
     )
-    failed_checks = [check["name"] for check in checks if check["required"] and not check["passed"]]
+    # ``failed_checks`` is the list of blocking quality failures.  An
+    # accepted cleanup exception remains visible in the check evidence, but
+    # must not be advertised as a blocking failure alongside a passing gate.
+    failed_checks = [
+        check["name"]
+        for check in checks
+        if check["required"]
+        and not check["passed"]
+        and not (
+            check["name"] == "cleanup"
+            and cleanup_accepted_by_policy
+        )
+    ]
 
     context = _FAILURE_CONTEXT.get(
         failure_code,

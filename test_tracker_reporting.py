@@ -118,7 +118,9 @@ class TrackerReportingTests(unittest.TestCase):
             if check["name"] == "normal_remixes"
         )
         self.assertEqual(cleanup_check["status"], "FAIL")
+        self.assertTrue(cleanup_check["accepted_by_policy"])
         self.assertTrue(cleanup_check["evidence"]["accepted_by_policy"])
+        self.assertNotIn("cleanup", diagnostic["quality_gate"]["failed_checks"])
         self.assertEqual(remix_check["evidence"]["succeeded"], 2)
         self.assertEqual(remix_check["evidence"]["total"], 4)
 
@@ -175,7 +177,9 @@ class TrackerReportingTests(unittest.TestCase):
         )
         self.assertTrue(diagnostic["quality_gate"]["passed"])
         self.assertEqual(cleanup_check["status"], "FAIL")
+        self.assertTrue(cleanup_check["accepted_by_policy"])
         self.assertTrue(cleanup_check["evidence"]["accepted_by_policy"])
+        self.assertNotIn("cleanup", diagnostic["quality_gate"]["failed_checks"])
         self.assertEqual(diagnostic["tracker_ui"]["badge"], "COMPLETED")
 
     def test_report_contains_structured_failure_and_full_input_snapshot(self):
