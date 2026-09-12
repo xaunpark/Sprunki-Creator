@@ -3142,6 +3142,59 @@ class SprunkiGamePlayer:
                 }
             )
 
+        # A watchdog idle timeout is a recoverable interruption, not a
+        # cancellation.  If it arrived while the normal return cascade was
+        # unwinding, do not enter targeted cleanup: that layer correctly
+        # refuses input while the shared stop event is set, but returning its
+        # STOPPED result here would promote the recoverable timeout to a
+        # terminal safety stop before the Re-Run coordinator gets a chance.
+        # Release the transient stop and hand the unresolved return directly
+        # to the operation-level Re-Run boundary.  Explicit cancellation,
+        # hard timeout, and safety-stop latches remain untouched.
+        if (
+            self._watchdog_idle_recovery_requested()
+            and not self._terminal_stop_requested()
+        ):
+            self._release_watchdog_idle_stop()
+            interrupted_result = target_result
+            interrupted_status = getattr(
+                getattr(interrupted_result, "status", None),
+                "value",
+                None,
+            )
+            if interrupted_result is None or interrupted_status not in {
+                OperationStatus.UNKNOWN.value,
+                OperationStatus.STOPPED.value,
+                OperationStatus.FAILED.value,
+            }:
+                interrupted_result = self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "watchdog_idle_cleanup_interrupted",
+                    details={
+                        "interruptedTargetResult": (
+                            target_result.as_dict()
+                            if hasattr(target_result, "as_dict")
+                            else None
+                        )
+                    },
+                )
+            rerun_result = self._rerun_after_operation_failure(
+                direction="return",
+                target_slot_index=getattr(context, "target_slot", None),
+                failed_result=interrupted_result,
+                reason="watchdog_idle_return_recovery",
+                operation_context=context,
+                baseline=baseline,
+                current_snapshot=final_snapshot,
+            )
+            rerun_details = getattr(rerun_result, "details", None)
+            if isinstance(rerun_details, dict):
+                rerun_details["watchdogIdleRecovery"] = True
+                rerun_details["cleanupMethod"] = "restart_recovery"
+                rerun_details["returnMethod"] = "restart_recovery"
+            return rerun_result
+
         if board_state == "CLEAN":
             details.update(
                 {

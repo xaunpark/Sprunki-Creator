@@ -820,6 +820,66 @@ class ReturnActionPolicyTests(unittest.TestCase):
         self.assertEqual(player._execute_precision_return_click.call_count, 1)
         self.assertEqual(player._execute_carpet_bombing_return.call_count, 1)
 
+    def test_watchdog_idle_return_skips_targeted_cleanup_and_runs_rerun(self):
+        import threading
+
+        from placement_verifier import PlacementSnapshot
+
+        player = self._cleanup_boundary_player()
+        player.stop_event = threading.Event()
+        player.stop_event.set()
+        player.should_stop = True
+        player.terminal_stop_event = threading.Event()
+        player.watchdog_recovery_event = threading.Event()
+        player.watchdog_recovery_event.set()
+
+        dirty = self._state(1, 1, ["1"], ["1"])
+        context = OperationContext.begin(
+            "return",
+            0,
+            max_input_attempts=4,
+            operation_id="return-watchdog-idle",
+        )
+        context.cleanup_boundary_id = "return-watchdog-idle"
+        context.set_baseline(PlacementSnapshot.from_mapping(dirty))
+        player._active_operation_context = context
+
+        player._targeted_cleanup_recovery = Mock(
+            return_value=OperationResult(
+                OperationStatus.STOPPED,
+                direction="cleanup",
+                message="targeted_cleanup_stop_requested",
+            )
+        )
+        player.restart_game_to_initial_state = Mock(
+            return_value=OperationResult(
+                OperationStatus.RECOVERED,
+                direction="recovery",
+                message="game_recovered",
+                details={"entryFlowVerified": True, "postState": dirty},
+            )
+        )
+
+        result = player._finalize_target_return_boundary(
+            context,
+            OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="return",
+                message="post_carpet_state_unknown",
+            ),
+            baseline=dirty,
+            use_cdp=False,
+            current_snapshot=dirty,
+        )
+
+        self.assertEqual(result.status, OperationStatus.ALREADY_EMPTY)
+        self.assertTrue(result.details["reRunVerified"])
+        self.assertTrue(result.details["watchdogIdleRecovery"])
+        self.assertFalse(player.stop_event.is_set())
+        self.assertFalse(player.watchdog_recovery_event.is_set())
+        player._targeted_cleanup_recovery.assert_not_called()
+        player.restart_game_to_initial_state.assert_called_once()
+
     def _cleanup_boundary_player(self):
         player = self._player()
         player._board_generation = 0
