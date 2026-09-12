@@ -918,7 +918,7 @@ class ReturnActionPolicyTests(unittest.TestCase):
         )
         player.restart_game_to_initial_state.assert_called_once()
 
-    def test_unknown_boundary_runs_one_rerun_but_missing_post_signal_stays_unknown(self):
+    def test_unknown_boundary_accepts_physical_rerun_when_post_signal_is_diagnostic_only(self):
         from placement_verifier import PlacementSnapshot
 
         player = self._cleanup_boundary_player()
@@ -955,12 +955,60 @@ class ReturnActionPolicyTests(unittest.TestCase):
             current_snapshot={"sequence": 2, "timestamp": 2.0},
         )
 
-        self.assertEqual(result.status, OperationStatus.UNKNOWN)
-        self.assertEqual(result.details["boardState"], "UNKNOWN")
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertEqual(result.details["boardState"], "CLEAN")
+        self.assertEqual(result.details["diagnosticBoardState"], "UNKNOWN")
         self.assertTrue(result.details["reRunAttempted"])
-        self.assertFalse(result.details["reRunVerified"])
-        self.assertTrue(result.details["contaminationCarriedForward"])
+        self.assertTrue(result.details["reRunVerified"])
+        self.assertFalse(result.details["contaminationCarriedForward"])
         player.restart_game_to_initial_state.assert_called_once()
+
+    def test_rerun_without_manual_profile_repeats_cdp_entry_flow(self):
+        import threading
+        from unittest.mock import Mock, patch
+
+        from workflow_quality import QualityGateResult
+
+        player = self._player()
+        player.stop_event = threading.Event()
+        player._recovery_budget_scope = None
+        player._physical_input_context = None
+        player.entry_strategy = {}
+        player._manual_profile_resolution_error = None
+        player._resolve_manual_profile = Mock(return_value=(None, None))
+        player._execute_rerun_button_click = Mock(
+            return_value=(True, {"gestureSuccess": True})
+        )
+        player.intro_skip_via_cdp = Mock(return_value=True)
+        player.intro_skip_via_pyautogui = Mock(return_value=False)
+        player._refresh_after_recovery = Mock(return_value=True)
+        player.prepare_game_for_playing = Mock()
+        player.verify_playable_runtime_entry = Mock(
+            return_value=QualityGateResult.pass_result(
+                evidence={"icons": 2, "slots": 2}
+            )
+        )
+        player._capture_stable_placement_snapshot = Mock(
+            return_value=self._state(2, 128, ["1"], ["1"])
+        )
+        player._classify_cleanup_board = Mock(
+            return_value=("DIRTY", {"reason": "diagnostic_counter_baseline"})
+        )
+        player._polos_reliability = Mock(return_value=False)
+        player._touch_watchdog_progress = Mock()
+        player._close_remove_cdp_session = Mock()
+
+        with patch("sprunki_game_player.time.sleep", return_value=None):
+            result = player.restart_game_to_initial_state(use_cdp=False)
+
+        self.assertEqual(result.status, OperationStatus.RECOVERED)
+        self.assertTrue(result.details["entryFlowVerified"])
+        self.assertFalse(result.details["boardEmptyVerified"])
+        player.intro_skip_via_cdp.assert_called_once()
+        player.intro_skip_via_pyautogui.assert_not_called()
+        player.prepare_game_for_playing.assert_called_once()
+        player.verify_playable_runtime_entry.assert_called_once()
+        player._execute_rerun_button_click.assert_called_once()
 
     def test_rerun_failure_is_terminal_for_boundary_and_is_not_repeated(self):
         from placement_verifier import PlacementSnapshot

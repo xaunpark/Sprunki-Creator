@@ -76,6 +76,12 @@ from workflow_quality import (
     validate_playable_layout,
 )
 
+
+# Remix playback is intentionally longer than the per-icon showcase.  Keep
+# this default in one place so direct callers and the workflow entrypoints use
+# the same duration when no explicit override is supplied.
+DEFAULT_REMIX_PLAYBACK_SECONDS = 25
+
 class WorkflowIncompatibleError(Exception):
     """Custom exception raised when the workflow detects a persistent,
     unrecoverable incompatibility with the current game mod."""
@@ -318,6 +324,8 @@ class SprunkiGamePlayer:
         self._max_cleanup_attempts = 2
         self._last_cleanup_result = None
         self._last_remix_cleanup_outcome = None
+        self._last_remix_reset_result = None
+        self._remix_workflow_started = False
         # Cleanup verification is exact.  Keep the attribute for config and
         # legacy-report compatibility, but never allow a positive residual
         # tolerance to make a cleanup boundary successful.
@@ -338,6 +346,8 @@ class SprunkiGamePlayer:
         self._last_showcase_content_committed = False
         self._last_remix_content_committed = False
         self._last_remix_failure_phase = None
+        self._last_remix_cleanup_outcome = None
+        self._last_remix_reset_result = None
         self._safety_stop = False
         self._safety_stop_reason = None
         self._polos_signal_profile = {
@@ -2299,6 +2309,33 @@ class SprunkiGamePlayer:
         # The boundary has already consumed its one Re-Run opportunity.  Do
         # not let a final validation or retry caller send another barrage.
         if bool(getattr(context, "rerun_attempted", False)):
+            # A completed physical Re-Run is the reset proof for this
+            # boundary.  Runtime counters are retained as diagnostics only;
+            # they are not allowed to reopen a boundary that has already been
+            # reset successfully.
+            if bool(getattr(context, "rerun_verified", False)):
+                diagnostic_state = board_state
+                base_details.update(
+                    {
+                        "cleanupBoundaryCompleted": True,
+                        "cleanupDecisionComplete": True,
+                        "cleanupVerified": True,
+                        "reRunAttempted": True,
+                        "reRunVerified": True,
+                        "targetSpecific": False,
+                        "cleanupVerificationScope": "restart_recovery",
+                        "boardState": "CLEAN",
+                        "diagnosticBoardState": diagnostic_state,
+                        "contaminationCarriedForward": False,
+                    }
+                )
+                result = self._operation_result(
+                    context,
+                    success_status,
+                    success_message,
+                    details=base_details,
+                )
+                return self._store_cleanup_boundary_result(context, result, base_details)
             final_status = (
                 OperationStatus.FAILED
                 if board_state == "DIRTY"
@@ -2365,7 +2402,7 @@ class SprunkiGamePlayer:
         if obs_controller:
             obs_controller.log_event_timestamp(
                 "start_game_restart",
-                "Restart triggered after cleanup boundary remained DIRTY/UNKNOWN",
+                "Restart triggered for cleanup boundary recovery",
                 {
                     "cleanupBoundaryId": boundary_id,
                     "boardStateBeforeRerun": board_state,
@@ -2411,21 +2448,36 @@ class SprunkiGamePlayer:
             post_state,
             baseline_snapshot,
         )
-        # A recovery result is authoritative only when the recovery helper
-        # itself reached RECOVERED and the fresh stable snapshot agrees.  A
-        # failed/unknown click or entry replay must not become CLEAN merely
-        # because a later diagnostic read happens to look empty.
+        # A failed/unknown click or entry replay must not become CLEAN merely
+        # because a later diagnostic read happens to look empty.  When the
+        # recovery helper reaches RECOVERED, its physical Re-Run + playable
+        # entry proof is authoritative; the fresh snapshot below is retained
+        # as diagnostics even when its counters do not describe emptiness.
         if restart_result.status != OperationStatus.RECOVERED and post_board_state == "CLEAN":
             post_board_state = "UNKNOWN"
             post_evidence = {
                 **post_evidence,
                 "reason": "rerun_result_not_recovered",
             }
-        context.rerun_status = restart_result.status.value
-        context.rerun_verified = bool(
+        physical_rerun_verified = bool(
             restart_result.status == OperationStatus.RECOVERED
-            and post_board_state == "CLEAN"
+            and restart_details.get("entryFlowVerified", True) is True
         )
+        context.rerun_status = restart_result.status.value
+        context.rerun_verified = physical_rerun_verified
+        diagnostic_board_state = post_board_state
+        if physical_rerun_verified:
+            # Re-Run is an explicit whole-game reset.  The post-entry counter
+            # read can be non-zero, stale, or unavailable on user-created
+            # mods, so preserve it only as diagnostic evidence and promote the
+            # physical reset to the policy state used by later workflow gates.
+            post_board_state = "CLEAN"
+            post_evidence = {
+                **post_evidence,
+                "reason": "physical_rerun_reset_policy",
+                "physicalResetVerified": True,
+                "diagnosticBoardState": diagnostic_board_state,
+            }
         self._board_contamination_carried_forward = not context.rerun_verified
         base_details.update(
             {
@@ -2435,12 +2487,13 @@ class SprunkiGamePlayer:
                 "reRunStatus": restart_result.status.value,
                 "reRunVerified": context.rerun_verified,
                 "boardState": post_board_state,
+                "diagnosticBoardState": diagnostic_board_state,
                 "stateEvidenceAfterRerun": post_evidence,
                 "stateSnapshotAfterRerun": self._snapshot_to_mapping(post_state),
                 "reRunResult": restart_result.as_dict(),
                 "targetSpecific": False,
                 "cleanupVerificationScope": (
-                    "board" if context.rerun_verified else "unknown"
+                    "restart_recovery" if context.rerun_verified else "unknown"
                 ),
                 "contaminationCarriedForward": not context.rerun_verified,
             }
@@ -2463,6 +2516,123 @@ class SprunkiGamePlayer:
                 details=base_details,
             )
         return self._store_cleanup_boundary_result(context, result, base_details)
+
+    def _run_remix_restart_boundary(
+        self,
+        remix_name="Unknown Remix",
+        transaction_start=None,
+        mode="Normal",
+        obs_controller=None,
+    ):
+        """Reset the game after one remix without returning individual icons.
+
+        Remix cleanup has a different invariant from showcase cleanup: the
+        playback segment is already committed, and the next remix must start
+        from the game's reset state.  A single coordinator-owned Re-Run is the
+        only cleanup action for that boundary.  The regular showcase return
+        cascade is deliberately not reachable from this helper.
+        """
+        if transaction_start is None:
+            transaction_start = len(
+                getattr(self, "_workflow_placement_transactions", []) or []
+            )
+        boundary_id = (
+            f"remix-rerun-{transaction_start}-"
+            f"{str(remix_name).strip() or 'unknown'}"
+        )
+        context = self._begin_operation(
+            "cleanup",
+            None,
+            max_input_attempts=self._cleanup_input_budget(),
+            deadline_seconds=self._cleanup_deadline_seconds(),
+        )
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="cleanup",
+                message="remix_rerun_operation_already_active",
+                details={
+                    "cleanupBoundaryId": boundary_id,
+                    "remixBoundary": True,
+                    "remixCleanupMethod": "restart_recovery",
+                },
+            )
+
+        context.cleanup_boundary_id = boundary_id
+        self._touch_watchdog_progress(
+            "remix",
+            "rerun_started",
+            remix_name=remix_name,
+            mode=mode,
+            cleanup_boundary_id=boundary_id,
+        )
+        result = None
+        try:
+            result = self._run_cleanup_boundary_recovery(
+                context,
+                use_cdp=True,
+                obs_controller=obs_controller,
+                reason="remix_boundary_restart",
+                success_status=OperationStatus.VERIFIED,
+                success_message="remix_reset_verified",
+                extra_details={
+                    "forceReRun": True,
+                    "remixBoundary": True,
+                    "remixName": str(remix_name),
+                    "remixMode": str(mode),
+                    "remixCleanupMethod": "restart_recovery",
+                    "cleanupMethod": "restart_recovery",
+                },
+            )
+        except Exception as error:
+            result = self._operation_result(
+                context,
+                OperationStatus.FAILED,
+                f"remix_rerun_exception:{error}",
+                details={
+                    "cleanupBoundaryId": boundary_id,
+                    "remixBoundary": True,
+                    "remixCleanupMethod": "restart_recovery",
+                    "cleanupBoundaryCompleted": True,
+                    "cleanupDecisionComplete": True,
+                    "cleanupVerified": False,
+                    "reRunAttempted": True,
+                    "reRunVerified": False,
+                    "reRunStatus": "FAILED",
+                    "boardState": "UNKNOWN",
+                },
+            )
+        finally:
+            # The boundary coordinator does not own the context, so close it
+            # here exactly once after the Re-Run decision is stored.
+            if result is not None:
+                result = self._finish_operation(context, result)
+            else:
+                result = self._finish_operation(
+                    context,
+                    self._operation_result(
+                        context,
+                        OperationStatus.UNKNOWN,
+                        "remix_rerun_no_result",
+                    ),
+                )
+
+        self._last_remix_reset_result = result
+        self._last_cleanup_result = result
+        self._cleanup_started = False
+        self._cleanup_completed = result.status in {
+            OperationStatus.VERIFIED,
+            OperationStatus.ALREADY_EMPTY,
+        }
+        self._touch_watchdog_progress(
+            "remix",
+            "rerun_completed",
+            remix_name=remix_name,
+            mode=mode,
+            status=result.status.value,
+            cleanup_boundary_id=boundary_id,
+        )
+        return result
 
     def _finalize_target_return_boundary(
         self,
@@ -11658,6 +11828,28 @@ class SprunkiGamePlayer:
             print(f"\nâœ… WORKFLOW COMPLETION VALIDATION")
             print("="*50)
 
+            # A successful physical Re-Run plus the standard playable-entry
+            # proof is the board-reset policy for remix boundaries.  The
+            # counter/Polos read below remains useful diagnostics, but it is
+            # not a second gate: user-created mods may expose inventory or
+            # non-empty baselines after a valid reset.
+            last_boundary = dict(
+                getattr(self, "_last_cleanup_boundary_evidence", {}) or {}
+            )
+            if (
+                last_boundary.get("reRunVerified") is True
+                and last_boundary.get("cleanupBoundaryCompleted") is True
+                and last_boundary.get("cleanupVerificationScope")
+                == "restart_recovery"
+            ):
+                print(
+                    "âœ… Re-Run reset accepted as clean; placement counters "
+                    "are diagnostic only for this boundary"
+                )
+                return True, [], [
+                    "Counter/Polos post-Re-Run values retained as diagnostics"
+                ]
+
             # A single read immediately after cleanup can observe a transient
             # counter/Polos mismatch.  Require a short stable sample window,
             # but keep the final empty-board predicate strict.
@@ -11715,9 +11907,6 @@ class SprunkiGamePlayer:
                 print("ðŸŽ‰ Characters Array validation passed!")
                 print("   âœ… Counters/Polos/Characters signals are consistently empty")
             
-            last_boundary = dict(
-                getattr(self, "_last_cleanup_boundary_evidence", {}) or {}
-            )
             boundary_terminal_unverified = (
                 self._cleanup_boundary_is_terminal_unverified(last_boundary)
             )
@@ -15362,7 +15551,13 @@ class SprunkiGamePlayer:
             print("="*60)
             print("   Method: Click Re-Run button + restore the configured game-entry flow")
             print("   Re-Run button coordinates: (40, 75)")
-            print("   Expected result: All icons returned to initial positions")
+            print("   Expected result: Fresh game-entry state; runtime counters are diagnostic")
+            self.entry_strategy = {
+                "selected": None,
+                "tested": [],
+                "verification": UNKNOWN,
+            }
+            self._touch_watchdog_progress("recovery", "rerun_click_start")
             
             # The CDP page binding brings the exact game tab to the front and
             # validates it again immediately before input.  ``use_cdp`` is
@@ -15392,6 +15587,7 @@ class SprunkiGamePlayer:
                     details={"reRunClick": rerun_click_evidence},
                 )
                 return self._finish_operation(context, result) if owns_context else result
+            self._touch_watchdog_progress("recovery", "rerun_click_delivered")
             
             # Wait for game restart process
             print("   Waiting for game restart process (3s)...")
@@ -15440,10 +15636,15 @@ class SprunkiGamePlayer:
                 # profile replay: it already registers each action itself.
                 self._physical_input_context = context
                 try:
-                    if use_cdp:
-                        prepare_success = self.intro_skip_via_cdp(operation_context=context)
-                    else:
-                        prepare_success = self.intro_skip_via_pyautogui(operation_context=context)
+                    # Initial setup uses the CDP intro routine, including its
+                    # candidate trial/rollback, two Space presses, and the
+                    # bounded (960, 540) blind-center fallback.  Re-Run must
+                    # repeat that same no-profile entry flow; it must not use
+                    # the older pyautogui-only shortcut just because a caller
+                    # passed ``use_cdp=False`` for legacy API compatibility.
+                    prepare_success = self.intro_skip_via_cdp(
+                        operation_context=context
+                    )
                 finally:
                     self._physical_input_context = None
 
@@ -15451,84 +15652,87 @@ class SprunkiGamePlayer:
                 result = self._operation_result(context, OperationStatus.FAILED, "game_entry_prepare_failed")
                 return self._finish_operation(context, result) if owns_context else result
             print("   Game entry preparation completed")
+            self._touch_watchdog_progress("recovery", "entry_prepare_completed")
             
             # Additional stabilization wait
             print("   Game restart stabilization (2s)...")
             time.sleep(2.0)
             
-            # Rebind the VM/session before reading the post-restart state.
-            self._refresh_after_recovery()
+            # Rebind the VM/session before the same final readiness checks
+            # used by initial setup.  Run/Fullscreen/F11 are intentionally not
+            # repeated: Re-Run keeps the existing fullscreen game surface.
+            refresh_ok = self._refresh_after_recovery()
+            self.prepare_game_for_playing()
+            time.sleep(1.0)
+            runtime_entry = self.verify_playable_runtime_entry()
+            entry_flow_verified = bool(getattr(runtime_entry, "passed", False))
+            runtime_entry_details = (
+                runtime_entry.as_dict()
+                if hasattr(runtime_entry, "as_dict")
+                else runtime_entry
+            )
             post_state = self._capture_stable_placement_snapshot(
                 timeout_ms=1500,
                 context=context,
                 stable_samples=self._cleanup_stable_sample_count(),
             )
-            if post_state is None:
+            if not entry_flow_verified:
                 result = self._operation_result(
                     context,
                     OperationStatus.UNKNOWN,
-                    "post_restart_state_unknown",
-                    details={"reRunClick": rerun_click_evidence},
+                    "post_restart_entry_not_verified",
+                    details={
+                        "reRunClick": rerun_click_evidence,
+                        "entryFlowVerified": False,
+                        "runtimeEntry": runtime_entry_details,
+                        "refreshAfterRecovery": bool(refresh_ok),
+                        "postState": self._snapshot_to_mapping(post_state),
+                    },
                 )
                 if operation_context is None:
                     context.end_recovery()
                 return self._finish_operation(context, result) if owns_context else result
 
-            # Re-Run is only a physical recovery action; it is not proof that
-            # every runtime signal was reset.  Require all signals that are
-            # available in the fresh snapshot to agree before accepting the
-            # recovery.  The previous ``polos_clean or counters_clean`` gate
-            # could accept a visually empty board while Characters/Putted
-            # still reported an occupied slot (or the reverse).
-            restart_verified, signal_checks = self._evaluate_restart_state(
+            # Re-Run plus the same playable-entry proof is the authoritative
+            # recovery result.  Characters/Putted/Polos are still captured,
+            # but are diagnostics and must not veto a physical reset on mods
+            # whose counters keep an inventory/baseline value after restart.
+            signal_checks = self._evaluate_restart_state(
                 post_state,
                 baseline_state=getattr(context, "baseline", None),
-                empty_board_baseline=getattr(
-                    self, "empty_board_baseline", None
-                ),
+                empty_board_baseline=getattr(self, "empty_board_baseline", None),
                 polos_reliable=self._polos_reliability(),
             )
+            if isinstance(signal_checks, tuple):
+                restart_signal_verified, signal_checks = signal_checks
+            else:
+                restart_signal_verified = None
             board_state, board_evidence = self._classify_cleanup_board(
                 post_state,
                 getattr(context, "baseline", None),
             )
-            restart_verified = bool(restart_verified and board_state == "CLEAN")
-            if not restart_verified:
-                print(
-                    "   RESTART UNCLEAR: available placement signals do not "
-                    "all report an empty board"
-                )
-                result = self._operation_result(
-                    context,
-                    OperationStatus.UNKNOWN,
-                    "post_restart_not_empty",
-                    details={
-                        "signals": signal_checks,
-                        "stateEvidence": board_evidence,
-                        "postState": self._snapshot_to_mapping(post_state),
-                        "boardState": board_state,
-                        "boardEmptyVerified": False,
-                        "reRunClick": rerun_click_evidence,
-                    },
-                )
-            else:
-                print(
-                    "   RESTART VERIFIED: all available placement signals "
-                    "report an empty board!"
-                )
-                result = self._operation_result(
-                    context,
-                    OperationStatus.RECOVERED,
-                    "game_recovered",
-                    details={
-                        "signals": signal_checks,
-                        "stateEvidence": board_evidence,
-                        "postState": self._snapshot_to_mapping(post_state),
-                        "boardState": board_state,
-                        "boardEmptyVerified": True,
-                        "reRunClick": rerun_click_evidence,
-                    },
-                )
+            print(
+                "   RESTART VERIFIED: Re-Run and the standard playable-entry "
+                "flow completed; placement signals retained for diagnostics"
+            )
+            result = self._operation_result(
+                context,
+                OperationStatus.RECOVERED,
+                "game_recovered",
+                details={
+                    "signals": signal_checks,
+                    "signalVerificationDiagnostic": restart_signal_verified,
+                    "stateEvidence": board_evidence,
+                    "postState": self._snapshot_to_mapping(post_state),
+                    "boardState": board_state,
+                    "boardEmptyVerified": bool(restart_signal_verified),
+                    "entryFlowVerified": True,
+                    "runtimeEntry": runtime_entry_details,
+                    "refreshAfterRecovery": bool(refresh_ok),
+                    "reRunClick": rerun_click_evidence,
+                },
+            )
+            self._touch_watchdog_progress("recovery", "entry_verified")
 
             print("GAME RESTART COMPLETED!")
             print("="*60)
@@ -15611,6 +15815,9 @@ class SprunkiGamePlayer:
             self._last_showcase_content_committed = False
             self._last_remix_content_committed = False
             self._last_remix_failure_phase = None
+            self._last_remix_cleanup_outcome = None
+            self._last_remix_reset_result = None
+            self._remix_workflow_started = False
             self._safety_stop = False
             self._safety_stop_reason = None
             # A new setup creates a new runtime page.  Do not carry a prior
@@ -17988,20 +18195,25 @@ class SprunkiGamePlayer:
             # or cleanup check failed after one or more icons had been shown.
             return success_count, total_count
 
-    def play_complete_remix_corrected(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
+    def play_complete_remix_corrected(
+        self,
+        remix_data,
+        mode="Normal",
+        listen_duration=DEFAULT_REMIX_PLAYBACK_SECONDS,
+        progress_callback=None,
+    ):
         """
         [FIXED & CHUẨN HÓA] Play remix, TRUYỀN obs_controller và context xuống các hàm cấp dưới.
 
-        A remix is content-successful when playback and placement complete.
-        Cleanup remains an independent exact board-state result; if its
-        bounded Re-Run decision is complete but still unverified, the content
-        may continue to the next remix while the contamination is retained in
-        the evidence.
+        A remix is content-successful when playback and placement complete,
+        followed by one verified whole-game Re-Run.  Remix cleanup never
+        returns individual icons; Re-Run is the boundary between remixes.
         """
         try:
             self._last_remix_content_committed = False
             self._last_remix_failure_phase = None
             self._last_panel_recovery = {}
+            self._last_remix_reset_result = None
             if not self.config or not remix_data:
                 return False
                 
@@ -18192,6 +18404,12 @@ class SprunkiGamePlayer:
                         print(f"Progress callback warning: {e}")
                 
                 time.sleep(1)
+                self._touch_watchdog_progress(
+                    "remix",
+                    "playback_progress",
+                    remix_name=remix_name,
+                    remaining_seconds=countdown - 1,
+                )
             
             if self.stop_event.is_set(): return False
             
@@ -18215,257 +18433,100 @@ class SprunkiGamePlayer:
                 placed_count=placed_count,
             )
 
-            # Phase 3: Smart batch return
-            print("ðŸ”„ PHASE 3: Smart batch returning with mode detection...")
+            # Phase 3: Re-Run boundary.  Remix playback is already committed,
+            # so no icon-by-icon return cascade is allowed here.
+            print("🔄 PHASE 3: Re-Run to reset the game before the next remix...")
             if progress_callback:
-                progress_callback(f"ðŸ§¹ Smart cleanup {remix_name}")
+                progress_callback(f"🔄 Re-Run reset {remix_name}")
 
-            self.set_return_mode_explicit(self.RETURN_MODE_REMIX, f"remix_cleanup_{len(remix_icons)}_icons")
-            
-            # === BƯỚC 4 (FIX): Truyền context và obs_controller xuống hàm dọn dẹp ===
-            # Lời gọi cũ không truyền tham số: self.smart_batch_return_all_slots_with_mode(use_cdp=False)
-            cleanup_exception = None
-            try:
-                success_count, total_attempted, error_log = self.smart_batch_return_all_slots_with_mode(
-                    use_cdp=False,
-                    context=remix_metadata, # Truyền context
-                    obs_controller=obs_controller # Truyền controller tường minh
-                )
-
-            except Exception as cleanup_error:
-                # The final remix no longer needs cleanup to be a content
-                # prerequisite.  Preserve the exception as evidence and let
-                # the final-remix policy decide whether playback can finish.
-                cleanup_exception = cleanup_error
-                success_count, total_attempted, error_log = (
-                    0,
-                    0,
-                    [f"cleanup_exception:{cleanup_error}"],
-                )
-            cleanup_attempted = bool(
-                total_attempted or success_count or error_log
+            reset_result = self._run_remix_restart_boundary(
+                remix_name=remix_name,
+                transaction_start=transaction_start,
+                mode=mode,
+                obs_controller=obs_controller,
             )
             boundary_evidence = dict(
-                getattr(self, "_last_cleanup_boundary_evidence", {}) or {}
+                getattr(reset_result, "details", {}) or {}
             )
-            try:
-                cleanup_policy = self._remix_cleanup_policy_evidence(
-                    cleanup_attempted=cleanup_attempted,
-                    final_remix=final_remix,
-                    boundary_evidence=boundary_evidence,
-                )
-            except Exception as policy_error:
-                cleanup_policy = {
-                    "maxResidualIcons": 0,
-                    "cleanupAttempted": cleanup_attempted,
-                    "finalRemix": final_remix,
-                    "cleanupPolicy": "exact_empty_board",
-                    "policyAccepted": False,
-                    "emptyVerified": False,
-                    "residualCount": None,
-                    "reason": f"cleanup_policy_exception:{policy_error}",
-                }
-            cleanup_policy.update(
-                {
-                    "cleanupBoundaryId": boundary_evidence.get(
-                        "cleanupBoundaryId"
-                    ),
-                    "cleanupVerified": bool(
-                        boundary_evidence.get("cleanupVerified") is True
-                        and boundary_evidence.get("boardState") == "CLEAN"
-                        and boundary_evidence.get("cleanupBoundaryCompleted") is True
-                    ),
-                    "boardState": boundary_evidence.get(
-                        "boardState",
-                        "UNKNOWN",
-                    ),
-                    "cleanupDecisionComplete": bool(
-                        boundary_evidence.get("cleanupDecisionComplete")
-                    ),
-                    "reRunAttempted": bool(
-                        boundary_evidence.get("reRunAttempted")
-                    ),
-                    "reRunStatus": boundary_evidence.get("reRunStatus"),
-                    "reRunVerified": bool(
-                        boundary_evidence.get("reRunVerified")
-                    ),
-                    "contaminationCarriedForward": bool(
-                        boundary_evidence.get("contaminationCarriedForward")
-                    ),
-                    "boardGeneration": boundary_evidence.get("boardGeneration"),
-                }
-            )
-            # The cleanup coordinator already verifies its own exact success
-            # path.  Preserve that evidence if the extra diagnostic snapshot
-            # is unavailable; no residual tolerance or final-remix bypass is
-            # applied here.
-            cleanup_exact_by_result = bool(
-                not error_log
-                and self._cleanup_boundary_result_is_verified(boundary_evidence)
-            )
-            if cleanup_exact_by_result and not cleanup_policy.get("policyAccepted"):
-                cleanup_policy.update(
-                    {
-                        "policyAccepted": True,
-                        "emptyVerified": True,
-                        "residualCount": 0,
-                        "reason": "cleanup_verified_by_operation_result",
-                    }
-                )
-            if cleanup_policy.get("policyAccepted") and cleanup_policy.get(
-                "emptyVerified"
-            ):
-                cleanup_policy.update(
-                    {
-                        "boardState": "CLEAN",
-                        "cleanupDecisionComplete": True,
-                    }
-                )
-            if cleanup_exception is not None:
-                cleanup_policy["cleanupException"] = str(cleanup_exception)
-
-            # ``forceReRun`` is emitted by the existing cleanup coordinator
-            # specifically when panel recovery failed.  Preserve that cause
-            # separately from ordinary no-progress cleanup errors so a failed
-            # Re-Run cannot be mistaken for a harmless content-only warning.
-            strategy_evidence = boundary_evidence.get("strategy")
-            strategy_details = (
-                strategy_evidence.get("details")
-                if isinstance(strategy_evidence, dict)
-                else None
-            )
-            panel_recovery_failed = bool(
-                boundary_evidence.get("panelRecoveryFailed")
-                or boundary_evidence.get("forceReRun")
-                or (
-                    isinstance(strategy_details, dict)
-                    and (
-                        strategy_details.get("panelRecoveryFailed")
-                        or strategy_details.get("forceReRun")
-                    )
-                )
-            )
-            recovery_unverified = bool(
-                cleanup_policy.get("reRunAttempted")
-                and not cleanup_policy.get("reRunVerified")
-            )
-            cleanup_policy["panelRecoveryFailed"] = panel_recovery_failed
-            cleanup_policy["safetyStopRequired"] = bool(
-                panel_recovery_failed and recovery_unverified
-            )
-            cleanup_policy["contentSuccessWithUnverifiedCleanup"] = bool(
-                not cleanup_policy.get("policyAccepted")
-                and cleanup_policy.get("cleanupDecisionComplete")
-                and cleanup_policy.get("reRunAttempted")
-                and not cleanup_policy.get("safetyStopRequired")
-            )
-            self._amend_last_cleanup_boundary_evidence(
-                {
-                    "contentSuccessWithUnverifiedCleanup": bool(
-                        cleanup_policy.get(
-                            "contentSuccessWithUnverifiedCleanup", False
-                        )
-                    ),
-                    "cleanupDecisionComplete": bool(
-                        cleanup_policy.get("cleanupDecisionComplete", False)
-                    ),
-                    "reRunAttempted": bool(
-                        cleanup_policy.get("reRunAttempted", False)
-                    ),
-                    "boardState": cleanup_policy.get("boardState", "UNKNOWN"),
-                    "contaminationCarriedForward": bool(
-                        cleanup_policy.get("contaminationCarriedForward", False)
-                    ),
-                    "panelRecoveryFailed": bool(
-                        cleanup_policy.get("panelRecoveryFailed", False)
-                    ),
-                    "safetyStopRequired": bool(
-                        cleanup_policy.get("safetyStopRequired", False)
-                    ),
-                }
-            )
-            # Preserve the cleanup result for the outer whole-remix retry
-            # coordinator.  If this attempt already ran the full cleanup
-            # chain, the coordinator must validate/reuse it instead of
-            # sending a second blind cleanup barrage.
+            reset_verified = reset_result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            }
+            error_log = [] if reset_verified else [
+                f"rerun_{reset_result.status.value.lower()}:{reset_result.message}"
+            ]
+            cleanup_policy = {
+                "cleanupPolicy": "remix_restart_recovery",
+                "cleanupMethod": "restart_recovery",
+                "remixCleanupMethod": "restart_recovery",
+                "remixBoundary": True,
+                "cleanupAttempted": True,
+                "cleanupBoundaryId": boundary_evidence.get("cleanupBoundaryId"),
+                "cleanupBoundaryCompleted": bool(
+                    boundary_evidence.get("cleanupBoundaryCompleted")
+                ),
+                "cleanupDecisionComplete": bool(
+                    boundary_evidence.get("cleanupDecisionComplete")
+                ),
+                "cleanupVerified": reset_verified,
+                "emptyVerified": reset_verified,
+                "policyAccepted": reset_verified,
+                "residualCount": 0 if reset_verified else None,
+                "boardState": boundary_evidence.get("boardState", "UNKNOWN"),
+                "reRunAttempted": bool(boundary_evidence.get("reRunAttempted")),
+                "reRunStatus": boundary_evidence.get("reRunStatus"),
+                "reRunVerified": bool(boundary_evidence.get("reRunVerified")),
+                "contaminationCarriedForward": bool(
+                    boundary_evidence.get("contaminationCarriedForward")
+                ),
+                "boardGeneration": boundary_evidence.get("boardGeneration"),
+                "contentSuccessWithUnverifiedCleanup": False,
+                "resetResult": reset_result.as_dict(),
+            }
             self._last_remix_cleanup_outcome = {
                 "transactionStart": transaction_start,
-                "successCount": success_count,
-                "totalAttempted": total_attempted,
-                "errors": list(error_log or []),
+                "successCount": 1 if reset_verified else 0,
+                "totalAttempted": 1,
+                "errors": error_log,
                 "placedCount": placed_count,
                 "skippedCount": skipped_count,
                 "skippedSlots": list(skipped_slots),
                 **cleanup_policy,
             }
-            
-            if cleanup_policy.get("policyAccepted"):
-                self._touch_watchdog_progress(
-                    "remix",
-                    "cleanup_completed",
-                    remix_name=remix_name,
-                    residual_count=cleanup_policy.get("residualCount"),
+
+            for transaction in self._workflow_placement_transactions[transaction_start:]:
+                transaction["cleanupVerified"] = reset_verified
+                transaction["cleanupAccepted"] = reset_verified
+                transaction["cleanupVerificationScope"] = (
+                    "restart_recovery" if reset_verified else "unknown"
                 )
-                residual_count = cleanup_policy.get("residualCount")
-                if cleanup_policy.get("emptyVerified"):
-                    print(
-                        f"  âœ… Smart batch return: {success_count}/{total_attempted} "
-                        "icons returned successfully"
-                    )
-                else:
-                    print(
-                        f"  ⚠️ Smart batch return accepted with known residual: "
-                        f"{residual_count} icon(s) remaining (limit "
-                        f"{cleanup_policy.get('maxResidualIcons')})"
-                    )
-                for transaction in self._workflow_placement_transactions[transaction_start:]:
-                    empty_verified = bool(cleanup_policy.get("emptyVerified"))
-                    transaction["cleanupVerified"] = empty_verified
-                    transaction["cleanupVerificationScope"] = (
-                        "board" if empty_verified else "unknown"
-                    )
-                    transaction["cleanupAccepted"] = True
-                    transaction["cleanupResidualCount"] = residual_count
-            else:
-                print(f"  âš ï¸  Smart batch return: {success_count}/{total_attempted} icons returned")
-                if error_log:
-                    print(f"  ðŸ“‹ Errors: {len(error_log)} issues encountered")
-                for transaction in self._workflow_placement_transactions[transaction_start:]:
-                    transaction["cleanupVerified"] = False
-                    transaction["cleanupAccepted"] = False
-                    transaction["cleanupVerificationScope"] = "unknown"
+                transaction["cleanupMethod"] = "restart_recovery"
+                if not reset_verified:
                     transaction["cleanupUnverified"] = True
-                if cleanup_policy.get("safetyStopRequired"):
-                    self._mark_safety_stop(
-                        "remix_panel_recovery_unverified",
-                        phase="remix_post_playback_cleanup",
-                        details={
-                            "remixName": remix_name,
-                            "cleanup": dict(cleanup_policy),
-                        },
-                    )
-                    print(
-                        "  🛑 Panel recovery/Re-Run was not verified; "
-                        "remix content is not replayable"
-                    )
-                    return False
-                if cleanup_policy.get("contentSuccessWithUnverifiedCleanup"):
-                    print(
-                        "  ⚠️ Remix content completed, but cleanup remains "
-                        "unverified after one Re-Run; continuing to the next remix"
-                    )
-                    self._touch_watchdog_progress(
-                        "remix",
-                        "cleanup_unverified_content_continues",
-                        remix_name=remix_name,
-                        board_state=cleanup_policy.get("boardState"),
-                    )
-                    time.sleep(0.5)
-                    print(f"âœ… COMPLETED ENHANCED REMIX CONTENT: {remix_name}")
-                    print("   ⚠️ Board cleanup remains unverified")
-                    return True
-                print("  🛑 Remix is not considered complete because cleanup decision was incomplete")
+
+            if not reset_verified:
+                self._last_remix_failure_phase = "post_playback_rerun_failed"
+                self._mark_safety_stop(
+                    "remix_rerun_unverified",
+                    phase="remix_post_playback_rerun",
+                    details={
+                        "remixName": remix_name,
+                        "reset": reset_result.as_dict(),
+                    },
+                )
+                print(
+                    "  🛑 Re-Run was not verified; remix content is committed "
+                    "and will not be replayed"
+                )
                 return False
+
+            self._touch_watchdog_progress(
+                "remix",
+                "cleanup_completed",
+                remix_name=remix_name,
+                cleanup_method="restart_recovery",
+            )
+            print("  ✅ Remix reset verified via Re-Run")
 
             time.sleep(0.5)
             
@@ -18661,16 +18722,33 @@ class SprunkiGamePlayer:
                     )
                 cleanup_source = "panel_rerun"
             else:
-                success_count, total_attempted, errors = (
-                    self.smart_batch_return_all_slots_with_mode(
-                        use_cdp=False,
-                        context=context,
-                        obs_controller=self.obs_controller,
-                    )
+                # Remix retries also use the same whole-game reset policy.
+                # Returning individual slots here would reintroduce the
+                # failure mode this remix boundary is designed to remove.
+                rerun_result = self._run_remix_restart_boundary(
+                    remix_name=remix_name,
+                    transaction_start=transaction_start,
+                    mode="retry",
+                    obs_controller=self.obs_controller,
                 )
                 cleanup_boundary_evidence = dict(
-                    getattr(self, "_last_cleanup_boundary_evidence", {}) or {}
+                    getattr(rerun_result, "details", {}) or {}
                 )
+                if rerun_result.status in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_EMPTY,
+                }:
+                    success_count, total_attempted, errors = 1, 1, []
+                else:
+                    success_count, total_attempted, errors = (
+                        0,
+                        1,
+                        [
+                            f"remix_rerun_{rerun_result.status.value.lower()}"
+                            f":{rerun_result.message}"
+                        ],
+                    )
+                cleanup_source = "remix_rerun"
             validation = self.validate_workflow_completion()
             if isinstance(validation, tuple):
                 validation_complete = bool(validation[0])
@@ -18747,7 +18825,7 @@ class SprunkiGamePlayer:
         self,
         remix_data: Dict[str, Any],
         mode: str = "Normal",
-        listen_duration: int = 15,
+        listen_duration: int = DEFAULT_REMIX_PLAYBACK_SECONDS,
         progress_callback=None,
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         """Run one complete remix with cleanup-gated whole-remix retries."""
@@ -18771,6 +18849,7 @@ class SprunkiGamePlayer:
 
             transaction_start = len(self._workflow_placement_transactions)
             self._last_remix_cleanup_outcome = None
+            self._last_remix_reset_result = None
             started_at = time.monotonic()
             if not input_valid:
                 success = False
@@ -18958,6 +19037,9 @@ class SprunkiGamePlayer:
         self._last_showcase_content_committed = False
         self._last_remix_content_committed = False
         self._last_remix_failure_phase = None
+        self._last_remix_cleanup_outcome = None
+        self._last_remix_reset_result = None
+        self._remix_workflow_started = False
         self._safety_stop = False
         self._safety_stop_reason = None
         try:
@@ -19217,11 +19299,34 @@ class SprunkiGamePlayer:
             # complete precision/carpet/recovery chain to run twice.
             print("\n🧹 FINAL SMART CLEANUP & COMPREHENSIVE VALIDATION")
             print("="*70)
-            cleanup_result = self._run_cleanup_once(
-                use_cdp=False,
-                context={"workflow": "full_showcase"},
-                obs_controller=self.obs_controller,
-            )
+            # Every completed remix already ends with its own Re-Run.  Reuse
+            # that terminal boundary for the final report instead of sending
+            # a second Re-Run or falling back to icon-by-icon return cleanup.
+            # If no remix boundary exists (for example a showcase-only or
+            # aborted workflow), preserve the existing generic cleanup path.
+            last_remix_reset = getattr(self, "_last_remix_reset_result", None)
+            if last_remix_reset is not None:
+                cleanup_result = last_remix_reset
+                report.evidence["finalCleanupSource"] = "last_remix_restart"
+                print("   ✅ Reusing the last remix Re-Run as final cleanup")
+            elif getattr(self, "_remix_workflow_started", False):
+                cleanup_result = self._run_remix_restart_boundary(
+                    remix_name="workflow_final_boundary",
+                    transaction_start=len(
+                        getattr(self, "_workflow_placement_transactions", []) or []
+                    ),
+                    mode="final",
+                    obs_controller=self.obs_controller,
+                )
+                report.evidence["finalCleanupSource"] = "final_remix_restart"
+                print("   🔄 No completed remix reset was available; using one final Re-Run")
+            else:
+                cleanup_result = self._run_cleanup_once(
+                    use_cdp=False,
+                    context={"workflow": "full_showcase"},
+                    obs_controller=self.obs_controller,
+                )
+                report.evidence["finalCleanupSource"] = "generic_cleanup"
             cleanup_ok = cleanup_result.status in {
                 OperationStatus.VERIFIED,
                 OperationStatus.ALREADY_EMPTY,
@@ -19496,7 +19601,7 @@ class SprunkiGamePlayer:
     def play_all_remixes_corrected(
         self,
         mode="Normal",
-        listen_duration=15,
+        listen_duration=DEFAULT_REMIX_PLAYBACK_SECONDS,
         progress_callback=None,
         final_cleanup_optional=True,
     ):
@@ -19526,6 +19631,8 @@ class SprunkiGamePlayer:
             if not self.remix_library:
                 print("ℹ️ No remixes in library to play.")
                 return RemixResult(failure_code="empty_remix")
+
+            self._remix_workflow_started = True
             
             emoji = "ðŸŽµ" if mode == "Test" else ("ðŸ‘»" if mode == "Horror" else "ðŸŽª")
             print(f"\n{emoji} STARTING ENHANCED {mode.upper()} REMIX SESSION")
@@ -19877,6 +19984,9 @@ class SprunkiGamePlayer:
         cleanup_result = None
         try:
             self._reset_cleanup_guard()
+            self._last_remix_cleanup_outcome = None
+            self._last_remix_reset_result = None
+            self._remix_workflow_started = False
             layout = (self.config or {}).get("layout", {}) or {}
             report.layout_icons = len(layout.get("icons", []) or [])
             report.layout_slots = len(layout.get("slots", []) or [])
@@ -19945,19 +20055,27 @@ class SprunkiGamePlayer:
                 print("\nðŸŽ‰ ENHANCED REMIX-ONLY WORKFLOW COMPLETED!")
                 
                 # ================================================================
-                # ðŸ§¹ REMIX-ONLY SMART CLEANUP & VALIDATION
+                # 🔄 REMIX-ONLY RE-RUN VALIDATION
                 # ================================================================
-                print("\nðŸ§¹ REMIX-ONLY SMART CLEANUP & VALIDATION")
+                print("\n🔄 REMIX-ONLY RE-RUN VALIDATION")
                 print("="*60)
                 
                 try:
-                    # Smart cleanup for remix-only mode
-                    print("ðŸ”„ Smart batch cleanup for remix-only mode...")
-                    cleanup_result = self._run_cleanup_once(
-                        use_cdp=False,
-                        context={"workflow": "remix_only"},
-                        obs_controller=self.obs_controller,
-                    )
+                    # Each completed remix already owns one Re-Run boundary.
+                    # Reuse it; if a compatibility caller reached this block
+                    # without one, create exactly one remix-style reset rather
+                    # than returning individual icons.
+                    cleanup_result = getattr(self, "_last_remix_reset_result", None)
+                    if cleanup_result is None:
+                        cleanup_result = self._run_remix_restart_boundary(
+                            remix_name="remix_only_final_boundary",
+                            transaction_start=len(
+                                getattr(self, "_workflow_placement_transactions", [])
+                                or []
+                            ),
+                            mode="final",
+                            obs_controller=self.obs_controller,
+                        )
                     cleanup_success = cleanup_result.status in {
                         OperationStatus.VERIFIED,
                         OperationStatus.ALREADY_EMPTY,
@@ -19966,15 +20084,15 @@ class SprunkiGamePlayer:
                     cleanup_success_count = 1 if cleanup_success else 0
                     if not cleanup_success:
                         report.issues.append(
-                            f"Remix cleanup failed: {cleanup_result.status.value}"
+                            f"Remix Re-Run failed: {cleanup_result.status.value}"
                         )
                     
                     if cleanup_total == 0:
                         print("âœ… No remix cleanup needed - all slots clean")
                     elif cleanup_success_count == cleanup_total:
-                        print(f"âœ… Remix cleanup: {cleanup_success_count}/{cleanup_total} perfect")
+                        print(f"✅ Remix Re-Run: {cleanup_success_count}/{cleanup_total} verified")
                     else:
-                        print(f"âš ï¸ Remix cleanup: {cleanup_success_count}/{cleanup_total} with issues")
+                        print(f"⚠️ Remix Re-Run: {cleanup_success_count}/{cleanup_total} with issues")
                     
                     # Remix-specific validation
                     is_complete, remaining_issues, recommendations = self.validate_workflow_completion()
@@ -20038,10 +20156,17 @@ class SprunkiGamePlayer:
             if (
                 not self._cleanup_completed
                 and not last_boundary.get("cleanupBoundaryCompleted", False)
+                and (
+                    getattr(self, "_remix_workflow_started", False)
+                    or bool(getattr(self, "_workflow_placement_transactions", []))
+                )
             ):
-                cleanup_result = self._run_cleanup_once(
-                    use_cdp=False,
-                    context={"workflow": "remix_only_finally"},
+                cleanup_result = self._run_remix_restart_boundary(
+                    remix_name="remix_only_finally",
+                    transaction_start=len(
+                        getattr(self, "_workflow_placement_transactions", []) or []
+                    ),
+                    mode="final",
                     obs_controller=self.obs_controller,
                 )
                 if cleanup_result.status not in {
@@ -20049,7 +20174,7 @@ class SprunkiGamePlayer:
                     OperationStatus.ALREADY_EMPTY,
                 }:
                     report.issues.append(
-                        f"Final remix cleanup failed: {cleanup_result.status.value}"
+                        f"Final remix Re-Run failed: {cleanup_result.status.value}"
                     )
 
             report.placement_verified = any(
@@ -20155,7 +20280,13 @@ class SprunkiGamePlayer:
         """Redirect to enhanced version"""
         return self.showcase_all_icons_corrected(mode, skip_icon_19, listen_duration, progress_callback)
     
-    def play_complete_remix(self, remix_data, mode="Normal", listen_duration=15, progress_callback=None):
+    def play_complete_remix(
+        self,
+        remix_data,
+        mode="Normal",
+        listen_duration=DEFAULT_REMIX_PLAYBACK_SECONDS,
+        progress_callback=None,
+    ):
         """Run one complete remix with the bounded retry/cleanup policy."""
         success, _attempt_details = self._play_remix_with_retry(
             remix_data,

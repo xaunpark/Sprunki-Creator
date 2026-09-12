@@ -3049,7 +3049,7 @@ class SprunkiUltimateMaster:
         automation_config = self.config_manager.get('automation', {})
         recording_durations = automation_config.get('recording_duration', {})
         icon_duration = recording_durations.get('icon_showcase', 14)
-        remix_duration = recording_durations.get('remix_playback', 20)
+        remix_duration = recording_durations.get('remix_playback', 25)
         
         result = messagebox.askyesno("Start Unified Processing",
             f"START UNIFIED PROCESSING PIPELINE?\n\n"
