@@ -824,8 +824,6 @@ class WorkflowQualityTests(unittest.TestCase):
         player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
         player.stop_event = threading.Event()
         player.obs_controller = None
-        player._session_recovery_count = 0
-        player._max_session_recoveries = 2
         player._active_operation_context = OperationContext.begin(
             "cleanup", 3, max_input_attempts=20
         )

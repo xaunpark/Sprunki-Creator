@@ -70,6 +70,14 @@ POLOS_EMPTY_TOKENS = frozenset({"", "0", "false"})
 POLOS_OCCUPIED_TOKENS = frozenset({"1", "true"})
 POLOS_UNKNOWN_TOKENS = frozenset({"none", "null"})
 
+# Recovery input is intentionally separate from the normal operation budget.
+# A failed placement/return may consume every coordinate in its bounded
+# cascade, but that must not consume the one physical Re-Run click and the
+# entry actions needed to recover the page.
+# Validated manual prepare timelines allow up to 256 actions.  Keep enough
+# headroom for the Re-Run click, entry probes, and the no-profile intro flow.
+DEFAULT_RECOVERY_INPUT_ATTEMPTS = 512
+
 
 @dataclass(frozen=True)
 class PolosSignalSummary:
@@ -482,11 +490,13 @@ class OperationContext:
     started_at: float
     deadline_at: float
     max_input_attempts: int = 5
+    max_recovery_input_attempts: int = DEFAULT_RECOVERY_INPUT_ATTEMPTS
     max_read_failures: int = 3
     max_recovery_attempts: int = 1
     baseline: Optional[PlacementSnapshot] = None
     last_snapshot: Optional[PlacementSnapshot] = None
     input_attempts: int = 0
+    recovery_input_attempts: int = 0
     read_count: int = 0
     consecutive_read_failures: int = 0
     recovery_attempts: int = 0
@@ -513,6 +523,7 @@ class OperationContext:
         target_slot: Optional[int],
         *,
         max_input_attempts: int = 5,
+        max_recovery_input_attempts: int = DEFAULT_RECOVERY_INPUT_ATTEMPTS,
         deadline_seconds: float = 12.0,
         max_read_failures: int = 3,
         max_recovery_attempts: int = 1,
@@ -533,6 +544,7 @@ class OperationContext:
             started_at=started_at,
             deadline_at=started_at + max(safe_deadline_seconds, 0.1),
             max_input_attempts=max(int(max_input_attempts), 0),
+            max_recovery_input_attempts=max(int(max_recovery_input_attempts), 1),
             max_read_failures=max(int(max_read_failures), 1),
             max_recovery_attempts=max(int(max_recovery_attempts), 0),
         )
@@ -546,6 +558,7 @@ class OperationContext:
         *,
         stop_requested: bool = False,
         allow_recovery_input: bool = False,
+        use_recovery_budget: bool = False,
         clock: Callable[[], float] = time.monotonic,
     ) -> bool:
         if (
@@ -555,7 +568,17 @@ class OperationContext:
             or self.expired(clock)
         ):
             return False
-        if self.input_attempts >= self.max_input_attempts:
+        attempt_count = (
+            self.recovery_input_attempts
+            if use_recovery_budget
+            else self.input_attempts
+        )
+        max_attempts = (
+            self.max_recovery_input_attempts
+            if use_recovery_budget
+            else self.max_input_attempts
+        )
+        if attempt_count >= max_attempts:
             return False
         if coordinates is not None and len(coordinates) >= 4:
             try:
@@ -566,10 +589,20 @@ class OperationContext:
                 return False
         return True
 
-    def register_input(self, coordinates: Optional[Sequence[float]] = None) -> bool:
-        if self.input_attempts >= self.max_input_attempts:
-            return False
-        self.input_attempts += 1
+    def register_input(
+        self,
+        coordinates: Optional[Sequence[float]] = None,
+        *,
+        recovery: bool = False,
+    ) -> bool:
+        if recovery:
+            if self.recovery_input_attempts >= self.max_recovery_input_attempts:
+                return False
+            self.recovery_input_attempts += 1
+        else:
+            if self.input_attempts >= self.max_input_attempts:
+                return False
+            self.input_attempts += 1
         if coordinates is not None and len(coordinates) >= 4:
             try:
                 self.attempted_coordinates.add(
@@ -578,6 +611,10 @@ class OperationContext:
             except (TypeError, ValueError):
                 pass
         return True
+
+    def register_recovery_input(self) -> bool:
+        """Consume one input from the independent Re-Run/entry budget."""
+        return self.register_input(recovery=True)
 
     def register_read(self, snapshot: Optional[PlacementSnapshot]) -> None:
         self.read_count += 1

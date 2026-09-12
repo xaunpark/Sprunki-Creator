@@ -632,6 +632,9 @@ class UnifiedProcessingManager:
         self._game_should_stop_before_cleanup = False
         self.workflow_attempt_index = 1
         self.watchdog_progress_callback = None
+        # Separate marker for a recoverable idle watchdog interruption.  The
+        # normal stop event remains the cancellation channel.
+        self.watchdog_recovery_event = threading.Event()
         self.queue: List[ProcessingItem] = []
         self.config: Optional[ProcessingConfig] = None
         self.current_item_index: int = 0
@@ -663,6 +666,14 @@ class UnifiedProcessingManager:
         """Set the workflow stop event used by normal production actions."""
         self.workflow_stop_event = stop_event
         self._propagate_stop_event(stop_event)
+
+    def set_watchdog_recovery_event(self, recovery_event: threading.Event):
+        """Propagate the watchdog's recoverable-idle marker separately."""
+        self.watchdog_recovery_event = recovery_event
+        if hasattr(self.json_generator, 'game_player'):
+            self.json_generator.game_player.watchdog_recovery_event = recovery_event
+        if hasattr(self.master_controller, 'game_player') and self.master_controller.game_player:
+            self.master_controller.game_player.watchdog_recovery_event = recovery_event
 
     def enter_cleanup_mode(self, cleanup_abort_event: threading.Event):
         """Allow bounded cleanup without clearing workflow cancellation."""

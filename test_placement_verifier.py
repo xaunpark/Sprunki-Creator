@@ -719,8 +719,6 @@ class ReturnActionPolicyTests(unittest.TestCase):
         player.carpet_bombing_config = {"max_sets": 1}
         player.verifier_targeted_cleanup_recovery_rounds = 1
         player.verifier_targeted_cleanup_backend_fallback = False
-        player._max_session_recoveries = 2
-        player._session_recovery_count = 0
         player.obs_controller = None
         player._cleanup_input_budget = lambda: 4
         player._cleanup_deadline_seconds = lambda: 30.0
@@ -861,6 +859,40 @@ class ReturnActionPolicyTests(unittest.TestCase):
         self.assertFalse(result.details["reRunAttempted"])
         player.restart_game_to_initial_state.assert_not_called()
 
+    def test_forced_rerun_resets_even_when_snapshot_is_clean(self):
+        from placement_verifier import PlacementSnapshot
+
+        player = self._cleanup_boundary_player()
+        clean = self._state(2, 0, ["0"], ["0"])
+        context = OperationContext.begin(
+            "cleanup",
+            None,
+            max_input_attempts=20,
+            operation_id="cleanup-forced-rerun",
+        )
+        context.cleanup_boundary_id = "cleanup-forced-rerun"
+        context.set_baseline(PlacementSnapshot.from_mapping(clean))
+        player.restart_game_to_initial_state = Mock(
+            return_value=OperationResult(
+                OperationStatus.RECOVERED,
+                direction="recovery",
+                details={"postState": clean},
+            )
+        )
+
+        result = player._run_cleanup_boundary_recovery(
+            context,
+            use_cdp=False,
+            baseline=clean,
+            current_snapshot=clean,
+            extra_details={"forceReRun": True},
+        )
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertTrue(result.details["reRunAttempted"])
+        self.assertTrue(result.details["reRunVerified"])
+        player.restart_game_to_initial_state.assert_called_once()
+
     def test_dirty_boundary_runs_exactly_one_rerun_and_invalidates_old_ledger(self):
         from placement_verifier import PlacementSnapshot
 
@@ -971,7 +1003,6 @@ class ReturnActionPolicyTests(unittest.TestCase):
 
         player = self._player()
         player.stop_event = threading.Event()
-        player._recovery_budget_scope = None
         player._physical_input_context = None
         player.entry_strategy = {}
         player._manual_profile_resolution_error = None

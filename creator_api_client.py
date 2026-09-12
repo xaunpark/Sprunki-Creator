@@ -1597,6 +1597,7 @@ class CreatorService:
         self._watchdog_failures_lock = threading.Lock()
         self._watchdog_states = {}
         self._watchdog_states_lock = threading.RLock()
+        self._active_watchdog_recovery_event = None
         self.watchdog_settings = load_watchdog_settings(self.config_manager.get)
         
         self.game_player = None
@@ -1704,6 +1705,13 @@ class CreatorService:
             
             # Khởi tạo GamePlayer VÀ TRUYỀN CỜ DỪNG CỦA JOB VÀO
             self.game_player = SprunkiGamePlayer(stop_event=job_stop_event)
+            # The service player is created after the job watchdog event.  It
+            # must join that same marker; otherwise an idle timeout would be
+            # visible to the workflow manager but not to placement recovery.
+            self.game_player.watchdog_recovery_event = (
+                getattr(self, "_active_watchdog_recovery_event", None)
+                or threading.Event()
+            )
             self.game_player.watchdog_progress_callback = (
                 self._watchdog_progress_callback
             )
@@ -1775,6 +1783,9 @@ class CreatorService:
         print("🛑 Stopping Creator Service...")
         self.running = False
         self.service_stop_event.set()
+        recovery_event = getattr(self, "_active_watchdog_recovery_event", None)
+        if recovery_event is not None:
+            recovery_event.clear()
         # Manual service cancellation is the one path that is allowed to
         # abort both production and cleanup.  A watchdog timeout uses a
         # separate cleanup event and never clears the workflow stop signal.
@@ -1893,6 +1904,8 @@ class CreatorService:
             self._watchdog_states = {}
         if not hasattr(self, "_watchdog_states_lock"):
             self._watchdog_states_lock = threading.RLock()
+        if not hasattr(self, "_active_watchdog_recovery_event"):
+            self._active_watchdog_recovery_event = None
 
     def _register_watchdog_state(self, queue_id: int, state: WatchdogState) -> None:
         if not hasattr(self, "_watchdog_states"):
@@ -1949,8 +1962,15 @@ class CreatorService:
         self,
         state: WatchdogState,
         workflow_stop_event: threading.Event,
+        recovery_event: Optional[threading.Event] = None,
     ) -> None:
-        """Monitor hard and idle deadlines without sending terminal status."""
+        """Monitor deadlines and mark idle interruption as recoverable.
+
+        The watchdog still interrupts the currently stuck workflow through its
+        stop event.  It does not own the Re-run decision: only the separate
+        ``recovery_event`` tells the operation coordinator that this stop may
+        be released for recovery.
+        """
 
         queue_id = state.queue_id
         while not state.finished_event.is_set():
@@ -1972,21 +1992,39 @@ class CreatorService:
                 event = state.mark_timeout(reason)
                 if event is not None:
                     workflow_stop_event.set()
-                    # A number of legacy workflow loops still consult the
-                    # boolean flag in addition to the shared Event.  Set it
-                    # for the production stop, then cleanup will temporarily
-                    # clear it while using its independent abort Event.
-                    self.processing_manager.should_stop = True
-                    if getattr(self, "game_player", None):
-                        self.game_player.should_stop = True
-                    self.logger.error(
-                        "🚨 [WATCHDOG] Job %s %s at %.1fs; phase=%s/%s",
-                        queue_id,
-                        reason,
-                        event.get("elapsed_seconds", 0.0),
-                        event.get("phase"),
-                        event.get("substep"),
-                    )
+                    if reason == "idle_timeout":
+                        if recovery_event is not None:
+                            recovery_event.set()
+                        # The shared event interrupts legacy loops, while the
+                        # boolean flags remain clear so a coordinator can
+                        # release this transient stop and perform Re-run.
+                        self.processing_manager.should_stop = False
+                        if getattr(self, "game_player", None):
+                            self.game_player.should_stop = False
+                        self.logger.warning(
+                            "⚠️ [WATCHDOG] Job %s idle timeout; recovery requested "
+                            "at %.1fs; phase=%s/%s",
+                            queue_id,
+                            event.get("elapsed_seconds", 0.0),
+                            event.get("phase"),
+                            event.get("substep"),
+                        )
+                    else:
+                        if recovery_event is not None:
+                            recovery_event.clear()
+                        # Hard deadline and all non-idle stop causes remain
+                        # terminal and cannot be reclassified as Re-run-safe.
+                        self.processing_manager.should_stop = True
+                        if getattr(self, "game_player", None):
+                            self.game_player.should_stop = True
+                        self.logger.error(
+                            "🚨 [WATCHDOG] Job %s %s at %.1fs; phase=%s/%s",
+                            queue_id,
+                            reason,
+                            event.get("elapsed_seconds", 0.0),
+                            event.get("phase"),
+                            event.get("substep"),
+                        )
                 return
 
             wait_seconds = min(
@@ -2046,6 +2084,20 @@ class CreatorService:
         if player is not None:
             player.stop_event = stop_event
 
+    def _set_watchdog_recovery_event(self, recovery_event: threading.Event) -> None:
+        """Propagate the recoverable-idle marker without replacing stop input."""
+        self._active_watchdog_recovery_event = recovery_event
+        manager = getattr(self, "processing_manager", None)
+        setter = getattr(manager, "set_watchdog_recovery_event", None)
+        if callable(setter):
+            setter(recovery_event)
+            return
+        if manager is not None:
+            manager.watchdog_recovery_event = recovery_event
+        player = getattr(self, "game_player", None)
+        if player is not None:
+            player.watchdog_recovery_event = recovery_event
+
     def _set_watchdog_progress_callback(self) -> None:
         manager = getattr(self, "processing_manager", None)
         setter = getattr(manager, "set_watchdog_progress_callback", None)
@@ -2101,10 +2153,11 @@ class CreatorService:
         self,
         state: WatchdogState,
         workflow_stop_event: threading.Event,
+        recovery_event: Optional[threading.Event] = None,
     ) -> threading.Thread:
         thread = threading.Thread(
             target=self._job_watchdog,
-            args=(state, workflow_stop_event),
+            args=(state, workflow_stop_event, recovery_event),
             daemon=True,
             name=f"creator-watchdog-{state.queue_id}",
         )
@@ -2284,8 +2337,16 @@ class CreatorService:
         item: Any,
         attempt: int,
         cleanup_abort_event: threading.Event,
+        *,
+        allow_game_recovery: bool = True,
     ) -> Dict[str, Any]:
-        """Stop recording, recover the board, close runtime components, and bound cleanup."""
+        """Stop recording, optionally recover the board, and bound cleanup.
+
+        Only a recoverable idle timeout may enter the game cleanup/Re-run
+        coordinator.  Hard deadline and explicit cancellation paths may still
+        stop recording and close resources, but must not extend gameplay past
+        the terminal deadline.
+        """
         started = time.monotonic()
         deadline = started + float(self.watchdog_settings["cleanup_grace_seconds"])
         result: Dict[str, Any] = {
@@ -2294,6 +2355,7 @@ class CreatorService:
             "started_at_monotonic": started,
             "deadline_seconds": self.watchdog_settings["cleanup_grace_seconds"],
             "output_files": [],
+            "allow_game_recovery": bool(allow_game_recovery),
         }
 
         def expired() -> bool:
@@ -2347,7 +2409,12 @@ class CreatorService:
                 return result
 
             player = getattr(self, "game_player", None)
-            if player and hasattr(player, "_run_cleanup_once") and not expired():
+            if (
+                player
+                and hasattr(player, "_run_cleanup_once")
+                and allow_game_recovery
+                and not expired()
+            ):
                 previous_boundary = dict(
                     getattr(player, "_last_cleanup_boundary_evidence", {}) or {}
                 )
@@ -2404,6 +2471,12 @@ class CreatorService:
                     result["board_cleanup"] = {"status": "failed", "error": str(exc)}
                     result["status"] = "failed"
                     result["reason"] = "board_cleanup_failed"
+            elif player and not allow_game_recovery:
+                result["board_cleanup"] = {
+                    "status": "skipped",
+                    "reason": "terminal_watchdog_timeout",
+                    "message": "Game Re-run is disabled after the hard deadline.",
+                }
 
             if controller and not expired():
                 completed, obs_cleanup, cleanup_error = self._run_bounded_cleanup_call(
@@ -2589,6 +2662,7 @@ class CreatorService:
         *,
         initial_workflow_stop_event: Optional[threading.Event] = None,
         initial_watcher_thread: Optional[threading.Thread] = None,
+        initial_watchdog_recovery_event: Optional[threading.Event] = None,
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[threading.Thread]]:
         """Run a bounded workflow and at most one early-idle full retry."""
         attempt = 1
@@ -2609,7 +2683,19 @@ class CreatorService:
                 if is_initial_attempt
                 else threading.Event()
             )
+            watchdog_recovery_event = (
+                initial_watchdog_recovery_event
+                if is_initial_attempt and initial_watchdog_recovery_event is not None
+                else threading.Event()
+            )
             cleanup_abort_event = threading.Event()
+            # A recovery marker from an earlier full workflow attempt must not
+            # leak into the next attempt.  Preserve an already-claimed marker
+            # on the initial event because the watchdog may have timed out
+            # while Tracker binding was still in progress.
+            if not (is_initial_attempt and watchdog_recovery_event.is_set()):
+                watchdog_recovery_event.clear()
+            self._set_watchdog_recovery_event(watchdog_recovery_event)
             self._set_workflow_stop_event(workflow_stop_event)
             self.processing_manager.cleanup_abort_event = cleanup_abort_event
             self._set_workflow_attempt(attempt)
@@ -2619,7 +2705,11 @@ class CreatorService:
             if is_initial_attempt and initial_watcher_thread is not None:
                 watcher_thread = initial_watcher_thread
             else:
-                watcher_thread = self._start_job_watchdog(state, workflow_stop_event)
+                watcher_thread = self._start_job_watchdog(
+                    state,
+                    workflow_stop_event,
+                    watchdog_recovery_event,
+                )
 
             job_successful = self._process_with_smart_retry(item, queue_id)
             timeout_event = state.take_timeout()
@@ -2631,6 +2721,7 @@ class CreatorService:
                     timeout_event = state.take_timeout()
             if timeout_event is None:
                 state.touch("workflow", "returned", success=bool(job_successful))
+                watchdog_recovery_event.clear()
                 return bool(job_successful), final_timeout, watcher_thread
 
             final_timeout = timeout_event
@@ -2651,6 +2742,7 @@ class CreatorService:
                 item,
                 attempt,
                 cleanup_abort_event,
+                allow_game_recovery=timeout_event.get("reason") == "idle_timeout",
             )
             item.watchdog_evidence.setdefault("cleanup", []).append(cleanup)
             failure["evidence"] = {
@@ -2763,9 +2855,12 @@ class CreatorService:
         )
         self._register_watchdog_state(queue_id, watchdog_state)
         job_stop_event = threading.Event()
+        job_watchdog_recovery_event = threading.Event()
+        self._set_watchdog_recovery_event(job_watchdog_recovery_event)
         initial_watchdog_thread = self._start_job_watchdog(
             watchdog_state,
             job_stop_event,
+            job_watchdog_recovery_event,
         )
         watchdog_thread = initial_watchdog_thread
         watchdog_failure = None
@@ -2847,6 +2942,7 @@ class CreatorService:
                     watchdog_state,
                     initial_workflow_stop_event=job_stop_event,
                     initial_watcher_thread=initial_watchdog_thread,
+                    initial_watchdog_recovery_event=job_watchdog_recovery_event,
                 )
             )
             if watchdog_failure:
@@ -2873,6 +2969,7 @@ class CreatorService:
             # Stop the monitor before finalization.  Cleanup has its own
             # bounded abort event and must not clear workflow cancellation.
             job_stop_event.set()
+            job_watchdog_recovery_event.clear()
             # The current attempt may use a fresh event after watchdog
             # recovery; stop the manager's active workflow event as well.
             try:

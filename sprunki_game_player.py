@@ -244,6 +244,10 @@ class SprunkiGamePlayer:
         # [MODIFIED] Lưu lại cờ dừng, tạo mới nếu không được cung cấp
         self.stop_event = stop_event or threading.Event()
         self.watchdog_progress_callback = None
+        # The watchdog may interrupt an idle operation, but that interruption
+        # is recoverable.  Keep its marker separate from the shared stop event
+        # so the Re-run coordinator can distinguish it from a user/safety stop.
+        self.watchdog_recovery_event = threading.Event()
 
         # Load configuration from config.json (like json_generator.py)
         self.load_config()
@@ -315,9 +319,6 @@ class SprunkiGamePlayer:
         self.last_operation_result = None
         self._operation_counter = 0
         self._active_operation_context = None
-        self._session_recovery_count = 0
-        self._max_session_recoveries = 2
-        self._recovery_budget_scope = None
         self._cleanup_started = False
         self._cleanup_completed = False
         self._cleanup_attempts = 0
@@ -692,6 +693,34 @@ class SprunkiGamePlayer:
             except Exception as exc:
                 self.logger.debug("Watchdog progress callback ignored: %s", exc)
 
+    def _watchdog_idle_recovery_requested(self) -> bool:
+        """Return whether the current stop was caused by recoverable idleness."""
+        event = getattr(self, "watchdog_recovery_event", None)
+        return bool(event is not None and event.is_set())
+
+    def _release_watchdog_idle_stop(self) -> bool:
+        """Release only a transient watchdog idle stop for Re-run recovery.
+
+        The shared stop event remains authoritative for explicit cancellation,
+        hard timeout, and safety-stop latches.  Only the separately-marked idle
+        watchdog condition may be cleared here.
+        """
+        if not self._watchdog_idle_recovery_requested():
+            return False
+        if bool(getattr(self, "_safety_stop", False)):
+            return False
+        stop_event = getattr(self, "stop_event", None)
+        if stop_event is not None:
+            stop_event.clear()
+        self.should_stop = False
+        return True
+
+    def _resolve_watchdog_idle_recovery(self) -> None:
+        """Clear a watchdog idle marker after its recovery decision is made."""
+        event = getattr(self, "watchdog_recovery_event", None)
+        if event is not None:
+            event.clear()
+
     def _cleanup_input_budget(self):
         """Reserve enough input budget for one complete cleanup attempt.
 
@@ -738,19 +767,13 @@ class SprunkiGamePlayer:
         return (MAX_TOTAL_PREPARE_DURATION_MS / 1000.0) + 300.0
 
     def _activate_recovery_scope(self, context):
-        """Scope the session recovery breaker to one physical operation.
+        """Return the operation identity used by the local recovery boundary.
 
-        The operation context already limits a single cleanup/return chain to
-        one recovery.  The old session-wide counter allowed earlier showcase
-        recoveries to disable recovery for a later remix or final cleanup.
-        A new operation gets a fresh breaker; nested calls keep the same
-        scope because they share the same OperationContext.
+        Recovery is intentionally scoped by ``OperationContext``.  There is no
+        session-wide Re-run counter: a previous showcase/remix operation must
+        not consume the recovery opportunity of a later operation.
         """
-        scope = getattr(context, "operation_id", None) or id(context)
-        if getattr(self, "_recovery_budget_scope", None) != scope:
-            self._session_recovery_count = 0
-            self._recovery_budget_scope = scope
-        return scope
+        return getattr(context, "operation_id", None) or id(context)
 
     def _log_return_completed_successfully(self, context, result):
         """Emit one completion event for every verified return strategy.
@@ -842,6 +865,187 @@ class SprunkiGamePlayer:
             reads=context.read_count if context and reads is None else (reads or 0),
             recovery_attempts=context.recovery_attempts if context else 0,
         )
+
+    @staticmethod
+    def _operation_failure_is_deterministic(result) -> bool:
+        """Return whether a failed business operation has a known hard cause.
+
+        Unknown/no-transition/read/transport failures are recoverable through
+        one whole-game Re-Run.  Configuration, cancellation, and a failed
+        Re-Run itself are deterministic and must not start a recovery loop.
+        """
+        message = str(getattr(result, "message", "") or "").strip().lower()
+        deterministic_prefixes = (
+            "invalid_target_slot",
+            "another_operation_is_active",
+            "manual_profile_",
+            "remix_definition_",
+            "remix_has_no_icons",
+            "remix_layout_unavailable",
+            "remix_requires_more_slots",
+            "remix_contains_invalid_icon",
+            "recovery_must_be_started_by_coordinator",
+            "service_stop",
+            "user_cancel",
+            "hard_timeout",
+            "rerun_click_failed",
+            "post_restart_entry_not_verified",
+            "recovery_input_budget_exhausted",
+            "cleanup_rerun_budget_exhausted",
+            "cleanup_rerun_not_verified",
+            "rerun_exception",
+        )
+        return any(message.startswith(prefix) for prefix in deterministic_prefixes)
+
+    def _operation_failure_needs_rerun(self, result, *, direction: str) -> bool:
+        """Decide whether one failed business operation needs Re-Run recovery."""
+        if result is None:
+            return False
+        status = getattr(result, "status", None)
+        if status not in {
+            OperationStatus.UNKNOWN,
+            OperationStatus.STOPPED,
+            OperationStatus.FAILED,
+        }:
+            return False
+        if bool(getattr(self, "_safety_stop", False)):
+            return False
+        if self._operation_failure_is_deterministic(result):
+            return False
+        # An explicit stop/cancel, hard timeout, or safety latch remains
+        # terminal.  An idle watchdog stop is different: it is a transient
+        # interruption and the operation coordinator is allowed to release it
+        # before starting its independent Re-run boundary.
+        if self.stop_event.is_set() or getattr(self, "should_stop", False):
+            if not self._watchdog_idle_recovery_requested():
+                return False
+            self._release_watchdog_idle_stop()
+        return True
+
+    def _rerun_after_operation_failure(
+        self,
+        *,
+        direction: str,
+        target_slot_index: Optional[int],
+        failed_result,
+        reason: str,
+        operation_context=None,
+        baseline=None,
+        current_snapshot=None,
+    ):
+        """Use one independent Re-Run after an unresolved operation.
+
+        The normal placement/return budget may already be exhausted.  The
+        recovery input budget on ``OperationContext`` is intentionally
+        independent, so the Re-Run click and the configured entry flow still
+        get their own bounded opportunity.
+        """
+        if not self._operation_failure_needs_rerun(
+            failed_result,
+            direction=direction,
+        ):
+            return failed_result
+
+        context = operation_context
+        owns_context = False
+        if context is None:
+            context = self._begin_operation(
+                "recovery",
+                target_slot_index,
+                max_input_attempts=1,
+                deadline_seconds=self._cleanup_deadline_seconds(),
+            )
+            owns_context = True
+        if context is None:
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                direction="recovery",
+                message="recovery_operation_context_unavailable",
+            )
+
+        self._activate_recovery_scope(context)
+        boundary_id = getattr(context, "cleanup_boundary_id", None)
+        if not boundary_id:
+            boundary_id = (
+                f"operation-rerun-{direction}-"
+                f"{getattr(failed_result, 'operation_id', None) or id(context)}"
+            )
+            context.cleanup_boundary_id = boundary_id
+
+        try:
+            result = self._run_cleanup_boundary_recovery(
+                context,
+                use_cdp=True,
+                baseline=baseline,
+                current_snapshot=current_snapshot,
+                obs_controller=self.obs_controller,
+                reason=reason,
+                success_status=(
+                    OperationStatus.ALREADY_EMPTY
+                    if direction == "return"
+                    else OperationStatus.RECOVERED
+                ),
+                success_message=(
+                    "return_verified_after_operation_rerun"
+                    if direction == "return"
+                    else "operation_recovered_after_rerun"
+                ),
+                extra_details={
+                    "forceReRun": True,
+                    "operationRecovery": True,
+                    "operationDirection": direction,
+                    "targetSlotIndex": target_slot_index,
+                    "failedOperation": (
+                        failed_result.as_dict()
+                        if hasattr(failed_result, "as_dict")
+                        else str(failed_result)
+                    ),
+                    "cleanupMethod": "restart_recovery",
+                    "returnMethod": (
+                        "restart_recovery" if direction == "return" else None
+                    ),
+                    "verificationMethod": "restart_recovery",
+                    "cleanupBoundaryId": boundary_id,
+                },
+            )
+        except Exception as error:
+            result = self._operation_result(
+                context,
+                OperationStatus.FAILED,
+                f"operation_rerun_exception:{error}",
+                details={
+                    "operationRecovery": True,
+                    "operationDirection": direction,
+                    "targetSlotIndex": target_slot_index,
+                    "cleanupBoundaryId": boundary_id,
+                },
+            )
+
+        if result.status not in {
+            OperationStatus.RECOVERED,
+            OperationStatus.VERIFIED,
+            OperationStatus.ALREADY_EMPTY,
+        }:
+            # A failed Re-Run leaves the active page untrusted.  Do not let a
+            # caller continue with the next icon or another coordinate.
+            self._mark_safety_stop(
+                "operation_rerun_unverified",
+                phase=f"{direction}_operation_recovery",
+                details={
+                    "operationRecovery": True,
+                    "operationDirection": direction,
+                    "targetSlotIndex": target_slot_index,
+                    "reRunResult": (
+                        result.as_dict()
+                        if hasattr(result, "as_dict")
+                        else result
+                    ),
+                },
+            )
+
+        if owns_context:
+            return self._finish_operation(context, result)
+        return result
 
     @staticmethod
     def _bounded_return_vector(values, limit: int = 64):
@@ -1604,9 +1808,10 @@ class SprunkiGamePlayer:
         if not context.can_send_input(
             stop_requested=self.stop_event.is_set(),
             allow_recovery_input=True,
+            use_recovery_budget=True,
         ):
             return False
-        return context.register_input()
+        return context.register_recovery_input()
 
     def _require_target_specific_result(self, context, result, message="target_transition_unproven"):
         """Demote aggregate-only evidence for a target-specific return."""
@@ -2225,6 +2430,13 @@ class SprunkiGamePlayer:
                 direction="cleanup",
                 message="cleanup_boundary_missing_context",
             )
+
+        # A watchdog idle timeout may have interrupted the operation by setting
+        # the shared stop event.  Let this coordinator release that transient
+        # stop before it evaluates/sends the physical Re-run.  The marker is
+        # consumed immediately; explicit/hard/safety stops are not released.
+        self._release_watchdog_idle_stop()
+        self._resolve_watchdog_idle_recovery()
 
         extra_details = dict(extra_details or {})
         force_re_run = bool(extra_details.get("forceReRun"))
@@ -6426,6 +6638,9 @@ class SprunkiGamePlayer:
         """
         self._safety_stop = True
         self._safety_stop_reason = str(reason)
+        # A safety latch must never be downgraded to a recoverable watchdog
+        # interruption by a stale event from an earlier idle timeout.
+        self._resolve_watchdog_idle_recovery()
         self.should_stop = True
         stop_event = getattr(self, "stop_event", None)
         if stop_event is not None:
@@ -10859,6 +11074,13 @@ class SprunkiGamePlayer:
             for set_num in range(1, max_sets + 1):
                 if self.stop_event.is_set():
                     break
+
+                self._touch_watchdog_progress(
+                    "operation",
+                    "return_carpet_set_started",
+                    set_number=set_num,
+                    max_sets=max_sets,
+                )
                     
                 print(f"\nðŸŽ¯ CARPET SET {set_num}/{max_sets}")
                 print("-" * 40)
@@ -11232,6 +11454,13 @@ class SprunkiGamePlayer:
             for slot_index in sorted_slot_indices:
                 if self.stop_event.is_set():
                     break
+
+                self._touch_watchdog_progress(
+                    "operation",
+                    "return_carpet_slot_started",
+                    set_number=set_num,
+                    slot_index=slot_index,
+                )
                 
                 slot_coords = self._prepare_carpet_slot_coordinates(
                     slots_coords[slot_index],
@@ -11320,6 +11549,12 @@ class SprunkiGamePlayer:
                         slot_index=slot_index,
                         slot_center=coord.get('slot_center'),
                         runtime_layout=runtime_layout,
+                    )
+                    self._touch_watchdog_progress(
+                        "operation",
+                        "return_carpet_click_completed",
+                        set_number=set_num,
+                        slot_index=slot_index,
                     )
                     
                     total_clicks += 1
@@ -15007,9 +15242,10 @@ class SprunkiGamePlayer:
                 if not context.can_send_input(
                     stop_requested=self.stop_event.is_set(),
                     allow_recovery_input=True,
+                    use_recovery_budget=True,
                 ):
                     return False
-                if not context.register_input():
+                if not context.register_recovery_input():
                     return False
 
                 action_type = (action.get("type") or "").lower()
@@ -15519,6 +15755,10 @@ class SprunkiGamePlayer:
                 message="another_operation_is_active",
             )
         self._activate_recovery_scope(context)
+        # Re-run is owned by the operation/cleanup coordinator.  If an idle
+        # watchdog interrupted that operation, release only that transient
+        # stop; explicit cancellation and safety stops remain blocking.
+        self._release_watchdog_idle_stop()
         if operation_context is not None and not context.recovery_in_progress:
             return self._operation_result(
                 context,
@@ -15526,26 +15766,11 @@ class SprunkiGamePlayer:
                 "recovery_must_be_started_by_coordinator",
             )
 
-        if self._session_recovery_count >= self._max_session_recoveries:
-            result = self._operation_result(
-                context,
-                OperationStatus.FAILED,
-                "session_recovery_circuit_breaker",
-            )
-            if operation_context is None and not owns_context:
-                context.end_recovery()
-            return self._finish_operation(context, result) if owns_context else result
-
         try:
             if operation_context is None:
                 if not context.begin_recovery():
                     result = self._operation_result(context, OperationStatus.FAILED, "recovery_budget_exhausted")
                     return self._finish_operation(context, result) if owns_context else result
-
-            # The recovery coordinator owns the session-wide counter.  This
-            # keeps direct and nested callers from incrementing it twice or
-            # bypassing the two-Re-run circuit breaker.
-            self._session_recovery_count += 1
 
             print(f"\nPHASE 3: GAME RESTART TO INITIAL STATE")
             print("="*60)
@@ -15567,7 +15792,8 @@ class SprunkiGamePlayer:
             if not context.can_send_input(
                 stop_requested=self.stop_event.is_set(),
                 allow_recovery_input=True,
-            ) or not context.register_input():
+                use_recovery_budget=True,
+            ) or not context.register_recovery_input():
                 result = self._operation_result(context, OperationStatus.STOPPED, "recovery_input_budget_exhausted")
                 return self._finish_operation(context, result) if owns_context else result
             rerun_clicked, rerun_click_evidence = self._execute_rerun_button_click(
@@ -15794,10 +16020,6 @@ class SprunkiGamePlayer:
                 )
                 return False
 
-            # A newly loaded game gets a fresh recovery/cleanup budget.  A
-            # Re-run inside an active operation is handled by the operation
-            # context and must not reset these counters.
-            self._session_recovery_count = 0
             self._batch_reconnect_attempts = 0
             self._active_operation_context = None
             self._board_generation = 0
@@ -16544,6 +16766,12 @@ class SprunkiGamePlayer:
         self._activate_recovery_scope(context)
 
         try:
+            self._touch_watchdog_progress(
+                "operation",
+                "return_started",
+                direction="return",
+                target_slot_index=target_slot_index,
+            )
             if target_slot_index < 0:
                 return self._finish_operation(
                     context,
@@ -16608,7 +16836,23 @@ class SprunkiGamePlayer:
                 )
                 return self._finish_operation(context, result)
             if remove_result.status == OperationStatus.STOPPED:
-                return self._finish_operation(context, remove_result)
+                rerun_result = self._rerun_after_operation_failure(
+                    direction="return",
+                    target_slot_index=target_slot_index,
+                    failed_result=remove_result,
+                    reason="return_remove_strategy_stopped",
+                    operation_context=context,
+                    baseline=baseline,
+                    current_snapshot=baseline,
+                )
+                return self._finish_operation(context, rerun_result)
+            self._touch_watchdog_progress(
+                "operation",
+                "return_remove_completed",
+                direction="return",
+                target_slot_index=target_slot_index,
+                status=remove_result.status.value,
+            )
             print(
                 "   REMOVE-FIRST did not prove target return; "
                 "continuing with legacy return chain."
@@ -16640,8 +16884,27 @@ class SprunkiGamePlayer:
                 return self._finish_operation(context, result)
 
             if precision_result.status == OperationStatus.STOPPED:
-                print(f"   🛑 Precision result is {precision_result.status.value}; stopping return")
-                return self._finish_operation(context, precision_result)
+                print(
+                    f"   🛑 Precision result is {precision_result.status.value}; "
+                    "using the operation Re-Run recovery"
+                )
+                rerun_result = self._rerun_after_operation_failure(
+                    direction="return",
+                    target_slot_index=target_slot_index,
+                    failed_result=precision_result,
+                    reason="return_precision_strategy_stopped",
+                    operation_context=context,
+                    baseline=baseline,
+                    current_snapshot=baseline,
+                )
+                return self._finish_operation(context, rerun_result)
+            self._touch_watchdog_progress(
+                "operation",
+                "return_precision_completed",
+                direction="return",
+                target_slot_index=target_slot_index,
+                status=precision_result.status.value,
+            )
 
             # Always inspect the board after the precision action when the
             # transition was not already accepted.  Aggregate evidence is
@@ -16718,6 +16981,13 @@ class SprunkiGamePlayer:
                 operation_context=context,
                 before_snapshot=baseline,
             )
+            self._touch_watchdog_progress(
+                "operation",
+                "return_carpet_completed",
+                direction="return",
+                target_slot_index=target_slot_index,
+                status=carpet_result.status.value,
+            )
             if self._target_return_result_is_final(carpet_result):
                 print("ðŸŽ‰ PHASE 2 SUCCESS!")
                 result = self._finalize_target_return_boundary(
@@ -16736,7 +17006,16 @@ class SprunkiGamePlayer:
                 return self._finish_operation(context, result)
 
             if carpet_result.status == OperationStatus.STOPPED:
-                return self._finish_operation(context, carpet_result)
+                rerun_result = self._rerun_after_operation_failure(
+                    direction="return",
+                    target_slot_index=target_slot_index,
+                    failed_result=carpet_result,
+                    reason="return_carpet_strategy_stopped",
+                    operation_context=context,
+                    baseline=baseline,
+                    current_snapshot=current_state,
+                )
+                return self._finish_operation(context, rerun_result)
 
             post_carpet_state = self._capture_stable_placement_snapshot(
                 timeout_ms=500,
@@ -17228,11 +17507,23 @@ class SprunkiGamePlayer:
     # == HIGH-LEVEL GAME OPERATIONS (ENHANCED) ==
     # ================================================================
     
-    def showcase_single_icon_corrected(self, current_icon, mode="Normal", listen_duration=15, progress_callback=None):
+    def showcase_single_icon_corrected(
+        self,
+        current_icon,
+        mode="Normal",
+        listen_duration=15,
+        progress_callback=None,
+        *,
+        allow_operation_rerun=None,
+    ):
         """Enhanced version with resource management"""
         try:
             obs_controller = self.obs_controller
             icon_index = current_icon.get('index', -1)
+            if allow_operation_rerun is None:
+                allow_operation_rerun = bool(
+                    getattr(self, "_allow_current_showcase_operation_rerun", True)
+                )
             self._last_showcase_retry_request = None
             self._last_showcase_content_committed = False
 
@@ -17314,6 +17605,34 @@ class SprunkiGamePlayer:
             )
             if panel_recovery.get("retry") or panel_recovery.get("fatal"):
                 return False
+
+            if not drag_verified and allow_operation_rerun:
+                rerun_result = self._rerun_after_operation_failure(
+                    direction="place",
+                    target_slot_index=target_slot.get("index"),
+                    failed_result=drag_success,
+                    reason="showcase_placement_not_verified",
+                    baseline=before_state,
+                    current_snapshot=after_state if "after_state" in locals() else None,
+                )
+                rerun_details = dict(getattr(rerun_result, "details", {}) or {})
+                if rerun_details.get("reRunVerified") is True:
+                    self._last_showcase_retry_request = {
+                        "scope": "showcase_icon",
+                        "iconIndex": icon_index,
+                        "phase": "showcase_placement",
+                        "reason": "placement_recovered_after_rerun",
+                        "reRunResult": (
+                            rerun_result.as_dict()
+                            if hasattr(rerun_result, "as_dict")
+                            else rerun_result
+                        ),
+                    }
+                    print(
+                        f"   🔁 Placement for icon {icon_index} was unresolved; "
+                        "Re-Run verified, retrying the same icon"
+                    )
+                    return False
 
             if not drag_verified:
                 if obs_controller:
@@ -17434,8 +17753,13 @@ class SprunkiGamePlayer:
             return_status = getattr(getattr(return_success, "status", None), "value", None)
             return_details = getattr(return_success, "details", {}) or {}
             recovery_verified = bool(
-                return_status == OperationStatus.RECOVERED.value
-                and return_details.get("reRunVerified") is True
+                return_details.get("reRunVerified") is True
+                and return_status
+                in {
+                    OperationStatus.RECOVERED.value,
+                    OperationStatus.VERIFIED.value,
+                    OperationStatus.ALREADY_EMPTY.value,
+                }
             )
             if not return_success and not recovery_verified:
                 print(
@@ -18130,6 +18454,9 @@ class SprunkiGamePlayer:
                 # next icon.  Give this same icon one bounded replay.
                 icon_attempt = 0
                 while True:
+                    self._allow_current_showcase_operation_rerun = (
+                        icon_attempt == 0
+                    )
                     if self.showcase_single_icon_corrected(
                         icon_object,
                         mode,
@@ -18951,20 +19278,6 @@ class SprunkiGamePlayer:
                         "_last_remix_failure_phase",
                         "post_playback_cleanup",
                     ),
-                    details={"remixName": remix_name, "attempt": attempt},
-                )
-                return False, attempt_details
-
-            if getattr(self, "_last_remix_failure_phase", None) == (
-                "pre_playback_runtime_unknown"
-            ):
-                detail["retryable"] = False
-                detail["retryBlockedReason"] = "pre_playback_runtime_unknown"
-                detail["safetyStop"] = True
-                attempt_details.append(detail)
-                self._mark_safety_stop(
-                    "remix_pre_playback_runtime_unknown",
-                    phase="remix_pre_playback",
                     details={"remixName": remix_name, "attempt": attempt},
                 )
                 return False, attempt_details

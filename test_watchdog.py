@@ -124,6 +124,66 @@ class WatchdogTests(unittest.TestCase):
             failure_is_retryable("watchdog_timeout", {"reason": "service_cancelled"})
         )
 
+    def test_idle_watchdog_marks_recovery_without_latching_terminal_boolean(self):
+        from creator_api_client import CreatorService
+
+        clock = FakeClock()
+        state = WatchdogState(
+            103,
+            hard_timeout_seconds=100,
+            idle_timeout_seconds=10,
+            clock=clock,
+        )
+        clock.advance(11)
+        workflow_stop_event = threading.Event()
+        recovery_event = threading.Event()
+        service = CreatorService.__new__(CreatorService)
+        service.service_stop_event = threading.Event()
+        service.processing_manager = SimpleNamespace(should_stop=False)
+        service.game_player = SimpleNamespace(should_stop=False)
+        service.logger = SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        )
+
+        service._job_watchdog(state, workflow_stop_event, recovery_event)
+
+        self.assertTrue(workflow_stop_event.is_set())
+        self.assertTrue(recovery_event.is_set())
+        self.assertFalse(service.processing_manager.should_stop)
+        self.assertFalse(service.game_player.should_stop)
+
+    def test_operation_releases_idle_watchdog_stop_but_not_terminal_stop(self):
+        from placement_verifier import OperationResult, OperationStatus
+        from sprunki_game_player import SprunkiGamePlayer
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.stop_event = threading.Event()
+        player.stop_event.set()
+        player.should_stop = True
+        player._safety_stop = False
+        player.watchdog_recovery_event = threading.Event()
+        player.watchdog_recovery_event.set()
+        unresolved = OperationResult(
+            OperationStatus.UNKNOWN,
+            direction="place",
+            message="expected_transition_not_observed",
+        )
+
+        self.assertTrue(
+            player._operation_failure_needs_rerun(unresolved, direction="place")
+        )
+        self.assertFalse(player.stop_event.is_set())
+        self.assertFalse(player.should_stop)
+
+        player.stop_event.set()
+        player.should_stop = True
+        player.watchdog_recovery_event.clear()
+        self.assertFalse(
+            player._operation_failure_needs_rerun(unresolved, direction="place")
+        )
+
     def test_early_idle_timeout_runs_one_full_workflow_retry(self):
         from creator_api_client import CreatorService
 
