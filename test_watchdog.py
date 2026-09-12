@@ -14,6 +14,8 @@ from watchdog_state import (
     DEFAULT_JOB_TIMEOUT_MINUTES,
     DEFAULT_MAX_FULL_RETRIES,
     DEFAULT_RETRY_MIN_REMAINING_SECONDS,
+    RecoveryRequest,
+    RecoveryRequestRegistry,
     WatchdogState,
     attempt_scoped_filename,
     load_watchdog_settings,
@@ -33,6 +35,53 @@ class FakeClock:
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_recovery_requests_are_deduplicated_per_boundary_not_per_job(self):
+        registry = RecoveryRequestRegistry()
+        first = registry.submit(
+            RecoveryRequest(
+                source="operation",
+                reason="placement_unknown",
+                queue_id=10,
+                direction="place",
+                cleanup_boundary_id="boundary-a",
+            )
+        )
+        duplicate = registry.submit(
+            RecoveryRequest(
+                source="watchdog",
+                reason="idle_timeout",
+                queue_id=10,
+                direction="place",
+                cleanup_boundary_id="boundary-a",
+            )
+        )
+        later_boundary = registry.submit(
+            RecoveryRequest(
+                source="operation",
+                reason="placement_unknown",
+                queue_id=10,
+                direction="place",
+                cleanup_boundary_id="boundary-b",
+            )
+        )
+
+        self.assertIs(first, duplicate)
+        self.assertIsNot(first, later_boundary)
+        self.assertTrue(first.claim())
+        registry.complete(first, "VERIFIED", result_message="reset_ok")
+        self.assertEqual(first.status, "VERIFIED")
+        self.assertEqual(first.as_dict()["requestId"], first.request_id)
+        same_after_completion = registry.submit(
+            RecoveryRequest(
+                source="watchdog",
+                reason="late_duplicate",
+                queue_id=10,
+                direction="place",
+                cleanup_boundary_id="boundary-a",
+            )
+        )
+        self.assertIs(same_after_completion, first)
+
     def test_missing_and_invalid_config_values_use_safe_defaults(self):
         settings = load_watchdog_settings(lambda key, default=None: default)
         self.assertEqual(settings["job_timeout_minutes"], DEFAULT_JOB_TIMEOUT_MINUTES)
@@ -153,6 +202,10 @@ class WatchdogTests(unittest.TestCase):
         self.assertTrue(recovery_event.is_set())
         self.assertFalse(service.processing_manager.should_stop)
         self.assertFalse(service.game_player.should_stop)
+        pending = service.recovery_request_registry.pending(103)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].source, "watchdog")
+        self.assertEqual(pending[0].reason, "idle_timeout")
 
     def test_operation_releases_idle_watchdog_stop_but_not_terminal_stop(self):
         from placement_verifier import OperationResult, OperationStatus
@@ -163,6 +216,7 @@ class WatchdogTests(unittest.TestCase):
         player.stop_event.set()
         player.should_stop = True
         player._safety_stop = False
+        player.terminal_stop_event = threading.Event()
         player.watchdog_recovery_event = threading.Event()
         player.watchdog_recovery_event.set()
         unresolved = OperationResult(
@@ -180,6 +234,14 @@ class WatchdogTests(unittest.TestCase):
         player.stop_event.set()
         player.should_stop = True
         player.watchdog_recovery_event.clear()
+        self.assertFalse(
+            player._operation_failure_needs_rerun(unresolved, direction="place")
+        )
+
+        player.stop_event.clear()
+        player.should_stop = False
+        player.watchdog_recovery_event.set()
+        player.terminal_stop_event.set()
         self.assertFalse(
             player._operation_failure_needs_rerun(unresolved, direction="place")
         )

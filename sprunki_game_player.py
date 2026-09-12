@@ -57,6 +57,7 @@ from placement_verifier import (
     summarize_polos,
     wait_for_stable_snapshot,
 )
+from watchdog_state import RecoveryRequest, RecoveryRequestRegistry
 from visual_placement_verifier import (
     VISUAL_INCONCLUSIVE,
     VisualROI,
@@ -236,6 +237,12 @@ class SprunkiGamePlayer:
     CARPET_PANEL_SURFACE_MIN_AREA_PX = 120000.0
     CARPET_FALLBACK_RADIUS_PX = 26.0
     CARPET_SET_RERUN_LIMIT = 1
+    # These are transport/entry retries inside one recovery transaction.  They
+    # are not additional logical Re-runs and do not create a new board
+    # generation.  A second logical boundary is still required before another
+    # reset may be requested.
+    RECOVERY_RERUN_DELIVERY_ATTEMPTS = 3
+    RECOVERY_ENTRY_ATTEMPTS = 2
 
     def __init__(self, stop_event=None): # [MODIFIED] Nhận stop_event
         # [NEW] Initialize logger for this class
@@ -243,11 +250,17 @@ class SprunkiGamePlayer:
         
         # [MODIFIED] Lưu lại cờ dừng, tạo mới nếu không được cung cấp
         self.stop_event = stop_event or threading.Event()
+        # ``stop_event`` aborts the current operation.  This separate latch is
+        # reserved for user/service cancellation, hard deadlines, and true
+        # safety violations; recoverable idle interruptions must never set it.
+        self.terminal_stop_event = threading.Event()
         self.watchdog_progress_callback = None
         # The watchdog may interrupt an idle operation, but that interruption
         # is recoverable.  Keep its marker separate from the shared stop event
         # so the Re-run coordinator can distinguish it from a user/safety stop.
         self.watchdog_recovery_event = threading.Event()
+        self.recovery_request = None
+        self.recovery_request_registry = RecoveryRequestRegistry()
 
         # Load configuration from config.json (like json_generator.py)
         self.load_config()
@@ -695,8 +708,92 @@ class SprunkiGamePlayer:
 
     def _watchdog_idle_recovery_requested(self) -> bool:
         """Return whether the current stop was caused by recoverable idleness."""
+        request = getattr(self, "recovery_request", None)
+        if request is not None and getattr(request, "status", None) in {
+            "PENDING",
+            "RUNNING",
+        }:
+            return True
         event = getattr(self, "watchdog_recovery_event", None)
         return bool(event is not None and event.is_set())
+
+    def _terminal_stop_requested(self) -> bool:
+        """Return whether recovery must not send any more game input."""
+
+        terminal_event = getattr(self, "terminal_stop_event", None)
+        return bool(
+            getattr(self, "_safety_stop", False)
+            or (terminal_event is not None and terminal_event.is_set())
+        )
+
+    def set_recovery_request(self, request) -> None:
+        """Attach the current durable recovery request to this player."""
+
+        self.recovery_request = request
+
+    def _new_recovery_request(
+        self,
+        *,
+        source: str,
+        reason: str,
+        direction: Optional[str] = None,
+        target_slot_index: Optional[int] = None,
+        operation_id: Optional[str] = None,
+        cleanup_boundary_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """Create/deduplicate a request without imposing a job-wide budget."""
+
+        existing = getattr(self, "recovery_request", None)
+        if (
+            existing is not None
+            and getattr(existing, "status", None) in {"PENDING", "RUNNING"}
+            and getattr(existing, "source", None) == "watchdog"
+        ):
+            # Coalesce an operation-level failure with the idle request already
+            # emitted by the watchdog.  There must be one physical reset for
+            # the boundary, not one reset per observing thread.
+            existing.direction = direction or existing.direction
+            existing.target_slot_index = (
+                target_slot_index
+                if target_slot_index is not None
+                else existing.target_slot_index
+            )
+            existing.operation_id = operation_id or existing.operation_id
+            existing.cleanup_boundary_id = (
+                cleanup_boundary_id or existing.cleanup_boundary_id
+            )
+            existing.metadata.update(dict(metadata or {}))
+            return existing
+
+        request = RecoveryRequest(
+            source=source,
+            reason=reason,
+            direction=direction,
+            target_slot_index=target_slot_index,
+            operation_id=operation_id,
+            cleanup_boundary_id=cleanup_boundary_id,
+            metadata=dict(metadata or {}),
+        )
+        registry = getattr(self, "recovery_request_registry", None)
+        if registry is None:
+            registry = RecoveryRequestRegistry()
+            self.recovery_request_registry = registry
+        request = registry.submit(request)
+        self.recovery_request = request
+        return request
+
+    def _complete_recovery_request(self, request, status, result=None) -> None:
+        registry = getattr(self, "recovery_request_registry", None)
+        if registry is not None:
+            registry.complete(
+                request,
+                status,
+                result_status=getattr(
+                    getattr(result, "status", None), "value", None
+                ),
+                result_message=getattr(result, "message", None),
+            )
 
     def _release_watchdog_idle_stop(self) -> bool:
         """Release only a transient watchdog idle stop for Re-run recovery.
@@ -707,7 +804,7 @@ class SprunkiGamePlayer:
         """
         if not self._watchdog_idle_recovery_requested():
             return False
-        if bool(getattr(self, "_safety_stop", False)):
+        if self._terminal_stop_requested():
             return False
         stop_event = getattr(self, "stop_event", None)
         if stop_event is not None:
@@ -908,7 +1005,7 @@ class SprunkiGamePlayer:
             OperationStatus.FAILED,
         }:
             return False
-        if bool(getattr(self, "_safety_stop", False)):
+        if self._terminal_stop_requested():
             return False
         if self._operation_failure_is_deterministic(result):
             return False
@@ -972,6 +1069,45 @@ class SprunkiGamePlayer:
             )
             context.cleanup_boundary_id = boundary_id
 
+        recovery_request = self._new_recovery_request(
+            source="operation",
+            reason=reason,
+            direction=direction,
+            target_slot_index=target_slot_index,
+            operation_id=getattr(failed_result, "operation_id", None),
+            cleanup_boundary_id=boundary_id,
+            metadata={
+                "failedStatus": getattr(
+                    getattr(failed_result, "status", None), "value", None
+                ),
+                "failedMessage": getattr(failed_result, "message", ""),
+            },
+        )
+        if recovery_request.status == "VERIFIED":
+            recovered_result = self._operation_result(
+                context,
+                (
+                    OperationStatus.ALREADY_EMPTY
+                    if direction == "return"
+                    else OperationStatus.RECOVERED
+                ),
+                "operation_recovery_already_verified",
+                details={
+                    "reRunVerified": True,
+                    "recoveryRequestId": recovery_request.request_id,
+                    "cleanupBoundaryId": boundary_id,
+                    "verificationMethod": "restart_recovery",
+                },
+            )
+            if owns_context:
+                return self._finish_operation(context, recovered_result)
+            return recovered_result
+        if recovery_request.status == "TERMINAL":
+            if owns_context:
+                return self._finish_operation(context, failed_result)
+            return failed_result
+        recovery_request.claim()
+
         try:
             result = self._run_cleanup_boundary_recovery(
                 context,
@@ -1006,6 +1142,7 @@ class SprunkiGamePlayer:
                     ),
                     "verificationMethod": "restart_recovery",
                     "cleanupBoundaryId": boundary_id,
+                    "recoveryRequestId": recovery_request.request_id,
                 },
             )
         except Exception as error:
@@ -1018,6 +1155,7 @@ class SprunkiGamePlayer:
                     "operationDirection": direction,
                     "targetSlotIndex": target_slot_index,
                     "cleanupBoundaryId": boundary_id,
+                    "recoveryRequestId": recovery_request.request_id,
                 },
             )
 
@@ -1042,6 +1180,16 @@ class SprunkiGamePlayer:
                     ),
                 },
             )
+
+        self._complete_recovery_request(
+            recovery_request,
+            "VERIFIED" if result.status in {
+                OperationStatus.RECOVERED,
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_EMPTY,
+            } else "TERMINAL",
+            result,
+        )
 
         if owns_context:
             return self._finish_operation(context, result)
@@ -2771,6 +2919,15 @@ class SprunkiGamePlayer:
             )
 
         context.cleanup_boundary_id = boundary_id
+        recovery_request = self._new_recovery_request(
+            source="remix",
+            reason="remix_boundary_restart",
+            direction="cleanup",
+            operation_id=context.operation_id,
+            cleanup_boundary_id=boundary_id,
+            metadata={"remixName": str(remix_name), "mode": str(mode)},
+        )
+        recovery_request.claim()
         self._touch_watchdog_progress(
             "remix",
             "rerun_started",
@@ -2794,6 +2951,7 @@ class SprunkiGamePlayer:
                     "remixMode": str(mode),
                     "remixCleanupMethod": "restart_recovery",
                     "cleanupMethod": "restart_recovery",
+                    "recoveryRequestId": recovery_request.request_id,
                 },
             )
         except Exception as error:
@@ -2812,6 +2970,7 @@ class SprunkiGamePlayer:
                     "reRunVerified": False,
                     "reRunStatus": "FAILED",
                     "boardState": "UNKNOWN",
+                    "recoveryRequestId": recovery_request.request_id,
                 },
             )
         finally:
@@ -2828,6 +2987,18 @@ class SprunkiGamePlayer:
                         "remix_rerun_no_result",
                     ),
                 )
+
+        self._complete_recovery_request(
+            recovery_request,
+            "VERIFIED"
+            if result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.RECOVERED,
+                OperationStatus.ALREADY_EMPTY,
+            }
+            else "TERMINAL",
+            result,
+        )
 
         self._last_remix_reset_result = result
         self._last_cleanup_result = result
@@ -6638,6 +6809,9 @@ class SprunkiGamePlayer:
         """
         self._safety_stop = True
         self._safety_stop_reason = str(reason)
+        terminal_event = getattr(self, "terminal_stop_event", None)
+        if terminal_event is not None:
+            terminal_event.set()
         # A safety latch must never be downgraded to a recoverable watchdog
         # interruption by a stale event from an earlier idle timeout.
         self._resolve_watchdog_idle_recovery()
@@ -15731,6 +15905,101 @@ class SprunkiGamePlayer:
             return False, evidence
         return True, evidence
 
+    def _replay_recovery_entry_flow(self, context):
+        """Replay the configured entry flow without issuing another Re-run.
+
+        A successful Re-run click is not repeated merely because a manual
+        profile or runtime read is slow.  The entry flow itself is idempotent
+        and may be replayed inside the same recovery transaction before the
+        boundary is considered unverified.
+        """
+
+        last_details = {}
+        for entry_attempt in range(1, self.RECOVERY_ENTRY_ATTEMPTS + 1):
+            if self._terminal_stop_requested():
+                return {
+                    "success": False,
+                    "reason": "terminal_stop_requested",
+                    "entryAttempt": entry_attempt,
+                }
+            manual_profile, manual_profile_path = self._resolve_manual_profile()
+            profile_resolution_error = getattr(
+                self, "_manual_profile_resolution_error", None
+            )
+            if profile_resolution_error:
+                return {
+                    "success": False,
+                    "reason": f"manual_profile_invalid:{profile_resolution_error}",
+                    "entryAttempt": entry_attempt,
+                }
+            manual_actions = (manual_profile or {}).get("prepareActions", [])
+            prepare_success = False
+            if manual_profile:
+                if not manual_actions:
+                    return {
+                        "success": False,
+                        "reason": "manual_profile_has_no_actions",
+                        "entryAttempt": entry_attempt,
+                    }
+                prepare_success = self.replay_manual_prepare_actions(
+                    manual_actions,
+                    manual_profile,
+                    operation_context=context,
+                )
+            else:
+                self._physical_input_context = context
+                try:
+                    prepare_success = self.intro_skip_via_cdp(
+                        operation_context=context
+                    )
+                finally:
+                    self._physical_input_context = None
+
+            if prepare_success:
+                time.sleep(2.0)
+                refresh_ok = self._refresh_after_recovery()
+                self.prepare_game_for_playing()
+                time.sleep(1.0)
+                runtime_entry = self.verify_playable_runtime_entry()
+                entry_flow_verified = bool(getattr(runtime_entry, "passed", False))
+                post_state = self._capture_stable_placement_snapshot(
+                    timeout_ms=1500,
+                    context=context,
+                    stable_samples=self._cleanup_stable_sample_count(),
+                )
+                last_details = {
+                    "entryAttempt": entry_attempt,
+                    "entryFlowVerified": entry_flow_verified,
+                    "runtimeEntry": (
+                        runtime_entry.as_dict()
+                        if hasattr(runtime_entry, "as_dict")
+                        else runtime_entry
+                    ),
+                    "refreshAfterRecovery": bool(refresh_ok),
+                    "postState": self._snapshot_to_mapping(post_state),
+                }
+                if entry_flow_verified:
+                    return {"success": True, **last_details}
+
+            last_details = {
+                **last_details,
+                "entryAttempt": entry_attempt,
+                "prepareSuccess": bool(prepare_success),
+            }
+            if entry_attempt < self.RECOVERY_ENTRY_ATTEMPTS:
+                self._touch_watchdog_progress(
+                    "recovery",
+                    "entry_prepare_retry",
+                    attempt=entry_attempt + 1,
+                )
+                time.sleep(0.5)
+
+        return {
+            "success": False,
+            "reason": "post_restart_entry_not_verified",
+            **last_details,
+        }
+
     def restart_game_to_initial_state(self, use_cdp=True, operation_context=None):
         """Perform one bounded Re-run recovery and verify the fresh state."""
         context = operation_context or getattr(self, "_active_operation_context", None)
@@ -15789,16 +16058,45 @@ class SprunkiGamePlayer:
             # retained for API compatibility and for the intro-prepare
             # transport; Re-Run itself never falls back to a screen click.
             print("   Step 1: Clicking Re-Run button...")
-            if not context.can_send_input(
-                stop_requested=self.stop_event.is_set(),
-                allow_recovery_input=True,
-                use_recovery_budget=True,
-            ) or not context.register_recovery_input():
-                result = self._operation_result(context, OperationStatus.STOPPED, "recovery_input_budget_exhausted")
-                return self._finish_operation(context, result) if owns_context else result
-            rerun_clicked, rerun_click_evidence = self._execute_rerun_button_click(
-                context
-            )
+            rerun_clicked = False
+            rerun_click_evidence = {}
+            rerun_click_attempts = []
+            for delivery_attempt in range(1, self.RECOVERY_RERUN_DELIVERY_ATTEMPTS + 1):
+                if not context.can_send_input(
+                    stop_requested=(
+                        self.stop_event.is_set() or self._terminal_stop_requested()
+                    ),
+                    allow_recovery_input=True,
+                    use_recovery_budget=True,
+                ) or not context.register_recovery_input():
+                    result = self._operation_result(
+                        context,
+                        OperationStatus.STOPPED,
+                        "recovery_input_budget_exhausted",
+                        details={"reRunClickAttempts": rerun_click_attempts},
+                    )
+                    return self._finish_operation(context, result) if owns_context else result
+                rerun_clicked, rerun_click_evidence = self._execute_rerun_button_click(
+                    context
+                )
+                rerun_click_attempts.append(
+                    {
+                        "attempt": delivery_attempt,
+                        "delivered": bool(rerun_clicked),
+                        "evidence": dict(rerun_click_evidence or {}),
+                    }
+                )
+                if rerun_clicked:
+                    break
+                if self._terminal_stop_requested() or context.expired():
+                    break
+                if delivery_attempt < self.RECOVERY_RERUN_DELIVERY_ATTEMPTS:
+                    self._touch_watchdog_progress(
+                        "recovery",
+                        "rerun_click_retry",
+                        attempt=delivery_attempt + 1,
+                    )
+                    time.sleep(0.35)
             print(
                 "   Re-Run clicked on exact game page"
                 if rerun_clicked
@@ -15810,114 +16108,46 @@ class SprunkiGamePlayer:
                     context,
                     OperationStatus.FAILED,
                     "rerun_click_failed",
-                    details={"reRunClick": rerun_click_evidence},
+                    details={
+                        "reRunClick": rerun_click_evidence,
+                        "reRunClickAttempts": rerun_click_attempts,
+                    },
                 )
                 return self._finish_operation(context, result) if owns_context else result
             self._touch_watchdog_progress("recovery", "rerun_click_delivered")
             
-            # Wait for game restart process
+            # Wait for game restart process and replay the same entry flow used
+            # during initial setup.  The entry flow may be retried in-place;
+            # the physical Re-run click is never duplicated after delivery.
             print("   Waiting for game restart process (3s)...")
             time.sleep(3.0)
-            
-            # Re-enter the game using the same manual profile that was used
-            # during the initial setup. A restart does not call
-            # setup_game_environment(), so the profile must be replayed here.
             print("   Step 2: Re-entering the game after restart...")
-            manual_profile, manual_profile_path = self._resolve_manual_profile()
-            profile_resolution_error = getattr(self, "_manual_profile_resolution_error", None)
-            if profile_resolution_error:
-                result = self._operation_result(
-                    context,
-                    OperationStatus.FAILED,
-                    f"manual_profile_invalid:{profile_resolution_error}",
-                )
-                return self._finish_operation(context, result) if owns_context else result
-            manual_actions = (manual_profile or {}).get("prepareActions", [])
-            prepare_success = False
-
-            if manual_profile:
-                print(f"   Manual profile detected for restart: {manual_profile_path}")
-                if not manual_actions:
-                    print("   Manual profile has no prepare actions; automatic fallback is disabled")
-                    result = self._operation_result(context, OperationStatus.FAILED, "manual_profile_has_no_actions")
-                    return self._finish_operation(context, result) if owns_context else result
-
-                print(f"   Replaying {len(manual_actions)} manual prepare actions...")
-                prepare_success = self.replay_manual_prepare_actions(
-                    manual_actions,
-                    manual_profile,
-                    operation_context=context,
-                )
-                if prepare_success:
-                    print("   Manual profile prepare replay completed after restart")
-                else:
-                    print("   Manual profile replay failed; automatic fallback is disabled")
-                    result = self._operation_result(context, OperationStatus.FAILED, "manual_prepare_replay_failed")
-                    return self._finish_operation(context, result) if owns_context else result
-            else:
-                print("   No manual profile detected; using automatic intro skip")
-                # Legacy intro helpers issue several physical inputs internally.
-                # Scope the same recovery context around them so those inputs
-                # cannot bypass the recovery budget.  Do not scope manual
-                # profile replay: it already registers each action itself.
-                self._physical_input_context = context
-                try:
-                    # Initial setup uses the CDP intro routine, including its
-                    # candidate trial/rollback, two Space presses, and the
-                    # bounded (960, 540) blind-center fallback.  Re-Run must
-                    # repeat that same no-profile entry flow; it must not use
-                    # the older pyautogui-only shortcut just because a caller
-                    # passed ``use_cdp=False`` for legacy API compatibility.
-                    prepare_success = self.intro_skip_via_cdp(
-                        operation_context=context
-                    )
-                finally:
-                    self._physical_input_context = None
-
-            if not prepare_success:
-                result = self._operation_result(context, OperationStatus.FAILED, "game_entry_prepare_failed")
-                return self._finish_operation(context, result) if owns_context else result
-            print("   Game entry preparation completed")
-            self._touch_watchdog_progress("recovery", "entry_prepare_completed")
-            
-            # Additional stabilization wait
-            print("   Game restart stabilization (2s)...")
-            time.sleep(2.0)
-            
-            # Rebind the VM/session before the same final readiness checks
-            # used by initial setup.  Run/Fullscreen/F11 are intentionally not
-            # repeated: Re-Run keeps the existing fullscreen game surface.
-            refresh_ok = self._refresh_after_recovery()
-            self.prepare_game_for_playing()
-            time.sleep(1.0)
-            runtime_entry = self.verify_playable_runtime_entry()
-            entry_flow_verified = bool(getattr(runtime_entry, "passed", False))
-            runtime_entry_details = (
-                runtime_entry.as_dict()
-                if hasattr(runtime_entry, "as_dict")
-                else runtime_entry
-            )
-            post_state = self._capture_stable_placement_snapshot(
-                timeout_ms=1500,
-                context=context,
-                stable_samples=self._cleanup_stable_sample_count(),
-            )
+            entry_result = self._replay_recovery_entry_flow(context)
+            entry_flow_verified = bool(entry_result.get("success"))
+            refresh_ok = bool(entry_result.get("refreshAfterRecovery", False))
+            runtime_entry_details = entry_result.get("runtimeEntry")
+            post_state = entry_result.get("postState")
             if not entry_flow_verified:
+                result_status = (
+                    OperationStatus.UNKNOWN
+                    if entry_result.get("reason") == "post_restart_entry_not_verified"
+                    else OperationStatus.FAILED
+                )
                 result = self._operation_result(
                     context,
-                    OperationStatus.UNKNOWN,
-                    "post_restart_entry_not_verified",
+                    result_status,
+                    entry_result.get("reason", "game_entry_prepare_failed"),
                     details={
                         "reRunClick": rerun_click_evidence,
-                        "entryFlowVerified": False,
-                        "runtimeEntry": runtime_entry_details,
-                        "refreshAfterRecovery": bool(refresh_ok),
-                        "postState": self._snapshot_to_mapping(post_state),
+                        "reRunClickAttempts": rerun_click_attempts,
+                        **entry_result,
                     },
                 )
                 if operation_context is None:
                     context.end_recovery()
                 return self._finish_operation(context, result) if owns_context else result
+            print("   Game entry preparation completed")
+            self._touch_watchdog_progress("recovery", "entry_prepare_completed")
 
             # Re-Run plus the same playable-entry proof is the authoritative
             # recovery result.  Characters/Putted/Polos are still captured,
@@ -15956,6 +16186,8 @@ class SprunkiGamePlayer:
                     "runtimeEntry": runtime_entry_details,
                     "refreshAfterRecovery": bool(refresh_ok),
                     "reRunClick": rerun_click_evidence,
+                    "reRunClickAttempts": rerun_click_attempts,
+                    "entryFlowAttempts": entry_result.get("entryAttempt"),
                 },
             )
             self._touch_watchdog_progress("recovery", "entry_verified")
@@ -16042,6 +16274,9 @@ class SprunkiGamePlayer:
             self._remix_workflow_started = False
             self._safety_stop = False
             self._safety_stop_reason = None
+            terminal_event = getattr(self, "terminal_stop_event", None)
+            if terminal_event is not None:
+                terminal_event.clear()
             # A new setup creates a new runtime page.  Do not carry a prior
             # session's counter baseline into that page; the trusted anchor
             # below will learn the current mod's actual empty values.

@@ -626,6 +626,10 @@ class UnifiedProcessingManager:
         self.master_controller = master_controller
         self.stop_event = threading.Event() # <-- TẠO MỘT CỜ MẶC ĐỊNH
         self.workflow_stop_event = self.stop_event
+        # The workflow event may be set to abort a recoverable idle operation.
+        # This latch is reserved for manual/service cancellation, hard timeout,
+        # or a game-player safety stop and is never cleared by Re-run.
+        self.terminal_stop_event = threading.Event()
         self.cleanup_abort_event = threading.Event()
         self._workflow_event_before_cleanup = None
         self._should_stop_before_cleanup = False
@@ -635,6 +639,7 @@ class UnifiedProcessingManager:
         # Separate marker for a recoverable idle watchdog interruption.  The
         # normal stop event remains the cancellation channel.
         self.watchdog_recovery_event = threading.Event()
+        self.recovery_request = None
         self.queue: List[ProcessingItem] = []
         self.config: Optional[ProcessingConfig] = None
         self.current_item_index: int = 0
@@ -667,6 +672,18 @@ class UnifiedProcessingManager:
         self.workflow_stop_event = stop_event
         self._propagate_stop_event(stop_event)
 
+    def set_terminal_stop_event(self, terminal_event: threading.Event):
+        """Propagate terminal cancellation separately from recoverable aborts."""
+
+        self.terminal_stop_event = terminal_event
+        if hasattr(self.json_generator, "game_player"):
+            self.json_generator.game_player.terminal_stop_event = terminal_event
+        if (
+            hasattr(self.master_controller, "game_player")
+            and self.master_controller.game_player
+        ):
+            self.master_controller.game_player.terminal_stop_event = terminal_event
+
     def set_watchdog_recovery_event(self, recovery_event: threading.Event):
         """Propagate the watchdog's recoverable-idle marker separately."""
         self.watchdog_recovery_event = recovery_event
@@ -674,6 +691,26 @@ class UnifiedProcessingManager:
             self.json_generator.game_player.watchdog_recovery_event = recovery_event
         if hasattr(self.master_controller, 'game_player') and self.master_controller.game_player:
             self.master_controller.game_player.watchdog_recovery_event = recovery_event
+
+    def set_recovery_request(self, request) -> None:
+        """Propagate the durable recovery request to active game players."""
+
+        self.recovery_request = request
+        if hasattr(self.json_generator, "game_player"):
+            setter = getattr(self.json_generator.game_player, "set_recovery_request", None)
+            if callable(setter):
+                setter(request)
+            else:
+                self.json_generator.game_player.recovery_request = request
+        if (
+            hasattr(self.master_controller, "game_player")
+            and self.master_controller.game_player
+        ):
+            setter = getattr(self.master_controller.game_player, "set_recovery_request", None)
+            if callable(setter):
+                setter(request)
+            else:
+                self.master_controller.game_player.recovery_request = request
 
     def enter_cleanup_mode(self, cleanup_abort_event: threading.Event):
         """Allow bounded cleanup without clearing workflow cancellation."""
@@ -1375,6 +1412,8 @@ class UnifiedProcessingManager:
         self.config = config
         self.is_running = True
         self.should_stop = False
+        self.stop_event.clear()
+        self.terminal_stop_event.clear()
         self.is_paused = False
         self.current_item_index = 0
         
@@ -1399,6 +1438,8 @@ class UnifiedProcessingManager:
         self.should_stop = True
         self.is_running = False
         self.is_paused = False
+        self.terminal_stop_event.set()
+        self.stop_event.set()
         
         if self.master_controller:
             self.master_controller.should_stop = True
@@ -3210,6 +3251,11 @@ class SprunkiUltimateMaster:
         emergency_start_time = datetime.now()
         
         try:
+            # Emergency stop is terminal.  A pending idle recovery may not
+            # clear this latch or dispatch another physical game input.
+            self.processing_manager.terminal_stop_event.set()
+            if hasattr(self, "game_player") and self.game_player:
+                self.game_player.terminal_stop_event.set()
             self.processing_manager.logger.info("🚨 EMERGENCY STOP INITIATED")
             self.processing_manager.logger.info("=" * 60)
             
