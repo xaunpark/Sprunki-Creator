@@ -729,14 +729,20 @@ def evaluate_transition(
     *,
     allow_aggregate_fallback: bool = True,
     allow_polos: bool = True,
+    allow_characters_target: bool = False,
 ) -> TransitionEvaluation:
     """Evaluate one before/after pair without issuing input.
 
     Polos is intentionally aggregate-only here.  Its array position is not
     assumed to be the same as the requested layout slot, so a valid one-bit
     transition can prove board progress but can never prove the target slot.
-    Target-specific button/Characters evidence and the existing aggregate
-    counters retain their historical roles.
+    Target-specific button evidence and the existing aggregate counters retain
+    their historical roles.  ``Characters`` is only target-specific when the
+    caller has explicitly established that its array is indexed by layout
+    slot.  Many Scratch mods expose ``Characters`` as an icon/runtime vector;
+    interpreting that vector with a layout-slot index creates false target
+    matches (for example, icon 2 makes ``Characters[2]`` non-empty even when
+    slot 2 is empty).
     """
     before_snapshot = PlacementSnapshot.from_mapping(before)
     after_snapshot = PlacementSnapshot.from_mapping(after)
@@ -802,7 +808,7 @@ def evaluate_transition(
         delta,
     ):
         target_evidence.append("set_of_buttons_enable_list_target")
-    if _target_array_changed(
+    if allow_characters_target and _target_array_changed(
         before_snapshot.characters,
         after_snapshot.characters,
         target_slot,
@@ -852,6 +858,7 @@ def evaluate_transition(
             "aggregateFallback": aggregate_fallback,
             "softVerified": bool(aggregate_fallback and not target_specific),
             "aggregateSignals": aggregate_signals,
+            "charactersTargetAllowed": bool(allow_characters_target),
             "verificationPolicy": "any_valid_aggregate_signal",
             "verificationConfidence": "strong" if target_specific else "soft",
         }
@@ -1031,6 +1038,8 @@ def classify_precondition(
     snapshot: Any,
     direction: str,
     target_slot: Optional[int],
+    *,
+    allow_characters_target: bool = False,
 ) -> Optional[OperationStatus]:
     """Return a safe idempotent status without trusting Polos array indices.
 
@@ -1050,10 +1059,12 @@ def classify_precondition(
     if normalized_direction in {"return", "remove", "take"}:
         return None
 
-    # Some mods expose the slot occupancy/identity through Characters.  Keep
-    # this independent target-specific signal for placement preconditions;
-    # Polos must not gate whether it is consulted.
-    if current.characters is not None:
+    # Some mods expose slot occupancy/identity through Characters, but many
+    # others expose an icon/runtime vector instead.  The latter is not safe for
+    # a layout-slot precondition: Characters[2] can be occupied because icon 2
+    # is active in slot 0.  Only an explicitly validated slot-indexed signal
+    # may suppress a physical placement.
+    if allow_characters_target and current.characters is not None:
         if target_slot < 0 or target_slot >= len(current.characters):
             return None
         value = current.characters[target_slot]
@@ -1222,6 +1233,7 @@ def observe_until_verified(
     stable_samples: int = 2,
     stop_requested: Optional[Callable[[], bool]] = None,
     allow_polos: bool = True,
+    allow_characters_target: bool = False,
     stability_key_fn: Optional[Callable[[PlacementSnapshot], Any]] = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
@@ -1364,6 +1376,7 @@ def observe_until_verified(
                 direction,
                 target_slot,
                 allow_polos=allow_polos,
+                allow_characters_target=allow_characters_target,
             )
             if last_eval.status == OperationStatus.VERIFIED:
                 transition_seen = True

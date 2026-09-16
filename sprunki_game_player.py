@@ -1262,7 +1262,11 @@ class SprunkiGamePlayer:
             "characters": self._bounded_return_vector(snapshot.characters),
             "targetPolos": _target_value(snapshot.polos),
             "targetCharacters": _target_value(snapshot.characters),
-            "targetOccupancy": self._return_target_occupancy(snapshot, target_slot_index),
+            "targetOccupancy": self._return_target_occupancy(
+                snapshot,
+                target_slot_index,
+                allow_characters_target=self._characters_array_is_slot_indexed(snapshot),
+            ),
             "targetPrecondition": precondition_value,
             "sequence": snapshot.sequence,
             "timestamp": snapshot.timestamp,
@@ -1292,8 +1296,69 @@ class SprunkiGamePlayer:
                     logger.debug("Unable to persist return state evidence: %s", log_error)
         return evidence
 
+    def _characters_array_is_slot_indexed(self, state) -> bool:
+        """Return whether ``Characters`` can safely be addressed by slot index.
+
+        Scratch projects commonly expose ``Characters`` as an icon/runtime
+        vector.  In that shape, ``Characters[2]`` means that icon 2 is active,
+        not that layout slot 2 is occupied.  The remix verifier must not use
+        that vector for target preconditions or target proof unless the
+        configured layout provides a matching, contiguous slot-shaped array.
+
+        A deployment can explicitly opt in through
+        ``placement_verification.characters_index_policy = "slot"`` when a
+        project is known to use a slot-indexed Characters list.  The default
+        ``auto`` mode only accepts an array whose shape matches the configured
+        slot layout; the 64-entry Characters / 9-slot project from the
+        reported log therefore stays aggregate-only.
+        """
+        snapshot = PlacementSnapshot.from_mapping(state)
+        if snapshot is None or snapshot.characters is None:
+            return False
+
+        configured = getattr(self, "placement_verification_config", {})
+        if not isinstance(configured, dict):
+            configured = {}
+        policy = str(configured.get("characters_index_policy", "auto") or "auto")
+        policy = policy.strip().lower().replace("-", "_")
+        if policy in {"slot", "slot_indexed", "target", "target_specific"}:
+            return True
+        if policy in {
+            "icon",
+            "icon_indexed",
+            "runtime",
+            "runtime_indexed",
+            "disabled",
+            "none",
+            "unknown",
+        }:
+            return False
+
+        # Auto mode is intentionally conservative.  It requires a configured
+        # contiguous slot layout and an array with exactly that cardinality.
+        layout = (getattr(self, "config", {}) or {}).get("layout", {})
+        slots = layout.get("slots", []) if isinstance(layout, dict) else []
+        if not isinstance(slots, (list, tuple)) or not slots:
+            return False
+        slot_indices = []
+        for position, slot in enumerate(slots):
+            if not isinstance(slot, dict):
+                return False
+            try:
+                slot_indices.append(int(slot.get("index", position)))
+            except (TypeError, ValueError, OverflowError):
+                return False
+        if slot_indices != list(range(len(slots))):
+            return False
+        return len(snapshot.characters) == len(slots)
+
     @staticmethod
-    def _return_target_occupancy(snapshot, target_slot_index: int):
+    def _return_target_occupancy(
+        snapshot,
+        target_slot_index: int,
+        *,
+        allow_characters_target: bool = False,
+    ):
         """Classify target occupancy without assuming a Polos index mapping."""
         snapshot = PlacementSnapshot.from_mapping(snapshot)
         if snapshot is None:
@@ -1305,7 +1370,12 @@ class SprunkiGamePlayer:
         # Polos is intentionally excluded: its array position is not a
         # canonical layout-slot index in this version.  Keep its raw value in
         # _return_state_evidence(), but never let it decide target occupancy.
-        for values in (snapshot.characters,):
+        values_to_check = (
+            (snapshot.characters,)
+            if allow_characters_target
+            else ()
+        )
+        for values in values_to_check:
             if values is None or not 0 <= target_slot_index < len(values):
                 continue
             token = str(values[target_slot_index]).strip().lower()
@@ -1364,6 +1434,9 @@ class SprunkiGamePlayer:
                 "return",
                 target_slot_index,
                 allow_polos=self._polos_aggregate_allowed(),
+                allow_characters_target=self._characters_array_is_slot_indexed(
+                    before_state
+                ),
             )
             if transition.status == OperationStatus.VERIFIED:
                 return True
@@ -1374,7 +1447,11 @@ class SprunkiGamePlayer:
         except Exception:
             pass
 
-        if self._return_target_occupancy(snapshot, target_slot_index) != "empty":
+        if self._return_target_occupancy(
+            snapshot,
+            target_slot_index,
+            allow_characters_target=self._characters_array_is_slot_indexed(snapshot),
+        ) != "empty":
             return False
 
         if before_state is None:
@@ -1383,7 +1460,11 @@ class SprunkiGamePlayer:
         if before is None:
             return True
 
-        before_target = self._return_target_occupancy(before, target_slot_index)
+        before_target = self._return_target_occupancy(
+            before,
+            target_slot_index,
+            allow_characters_target=self._characters_array_is_slot_indexed(before),
+        )
         if before_target == "occupied":
             return True
         # An unknown/empty pre-action target plus a lower aggregate count only
@@ -1411,6 +1492,7 @@ class SprunkiGamePlayer:
             "return",
             target_slot_index,
             allow_polos=self._polos_aggregate_allowed(),
+            allow_characters_target=self._characters_array_is_slot_indexed(before),
         )
         if transition.status == OperationStatus.VERIFIED:
             if transition.target_specific:
@@ -1418,8 +1500,16 @@ class SprunkiGamePlayer:
             if transition.aggregate_fallback:
                 return "aggregate"
 
-        before_target = self._return_target_occupancy(before, target_slot_index)
-        after_target = self._return_target_occupancy(after, target_slot_index)
+        before_target = self._return_target_occupancy(
+            before,
+            target_slot_index,
+            allow_characters_target=self._characters_array_is_slot_indexed(before),
+        )
+        after_target = self._return_target_occupancy(
+            after,
+            target_slot_index,
+            allow_characters_target=self._characters_array_is_slot_indexed(after),
+        )
         if before_target == "occupied" and after_target == "empty":
             return "target"
         try:
@@ -1642,7 +1732,11 @@ class SprunkiGamePlayer:
                 details={"attempts": [], "fallback": "legacy_return"},
             )
 
-        occupancy = self._return_target_occupancy(baseline, target_slot_index)
+        occupancy = self._return_target_occupancy(
+            baseline,
+            target_slot_index,
+            allow_characters_target=self._characters_array_is_slot_indexed(baseline),
+        )
         # Action First is intentional: an empty or unknown pre-action target
         # observation must not suppress a valid Remove click.  The post-click
         # snapshot decides whether the operation made progress.
@@ -1813,7 +1907,11 @@ class SprunkiGamePlayer:
                     },
                     reads=context.read_count,
                 )
-            if self._return_target_occupancy(after, target_slot_index) is None:
+            if self._return_target_occupancy(
+                after,
+                target_slot_index,
+                allow_characters_target=self._characters_array_is_slot_indexed(after),
+            ) is None:
                 return self._operation_result(
                     context,
                     OperationStatus.UNKNOWN,
@@ -11953,6 +12051,9 @@ class SprunkiGamePlayer:
                 "return",
                 target_slot_index,
                 allow_polos=self._polos_aggregate_allowed(),
+                allow_characters_target=self._characters_array_is_slot_indexed(
+                    state_before
+                ),
             )
             details = dict(evaluation.details)
             details.update({
@@ -13702,6 +13803,9 @@ class SprunkiGamePlayer:
             stable_samples=getattr(self, "verifier_post_action_stable_samples", 1),
             stop_requested=lambda: self.stop_event.is_set(),
             allow_polos=self._polos_aggregate_allowed(),
+            allow_characters_target=self._characters_array_is_slot_indexed(
+                before_snapshot
+            ),
             stability_key_fn=self._placement_core_stability_key,
             context=context,
         )
@@ -13830,7 +13934,14 @@ class SprunkiGamePlayer:
             )
             if current_state is None:
                 return {"result": self._operation_result(context, OperationStatus.UNKNOWN, "post_attempt_state_unavailable")}
-            precondition = classify_precondition(current_state, "place", context.target_slot)
+            precondition = classify_precondition(
+                current_state,
+                "place",
+                context.target_slot,
+                allow_characters_target=self._characters_array_is_slot_indexed(
+                    current_state
+                ),
+            )
             if precondition == OperationStatus.ALREADY_PLACED:
                 result = self._operation_result(
                     context,
@@ -13956,7 +14067,12 @@ class SprunkiGamePlayer:
             )
         context.set_baseline(baseline)
 
-        precondition = classify_precondition(baseline, "place", target_slot_index)
+        precondition = classify_precondition(
+            baseline,
+            "place",
+            target_slot_index,
+            allow_characters_target=self._characters_array_is_slot_indexed(baseline),
+        )
         if precondition == OperationStatus.ALREADY_PLACED:
             return self._finish_operation(
                 context,
@@ -14044,7 +14160,14 @@ class SprunkiGamePlayer:
                     context,
                     self._operation_result(context, OperationStatus.UNKNOWN, "cached_drag_post_state_unknown"),
                 )
-            if classify_precondition(cache_state_after, "place", target_slot_index) == OperationStatus.ALREADY_PLACED:
+            if classify_precondition(
+                cache_state_after,
+                "place",
+                target_slot_index,
+                allow_characters_target=self._characters_array_is_slot_indexed(
+                    cache_state_after
+                ),
+            ) == OperationStatus.ALREADY_PLACED:
                 cache_result = self._operation_result(
                     context,
                     OperationStatus.ALREADY_PLACED,
@@ -17698,6 +17821,9 @@ class SprunkiGamePlayer:
                 stable_samples=getattr(self, "verifier_post_action_stable_samples", 1),
                 stop_requested=lambda: self.stop_event.is_set(),
                 allow_polos=self._polos_aggregate_allowed(),
+                allow_characters_target=self._characters_array_is_slot_indexed(
+                    before_snapshot
+                ),
                 stability_key_fn=self._placement_core_stability_key,
                 context=context,
             )
@@ -17850,6 +17976,9 @@ class SprunkiGamePlayer:
                 "return",
                 context.target_slot,
                 allow_polos=self._polos_aggregate_allowed(),
+                allow_characters_target=self._characters_array_is_slot_indexed(
+                    before_snapshot
+                ),
             )
             if evaluation.status == OperationStatus.VERIFIED:
                 result = self._operation_result(

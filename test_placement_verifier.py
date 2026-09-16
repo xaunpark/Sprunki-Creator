@@ -375,9 +375,80 @@ class PlacementVerifierTests(unittest.TestCase):
                 _snapshot(4, 4, characters_array=["n-1"]),
                 "place",
                 0,
+                allow_characters_target=True,
             ),
             OperationStatus.ALREADY_PLACED,
         )
+
+    def test_icon_indexed_characters_cannot_mark_layout_slot_occupied(self):
+        # The affected game exposes Characters as an icon/runtime vector.  An
+        # active icon at index 2 does not mean that layout slot 2 is occupied.
+        characters = ["0"] * 64
+        characters[2] = "1"
+        state = _snapshot(
+            1,
+            1,
+            characters_count=1,
+            putted_characters=1,
+            characters_array=characters,
+            polos_array=["1", "0", "0", "0", "0", "0", "0", "0", "0"],
+        )
+
+        self.assertIsNone(classify_precondition(state, "place", 2))
+        self.assertEqual(
+            classify_precondition(
+                state,
+                "place",
+                2,
+                allow_characters_target=True,
+            ),
+            OperationStatus.ALREADY_PLACED,
+        )
+
+    def test_icon_indexed_characters_cannot_prove_requested_target_transition(self):
+        before_characters = ["0"] * 64
+        after_characters = list(before_characters)
+        after_characters[2] = "1"
+        before = _snapshot(
+            1,
+            1,
+            characters_count=0,
+            putted_characters=0,
+            characters_array=before_characters,
+        )
+        after = _snapshot(
+            2,
+            2,
+            characters_count=1,
+            putted_characters=1,
+            characters_array=after_characters,
+        )
+
+        evaluation = evaluate_transition(before, after, "place", 2)
+        self.assertEqual(evaluation.status, OperationStatus.VERIFIED)
+        self.assertFalse(evaluation.target_specific)
+        self.assertNotIn("characters_target", evaluation.evidence)
+        self.assertFalse(evaluation.details["charactersTargetAllowed"])
+
+    def test_player_rejects_icon_vector_for_slot_targeting(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.config = {
+            "layout": {
+                "slots": [{"index": index} for index in range(9)],
+            }
+        }
+        player.placement_verification_config = {}
+
+        state = _snapshot(1, 1, characters_array=["0"] * 64)
+        self.assertFalse(player._characters_array_is_slot_indexed(state))
+
+        slot_state = _snapshot(2, 2, characters_array=["0"] * 9)
+        self.assertTrue(player._characters_array_is_slot_indexed(slot_state))
+
+        player.placement_verification_config = {
+            "characters_index_policy": "icon"
+        }
+        self.assertFalse(player._characters_array_is_slot_indexed(slot_state))
 
     def test_polos_only_transition_requires_two_stable_post_action_reads(self):
         clock = FakeClock()
