@@ -13,12 +13,20 @@ import pyautogui
 import pygetwindow as gw
 import random
 import websocket
+from typing import Optional
 from image_detector import ImageDetector
 import numpy as np
 from page_load_verifier import PageLoadVerifier
 from manual_profile_manager import find_profile, validate_profile
 from manual_prepare_gestures import DOUBLE_CLICK_DRAG_TYPE
 from cdp_gesture_executor import execute_cdp_gesture
+from manual_profile_v3 import (
+    DEFAULT_EXPECTED_VIEWPORT,
+    ManualProfileJobContext,
+    ManualProfileV3Error,
+    canonicalize_cocrea_url,
+    materialize_tracker_profile,
+)
 
 from sprunki_game_player import SprunkiGamePlayer
 
@@ -75,6 +83,7 @@ class SprunkiJSONGenerator:
         # có luồng sống riêng và ngắn. Nó sẽ tự tạo stop_event mặc định.
         self.game_player = SprunkiGamePlayer() 
         self.ws_url = None
+        self.last_manual_profile_error = None
 
         # JavaScript for comprehensive state capture (coordinates + game data)
         self.js_get_state_and_coordinates = '''
@@ -2047,14 +2056,22 @@ class SprunkiJSONGenerator:
         """
         print("🔄 [JSON Generator] Resetting state for new job...")
         self.ws_url = None
+        self.last_manual_profile_error = None
         # Cũng reset trạng thái của game_player để đảm bảo sạch sẽ
         if self.game_player:
             self.game_player.ws_url = None
             self.game_player.session_websocket = None
             self.game_player.batch_verification_active = False
+            self.game_player.manual_profile_context = None
         print("✅ [JSON Generator] State reset completed.")
 
-    def generate_complete_json(self, url, output_path=None):
+    def generate_complete_json(
+        self,
+        url,
+        output_path=None,
+        *,
+        manual_profile_context: Optional[ManualProfileJobContext] = None,
+    ):
             """
             [FINAL VERSION - PHASE 3 REFACTORED]
             Orchestrates the entire JSON generation process by delegating all browser
@@ -2074,6 +2091,13 @@ class SprunkiJSONGenerator:
             STOP immediately when hasHorror = True is detected
             """
             try:
+                ws = None
+                active_profile_context = (
+                    manual_profile_context
+                    if manual_profile_context is not None
+                    else None
+                )
+                self.game_player.manual_profile_context = active_profile_context
                 print("\n🎯 Starting SIMPLIFIED COMPLETE LOGIC (A vs B vs C)")
                 print("="*70)
                 print("Logic: A(initial) vs B(icon19) vs C(highest) - Stop when hasHorror=True")
@@ -2089,22 +2113,73 @@ class SprunkiJSONGenerator:
 
                 manual_profile = None
                 manual_profile_path = None
-                found_profile, found_profile_path = find_profile(url)
-                is_manual_profile_valid, manual_profile_error = validate_profile(found_profile, expected_url=url)
-                if found_profile and is_manual_profile_valid:
-                    manual_profile = found_profile
-                    manual_profile_path = found_profile_path
-                    print(f"🧭 Manual profile detected for this URL: {manual_profile_path}")
-                elif found_profile and manual_profile_error:
-                    print(f"⚠️ Manual profile found but invalid: {manual_profile_error}")
+                queued_profile_pending = bool(
+                    active_profile_context is not None
+                    and active_profile_context.has_queue_profile
+                )
+                if active_profile_context is None:
+                    # No queue context means a legacy GUI/manual invocation;
+                    # retain the existing URL-indexed v1/v2 lookup there.
+                    found_profile, found_profile_path = find_profile(url)
+                    is_manual_profile_valid, manual_profile_error = validate_profile(found_profile, expected_url=url)
+                    if found_profile and is_manual_profile_valid:
+                        manual_profile = found_profile
+                        manual_profile_path = found_profile_path
+                        print(f"🧭 Manual profile detected for this URL: {manual_profile_path}")
+                    elif found_profile and manual_profile_error:
+                        print(f"⚠️ Manual profile found but invalid: {manual_profile_error}")
 
                 # OPTIMIZED: Single WebSocket approach like original working code
-                ws_url = self._get_websocket_url()
+                try:
+                    ws_url = self._get_websocket_url()
+                except Exception:
+                    if queued_profile_pending:
+                        raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
+                    raise
                 if not ws_url: 
+                    if queued_profile_pending:
+                        raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
                     self.game_player.cleanup_chrome_complete()
                     return False, None, None
 
-                ws = websocket.create_connection(ws_url, timeout=30)
+                try:
+                    ws = websocket.create_connection(ws_url, timeout=30)
+                except Exception:
+                    if queued_profile_pending:
+                        raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
+                    raise
+
+                if queued_profile_pending:
+                    identity = self.game_player._read_cdp_page_identity(ws)
+                    if not identity:
+                        raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
+                    if not isinstance(identity.get("href"), str) or not identity.get("href").strip():
+                        raise ManualProfileV3Error("manual_profile_url_invalid")
+                    try:
+                        requested_url = canonicalize_cocrea_url(url)
+                        runtime_url = canonicalize_cocrea_url(identity["href"])
+                    except ManualProfileV3Error:
+                        raise ManualProfileV3Error("manual_profile_url_invalid")
+                    if requested_url != runtime_url:
+                        raise ManualProfileV3Error("manual_profile_url_mismatch")
+                    live_viewport = {
+                        "width": (identity or {}).get("innerWidth"),
+                        "height": (identity or {}).get("innerHeight"),
+                    }
+                    resolved_context = materialize_tracker_profile(
+                        active_profile_context,
+                        expected_url=identity["href"],
+                        live_viewport=live_viewport,
+                        expected_environment_viewport=DEFAULT_EXPECTED_VIEWPORT,
+                    )
+                    # Keep the same ProcessingItem context object alive for
+                    # the later component initialization/recovery phase.
+                    active_profile_context.legacy_profile = resolved_context.legacy_profile
+                    active_profile_context.audit = resolved_context.audit
+                    manual_profile = active_profile_context.legacy_profile
+                    manual_profile_path = active_profile_context.source_token
+                    self.game_player.manual_profile_context = active_profile_context
+                    print(f"🧭 Using Tracker manual profile snapshot: {manual_profile_path}")
 
                 # Bước 1: ĐÃ XÓA - Quản lý WebSocket thủ công
                 # ws_url = self._get_websocket_url()
@@ -2128,6 +2203,25 @@ class SprunkiJSONGenerator:
                         manual_profile.get("prepareActions", []),
                         manual_profile,
                     ):
+                        replay_error = getattr(
+                            self.game_player,
+                            "_manual_profile_resolution_error",
+                            None,
+                        )
+                        replay_failure_code = getattr(
+                            self.game_player,
+                            "_manual_profile_replay_failure_code",
+                            None,
+                        )
+                        if queued_profile_pending and isinstance(replay_error, str) and (
+                            replay_error.startswith("manual_profile_")
+                            or replay_error == "invalid_capture_environment"
+                        ):
+                            raise ManualProfileV3Error(replay_error)
+                        if queued_profile_pending and isinstance(replay_failure_code, str):
+                            raise ManualProfileV3Error(replay_failure_code)
+                        if queued_profile_pending:
+                            raise ManualProfileV3Error("manual_profile_replay_failed")
                         raise Exception(f"Manual profile replay failed: {manual_profile_path}")
                     print("✅ Manual prepare replay finished - Game should be ready for interaction")
                 else:
@@ -2362,7 +2456,23 @@ class SprunkiJSONGenerator:
                     },
                     "layout": layout_state.get('layout', {}),
                     "settings": {
-                        "manualProfilePath": manual_profile_path if manual_profile else None
+                        # Queue snapshots are memory-only.  Keep the legacy
+                        # path field for local v1/v2 runs, but never serialize
+                        # a Tracker source token as if it were a filesystem
+                        # path; the ProcessingItem context is the recovery
+                        # source of truth.
+                        "manualProfilePath": (
+                            manual_profile_path
+                            if manual_profile and not queued_profile_pending
+                            else None
+                        ),
+                        **({
+                            "manualProfileId": active_profile_context.audit.get("id"),
+                            "manualProfileRevision": active_profile_context.audit.get("revision"),
+                            "manualProfileRevisionId": active_profile_context.audit.get("revision_id"),
+                            "manualProfileSha256": active_profile_context.audit.get("sha256"),
+                            "manualProfileCoordinateSpace": active_profile_context.audit.get("coordinateSpace"),
+                        } if queued_profile_pending else {}),
                     }
                 }
 
@@ -2379,11 +2489,27 @@ class SprunkiJSONGenerator:
                 self.game_player.cleanup_chrome_complete()
                 return True, json_file_path, final_json
                 
+            except ManualProfileV3Error as e:
+                self.last_manual_profile_error = str(e)
+                self.game_player._manual_profile_resolution_error = str(e)
+                print(f"🛑 Manual profile rejected before workflow input: {e}")
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                self.game_player.cleanup_chrome_complete()
+                return False, None, None
             except Exception as e:
+                self.last_manual_profile_error = None
                 print(f"❌ Simplified complete logic error: {e}")
                 import traceback
                 traceback.print_exc()
-                
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
                 self.game_player.cleanup_chrome_complete()
                 return False, None, None
             

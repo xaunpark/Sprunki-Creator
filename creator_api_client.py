@@ -51,6 +51,10 @@ from watchdog_state import (
     WatchdogState,
     load_watchdog_settings,
 )
+from manual_profile_v3 import (
+    ManualProfileJobContext,
+    build_manual_profile_context,
+)
 
 # --- CONFIG: Thư mục chứa file JSON thủ công ---
 MANUAL_JSON_DIR = "manual_jsons"
@@ -1692,7 +1696,12 @@ class CreatorService:
                 pass
         return DummyRoot()
 
-    def _initialize_components(self, config_data: Dict[str, Any], job_stop_event: threading.Event) -> bool:
+    def _initialize_components(
+        self,
+        config_data: Dict[str, Any],
+        job_stop_event: threading.Event,
+        manual_profile_context: Optional[ManualProfileJobContext] = None,
+    ) -> bool:
         """
         [REVISED] Initialize game player and OBS controller for a specific job,
         passing the job-specific stop event.
@@ -1729,6 +1738,7 @@ class CreatorService:
                 self._watchdog_progress_callback
             )
             self.game_player.config = config_data
+            self.game_player.manual_profile_context = manual_profile_context
             
             current_url = config_data.get('currentUrl', '').lower()
             if 'cocrea.world' not in current_url:
@@ -3159,6 +3169,10 @@ class CreatorService:
             )
             
             item = self._convert_job_to_processing_item(job)
+            # `/api/queue/next` supplies an immutable manual-profile snapshot
+            # in the same claim transaction. Snapshot it on the item so the
+            # same source is used during generation, component re-init and
+            # recovery without creating a temporary profile file.
             if getattr(item, "start_time", None) is None:
                 item.start_time = datetime.now()
 
@@ -3213,6 +3227,9 @@ class CreatorService:
                 self.api_client.update_job_progress(queue_id, 'critical_failure', str(e), 0.0, 'failed')
         
         finally:
+            # The context is job-scoped. Release the service reference after
+            # all terminal reporting has completed so it cannot bleed into the
+            # next queue item.
             # Stop the monitor before finalization.  Cleanup has its own
             # bounded abort event and must not clear workflow cancellation.
             job_stop_event.set()
@@ -3227,6 +3244,22 @@ class CreatorService:
             watchdog_state.mark_finished()
             if watchdog_thread is not None:
                 watchdog_thread.join(timeout=2.0)
+
+            # Drop runtime references once all worker threads have stopped.
+            # The ProcessingItem keeps its audit snapshot for final reporting,
+            # but reusable GamePlayer/JSON-generator instances must not carry a
+            # queue profile into the next job or a legacy GUI invocation.
+            for runtime_owner in (
+                getattr(self, "game_player", None),
+                getattr(getattr(self, "processing_manager", None), "game_player", None),
+                getattr(
+                    getattr(getattr(self, "processing_manager", None), "json_generator", None),
+                    "game_player",
+                    None,
+                ),
+            ):
+                if runtime_owner is not None and hasattr(runtime_owner, "manual_profile_context"):
+                    runtime_owner.manual_profile_context = None
 
             if watchdog_failure is None:
                 watchdog_failure = self._take_watchdog_failure(queue_id)
@@ -3373,6 +3406,8 @@ class CreatorService:
                     "attempt_bound": False,
                 })
                 self._remove_watchdog_state(queue_id)
+                if item is not None:
+                    item.manual_profile_context = None
                 return False
 
             if item:
@@ -3526,6 +3561,8 @@ class CreatorService:
                 "terminal_callback_ok": terminal_callback_ok,
             })
             self._remove_watchdog_state(queue_id)
+            if item is not None:
+                item.manual_profile_context = None
         # The orchestration result must agree with the status sent to the
         # tracker.  A workflow return value alone is not sufficient: the
         # shared quality gate is the final authority.
@@ -3584,14 +3621,36 @@ class CreatorService:
             }
             return None, None
 
-    def _build_manual_profile_failure_details(self, url: str, error_message: Optional[str] = None) -> Dict:
+    def _build_manual_profile_failure_details(
+        self,
+        url: str,
+        error_message: Optional[str] = None,
+        manual_profile_context: Optional[ManualProfileJobContext] = None,
+    ) -> Dict:
         url = (url or "").strip()
         details = {
-            "manualProfileRequired": True,
             "sourceUrl": url,
             "urlKey": url_key_from_url(url),
-            "suggestedManualProfilePath": suggested_profile_path_for_url(url),
         }
+        if isinstance(manual_profile_context, ManualProfileJobContext):
+            details["manualProfileFieldState"] = manual_profile_context.field_state
+            if manual_profile_context.has_queue_profile:
+                audit = manual_profile_context.audit or {}
+                details.update(
+                    {
+                        "manualProfileRequired": True,
+                        "manualProfileId": audit.get("id"),
+                        "manualProfileRevision": audit.get("revision"),
+                        "manualProfileRevisionId": audit.get("revision_id"),
+                        "manualProfileSha256": audit.get("sha256"),
+                    }
+                )
+            else:
+                details["manualProfileRequired"] = False
+        else:
+            # Legacy/manual invocations retain the helpful local-profile hint.
+            details["manualProfileRequired"] = True
+            details["suggestedManualProfilePath"] = suggested_profile_path_for_url(url)
         if error_message:
             details["reason"] = error_message
         return details
@@ -3604,35 +3663,63 @@ class CreatorService:
 
             if getattr(self, "_manual_json_failure", None):
                 failure = self._manual_json_failure
-                item.json_generation_status = "failure"
-                self.processing_manager._record_quality_failure(
-                    item,
-                    failure.get("failure_code", "manual_json_invalid"),
-                    failure.get("message", "Manual JSON failed static playability validation."),
-                    evidence={
-                        "manualJson": failure,
-                        "path": failure.get("path"),
-                    },
-                )
-                self.api_client.update_job_progress(
-                    queue_id,
-                    "json_generation",
-                    "manual_override",
-                    0.0,
-                    "failed",
-                    metadata=failure,
-                    error_details=item.error_message,
-                )
-                return False
+                queue_context = getattr(item, "manual_profile_context", None)
+                if queue_context is not None and getattr(queue_context, "has_queue_profile", False):
+                    # A malformed local override is irrelevant when Tracker
+                    # supplied the mandatory queue snapshot; continue with
+                    # the authoritative Tracker workflow.
+                    self.logger.warning(
+                        "Ignoring invalid local JSON override for queue %s because a Tracker manual profile snapshot is attached.",
+                        queue_id,
+                    )
+                    self._manual_json_failure = None
+                    manual_data, manual_path = None, None
+                else:
+                    item.json_generation_status = "failure"
+                    self.processing_manager._record_quality_failure(
+                        item,
+                        failure.get("failure_code", "manual_json_invalid"),
+                        failure.get("message", "Manual JSON failed static playability validation."),
+                        evidence={
+                            "manualJson": failure,
+                            "path": failure.get("path"),
+                        },
+                    )
+                    self.api_client.update_job_progress(
+                        queue_id,
+                        "json_generation",
+                        "manual_override",
+                        0.0,
+                        "failed",
+                        metadata=failure,
+                        error_details=item.error_message,
+                    )
+                    return False
             
             if manual_data:
-                print(f"🟢 MANUAL OVERRIDE DETECTED! Using local JSON file: {manual_path}")
-                item.json_data = manual_data
-                item.json_path = manual_path
-                item.json_generation_status = "success"
-                # Đánh dấu là JSON đã có sẵn để bỏ qua bước sinh tự động
-                self.api_client.update_job_progress(queue_id, 'json_generation', 'manual_override', 100.0, 'completed',
-                    metadata={'override_file': manual_path})
+                queue_context = getattr(item, "manual_profile_context", None)
+                if queue_context is not None and getattr(queue_context, "has_queue_profile", False):
+                    # A claimed Tracker object is authoritative. A local JSON
+                    # override must never replace it or downgrade the job to a
+                    # URL-local profile lookup.
+                    self.logger.warning(
+                        "Ignoring local JSON override for queue %s because a Tracker manual profile snapshot is attached.",
+                        queue_id,
+                    )
+                else:
+                    print(f"🟢 MANUAL OVERRIDE DETECTED! Using local JSON file: {manual_path}")
+                    # Keep a queue context (including an explicit null or an
+                    # omitted field) attached to the item.  The JSON override
+                    # may replace generated JSON, but it must not turn a
+                    # queue job back into a URL-indexed v1/v2 profile lookup.
+                    # Items created outside the queue have no context and
+                    # retain their legacy manualProfilePath behavior.
+                    item.json_data = manual_data
+                    item.json_path = manual_path
+                    item.json_generation_status = "success"
+                    # Đánh dấu là JSON đã có sẵn để bỏ qua bước sinh tự động
+                    self.api_client.update_job_progress(queue_id, 'json_generation', 'manual_override', 100.0, 'completed',
+                        metadata={'override_file': manual_path})
             
             # --- Step 1: JSON Generation (ONLY if not overridden) ---
             if item.source_url and not item.json_data:
@@ -3804,7 +3891,11 @@ class CreatorService:
                                 )
                             details = None
                             if operation_name == 'json_generation':
-                                details = self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg)
+                                details = self._build_manual_profile_failure_details(
+                                    (context or {}).get('url', ''),
+                                    error_msg,
+                                    getattr(failed_item, "manual_profile_context", None),
+                                )
                             self.api_client.update_job_progress(
                                 queue_id,
                                 operation_name,
@@ -3830,7 +3921,11 @@ class CreatorService:
                                 )
                             details = None
                             if operation_name == 'json_generation':
-                                details = self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg)
+                                details = self._build_manual_profile_failure_details(
+                                    (context or {}).get('url', ''),
+                                    error_msg,
+                                    getattr(failed_item, "manual_profile_context", None),
+                                )
                             self.api_client.update_job_progress(
                                 queue_id,
                                 operation_name,
@@ -3928,7 +4023,15 @@ class CreatorService:
                     # Final failure
                     self.api_client.update_job_progress(
                         queue_id, operation_name, 'exception', 0.0, 'failed',
-                        metadata=self._build_manual_profile_failure_details((context or {}).get('url', ''), error_msg) if operation_name == 'json_generation' else None,
+                        metadata=(
+                            self._build_manual_profile_failure_details(
+                                (context or {}).get('url', ''),
+                                error_msg,
+                                getattr(failed_item, "manual_profile_context", None),
+                            )
+                            if operation_name == 'json_generation'
+                            else None
+                        ),
                         error_details=error_msg
                     )
                     # 🆕 PHASE 4: Track performance
@@ -3973,8 +4076,14 @@ class CreatorService:
 
         requested_mode = job.get('production_mode')
         effective_mode = normalize_production_mode(requested_mode, allow_skip=True)
+        manual_profile_context = build_manual_profile_context(
+            job.get("manual_profile") if "manual_profile" in job else None,
+            field_present="manual_profile" in job,
+            expected_revision_id=job.get("manual_profile_revision_id"),
+        )
         item = ProcessingItem(
             source_url=game_url,
+            manual_profile_context=manual_profile_context,
             mode=effective_mode,
             requested_production_mode=requested_mode,
             # SỬA ĐỔI QUAN TRỌNG: Gọi hàm mới và truyền URL vào
@@ -4029,6 +4138,7 @@ class CreatorService:
             success = self.processing_manager._generate_json_for_item(item)
             
             if not success:
+                failure_code = getattr(item, "failure_code", None) or "manual_json_invalid"
                 self.api_client.update_job_progress(
                     queue_id,
                     "json_generation",
@@ -4038,10 +4148,14 @@ class CreatorService:
                     metadata={
                         "final": False,
                         "details": self._build_manual_profile_failure_details(
-                            item.source_url or "", "JSON generation failed"
+                            item.source_url or "",
+                            getattr(item, "error_message", None)
+                            or getattr(item, "failure_code", None)
+                            or "JSON generation failed",
+                            getattr(item, "manual_profile_context", None),
                         ),
                     },
-                    error_details="JSON generation failed",
+                    error_details=failure_code,
                 )
                 return False
             
@@ -4134,7 +4248,11 @@ class CreatorService:
                 job_stop_event = self.processing_manager.stop_event 
 
                 # Truyền cờ stop vào hàm _initialize_components
-                if not self._initialize_components(item.json_data, job_stop_event):
+                if not self._initialize_components(
+                    item.json_data,
+                    job_stop_event,
+                    manual_profile_context=getattr(item, "manual_profile_context", None),
+                ):
                 # === KẾT THÚC SỬA ĐỔI ===
                     error_details = "Failed to initialize components (GamePlayer/OBS)."
                     self.api_client.update_job_progress(

@@ -924,6 +924,16 @@ def failure_is_retryable(
 
     if not code:
         return False
+    # A claimed Tracker snapshot is immutable and its validation failures are
+    # deterministic for the whole queue attempt. Retrying cannot repair a bad
+    # hash/URL/schema/environment and would unnecessarily repeat browser
+    # setup input. Only transport/replay failures retain a bounded fresh-run
+    # retry path.
+    if code == "invalid_capture_environment" or (
+        code.startswith("manual_profile_")
+        and code not in {"manual_profile_replay_failed", "manual_profile_cdp_inconclusive"}
+    ):
+        return False
     if code == "watchdog_timeout":
         evidence = evidence or {}
         return str(evidence.get("reason", "")).lower() not in {

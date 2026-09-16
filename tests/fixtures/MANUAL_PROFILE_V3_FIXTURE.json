@@ -1,0 +1,45 @@
+{
+  "envelope": {
+    "id": 123,
+    "revision": 2,
+    "revision_id": 789,
+    "sha256": "b545b1cc0e34bbeb635034c8c587fcaee6c14ab6a84c4d067b1289cd6db9c7e8",
+    "content": {
+      "canonicalUrl": "https://www.cocrea.world/@Author/Project",
+      "capture": {
+        "createdAt": "2026-01-01T00:00:00+00:00",
+        "surface": {"type": "browser_viewport"},
+        "viewport": {"height": 1080, "width": 1920}
+      },
+      "coordinateSpace": "viewport_normalized",
+      "layout": {
+        "icons": [{"index": 0, "x": 0.1, "y": 0.8}],
+        "slots": [{"index": 0, "x": 0.3, "y": 0.8}]
+      },
+      "notes": "fixture",
+      "prepareActions": [
+        {"delayMs": 120, "pressDurationMs": 80, "type": "click", "x": 0.5, "y": 0.5},
+        {"delayMs": 250, "dragDurationMs": 600, "endX": 0.3, "endY": 0.7, "holdBeforeMoveMs": 150, "startX": 0.1, "startY": 0.7, "type": "drag"},
+        {"delayMs": 300, "key": "space", "type": "key"}
+      ],
+      "prepareTiming": {"durationMs": 1370, "endDelayMs": 50},
+      "settings": {"gameControlType": "unknown"},
+      "urlKey": "Author/Project",
+      "version": 3
+    }
+  },
+  "expectedCaptureEnvironment": {
+    "viewport": {"width": 1920, "height": 1080},
+    "browserZoomPolicy": "100_percent"
+  },
+  "canonicalUrlVariants": [
+    "https://cocrea.world/@Author/Project?foo=bar#hash",
+    "https://www.cocrea.world/@Author/Project/"
+  ],
+  "expectedCanonicalUrl": "https://www.cocrea.world/@Author/Project",
+  "expectedPixelCoordinates": {
+    "click": {"x": 960, "y": 540},
+    "icon0": {"x": 192, "y": 864},
+    "slot0": {"x": 576, "y": 864}
+  }
+}

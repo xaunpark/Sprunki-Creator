@@ -90,6 +90,42 @@ def get_prepare_duration_ms(profile_or_timing: Optional[Mapping[str, Any]]) -> i
     return coerce_delay_ms(timing.get(DURATION_KEY, 0))
 
 
+def calculate_prepare_safety_timeline_ms(
+    actions: Iterable[Mapping[str, Any]],
+    end_delay_ms: Any = 0,
+) -> int:
+    """Calculate the declared PREPARE gesture timeline cost.
+
+    This is the safety-limit calculation shared by the queue v3 validator and
+    the legacy replay preflight.  ``delayMs`` is the wait before each action;
+    click press time, drag time, and the complete compound double-click drag
+    timing are then added to the action cost.  ``holdBeforeMoveMs`` is part of
+    ``dragDurationMs`` and is deliberately not added a second time.
+
+    Callers validate individual fields and their per-field limits before using
+    this helper.  ``coerce_delay_ms`` keeps the legacy profile path tolerant of
+    the numeric values it historically accepted, while v3 has already checked
+    that every value is a finite non-negative integer.
+    """
+    total_ms = coerce_delay_ms(end_delay_ms)
+    for action in actions or []:
+        if not isinstance(action, Mapping):
+            continue
+        action_type = str(action.get("type") or "").strip().lower()
+        total_ms += coerce_delay_ms(action.get("delayMs", 0))
+        if action_type == "click":
+            total_ms += coerce_delay_ms(action.get("pressDurationMs", 0))
+        elif action_type == DRAG_TYPE:
+            total_ms += coerce_delay_ms(action.get("dragDurationMs", 0))
+        elif action_type == DOUBLE_CLICK_DRAG_TYPE:
+            total_ms += (
+                coerce_delay_ms(action.get("firstClickDurationMs", 0))
+                + coerce_delay_ms(action.get("clickIntervalMs", 0))
+                + coerce_delay_ms(action.get("dragDurationMs", 0))
+            )
+    return total_ms
+
+
 def validate_prepare_timeline(
     actions: Optional[Sequence[Mapping[str, Any]]],
     profile_or_timing: Optional[Mapping[str, Any]],
@@ -128,7 +164,6 @@ def validate_prepare_timeline(
             return False, f"invalid_coordinate:{action_index}:{field_name}"
         return True, ""
 
-    total_ms = 0
     for index, action in enumerate(normalized_actions, start=1):
         if not isinstance(action, Mapping):
             return False, f"invalid_action:{index}"
@@ -190,20 +225,28 @@ def validate_prepare_timeline(
                 return False, f"delay_exceeds_limit:{index}:firstClickDurationMs:{first_click_duration_ms}"
             if first_click_duration_ms > click_interval_ms:
                 return False, f"first_click_exceeds_interval:{index}"
+        elif action_type == "click":
+            valid, press_duration_ms, reason = parse_delay(
+                action.get("pressDurationMs", 0),
+                "pressDurationMs",
+                index,
+            )
+            if not valid:
+                return False, reason
+            if press_duration_ms > max_single_delay_ms:
+                return False, f"delay_exceeds_limit:{index}:pressDurationMs:{press_duration_ms}"
         else:
             click_interval_ms = 0
         for field_name, value in (("delayMs", delay_ms), ("dragDurationMs", drag_duration_ms)):
             if value > max_single_delay_ms:
                 return False, f"delay_exceeds_limit:{index}:{field_name}:{value}"
-        total_ms += delay_ms + drag_duration_ms + click_interval_ms
-
     timing = extract_prepare_timing(profile_or_timing)
     valid, end_delay_ms, reason = parse_delay(timing.get(END_DELAY_KEY, timing.get("prepareEndDelayMs", 0)), END_DELAY_KEY)
     if not valid:
         return False, reason
     if end_delay_ms > max_single_delay_ms:
         return False, f"delay_exceeds_limit:endDelayMs:{end_delay_ms}"
-    total_ms += end_delay_ms
+    total_ms = calculate_prepare_safety_timeline_ms(normalized_actions, end_delay_ms)
 
     valid, declared_duration, reason = parse_delay(timing.get(DURATION_KEY, 0), DURATION_KEY)
     if not valid:

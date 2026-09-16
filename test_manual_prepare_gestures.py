@@ -9,7 +9,10 @@ from manual_prepare_gestures import (
     merge_click_and_drag,
     split_double_click_drag,
 )
-from manual_prepare_timeline import replay_prepare_timeline, validate_prepare_timeline
+from manual_prepare_timeline import (
+    replay_prepare_timeline,
+    validate_prepare_timeline,
+)
 
 
 class ManualPrepareGestureTests(unittest.TestCase):
@@ -97,6 +100,44 @@ class ManualPrepareGestureTests(unittest.TestCase):
             )
         )
         self.assertEqual(executed, [(1, DOUBLE_CLICK_DRAG_TYPE)])
+
+    def test_timeline_safety_total_counts_click_press_duration(self):
+        actions = [
+            {"type": "click", "x": 10, "y": 20, "pressDurationMs": 600_000}
+            for _ in range(4)
+        ]
+        self.assertFalse(validate_prepare_timeline(actions, {})[0])
+
+    def test_timeline_safety_total_counts_first_click_and_not_hold_twice(self):
+        double_click_actions = [
+            {
+                "type": DOUBLE_CLICK_DRAG_TYPE,
+                "startX": 10,
+                "startY": 20,
+                "endX": 30,
+                "endY": 40,
+                "clickIntervalMs": 600_000,
+                "firstClickDurationMs": 600_000,
+                "holdBeforeMoveMs": 0,
+                "dragDurationMs": 0,
+            }
+            for _ in range(2)
+        ]
+        self.assertFalse(validate_prepare_timeline(double_click_actions, {})[0])
+
+        drag_actions = [
+            {
+                "type": "drag",
+                "startX": 10,
+                "startY": 20,
+                "endX": 30,
+                "endY": 40,
+                "dragDurationMs": 600_000,
+                "holdBeforeMoveMs": 600_000,
+            }
+            for _ in range(3)
+        ]
+        self.assertTrue(validate_prepare_timeline(drag_actions, {})[0])
 
     def test_executor_emits_one_compound_event_sequence(self):
         events = []

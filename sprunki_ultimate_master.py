@@ -19,6 +19,7 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 from config_manager import initialize_config, get_config
 from watchdog_state import attempt_scoped_filename
+from manual_profile_v3 import ManualProfileJobContext
 
 # Import required modules
 try:
@@ -98,6 +99,13 @@ class ProcessingItem:
     recorded_identity_reason: Optional[str] = None
     recorded_identity_retryable: bool = False
     recorded_identity_files: List[str] = field(default_factory=list)
+
+    # Queue-scoped Tracker snapshot.  Kept at the end of the dataclass so
+    # legacy positional ProcessingItem(source_url, json_path, json_data,
+    # mode, ...) callers retain their original argument order.  It is
+    # deliberately separate from generated JSON and never becomes a local
+    # URL-indexed profile or a temporary profile file.
+    manual_profile_context: Optional[ManualProfileJobContext] = None
 
     def __post_init__(self) -> None:
         # Tracker's ``normal`` queue value and Creator's ``master`` workflow
@@ -1519,7 +1527,10 @@ class UnifiedProcessingManager:
             
             self.logger.info(f"Generating JSON for: {item.source_url}")
             
-            success, json_path, json_data = self.json_generator.generate_complete_json(item.source_url)
+            success, json_path, json_data = self.json_generator.generate_complete_json(
+                item.source_url,
+                manual_profile_context=getattr(item, "manual_profile_context", None),
+            )
             
             layout_quality = validate_playable_layout(json_data) if json_data else QualityGateResult.failure(
                 "manual_json_invalid",
@@ -1533,11 +1544,38 @@ class UnifiedProcessingManager:
                 self.logger.info(f"JSON generated successfully: {json_path}")
                 return True
             else:
+                profile_error = getattr(self.json_generator, "last_manual_profile_error", None)
+                profile_failure = (
+                    profile_error.split(":", 1)[0]
+                    if isinstance(profile_error, str)
+                    and (
+                        profile_error.startswith("manual_profile_")
+                        or profile_error == "invalid_capture_environment"
+                    )
+                    else None
+                )
+                failure_code = profile_failure or layout_quality.failure_code or "manual_json_invalid"
+                failure_message = (
+                    f"Manual profile rejected: {profile_error}"
+                    if profile_failure
+                    else layout_quality.message or "JSON generation failed"
+                )
+                profile_context = getattr(item, "manual_profile_context", None)
+                audit = dict(getattr(profile_context, "audit", {}) or {})
                 self._record_quality_failure(
                     item,
-                    layout_quality.failure_code or "manual_json_invalid",
-                    layout_quality.message or "JSON generation failed",
-                    evidence=layout_quality.evidence,
+                    failure_code,
+                    failure_message,
+                    evidence={
+                        **(layout_quality.evidence or {}),
+                        **({
+                            "profileId": audit.get("id"),
+                            "revision": audit.get("revision"),
+                            "revisionId": audit.get("revision_id"),
+                            "sha256": audit.get("sha256"),
+                            "failureCode": profile_failure,
+                        } if profile_failure else {}),
+                    },
                 )
                 item.json_generation_status = "failure" # GHI LẠI TRẠNG THÁI
                 self.logger.error(f"JSON generation failed for: {item.source_url}")
@@ -1546,11 +1584,22 @@ class UnifiedProcessingManager:
         except Exception as e:
             error_msg = f"JSON generation error: {str(e)}"
             self.logger.error(f"Error for {item.source_url}: {error_msg}", exc_info=True)
+
+            profile_error = getattr(self.json_generator, "last_manual_profile_error", None)
+            failure_code = (
+                profile_error.split(":", 1)[0]
+                if isinstance(profile_error, str)
+                and (
+                    profile_error.startswith("manual_profile_")
+                    or profile_error == "invalid_capture_environment"
+                )
+                else "manual_json_invalid"
+            )
             
             self._record_quality_failure(
                 item,
-                "manual_json_invalid",
-                error_msg,
+                failure_code,
+                error_msg if failure_code == "manual_json_invalid" else f"Manual profile rejected: {failure_code}",
                 evidence={"error": error_msg},
             )
             item.json_generation_status = "failure"
@@ -1706,7 +1755,11 @@ class UnifiedProcessingManager:
                 return False
             
             # BƯỚC 2: Khởi tạo các component
-            if not self.master_controller._initialize_components(item.json_data, self.stop_event):
+            if not self.master_controller._initialize_components(
+                item.json_data,
+                self.stop_event,
+                manual_profile_context=getattr(item, "manual_profile_context", None),
+            ):
                 raise Exception("Failed to initialize components")
             
             # BƯỚC 3: GÁN project_folder cho OBS Controller NGAY LẬP TỨC
@@ -3521,7 +3574,12 @@ class SprunkiUltimateMaster:
             except:
                 pass
     
-    def _initialize_components(self, config_data: Dict[str, Any], stop_event: Optional[threading.Event] = None) -> bool:
+    def _initialize_components(
+        self,
+        config_data: Dict[str, Any],
+        stop_event: Optional[threading.Event] = None,
+        manual_profile_context: Optional[ManualProfileJobContext] = None,
+    ) -> bool:
         """
         [CHUẨN HÓA] Khởi tạo và liên kết các component cho một job.
         """
@@ -3537,6 +3595,7 @@ class SprunkiUltimateMaster:
             # 2. LIÊN KẾT CÁC COMPONENT
             # Gán obs_controller vào game_player để tất cả các hàm bên trong nó có thể truy cập
             self.game_player.obs_controller = self.obs_controller
+            self.game_player.manual_profile_context = manual_profile_context
             
             # 3. Nạp config và tạo remix
             self.game_player.config = config_data

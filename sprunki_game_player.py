@@ -43,6 +43,13 @@ from manual_prepare_timeline import (
     validate_prepare_timeline,
 )
 from manual_prepare_gestures import DOUBLE_CLICK_DRAG_TYPE
+from manual_profile_v3 import (
+    ManualProfileJobContext,
+    ManualProfileV3Error,
+    canonicalize_cocrea_url,
+    materialize_tracker_profile,
+    validate_context_runtime_viewport,
+)
 from cdp_gesture_executor import execute_cdp_click, execute_cdp_gesture
 from placement_verifier import (
     OperationContext,
@@ -296,6 +303,11 @@ class SprunkiGamePlayer:
 
         # Core state
         self.config = None
+        # Queue-scoped manual profile context supplied by CreatorService.
+        # The context is never resolved by URL and is intentionally kept out
+        # of the persisted Creator JSON payload.
+        self.manual_profile_context: Optional[ManualProfileJobContext] = None
+        self._manual_profile_replay_failure_code: Optional[str] = None
         self.is_playing = False
         self.should_stop = False
         self.current_icon = 0
@@ -8532,13 +8544,16 @@ class SprunkiGamePlayer:
             print(f"âŒ CDP-ONLY: Relaxed Fullscreen error: {e}")
             return False
 
-    def _simulate_click_via_cdp(self, ws, x, y):
+    def _simulate_click_via_cdp(self, ws, x, y, press_duration_ms=None):
         """Simulate mouse click via CDP"""
         if not self._register_scoped_physical_input():
             return False
         down_command = {"method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}}
         down_response = self._send_cdp_command(ws, down_command)
-        time.sleep(random.uniform(0.05, 0.1))
+        if press_duration_ms is None:
+            time.sleep(random.uniform(0.05, 0.1))
+        else:
+            time.sleep(max(0, min(coerce_delay_ms(press_duration_ms), 10 * 60 * 1000)) / 1000.0)
         up_command = {"method": "Input.dispatchMouseEvent", "params": {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}}
         up_response = self._send_cdp_command(ws, up_command)
         return bool(
@@ -13409,7 +13424,7 @@ class SprunkiGamePlayer:
             print(f"❌ Single return click execution error: {e}")
             return False
 
-    def _execute_cdp_single_click(self, click_x, click_y):
+    def _execute_cdp_single_click(self, click_x, click_y, press_duration_ms=None):
         """ADDED: Execute single click using CDP"""
         ws = None
         try:
@@ -13426,7 +13441,9 @@ class SprunkiGamePlayer:
             if not move_response or "error" in move_response:
                 return False
             time.sleep(0.1)
-            click_success = self._simulate_click_via_cdp(ws, click_x, click_y)
+            click_success = self._simulate_click_via_cdp(
+                ws, click_x, click_y, press_duration_ms=press_duration_ms
+            )
 
             print("âœ… CDP single click completed" if click_success else "🛑 CDP single click inconclusive")
             return bool(click_success)
@@ -13447,7 +13464,7 @@ class SprunkiGamePlayer:
         start_y,
         end_x,
         end_y,
-        drag_duration_ms=0,
+        drag_duration_ms=None,
         hold_before_move_ms=0,
     ):
         """Replay one manually recorded drag with browser-native mouse events."""
@@ -13470,7 +13487,9 @@ class SprunkiGamePlayer:
                 end_x,
                 end_y,
                 mode="drag",
-                drag_duration_ms=coerce_delay_ms(drag_duration_ms) or 800,
+                drag_duration_ms=(
+                    800 if drag_duration_ms is None else coerce_delay_ms(drag_duration_ms)
+                ),
                 hold_before_move_ms=coerce_delay_ms(hold_before_move_ms),
                 focus_delay_ms=50,
                 sleep_fn=time.sleep,
@@ -15282,9 +15301,81 @@ class SprunkiGamePlayer:
 
         return {"selected": None, "tested": tested, "success": False, "reason": "no_playable_candidate"}
 
+    def _resolve_queue_manual_profile(self, context: ManualProfileJobContext):
+        """Return the verified absolute projection for the current runtime."""
+
+        if not context.has_queue_profile:
+            return None, None
+
+        ws = None
+        try:
+            try:
+                ws_url = self._get_websocket_url()
+            except Exception:
+                raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
+            if not ws_url:
+                raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
+            try:
+                ws = websocket.create_connection(ws_url, timeout=30)
+            except Exception:
+                raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
+            identity = self._read_cdp_page_identity(ws)
+            if not identity:
+                raise ManualProfileV3Error("manual_profile_cdp_inconclusive")
+            if not isinstance(identity.get("href"), str) or not identity.get("href").strip():
+                raise ManualProfileV3Error("manual_profile_url_invalid")
+            try:
+                actual_url = canonicalize_cocrea_url(identity.get("href"))
+                requested_url = getattr(self, "game_url", None) or (
+                    (self.config or {}).get("currentUrl") if isinstance(self.config, dict) else None
+                )
+                requested_canonical = (
+                    canonicalize_cocrea_url(requested_url) if requested_url else None
+                )
+                profile_url = canonicalize_cocrea_url(
+                    context.legacy_profile.get("canonicalUrl")
+                ) if context.legacy_profile is not None else None
+            except ManualProfileV3Error:
+                raise ManualProfileV3Error("manual_profile_url_invalid")
+            if requested_canonical is not None and requested_canonical != actual_url:
+                raise ManualProfileV3Error("manual_profile_url_mismatch")
+            if profile_url is not None and actual_url != profile_url:
+                raise ManualProfileV3Error("manual_profile_url_mismatch")
+            live_viewport = {
+                "width": identity.get("innerWidth"),
+                "height": identity.get("innerHeight"),
+            }
+            if context.legacy_profile is None:
+                resolved = materialize_tracker_profile(
+                    context,
+                    expected_url=identity["href"],
+                    live_viewport=live_viewport,
+                )
+                context.legacy_profile = resolved.legacy_profile
+                context.audit = resolved.audit
+            else:
+                validate_context_runtime_viewport(context, live_viewport)
+            return context.legacy_profile, context.source_token
+        finally:
+            if ws:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
     def _resolve_manual_profile(self):
         self._manual_profile_resolution_error = None
         try:
+            queue_context = getattr(self, "manual_profile_context", None)
+            if isinstance(queue_context, ManualProfileJobContext):
+                # A queue field (including null/omitted) is authoritative. Do
+                # not consult the local URL index for this job.
+                if queue_context.has_queue_profile:
+                    return self._resolve_queue_manual_profile(queue_context)
+                return None, None
+
+            # No queue context means a legacy GUI/manual invocation. Preserve
+            # the existing local v1/v2 lookup behavior for that path only.
             settings = (self.config or {}).get("settings", {}) or {}
             manual_profile_path = settings.get("manualProfilePath")
             current_url = (self.config or {}).get("currentUrl", "")
@@ -15307,11 +15398,22 @@ class SprunkiGamePlayer:
                 if profile_data and error_message:
                     print(f"⚠️ Manual profile lookup found invalid data for {current_url}: {error_message}")
                     self._manual_profile_resolution_error = str(error_message)
+        except ManualProfileV3Error as error:
+            self._manual_profile_resolution_error = str(error)
+            print(f"🛑 Manual profile v3 rejected: {error}")
         except Exception as e:
             print(f"⚠️ Could not resolve manual profile: {e}")
             self._manual_profile_resolution_error = str(e)
 
         return None, None
+
+    @staticmethod
+    def _manual_profile_failure_code(error_value, default="manual_json_invalid"):
+        """Keep Tracker profile diagnostics stable without leaking content."""
+        error_text = str(error_value or "")
+        if error_text.startswith("manual_profile_") or error_text == "invalid_capture_environment":
+            return error_text.split(":", 1)[0]
+        return default
 
     def _execute_cdp_key_press(self, key_name):
         """Send a browser-native key press to the active game target via CDP."""
@@ -15426,13 +15528,36 @@ class SprunkiGamePlayer:
         changed game state.
         """
         actions = list(actions or [])
+        queue_profile_active = (
+            isinstance(getattr(self, "manual_profile_context", None), ManualProfileJobContext)
+            and getattr(self.manual_profile_context, "has_queue_profile", False)
+        )
+        if queue_profile_active:
+            self._manual_profile_replay_failure_code = None
         if not actions:
             print("⚠️ Manual profile has no prepare actions to replay.")
+            if queue_profile_active:
+                self._manual_profile_replay_failure_code = "manual_profile_replay_failed"
             return False
+
+        # Queue snapshots are bound to the CSS viewport that was verified at
+        # materialization time.  Re-check the live page immediately before
+        # sending the first replay action so a resize, zoom change, or tab
+        # switch cannot silently reinterpret the absolute projection.
+        queue_context = getattr(self, "manual_profile_context", None)
+        if isinstance(queue_context, ManualProfileJobContext) and queue_context.has_queue_profile:
+            try:
+                self._resolve_queue_manual_profile(queue_context)
+            except ManualProfileV3Error as profile_error:
+                self._manual_profile_resolution_error = str(profile_error)
+                print(f"🛑 Manual profile runtime validation failed before replay: {profile_error}")
+                return False
 
         is_valid, validation_reason = validate_prepare_timeline(actions, profile_or_timing)
         if not is_valid:
             print(f"🛑 Manual profile replay rejected before input: {validation_reason}")
+            if queue_profile_active:
+                self._manual_profile_replay_failure_code = "manual_profile_action_invalid"
             return False
 
         context = operation_context or getattr(self, "_active_operation_context", None)
@@ -15471,22 +15596,41 @@ class SprunkiGamePlayer:
                     allow_recovery_input=True,
                     use_recovery_budget=True,
                 ):
+                    if queue_profile_active:
+                        self._manual_profile_replay_failure_code = "manual_profile_replay_failed"
                     return False
                 if not context.register_recovery_input():
+                    if queue_profile_active:
+                        self._manual_profile_replay_failure_code = "manual_profile_replay_failed"
                     return False
 
                 action_type = (action.get("type") or "").lower()
                 if action_type == "click":
                     x = int(action.get("x"))
                     y = int(action.get("y"))
-                    print(f"   {index}. Click @ ({x}, {y})")
-                    return bool(self._execute_cdp_single_click(x, y))
+                    press_duration_ms = (
+                        action.get("pressDurationMs")
+                        if "pressDurationMs" in action
+                        else None
+                    )
+                    print(
+                        f"   {index}. Click @ ({x}, {y})"
+                        + (
+                            f" ({coerce_delay_ms(press_duration_ms)} ms)"
+                            if press_duration_ms is not None
+                            else ""
+                        )
+                    )
+                    success = bool(self._execute_cdp_single_click(x, y, press_duration_ms))
+                    if not success and queue_profile_active:
+                        self._manual_profile_replay_failure_code = "manual_profile_cdp_inconclusive"
+                    return success
                 if action_type == DOUBLE_CLICK_DRAG_TYPE:
                     start_x = int(action.get("startX"))
                     start_y = int(action.get("startY"))
                     end_x = int(action.get("endX"))
                     end_y = int(action.get("endY"))
-                    drag_duration_ms = coerce_delay_ms(action.get("dragDurationMs", 0))
+                    drag_duration_ms = action.get("dragDurationMs", 0)
                     click_interval_ms = coerce_delay_ms(action.get("clickIntervalMs", 300))
                     first_click_duration_ms = coerce_delay_ms(
                         action.get("firstClickDurationMs", 100)
@@ -15499,7 +15643,7 @@ class SprunkiGamePlayer:
                         f"({end_x}, {end_y}) ({drag_duration_ms} ms, "
                         f"interval {click_interval_ms} ms)"
                     )
-                    return bool(self._execute_cdp_double_click_drag(
+                    success = bool(self._execute_cdp_double_click_drag(
                         start_x,
                         start_y,
                         end_x,
@@ -15509,20 +15653,28 @@ class SprunkiGamePlayer:
                         first_click_duration_ms,
                         hold_before_move_ms,
                     ))
+                    if not success and queue_profile_active:
+                        self._manual_profile_replay_failure_code = "manual_profile_cdp_inconclusive"
+                    return success
                 if action_type == "drag":
                     start_x = int(action.get("startX"))
                     start_y = int(action.get("startY"))
                     end_x = int(action.get("endX"))
                     end_y = int(action.get("endY"))
-                    drag_duration_ms = coerce_delay_ms(action.get("dragDurationMs", 0))
+                    drag_duration_ms = (
+                        action.get("dragDurationMs")
+                        if "dragDurationMs" in action
+                        else None
+                    )
                     hold_before_move_ms = coerce_delay_ms(
                         action.get("holdBeforeMoveMs", 0)
                     )
                     print(
                         f"   {index}. Drag @ ({start_x}, {start_y}) -> "
-                        f"({end_x}, {end_y}) ({drag_duration_ms} ms)"
+                        f"({end_x}, {end_y}) ("
+                        f"{coerce_delay_ms(drag_duration_ms) if drag_duration_ms is not None else 'default'} ms)"
                     )
-                    return bool(self._execute_cdp_single_drag(
+                    success = bool(self._execute_cdp_single_drag(
                         start_x,
                         start_y,
                         end_x,
@@ -15530,6 +15682,9 @@ class SprunkiGamePlayer:
                         drag_duration_ms,
                         hold_before_move_ms,
                     ))
+                    if not success and queue_profile_active:
+                        self._manual_profile_replay_failure_code = "manual_profile_cdp_inconclusive"
+                    return success
                 if action_type == "key":
                     key_name = action.get("key")
                     print(f"   {index}. Key {key_name} (CDP native input)")
@@ -15538,11 +15693,17 @@ class SprunkiGamePlayer:
                             f"   🛑 CDP key input was inconclusive; refusing a duplicate "
                             f"PyAutoGUI key: {key_name}"
                         )
+                        if queue_profile_active:
+                            self._manual_profile_replay_failure_code = "manual_profile_cdp_inconclusive"
                         return False
                     return True
+                if queue_profile_active:
+                    self._manual_profile_replay_failure_code = "manual_profile_replay_failed"
                 return False
             except Exception as action_error:
                 print(f"⚠️ Manual prepare action {index} failed: {action_error}")
+                if queue_profile_active:
+                    self._manual_profile_replay_failure_code = "manual_profile_replay_failed"
                 return False
 
         def bounded_sleep(seconds):
@@ -16008,6 +16169,31 @@ class SprunkiGamePlayer:
                 finally:
                     self._physical_input_context = None
 
+            # A queue profile replay is a single bounded timeline.  If one
+            # CDP action is inconclusive, do not loop and send the same action
+            # again on the partially changed page.  An outer fresh workflow
+            # attempt may still reuse the immutable snapshot.
+            if (
+                not prepare_success
+                and isinstance(getattr(self, "manual_profile_context", None), ManualProfileJobContext)
+                and getattr(self.manual_profile_context, "has_queue_profile", False)
+            ):
+                replay_failure_code = (
+                    getattr(self, "_manual_profile_resolution_error", None)
+                    or getattr(self, "_manual_profile_replay_failure_code", None)
+                    or "manual_profile_replay_failed"
+                )
+                replay_failure_code = self._manual_profile_failure_code(
+                    replay_failure_code,
+                    default="manual_profile_replay_failed",
+                )
+                return {
+                    "success": False,
+                    "reason": replay_failure_code,
+                    "failureCode": replay_failure_code,
+                    "entryAttempt": entry_attempt,
+                }
+
             if prepare_success:
                 time.sleep(2.0)
                 refresh_ok = self._refresh_after_recovery()
@@ -16462,10 +16648,11 @@ class SprunkiGamePlayer:
                     "🛑 Manual profile is invalid; refusing automatic intro fallback: "
                     f"{profile_resolution_error}"
                 )
+                profile_failure_code = self._manual_profile_failure_code(profile_resolution_error)
                 self.last_setup_result = QualityGateResult.failure(
-                    "manual_json_invalid",
+                    profile_failure_code,
                     evidence={"profileError": profile_resolution_error},
-                    message="Manual entry profile is invalid.",
+                    message=f"Manual entry profile is invalid: {profile_failure_code}.",
                 )
                 return False
             if manual_profile:
@@ -16481,8 +16668,19 @@ class SprunkiGamePlayer:
                 )
                 if not replay_success:
                     print("🛑 Manual profile replay failed; refusing blind automatic input on a partially prepared game")
+                    queue_profile_active = (
+                        isinstance(getattr(self, "manual_profile_context", None), ManualProfileJobContext)
+                        and getattr(self.manual_profile_context, "has_queue_profile", False)
+                    )
+                    replay_failure_code = "manual_json_invalid"
+                    if queue_profile_active:
+                        replay_failure_code = self._manual_profile_failure_code(
+                            getattr(self, "_manual_profile_resolution_error", None)
+                            or getattr(self, "_manual_profile_replay_failure_code", None),
+                            default="manual_profile_replay_failed",
+                        )
                     self.last_setup_result = QualityGateResult.failure(
-                        "manual_json_invalid",
+                        replay_failure_code,
                         evidence={"profilePath": manual_profile_path},
                         message="Manual entry profile replay failed.",
                     )
