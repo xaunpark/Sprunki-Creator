@@ -224,6 +224,120 @@ class VisualPlacementVerifierTests(unittest.TestCase):
         self.assertTrue(returned.target_verified)
         self.assertEqual(len(player._visual_empty_references), 1)
 
+    def test_operation_deadline_after_delivered_action_still_uses_image_fallback(self):
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player._visual_empty_references = {}
+        player._board_generation = 0
+        player.visual_thresholds = VisualThresholds()
+        player.visual_roi_inner_ratio = 0.60
+        player._visual_capture_after_frames = Mock(
+            return_value=(self.character, self.character)
+        )
+        arm = {
+            "direction": "place",
+            "targetSlot": 3,
+            "roi": self.roi,
+            "geometryFingerprint": "g1",
+            "beforeFrames": (self.polo, self.polo),
+        }
+        result = OperationResult(
+            OperationStatus.STOPPED,
+            direction="place",
+            message="operation_deadline_exceeded",
+            details={
+                "actionAttempted": True,
+                "actionDelivered": True,
+                "actionAmbiguous": False,
+            },
+        )
+
+        returned = player._visual_complete_fallback(
+            arm,
+            result,
+            action_attempted=True,
+        )
+
+        self.assertEqual(returned.status, OperationStatus.VERIFIED)
+        self.assertTrue(returned.details["visualFallbackAttempted"])
+        self.assertEqual(returned.details["verificationMethod"], "image_fallback")
+        player._visual_capture_after_frames.assert_called_once_with(arm)
+
+    def test_unresolved_failed_action_is_not_limited_to_message_whitelist(self):
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player._visual_empty_references = {}
+        player._board_generation = 0
+        player.visual_thresholds = VisualThresholds()
+        player.visual_roi_inner_ratio = 0.60
+        player._visual_capture_after_frames = Mock(
+            return_value=(self.character, self.character)
+        )
+        arm = {
+            "direction": "place",
+            "targetSlot": 3,
+            "roi": self.roi,
+            "geometryFingerprint": "g1",
+            "beforeFrames": (self.polo, self.polo),
+        }
+        result = OperationResult(
+            OperationStatus.FAILED,
+            direction="place",
+            message="no_progress_after_two_attempts",
+            details={
+                "actionAttempted": True,
+                "actionDelivered": True,
+                "actionAmbiguous": False,
+            },
+        )
+
+        returned = player._visual_complete_fallback(
+            arm,
+            result,
+            action_attempted=True,
+        )
+
+        self.assertEqual(returned.status, OperationStatus.VERIFIED)
+        self.assertTrue(returned.details["visualFallback"])
+
+    def test_explicit_stop_does_not_prolong_operation_with_visual_capture(self):
+        import threading
+
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player.stop_event = threading.Event()
+        player.stop_event.set()
+        player.terminal_stop_event = threading.Event()
+        player._visual_capture_after_frames = Mock(
+            return_value=(self.character, self.character)
+        )
+        arm = {
+            "direction": "place",
+            "targetSlot": 3,
+            "roi": self.roi,
+            "geometryFingerprint": "g1",
+            "beforeFrames": (self.polo, self.polo),
+        }
+        result = OperationResult(
+            OperationStatus.STOPPED,
+            direction="place",
+            message="stop_requested",
+            details={
+                "actionAttempted": True,
+                "actionDelivered": True,
+            },
+        )
+
+        returned = player._visual_complete_fallback(
+            arm,
+            result,
+            action_attempted=True,
+        )
+
+        self.assertIs(returned, result)
+        player._visual_capture_after_frames.assert_not_called()
+        self.assertEqual(
+            returned.details["visualFallbackSkipReason"],
+            "terminal_stop",
+        )
+
     def test_image_fallback_is_not_called_when_action_was_not_sent(self):
         player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
         arm = {

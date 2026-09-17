@@ -323,6 +323,8 @@ class SprunkiGamePlayer:
         self._remove_cdp_session = None
         self._remove_cdp_target_id = None
         self._last_remove_click_delivery = {}
+        self._last_return_click_delivery = {}
+        self._last_drag_delivery = {}
         
         self.obs_controller: Optional['SprunkiController'] = None
 
@@ -1801,6 +1803,15 @@ class SprunkiGamePlayer:
                 "status": result.status.value,
                 "message": result.message,
                 "targetVerified": result.target_verified,
+                "visualFallbackAttempted": bool(
+                    (result.details or {}).get("visualFallbackAttempted")
+                ),
+                "visualFallbackStatus": (result.details or {}).get(
+                    "visualFallbackStatus"
+                ),
+                "visualFallbackReason": (result.details or {}).get(
+                    "visualFallbackReason"
+                ),
             }
             attempts.append(attempt)
 
@@ -1838,11 +1849,16 @@ class SprunkiGamePlayer:
                     reads=context.read_count,
                 )
             if result.status == OperationStatus.STOPPED:
+                stop_details = {
+                    **(result.details or {}),
+                    "attempts": attempts,
+                    "fallback": "legacy_return",
+                }
                 return self._operation_result(
                     context,
                     result.status,
                     "remove_button_stop_requested",
-                    details={"attempts": attempts},
+                    details=stop_details,
                 )
             result_details = result.details or {}
             if result_details.get("polosTransitionReason") in {
@@ -1856,7 +1872,11 @@ class SprunkiGamePlayer:
                     context,
                     OperationStatus.UNKNOWN,
                     "remove_button_polos_state_uncertain",
-                    details={"attempts": attempts, "fallback": "legacy_return"},
+                    details={
+                        **result_details,
+                        "attempts": attempts,
+                        "fallback": "legacy_return",
+                    },
                 )
             if result.status == OperationStatus.UNKNOWN:
                 # Unknown state means we cannot safely decide whether another
@@ -1865,7 +1885,11 @@ class SprunkiGamePlayer:
                     context,
                     OperationStatus.UNKNOWN,
                     "remove_button_verification_unknown",
-                    details={"attempts": attempts, "fallback": "legacy_return"},
+                    details={
+                        **result_details,
+                        "attempts": attempts,
+                        "fallback": "legacy_return",
+                    },
                 )
 
             after = self._capture_stable_placement_snapshot(
@@ -1877,7 +1901,11 @@ class SprunkiGamePlayer:
                     context,
                     OperationStatus.UNKNOWN,
                     "remove_button_post_click_state_unknown",
-                    details={"attempts": attempts, "fallback": "legacy_return"},
+                    details={
+                        **(result.details or {}),
+                        "attempts": attempts,
+                        "fallback": "legacy_return",
+                    },
                 )
             if self._return_state_is_empty(after, target_slot_index, current_baseline):
                 empty_scope = self._return_empty_scope(
@@ -1890,7 +1918,11 @@ class SprunkiGamePlayer:
                         context,
                         OperationStatus.UNKNOWN,
                         "remove_button_empty_scope_unknown",
-                        details={"attempts": attempts, "fallback": "legacy_return"},
+                        details={
+                            **(result.details or {}),
+                            "attempts": attempts,
+                            "fallback": "legacy_return",
+                        },
                     )
                 return self._operation_result(
                     context,
@@ -1916,7 +1948,11 @@ class SprunkiGamePlayer:
                     context,
                     OperationStatus.UNKNOWN,
                     "remove_button_target_state_unknown",
-                    details={"attempts": attempts, "fallback": "legacy_return"},
+                    details={
+                        **(result.details or {}),
+                        "attempts": attempts,
+                        "fallback": "legacy_return",
+                    },
                 )
             current_baseline = after
 
@@ -6598,22 +6634,91 @@ class SprunkiGamePlayer:
             "operationId": getattr(operation_context, "operation_id", None),
         }
 
-    @staticmethod
-    def _visual_fallback_eligible(result, action_attempted):
-        """Allow visual fallback only for an attempted, unresolved action."""
+    def _visual_stop_allows_read_only_fallback(self, result) -> bool:
+        """Return whether a STOPPED result still permits a visual read.
+
+        A per-operation deadline or a recoverable watchdog interruption may
+        happen after the gesture was delivered.  The screenshot is read-only
+        and is therefore still useful to reconcile that gesture.  Explicit
+        cancellation, a hard timeout, and a safety latch remain authoritative
+        and must not be prolonged by visual work.
+        """
+        if result is None or result.status != OperationStatus.STOPPED:
+            return True
+        if self._terminal_stop_requested():
+            return False
+        message = str(getattr(result, "message", "") or "").strip().lower()
+        if message == "operation_deadline_exceeded":
+            return True
+        if message in {
+            "watchdog_idle_timeout",
+            "watchdog_idle_cleanup_interrupted",
+        }:
+            return self._watchdog_idle_recovery_requested()
+        if message == "stop_requested":
+            return self._watchdog_idle_recovery_requested()
+        return False
+
+    def _visual_fallback_skip_reason(self, result, action_attempted) -> str:
+        """Explain why the final visual check was not run."""
+        if result is None:
+            return "primary_result_missing"
+        if not action_attempted:
+            return "action_not_attempted"
+        details = dict(getattr(result, "details", {}) or {})
+        if details.get("aggregateFallback"):
+            return "primary_aggregate_success"
+        if result.status in {
+            OperationStatus.VERIFIED,
+            OperationStatus.ALREADY_PLACED,
+            OperationStatus.ALREADY_EMPTY,
+        }:
+            return "primary_success"
+        if result.status == OperationStatus.STOPPED and not self._visual_stop_allows_read_only_fallback(result):
+            return "terminal_stop"
+        if details.get("actionDelivered") is False and not details.get("actionAmbiguous"):
+            return "action_not_delivered"
+        return "primary_result_not_eligible"
+
+    def _visual_fallback_eligible(self, result, action_attempted):
+        """Allow visual fallback for every unresolved delivered gesture.
+
+        The semantic verifier remains primary.  ``aggregateFallback`` is an
+        accepted primary success under the current policy, so it deliberately
+        skips image verification.  For an actual delivered (or transport-
+        ambiguous) action, however, the image check is not restricted to a
+        message whitelist: UNKNOWN, semantic FAILED, and recoverable STOPPED
+        results must all get one final read-only visual opportunity.
+        """
         if not action_attempted or result is None:
+            return False
+        details = dict(getattr(result, "details", {}) or {})
+        if details.get("aggregateFallback"):
             return False
         if result.status in {
             OperationStatus.VERIFIED,
             OperationStatus.ALREADY_PLACED,
             OperationStatus.ALREADY_EMPTY,
+        }:
+            return False
+        if result.status not in {
+            OperationStatus.UNKNOWN,
+            OperationStatus.FAILED,
             OperationStatus.STOPPED,
         }:
             return False
-        details = dict(getattr(result, "details", {}) or {})
-        if details.get("aggregateFallback"):
+        if result.status == OperationStatus.STOPPED and not self._visual_stop_allows_read_only_fallback(result):
             return False
-        message = str(getattr(result, "message", "") or "").lower()
+
+        action_delivered = details.get("actionDelivered")
+        action_ambiguous = bool(details.get("actionAmbiguous"))
+        if action_delivered is False and not action_ambiguous:
+            return False
+
+        # These messages describe a failure before a physical gesture could
+        # be sent.  They are kept as a guard for callers that do not yet carry
+        # explicit action metadata.
+        message = str(getattr(result, "message", "") or "").strip().lower()
         if message in {
             "invalid_target_slot",
             "input_budget_exhausted",
@@ -6622,26 +6727,12 @@ class SprunkiGamePlayer:
             "precision_click_execution_failed",
             "remove_button_input_budget_exhausted",
             "runtime_layout_unknown",
-            "panel_opened_during_set",
-            "panel_recovery_failed",
             "slot_hitbox_unknown",
             "slot_target_unknown",
             "slot_bounds_unknown",
-        }:
+        } and not action_ambiguous:
             return False
-        if result.status == OperationStatus.UNKNOWN:
-            return True
-        return message in {
-            "expected_transition_not_observed",
-            "transition_not_observed",
-            "no_comparable_signal",
-            "transition_seen_but_not_stable",
-            "stale_snapshot_stream",
-            "cdp_drag_inconclusive",
-            "carpet_result_not_target_specific",
-            "post_carpet_state_unknown",
-            "post_precision_state_unknown",
-        }
+        return True
 
     def _visual_capture_after_frames(self, arm):
         """Capture post-action frames for a previously armed ROI."""
@@ -6742,9 +6833,97 @@ class SprunkiGamePlayer:
             self._visual_empty_references = {}
         self._visual_active_geometry_fingerprint = None
 
+    def _visual_record_carpet_candidate(
+        self,
+        visual_arm,
+        slot_index,
+        group_input_start,
+        context,
+    ):
+        """Capture one slot-group's post-action frames, including aborts.
+
+        A carpet set can be interrupted after one or more clicks in a slot
+        group.  Those clicks still need their own visual reconciliation before
+        the coordinator reports the set as unresolved.  This helper is
+        intentionally read-only and never creates another input attempt.
+        """
+        if not isinstance(visual_arm, dict) or context is None:
+            return False
+        if getattr(context, "input_attempts", 0) <= int(group_input_start or 0):
+            return False
+        after_frames = self._visual_capture_after_frames(visual_arm)
+        candidates = getattr(self, "_visual_carpet_candidates", None)
+        if not isinstance(candidates, list):
+            candidates = []
+            self._visual_carpet_candidates = candidates
+        candidates.append(
+            {
+                "slotIndex": slot_index,
+                "arm": visual_arm,
+                "afterFrames": after_frames,
+                "actionAttempted": True,
+                "actionDelivered": True,
+                "actionAmbiguous": False,
+            }
+        )
+        return True
+
+    def _visual_evaluate_carpet_candidates(self):
+        """Evaluate pending slot-group images without assigning whole-set state."""
+        candidates = getattr(self, "_visual_carpet_candidates", None)
+        if not isinstance(candidates, list) or not candidates:
+            return 0
+
+        visual_progress = 0
+        for candidate in list(candidates):
+            if not candidate.get("actionAttempted"):
+                continue
+            visual_result = self._visual_classify_after_frames(
+                candidate.get("arm"),
+                candidate.get("afterFrames") or (),
+            )
+            self._visual_last_result = visual_result
+            self._visual_carpet_visual_attempted = True
+            candidate["visualFallbackAttempted"] = True
+            candidate["visualResult"] = {
+                "status": visual_result.status,
+                "message": visual_result.message,
+                "details": dict(visual_result.details or {}),
+            }
+            try:
+                normalized_slot_index = int(candidate.get("slotIndex"))
+            except (TypeError, ValueError):
+                continue
+            visual_evidence = getattr(self, "_visual_carpet_visual_evidence", None)
+            if not isinstance(visual_evidence, dict):
+                visual_evidence = {}
+                self._visual_carpet_visual_evidence = visual_evidence
+            visual_evidence[normalized_slot_index] = {
+                "status": visual_result.status,
+                "message": visual_result.message,
+                **dict(visual_result.details or {}),
+            }
+            if not visual_result.verified:
+                continue
+            progress_slots = getattr(self, "_visual_carpet_progress_slots", None)
+            if not isinstance(progress_slots, set):
+                progress_slots = set()
+                self._visual_carpet_progress_slots = progress_slots
+            progress_slots.add(normalized_slot_index)
+            visual_progress += 1
+
+        self._visual_carpet_candidates = []
+        return visual_progress
+
     def _visual_complete_fallback(self, arm, result, *, action_attempted):
         """Run the final visual check and preserve the primary result on miss."""
         if not isinstance(arm, dict):
+            if result is not None and action_attempted:
+                result.details = {
+                    **(getattr(result, "details", {}) or {}),
+                    "visualFallbackAttempted": False,
+                    "visualFallbackSkipReason": "visual_arm_unavailable",
+                }
             return result
         if not self._visual_fallback_eligible(result, action_attempted):
             primary_details = dict(getattr(result, "details", {}) or {}) if result is not None else {}
@@ -6761,10 +6940,29 @@ class SprunkiGamePlayer:
             )
             if primary_proves_target:
                 self._visual_remember_empty_reference(arm)
+            if result is not None and action_attempted and result.status not in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_PLACED,
+                OperationStatus.ALREADY_EMPTY,
+            }:
+                result.details = {
+                    **primary_details,
+                    "visualFallbackAttempted": False,
+                    "visualFallbackSkipReason": self._visual_fallback_skip_reason(
+                        result,
+                        action_attempted,
+                    ),
+                }
             return result
         roi = arm.get("roi")
         fingerprint = arm.get("geometryFingerprint")
         if not isinstance(roi, VisualROI) or not fingerprint:
+            if result is not None:
+                result.details = {
+                    **(result.details or {}),
+                    "visualFallbackAttempted": False,
+                    "visualFallbackSkipReason": "visual_roi_unavailable",
+                }
             return result
         after_frames = self._visual_capture_after_frames(arm)
         target_slot_index = arm.get("targetSlot")
@@ -6772,6 +6970,7 @@ class SprunkiGamePlayer:
         self._visual_last_result = visual_result
         diagnostic = {
             "visualFallback": True,
+            "visualFallbackAttempted": True,
             "visualFallbackStatus": visual_result.status,
             "visualFallbackReason": visual_result.message,
             "visualEvidence": dict(visual_result.details or {}),
@@ -11400,6 +11599,7 @@ class SprunkiGamePlayer:
             self._visual_carpet_progress_slots = set()
             self._visual_carpet_candidates = []
             self._visual_carpet_visual_evidence = {}
+            self._visual_carpet_visual_attempted = False
 
             if context is not None and context.baseline is None:
                 baseline = self._capture_stable_placement_snapshot(
@@ -11476,6 +11676,10 @@ class SprunkiGamePlayer:
                         and set_abort_reason == "panel_opened_during_set"
                         and set_attempt <= self.CARPET_SET_RERUN_LIMIT
                     ):
+                        # Reconcile any clicks delivered before the panel was
+                        # detected before replaying the bounded set.  The
+                        # replay must not erase evidence from that first set.
+                        self._visual_evaluate_carpet_candidates()
                         print(
                             f"      🔁 Panel recovery succeeded; re-running "
                             f"carpet set {set_num} ({set_attempt}/{self.CARPET_SET_RERUN_LIMIT})"
@@ -11488,6 +11692,7 @@ class SprunkiGamePlayer:
                     not set_success
                     and set_abort_reason == "panel_opened_during_set"
                 ):
+                    self._visual_evaluate_carpet_candidates()
                     print(
                         "   🛑 Panel recovery retry budget exhausted; "
                         "stopping before the next carpet set"
@@ -11507,6 +11712,7 @@ class SprunkiGamePlayer:
                         "   🛑 Panel could not be closed; stopping carpet input "
                         "and requesting coordinator Re-Run recovery"
                     )
+                    self._visual_evaluate_carpet_candidates()
                     return False
                 if set_abort_reason in {
                     "runtime_layout_unknown",
@@ -11520,6 +11726,7 @@ class SprunkiGamePlayer:
                         "   🛑 Carpet set stopped because live input geometry "
                         f"was not proven ({set_abort_reason})"
                     )
+                    self._visual_evaluate_carpet_candidates()
                     return False
                 
                 # Check progress after set
@@ -11527,6 +11734,7 @@ class SprunkiGamePlayer:
                 after_count = self._get_board_progress_count(after_state)
                 if after_count is None:
                     print("   ⚠️ Post-set board state is UNKNOWN; stopping without another set")
+                    self._visual_evaluate_carpet_candidates()
                     return False
                 progress = current_count - after_count
 
@@ -11558,34 +11766,7 @@ class SprunkiGamePlayer:
                         "skipping image fallback"
                     )
                 elif progress <= 0 and self._visual_carpet_candidates:
-                    for candidate in list(self._visual_carpet_candidates):
-                        if not candidate.get("actionAttempted"):
-                            continue
-                        visual_result = self._visual_classify_after_frames(
-                            candidate.get("arm"),
-                            candidate.get("afterFrames") or (),
-                        )
-                        self._visual_last_result = visual_result
-                        if visual_result.verified:
-                            slot_index = candidate.get("slotIndex")
-                            try:
-                                normalized_slot_index = int(slot_index)
-                                self._visual_carpet_progress_slots.add(
-                                    normalized_slot_index
-                                )
-                                self._visual_carpet_visual_evidence[
-                                    normalized_slot_index
-                                ] = dict(visual_result.details or {})
-                                visual_progress += 1
-                            except (TypeError, ValueError):
-                                pass
-                        else:
-                            candidate["visualResult"] = {
-                                "status": visual_result.status,
-                                "message": visual_result.message,
-                                "details": dict(visual_result.details or {}),
-                            }
-                    self._visual_carpet_candidates = []
+                    visual_progress = self._visual_evaluate_carpet_candidates()
                 elif progress > 0:
                     # Aggregate progress is already an accepted primary
                     # result; do not run or retain a visual candidate for it.
@@ -11730,6 +11911,9 @@ class SprunkiGamePlayer:
         """
         ðŸ‘† NEW: Execute clicking in sequential order (slot 0 â†’ slot 1 â†’ slot 2...)
         """
+        visual_arm = None
+        active_slot_index = None
+        group_input_start = 0
         try:
             self._last_carpet_set_abort_reason = None
             print(f"   ðŸ‘† Executing sequential clicking for set {set_num}")
@@ -11836,6 +12020,7 @@ class SprunkiGamePlayer:
                     visual_slot,
                     operation_context=context,
                 )
+                active_slot_index = slot_index
                 group_input_start = context.input_attempts
                 
                 # Execute all coordinates for this slot
@@ -11844,6 +12029,12 @@ class SprunkiGamePlayer:
                         stop_requested=self.stop_event.is_set()
                     ):
                         print("      🛑 Carpet input budget exhausted")
+                        self._visual_record_carpet_candidate(
+                            visual_arm,
+                            slot_index,
+                            group_input_start,
+                            context,
+                        )
                         return False
 
                     safety = self._carpet_click_safety(
@@ -11870,15 +12061,39 @@ class SprunkiGamePlayer:
                                 phase="cleanup_set_input",
                             ):
                                 self._last_carpet_set_abort_reason = "panel_recovery_failed"
+                                self._visual_record_carpet_candidate(
+                                    visual_arm,
+                                    slot_index,
+                                    group_input_start,
+                                    context,
+                                )
                                 return False
                             runtime_layout = self._inspect_runtime_layout_bounds()
                             if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
                                 self._last_carpet_set_abort_reason = "panel_recovery_layout_unknown"
+                                self._visual_record_carpet_candidate(
+                                    visual_arm,
+                                    slot_index,
+                                    group_input_start,
+                                    context,
+                                )
                                 return False
                             self._last_carpet_set_abort_reason = "panel_opened_during_set"
+                            self._visual_record_carpet_candidate(
+                                visual_arm,
+                                slot_index,
+                                group_input_start,
+                                context,
+                            )
                             return False
                         self._last_carpet_set_abort_reason = str(
                             safety.get("reason") or "unsafe_carpet_coordinate"
+                        )
+                        self._visual_record_carpet_candidate(
+                            visual_arm,
+                            slot_index,
+                            group_input_start,
+                            context,
                         )
                         return False
 
@@ -11913,6 +12128,12 @@ class SprunkiGamePlayer:
                             "stopping before the next coordinate"
                         )
                         self._last_carpet_set_abort_reason = "post_click_layout_unknown"
+                        self._visual_record_carpet_candidate(
+                            visual_arm,
+                            slot_index,
+                            group_input_start,
+                            context,
+                        )
                         return False
                     if self._carpet_panel_targets(post_layout):
                         print("      ⚠️ A panel opened during carpet bombing; closing and stopping this set")
@@ -11926,29 +12147,26 @@ class SprunkiGamePlayer:
                             if closed
                             else "panel_recovery_failed"
                         )
+                        self._visual_record_carpet_candidate(
+                            visual_arm,
+                            slot_index,
+                            group_input_start,
+                            context,
+                        )
                         return False
                     runtime_layout = post_layout
                     
                     # Small delay between clicks within same slot
                     time.sleep(0.03)
 
-                if (
-                    visual_arm is not None
-                    and context.input_attempts > group_input_start
-                ):
-                    after_frames = self._visual_capture_after_frames(visual_arm)
-                    candidates = getattr(self, "_visual_carpet_candidates", None)
-                    if not isinstance(candidates, list):
-                        candidates = []
-                        self._visual_carpet_candidates = candidates
-                    candidates.append(
-                        {
-                            "slotIndex": slot_index,
-                            "arm": visual_arm,
-                            "afterFrames": after_frames,
-                            "actionAttempted": True,
-                        }
-                    )
+                self._visual_record_carpet_candidate(
+                    visual_arm,
+                    slot_index,
+                    group_input_start,
+                    context,
+                )
+                visual_arm = None
+                active_slot_index = None
                 
                 # Slightly longer delay between slots for visual feedback
                 if slot_index != sorted_slot_indices[-1]:  # Not last slot
@@ -11962,6 +12180,12 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print(f"âŒ Error executing clicking set: {e}")
+            self._visual_record_carpet_candidate(
+                visual_arm,
+                active_slot_index,
+                group_input_start,
+                context if 'context' in locals() else None,
+            )
             return False
 
     def get_comprehensive_slot_state(self):
@@ -13486,6 +13710,12 @@ class SprunkiGamePlayer:
         UPDATED: Always use CDP first for game operations with fallback
         """
         try:
+            self._last_return_click_delivery = {
+                "transport": "unknown",
+                "actionAttempted": False,
+                "actionDelivered": False,
+                "actionAmbiguous": False,
+            }
             if getattr(self, "_active_operation_context", None) is None:
                 print("❌ Return click rejected without an active OperationContext")
                 return False
@@ -13502,24 +13732,70 @@ class SprunkiGamePlayer:
                     f"🌐 Using strict CDP Remove input at reference "
                     f"({click_x}, {click_y})"
                 )
-                return self._execute_remove_button_cdp_click(
+                delivered = self._execute_remove_button_cdp_click(
                     click_x,
                     click_y,
                     target_slot,
                     context,
                 )
+                delivery = dict(
+                    getattr(self, "_last_remove_click_delivery", {}) or {}
+                )
+                gesture_started = "gestureSuccess" in delivery
+                self._last_return_click_delivery = {
+                    **delivery,
+                    "transport": delivery.get(
+                        "transport", "cdp_exact_game_page"
+                    ),
+                    "actionAttempted": bool(gesture_started),
+                    "actionDelivered": bool(delivered),
+                    "actionAmbiguous": bool(gesture_started and not delivered),
+                }
+                return delivered
             # 🌐 Choose the transport before sending input.  If a browser
             # target exists but CDP becomes inconclusive, a second PyAutoGUI
             # click could duplicate a partially delivered return gesture.
             ws_url = self._get_websocket_url() if use_cdp else None
             if ws_url:
                 print(f"🌐 Using CDP for game click at ({click_x}, {click_y})")
+                self._last_return_click_delivery = {
+                    "transport": "cdp_game_page",
+                    "actionAttempted": True,
+                    "actionDelivered": False,
+                    "actionAmbiguous": True,
+                }
                 cdp_success = self._execute_cdp_single_click(click_x, click_y)
+                self._last_return_click_delivery.update(
+                    {
+                        "actionDelivered": bool(cdp_success),
+                        "actionAmbiguous": not bool(cdp_success),
+                    }
+                )
                 print("✅ CDP click successful" if cdp_success else "🛑 CDP click inconclusive; no duplicate fallback")
                 return bool(cdp_success)
 
             print(f"🖱️ Using PyAutoGUI for game click at ({click_x}, {click_y})")
-            return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
+            pyautogui_success = self._execute_pyautogui_single_click(
+                click_x,
+                click_y,
+                domain_adj,
+            )
+            delivery = dict(
+                getattr(self, "_last_return_click_delivery", {}) or {}
+            )
+            self._last_return_click_delivery = {
+                **delivery,
+                "transport": "pyautogui",
+                "actionAttempted": bool(
+                    delivery.get("actionAttempted", pyautogui_success)
+                ),
+                "actionDelivered": bool(pyautogui_success),
+                "actionAmbiguous": bool(
+                    delivery.get("actionAmbiguous")
+                    or (delivery.get("actionAttempted") and not pyautogui_success)
+                ),
+            }
+            return bool(pyautogui_success)
                 
         except Exception as e:
             print(f"❌ Single return click execution error: {e}")
@@ -13751,6 +14027,12 @@ class SprunkiGamePlayer:
             ws_url = self._get_websocket_url()
             if ws_url:
                 cdp_attempted = True
+                self._last_drag_delivery = {
+                    "transport": "cdp_game_page",
+                    "actionAttempted": True,
+                    "actionDelivered": False,
+                    "actionAmbiguous": True,
+                }
                 try:
                     ws = websocket.create_connection(ws_url, timeout=30)
                     drag_executed, action_start_time, drop_time = self._execute_dynamic_drag_cdp(
@@ -13759,6 +14041,12 @@ class SprunkiGamePlayer:
                         is_first_icon,
                     )
                     ws.close()
+                    self._last_drag_delivery.update(
+                        {
+                            "actionDelivered": bool(drag_executed),
+                            "actionAmbiguous": not bool(drag_executed),
+                        }
+                    )
                 except Exception as error:
                     print(f"⚠️ CDP drag execution failed: {error}")
                     drag_executed = False
@@ -13767,7 +14055,16 @@ class SprunkiGamePlayer:
         # Do not send a second physical gesture through PyAutoGUI in that
         # ambiguous state; the verifier will classify the resulting state.
         if cdp_attempted and not drag_executed:
-            result = self._operation_result(context, OperationStatus.UNKNOWN, "cdp_drag_inconclusive")
+            result = self._operation_result(
+                context,
+                OperationStatus.UNKNOWN,
+                "cdp_drag_inconclusive",
+                details={
+                    "actionAttempted": True,
+                    "actionDelivered": False,
+                    "actionAmbiguous": True,
+                },
+            )
             result = self._visual_complete_fallback(
                 visual_arm,
                 result,
@@ -13789,7 +14086,25 @@ class SprunkiGamePlayer:
                 drop_time = time.monotonic()
 
         if not drag_executed:
-            result = self._operation_result(context, OperationStatus.FAILED, "drag_execution_failed")
+            delivery = dict(getattr(self, "_last_drag_delivery", {}) or {})
+            action_ambiguous = bool(delivery.get("actionAmbiguous"))
+            result = self._operation_result(
+                context,
+                OperationStatus.FAILED,
+                "drag_execution_failed",
+                details={
+                    "actionAttempted": bool(delivery.get("actionAttempted")),
+                    "actionDelivered": bool(delivery.get("actionDelivered")),
+                    "actionAmbiguous": action_ambiguous,
+                    "inputDelivery": delivery,
+                },
+            )
+            if action_ambiguous:
+                result = self._visual_complete_fallback(
+                    visual_arm,
+                    result,
+                    action_attempted=True,
+                )
             return result
 
         observed_result = observe_until_verified(
@@ -13822,6 +14137,12 @@ class SprunkiGamePlayer:
                 "drop_time": drop_time,
                 "verified_at": time.monotonic() if observed_result.status == OperationStatus.VERIFIED else None,
                 "inputAttempt": context.input_attempts,
+                "actionAttempted": True,
+                "actionDelivered": True,
+                "actionAmbiguous": False,
+                "inputDelivery": dict(
+                    getattr(self, "_last_drag_delivery", {}) or {}
+                ),
             },
             reads=context.read_count,
         )
@@ -17173,6 +17494,12 @@ class SprunkiGamePlayer:
 
     def _execute_pyautogui_drag(self, start_x, start_y, end_x, end_y, delays, domain_adj, is_first_icon):
         """Execute drag using PyAutoGUI (IMPROVED with stability enhancements)"""
+        self._last_drag_delivery = {
+            "transport": "pyautogui",
+            "actionAttempted": False,
+            "actionDelivered": False,
+            "actionAmbiguous": False,
+        }
         # 🔥 KIỂM TRA AN TOÀN TỌA ĐỘ TRƯỚC KHI THỰC HIỆN
         if not self._are_coords_safe(start_x, start_y, end_x, end_y):
             print("   ❌ PyAutoGUI drag bị hủy do tọa độ không an toàn.")
@@ -17224,6 +17551,12 @@ class SprunkiGamePlayer:
             # ENHANCED MOUSE DOWN with verification
             print("🖱 MOUSE DOWN - holding with enhanced timing...")
             pyautogui.mouseDown(button='left')
+            self._last_drag_delivery.update(
+                {
+                    "actionAttempted": True,
+                    "actionAmbiguous": True,
+                }
+            )
             
             # 🔥 CRITICAL: Extended hold time để game nhận diện
             extended_hold = delays['hold'] * 1.5  # Tăng thêm 50%
@@ -17267,6 +17600,12 @@ class SprunkiGamePlayer:
             # 🔥 ENHANCED MOUSE RELEASE
             print("🖱 RELEASING mouse with verification...")
             pyautogui.mouseUp(button='left')
+            self._last_drag_delivery.update(
+                {
+                    "actionDelivered": True,
+                    "actionAmbiguous": False,
+                }
+            )
             
             # Verify release completed
             print("   ✅ Mouse UP completed")
@@ -17285,6 +17624,15 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print(f"❌ IMPROVED PyAutoGUI drag failed: {e}")
+            self._last_drag_delivery.update(
+                {
+                    "actionDelivered": False,
+                    "actionAmbiguous": bool(
+                        self._last_drag_delivery.get("actionAttempted")
+                    ),
+                    "error": str(e),
+                }
+            )
             # Emergency mouse release
             try:
                 pyautogui.mouseUp(button='left')
@@ -17804,7 +18152,32 @@ class SprunkiGamePlayer:
                 operation_context=context,
             )
             if not executed:
-                return self._operation_result(context, OperationStatus.FAILED, "precision_click_execution_failed")
+                delivery = dict(
+                    getattr(self, "_last_return_click_delivery", {}) or {}
+                )
+                action_ambiguous = bool(delivery.get("actionAmbiguous"))
+                failed_result = self._operation_result(
+                    context,
+                    OperationStatus.FAILED,
+                    "precision_click_execution_failed",
+                    details={
+                        "actionAttempted": bool(
+                            delivery.get("actionAttempted")
+                        ),
+                        "actionDelivered": bool(
+                            delivery.get("actionDelivered")
+                        ),
+                        "actionAmbiguous": action_ambiguous,
+                        "inputDelivery": delivery,
+                    },
+                )
+                if action_ambiguous:
+                    failed_result = self._visual_complete_fallback(
+                        visual_arm,
+                        failed_result,
+                        action_attempted=True,
+                    )
+                return failed_result
 
             observed_result = observe_until_verified(
                 before_snapshot,
@@ -17832,7 +18205,15 @@ class SprunkiGamePlayer:
                 observed_result.status,
                 observed_result.message,
                 evidence=observed_result.evidence,
-                details=observed_result.details,
+                details={
+                    **(observed_result.details or {}),
+                    "actionAttempted": True,
+                    "actionDelivered": True,
+                    "actionAmbiguous": False,
+                    "inputDelivery": dict(
+                        getattr(self, "_last_return_click_delivery", {}) or {}
+                    ),
+                },
                 reads=context.read_count,
             )
             if getattr(self, "verifier_accept_aggregate_progress", True):
@@ -17945,6 +18326,18 @@ class SprunkiGamePlayer:
                 )
                 or {}
             )
+            visual_fallback_attempted = bool(
+                getattr(self, "_visual_carpet_visual_attempted", False)
+            )
+            visual_fallback_details = {
+                "visualFallbackAttempted": visual_fallback_attempted,
+                "visualFallbackStatus": (
+                    "INCONCLUSIVE" if visual_fallback_attempted else None
+                ),
+                "visualFallbackEvidenceBySlot": dict(
+                    getattr(self, "_visual_carpet_visual_evidence", {}) or {}
+                ),
+            }
             after_snapshot = self._capture_stable_placement_snapshot(
                 timeout_ms=1000,
                 context=context,
@@ -17958,6 +18351,7 @@ class SprunkiGamePlayer:
                         evidence=("visual_transition",),
                         details={
                             "visualFallback": True,
+                            "visualFallbackAttempted": True,
                             "verificationMethod": "image_fallback",
                             "verificationConfidence": "visual",
                             "targetSpecific": True,
@@ -17968,7 +18362,12 @@ class SprunkiGamePlayer:
                             "visualEvidence": visual_evidence,
                         },
                     )
-                return self._operation_result(context, OperationStatus.UNKNOWN, "post_carpet_state_unknown")
+                return self._operation_result(
+                    context,
+                    OperationStatus.UNKNOWN,
+                    "post_carpet_state_unknown",
+                    details=visual_fallback_details,
+                )
 
             evaluation = evaluate_transition(
                 before_snapshot,
@@ -17988,6 +18387,7 @@ class SprunkiGamePlayer:
                     evidence=evaluation.evidence,
                     details={
                         **evaluation.details,
+                        **visual_fallback_details,
                         "targetSpecific": evaluation.target_specific,
                         "aggregateFallback": evaluation.aggregate_fallback,
                         "softVerified": bool(
@@ -18013,6 +18413,7 @@ class SprunkiGamePlayer:
                     evidence=("visual_transition",),
                     details={
                         "visualFallback": True,
+                        "visualFallbackAttempted": True,
                         "verificationMethod": "image_fallback",
                         "verificationConfidence": "visual",
                         "targetSpecific": True,
@@ -18040,6 +18441,7 @@ class SprunkiGamePlayer:
                     "target_empty_after_bounded_carpet",
                     evidence=("target_empty_after_bounded_carpet",),
                     details={
+                        **visual_fallback_details,
                         "targetSpecific": empty_scope == "target",
                         "aggregateFallback": empty_scope == "aggregate",
                         "softVerified": empty_scope == "aggregate",
@@ -18047,8 +18449,18 @@ class SprunkiGamePlayer:
                     },
                 )
             if not success:
-                return self._operation_result(context, OperationStatus.FAILED, "carpet_no_progress")
-            return self._operation_result(context, OperationStatus.UNKNOWN, "carpet_result_not_target_specific")
+                return self._operation_result(
+                    context,
+                    OperationStatus.FAILED,
+                    "carpet_no_progress",
+                    details=visual_fallback_details,
+                )
+            return self._operation_result(
+                context,
+                OperationStatus.UNKNOWN,
+                "carpet_result_not_target_specific",
+                details=visual_fallback_details,
+            )
         except Exception as e:
             print(f"â Œ Error in carpet bombing return: {e}")
             return self._operation_result(
@@ -18090,6 +18502,8 @@ class SprunkiGamePlayer:
         return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
 
     def _execute_pyautogui_single_click(self, click_x, click_y, domain_adj):
+        if not isinstance(getattr(self, "_last_return_click_delivery", None), dict):
+            self._last_return_click_delivery = {}
         # 🔥 KIỂM TRA AN TOÀN TỌA ĐỘ TRƯỚC KHI THỰC HIỆN
         if not self._are_coords_safe(click_x, click_y):
             print("   ❌ PyAutoGUI click bị hủy do tọa độ không an toàn.")
@@ -18105,7 +18519,20 @@ class SprunkiGamePlayer:
             time.sleep(0.1)
             
             # Single click
+            self._last_return_click_delivery.update(
+                {
+                    "transport": "pyautogui",
+                    "actionAttempted": True,
+                    "actionAmbiguous": True,
+                }
+            )
             pyautogui.click(button='left')
+            self._last_return_click_delivery.update(
+                {
+                    "actionDelivered": True,
+                    "actionAmbiguous": False,
+                }
+            )
             
             # Wait for click to register
             click_wait = 0.2 * domain_adj['stability_factor']
@@ -18116,6 +18543,15 @@ class SprunkiGamePlayer:
             
         except Exception as e:
             print(f"âŒ PyAutoGUI single click failed: {e}")
+            self._last_return_click_delivery.update(
+                {
+                    "actionDelivered": False,
+                    "actionAmbiguous": bool(
+                        self._last_return_click_delivery.get("actionAttempted")
+                    ),
+                    "error": str(e),
+                }
+            )
             return False
 
     # ================================================================
