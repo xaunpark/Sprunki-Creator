@@ -965,13 +965,50 @@ class SprunkiGamePlayer:
         attempts=None,
         reads=None,
     ):
+        normalized_details = dict(details or {})
+        message_text = str(message or "").strip().lower()
+        # A visual check cannot run when no physical gesture was sent.  Keep
+        # that distinction explicit in the result so callers do not mistake
+        # a pre-action/input failure for a failed visual verification chain.
+        pre_action_messages = {
+            "missing_stable_baseline",
+            "baseline_unavailable",
+            "invalid_target_slot",
+            "input_budget_exhausted",
+            "input_budget_or_deadline_exhausted",
+            "remove_button_input_budget_exhausted",
+            "runtime_layout_unknown",
+            "panel_recovery_layout_unknown",
+            "slot_hitbox_unknown",
+            "slot_target_unknown",
+            "slot_bounds_unknown",
+            "another_operation_is_active",
+        }
+        action_not_attempted = normalized_details.get("actionAttempted") is False
+        if status == OperationStatus.FAILED and (
+            action_not_attempted or message_text in pre_action_messages
+        ):
+            normalized_details.setdefault("visualFallbackAttempted", False)
+            normalized_details.setdefault(
+                "visualFallbackStatus", "NOT_APPLICABLE"
+            )
+            normalized_details.setdefault(
+                "visualFallbackSkipReason", "action_not_attempted"
+            )
+            normalized_details.setdefault(
+                "verificationChain",
+                {
+                    "primary": "NOT_ATTEMPTED",
+                    "visual": "NOT_APPLICABLE",
+                },
+            )
         return OperationResult(
             status,
             operation_id=context.operation_id if context else "",
             direction=context.direction if context else "",
             message=message,
             evidence=tuple(evidence or ()),
-            details=dict(details or {}),
+            details=normalized_details,
             attempts=context.input_attempts if context and attempts is None else (attempts or 0),
             reads=context.read_count if context and reads is None else (reads or 0),
             recovery_attempts=context.recovery_attempts if context else 0,
@@ -1754,6 +1791,8 @@ class SprunkiGamePlayer:
             int(getattr(self, "remove_button_verify_timeout_ms", 1000)),
         )
 
+        verification_inconclusive = False
+        last_inconclusive_details = {}
         for attempt_index, candidate in enumerate(candidates, 1):
             if not context.can_send_input(stop_requested=self.stop_event.is_set()):
                 return self._operation_result(
@@ -1814,6 +1853,11 @@ class SprunkiGamePlayer:
                 ),
             }
             attempts.append(attempt)
+            if result.status == OperationStatus.UNKNOWN or (
+                result.details or {}
+            ).get("visualFallbackStatus") == VISUAL_INCONCLUSIVE:
+                verification_inconclusive = True
+                last_inconclusive_details = dict(result.details or {})
 
             if self._return_result_proves_completion(result):
                 details = dict(result.details or {})
@@ -1878,20 +1922,12 @@ class SprunkiGamePlayer:
                         "fallback": "legacy_return",
                     },
                 )
-            if result.status == OperationStatus.UNKNOWN:
-                # Unknown state means we cannot safely decide whether another
-                # jitter click is still aimed at the occupied target.
-                return self._operation_result(
-                    context,
-                    OperationStatus.UNKNOWN,
-                    "remove_button_verification_unknown",
-                    details={
-                        **result_details,
-                        "attempts": attempts,
-                        "fallback": "legacy_return",
-                    },
-                )
-
+            # UNKNOWN/FAILED after a delivered Remove click is not a terminal
+            # result by itself.  The precision-return helper has already run
+            # the complete verifier chain (target runtime, aggregate runtime,
+            # then image fallback).  Reconcile one stable post-click snapshot
+            # before deciding whether this jitter point failed and the next
+            # Remove candidate should be tried.
             after = self._capture_stable_placement_snapshot(
                 timeout_ms=verify_timeout_ms,
                 context=context,
@@ -1954,13 +1990,35 @@ class SprunkiGamePlayer:
                         "fallback": "legacy_return",
                     },
                 )
+            if result.status == OperationStatus.UNKNOWN:
+                print(
+                    "   ↪️ Remove verifier chain was inconclusive; "
+                    "continuing with the next bounded Remove candidate"
+                )
             current_baseline = after
 
+        final_status = (
+            OperationStatus.UNKNOWN
+            if verification_inconclusive
+            else OperationStatus.FAILED
+        )
+        final_message = (
+            "remove_button_verification_inconclusive"
+            if verification_inconclusive
+            else "remove_button_attempts_exhausted"
+        )
         return self._operation_result(
             context,
-            OperationStatus.FAILED,
-            "remove_button_attempts_exhausted",
-            details={"attempts": attempts, "fallback": "legacy_return"},
+            final_status,
+            final_message,
+            details={
+                **last_inconclusive_details,
+                "attempts": attempts,
+                "fallback": "legacy_return",
+                "verificationChain": (
+                    "UNRESOLVED" if verification_inconclusive else "EXHAUSTED"
+                ),
+            },
         )
 
     def _try_remove_buttons_for_occupied_slots(
@@ -6734,6 +6792,74 @@ class SprunkiGamePlayer:
             return False
         return True
 
+    def _visual_mark_inconclusive(
+        self,
+        result,
+        *,
+        reason: str,
+        action_attempted: bool,
+        visual_applicable: bool = True,
+    ):
+        """Record an unavailable visual verifier without hiding the gap.
+
+        A delivered physical action with no usable visual arm is not a
+        business ``FAILED`` result: the final verifier was technically
+        inconclusive.  Convert only that case to ``UNKNOWN`` so the normal
+        recovery path can reconcile the board.  A pre-action failure remains
+        ``FAILED`` and is explicitly marked as not applicable instead.
+        """
+        if result is None:
+            return result
+
+        details = dict(getattr(result, "details", {}) or {})
+        outcome = VISUAL_INCONCLUSIVE if visual_applicable else "NOT_APPLICABLE"
+        primary_status = getattr(
+            getattr(result, "status", None), "value", getattr(result, "status", None)
+        )
+        primary_message = str(getattr(result, "message", "") or "")
+        details.update(
+            {
+                "visualFallbackAttempted": False,
+                "visualFallbackStatus": outcome,
+                "visualFallbackReason": str(reason),
+                "visualFallbackSkipReason": str(reason),
+                "visualFallbackApplicable": bool(visual_applicable),
+                "verificationChain": {
+                    "primary": "UNRESOLVED",
+                    "visual": outcome,
+                },
+                "primaryStatusBeforeVisualFallback": primary_status,
+                "primaryMessageBeforeVisualFallback": primary_message,
+            }
+        )
+
+        # Do not turn a terminal stop or an action that was never delivered
+        # into an UNKNOWN result.  Those are handled by their own safety or
+        # input-delivery paths.  Only a delivered/ambiguous action whose
+        # visual verifier was unavailable needs recovery reconciliation.
+        if (
+            visual_applicable
+            and bool(action_attempted)
+            and result.status == OperationStatus.FAILED
+        ):
+            evidence = tuple(getattr(result, "evidence", ()) or ())
+            if "visual_inconclusive" not in evidence:
+                evidence += ("visual_inconclusive",)
+            return OperationResult(
+                OperationStatus.UNKNOWN,
+                operation_id=getattr(result, "operation_id", ""),
+                direction=getattr(result, "direction", ""),
+                message=f"visual_fallback_inconclusive:{reason}",
+                evidence=evidence,
+                details=details,
+                attempts=getattr(result, "attempts", 0),
+                reads=getattr(result, "reads", 0),
+                recovery_attempts=getattr(result, "recovery_attempts", 0),
+            )
+
+        result.details = details
+        return result
+
     def _visual_capture_after_frames(self, arm):
         """Capture post-action frames for a previously armed ROI."""
         if not isinstance(arm, dict):
@@ -6847,25 +6973,40 @@ class SprunkiGamePlayer:
         the coordinator reports the set as unresolved.  This helper is
         intentionally read-only and never creates another input attempt.
         """
-        if not isinstance(visual_arm, dict) or context is None:
+        if context is None:
             return False
         if getattr(context, "input_attempts", 0) <= int(group_input_start or 0):
             return False
-        after_frames = self._visual_capture_after_frames(visual_arm)
+        after_frames = (
+            self._visual_capture_after_frames(visual_arm)
+            if isinstance(visual_arm, dict)
+            else ()
+        )
         candidates = getattr(self, "_visual_carpet_candidates", None)
         if not isinstance(candidates, list):
             candidates = []
             self._visual_carpet_candidates = candidates
-        candidates.append(
-            {
-                "slotIndex": slot_index,
-                "arm": visual_arm,
-                "afterFrames": after_frames,
-                "actionAttempted": True,
-                "actionDelivered": True,
-                "actionAmbiguous": False,
-            }
-        )
+        candidate = {
+            "slotIndex": slot_index,
+            "arm": visual_arm,
+            "afterFrames": after_frames,
+            "actionAttempted": True,
+            "actionDelivered": True,
+            "actionAmbiguous": False,
+        }
+        if not isinstance(visual_arm, dict):
+            # Keep an explicit slot-group record instead of silently dropping
+            # the final verifier when live geometry/CDP capture was
+            # unavailable.  The evaluator will preserve this as visual
+            # INCONCLUSIVE and the coordinator will take its recovery path.
+            candidate.update(
+                {
+                    "visualFallbackAttempted": False,
+                    "visualFallbackStatus": VISUAL_INCONCLUSIVE,
+                    "visualFallbackReason": "visual_arm_unavailable",
+                }
+            )
+        candidates.append(candidate)
         return True
 
     def _visual_evaluate_carpet_candidates(self):
@@ -6878,13 +7019,28 @@ class SprunkiGamePlayer:
         for candidate in list(candidates):
             if not candidate.get("actionAttempted"):
                 continue
-            visual_result = self._visual_classify_after_frames(
-                candidate.get("arm"),
-                candidate.get("afterFrames") or (),
-            )
+            if not isinstance(candidate.get("arm"), dict):
+                visual_result = VisualVerificationResult(
+                    VISUAL_INCONCLUSIVE,
+                    "return",
+                    "visual_arm_unavailable",
+                    {
+                        "slotIndex": candidate.get("slotIndex"),
+                        "visualFallbackApplicable": True,
+                    },
+                )
+                visual_attempted = False
+            else:
+                visual_result = self._visual_classify_after_frames(
+                    candidate.get("arm"),
+                    candidate.get("afterFrames") or (),
+                )
+                visual_attempted = True
             self._visual_last_result = visual_result
             self._visual_carpet_visual_attempted = True
-            candidate["visualFallbackAttempted"] = True
+            candidate["visualFallbackAttempted"] = visual_attempted
+            candidate["visualFallbackStatus"] = visual_result.status
+            candidate["visualFallbackReason"] = visual_result.message
             candidate["visualResult"] = {
                 "status": visual_result.status,
                 "message": visual_result.message,
@@ -6901,6 +7057,9 @@ class SprunkiGamePlayer:
             visual_evidence[normalized_slot_index] = {
                 "status": visual_result.status,
                 "message": visual_result.message,
+                "visualFallbackAttempted": visual_attempted,
+                "visualFallbackStatus": visual_result.status,
+                "visualFallbackReason": visual_result.message,
                 **dict(visual_result.details or {}),
             }
             if not visual_result.verified:
@@ -6918,12 +7077,43 @@ class SprunkiGamePlayer:
     def _visual_complete_fallback(self, arm, result, *, action_attempted):
         """Run the final visual check and preserve the primary result on miss."""
         if not isinstance(arm, dict):
-            if result is not None and action_attempted:
+            if result is not None and result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_PLACED,
+                OperationStatus.ALREADY_EMPTY,
+            }:
+                primary_details = dict(getattr(result, "details", {}) or {})
                 result.details = {
-                    **(getattr(result, "details", {}) or {}),
+                    **primary_details,
                     "visualFallbackAttempted": False,
-                    "visualFallbackSkipReason": "visual_arm_unavailable",
+                    "visualFallbackStatus": "NOT_APPLICABLE",
+                    "visualFallbackSkipReason": self._visual_fallback_skip_reason(
+                        result,
+                        action_attempted,
+                    ),
+                    "verificationChain": {
+                        "primary": (
+                            "AGGREGATE_SUCCESS"
+                            if primary_details.get("aggregateFallback")
+                            else "TARGET_SUCCESS"
+                        ),
+                        "visual": "NOT_APPLICABLE",
+                    },
                 }
+                return result
+            if result is not None and action_attempted:
+                primary_details = dict(getattr(result, "details", {}) or {})
+                action_delivered = primary_details.get("actionDelivered")
+                action_ambiguous = bool(primary_details.get("actionAmbiguous"))
+                visual_applicable = not (
+                    action_delivered is False and not action_ambiguous
+                )
+                return self._visual_mark_inconclusive(
+                    result,
+                    reason="visual_arm_unavailable",
+                    action_attempted=action_attempted,
+                    visual_applicable=visual_applicable,
+                )
             return result
         if not self._visual_fallback_eligible(result, action_attempted):
             primary_details = dict(getattr(result, "details", {}) or {}) if result is not None else {}
@@ -6940,30 +7130,58 @@ class SprunkiGamePlayer:
             )
             if primary_proves_target:
                 self._visual_remember_empty_reference(arm)
-            if result is not None and action_attempted and result.status not in {
-                OperationStatus.VERIFIED,
-                OperationStatus.ALREADY_PLACED,
-                OperationStatus.ALREADY_EMPTY,
-            }:
-                result.details = {
-                    **primary_details,
-                    "visualFallbackAttempted": False,
-                    "visualFallbackSkipReason": self._visual_fallback_skip_reason(
+            if result is not None:
+                skip_reason = self._visual_fallback_skip_reason(
+                    result,
+                    action_attempted,
+                )
+                if result.status in {
+                    OperationStatus.VERIFIED,
+                    OperationStatus.ALREADY_PLACED,
+                    OperationStatus.ALREADY_EMPTY,
+                }:
+                    # A primary verifier already ended this operation.  The
+                    # image verifier is intentionally not applicable and
+                    # must not be mistaken for a skipped failure.
+                    result.details = {
+                        **primary_details,
+                        "visualFallbackAttempted": False,
+                        "visualFallbackStatus": "NOT_APPLICABLE",
+                        "visualFallbackSkipReason": skip_reason,
+                        "verificationChain": {
+                            "primary": (
+                                "AGGREGATE_SUCCESS"
+                                if primary_details.get("aggregateFallback")
+                                else "TARGET_SUCCESS"
+                            ),
+                            "visual": "NOT_APPLICABLE",
+                        },
+                    }
+                elif action_attempted:
+                    action_delivered = primary_details.get("actionDelivered")
+                    action_ambiguous = bool(
+                        primary_details.get("actionAmbiguous")
+                    )
+                    visual_applicable = not (
+                        skip_reason in {"terminal_stop", "action_not_delivered"}
+                        or (action_delivered is False and not action_ambiguous)
+                    )
+                    return self._visual_mark_inconclusive(
                         result,
-                        action_attempted,
-                    ),
-                }
+                        reason=skip_reason,
+                        action_attempted=action_attempted,
+                        visual_applicable=visual_applicable,
+                    )
             return result
         roi = arm.get("roi")
         fingerprint = arm.get("geometryFingerprint")
         if not isinstance(roi, VisualROI) or not fingerprint:
-            if result is not None:
-                result.details = {
-                    **(result.details or {}),
-                    "visualFallbackAttempted": False,
-                    "visualFallbackSkipReason": "visual_roi_unavailable",
-                }
-            return result
+            return self._visual_mark_inconclusive(
+                result,
+                reason="visual_roi_unavailable",
+                action_attempted=action_attempted,
+                visual_applicable=bool(action_attempted),
+            )
         after_frames = self._visual_capture_after_frames(arm)
         target_slot_index = arm.get("targetSlot")
         visual_result = self._visual_classify_after_frames(arm, after_frames)
@@ -6973,11 +7191,21 @@ class SprunkiGamePlayer:
             "visualFallbackAttempted": True,
             "visualFallbackStatus": visual_result.status,
             "visualFallbackReason": visual_result.message,
+            "visualVerificationOutcome": (
+                "VERIFIED" if visual_result.verified else VISUAL_INCONCLUSIVE
+            ),
             "visualEvidence": dict(visual_result.details or {}),
         }
         if not visual_result.verified:
             if result is not None:
-                result.details = {**(result.details or {}), **diagnostic}
+                result.details = {
+                    **(result.details or {}),
+                    **diagnostic,
+                    "verificationChain": {
+                        "primary": "UNRESOLVED",
+                        "visual": VISUAL_INCONCLUSIVE,
+                    },
+                }
             return result
 
         details = {
@@ -6989,6 +7217,10 @@ class SprunkiGamePlayer:
             "targetSpecific": True,
             "aggregateFallback": False,
             "softVerified": False,
+            "verificationChain": {
+                "primary": "UNRESOLVED",
+                "visual": "SUCCESS",
+            },
             "visualReferenceKey": str(self._visual_reference_key(target_slot_index)),
         }
         if str(arm.get("direction")).lower() == "return":
@@ -11754,9 +11986,11 @@ class SprunkiGamePlayer:
                     and aggregate_evaluation.aggregate_fallback
                 )
 
-                # Only when this set produced no aggregate progress and no
-                # aggregateFallback result do we spend the final visual
-                # fallback on the slot-group candidates captured above.  A
+                # Only an exact aggregate verifier result ends this set's
+                # verification chain before image analysis.  A raw decrease
+                # in the derived progress count is not enough by itself: it
+                # may come from a baseline/inventory signal and must still
+                # give each captured slot-group its visual opportunity.  A
                 # whole-set image is never attributed to an individual slot.
                 visual_progress = 0
                 if aggregate_primary_success:
@@ -11765,12 +11999,8 @@ class SprunkiGamePlayer:
                         "   ✅ Primary aggregateFallback verified this set; "
                         "skipping image fallback"
                     )
-                elif progress <= 0 and self._visual_carpet_candidates:
+                elif self._visual_carpet_candidates:
                     visual_progress = self._visual_evaluate_carpet_candidates()
-                elif progress > 0:
-                    # Aggregate progress is already an accepted primary
-                    # result; do not run or retain a visual candidate for it.
-                    self._visual_carpet_candidates = []
 
                 print(f"   ðŸ“Š Set {set_num} result: {current_count} â†’ {after_count} (cleared: {progress})")
                 if visual_progress:
@@ -12996,133 +13226,102 @@ class SprunkiGamePlayer:
         except:
             return False
 
-    def verify_drag_success_dual(self, before_chars, after_chars, before_putted, after_putted):
+    def _evaluate_legacy_dual_transition(
+        self,
+        before_chars,
+        after_chars,
+        before_putted,
+        after_putted,
+        direction,
+    ):
+        """Evaluate legacy scalar counters through the shared verifier.
+
+        These compatibility APIs do not carry a target slot, operation
+        context, or screenshot arm, so they intentionally provide runtime
+        aggregate verification only.  Active gameplay must use the bounded
+        corrected placement/return coordinators for image fallback.
         """
-        🎯 SMART DUAL VERIFICATION: Track working systems for future operations
+        evaluation = evaluate_transition(
+            {
+                "characters_count": before_chars,
+                "putted_characters": before_putted,
+            },
+            {
+                "characters_count": after_chars,
+                "putted_characters": after_putted,
+            },
+            direction,
+            target_slot=None,
+            allow_aggregate_fallback=True,
+            allow_polos=False,
+        )
+        return evaluation
+
+    def verify_drag_success_dual(self, before_chars, after_chars, before_putted, after_putted):
+        """Compatibility placement verifier using the shared runtime policy.
+
+        This legacy API has no target slot, OperationContext, or screenshot
+        arm, so it can only provide aggregate runtime verification.  Active
+        gameplay must use corrected_drag_and_drop for image fallback.
         """
         try:
-            print(f"📊 SMART DUAL Drag verification:")
-            
-            # Check Characters Array
-            chars_success = False
-            chars_working = False
-            if before_chars is not None and after_chars is not None:
-                expected_chars = before_chars + 1
-                chars_success = (after_chars == expected_chars)
-                chars_working = True  # System is responding
-                print(f"   📢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'}")
-            else:
-                print(f"   📢 Characters: N/A (not available)")
-            
-            # Check Putted Characters  
-            putted_success = False
-            putted_working = False
-            if before_putted is not None and after_putted is not None:
-                expected_putted = before_putted + 1
-                putted_success = (after_putted == expected_putted)
-                putted_working = True  # System is responding
-                print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'}")
-            else:
-                print(f"   🎯 Putted: N/A (not available)")
-            
-            # 🎯 SMART TRACKING: Record which systems are working
-            self.working_systems['characters'] = chars_success if chars_working else None # type: ignore
-            self.working_systems['putted'] = putted_success if putted_working else None # type: ignore
-            
-            # Store for this specific operation
+            evaluation = self._evaluate_legacy_dual_transition(
+                before_chars,
+                after_chars,
+                before_putted,
+                after_putted,
+                "place",
+            )
+            self.working_systems["characters"] = (
+                after_chars - before_chars == 1
+                if before_chars is not None and after_chars is not None
+                else None
+            )
+            self.working_systems["putted"] = (
+                after_putted - before_putted == 1
+                if before_putted is not None and after_putted is not None
+                else None
+            )
             operation_id = f"drag_{id(self)}"
             self.last_operation_working_systems[operation_id] = {
-                'characters': chars_success if chars_working else None, # type: ignore
-                'putted': putted_success if putted_working else None # type: ignore
+                "characters": self.working_systems["characters"],
+                "putted": self.working_systems["putted"],
+                "verificationPolicy": "shared_any_valid_aggregate_signal",
+                "visualFallback": "unavailable_legacy_api",
             }
-            
-            # DUAL LOGIC: Chỉ cần 1 trong 2 thành công
-            overall_success = chars_success or putted_success
-            
-            if overall_success:
-                successful_systems = []
-                if chars_success: successful_systems.append("Characters Array")
-                if putted_success: successful_systems.append("Putted Characters")
-                print(f"   🎉 SMART DUAL SUCCESS via: {', '.join(successful_systems)}")
-                print(f"   🎯 Tracked working systems for return verification")
-            else:
-                print(f"   ❌ SMART DUAL FAILURE: Both methods failed")
-                print(f"   🎯 No working systems to track")
-            
-            return overall_success
-            
-        except Exception as e:
-            print(f"❌ SMART DUAL verification error: {e}")
+            print(
+                "Legacy drag verification via shared policy: "
+                f"{evaluation.status.value} ({evaluation.message})"
+            )
+            return evaluation.status == OperationStatus.VERIFIED
+        except Exception as error:
+            print(f"Legacy shared drag verification error: {error}")
             return False
 
     def verify_return_success_dual(self, before_chars, after_chars, before_putted, after_putted):
-        """
-        🎯 SMART DUAL VERIFICATION: Only check systems that worked in drag phase
+        """Compatibility return verifier using every available runtime signal.
+
+        The old implementation skipped a signal when it had not changed during
+        placement.  That is unsafe for heterogeneous mods.  Every available
+        Characters/Putted transition is evaluated with the same one-of-three
+        policy.  This API still cannot run image fallback without an action
+        context.
         """
         try:
-            print(f"📊 SMART DUAL Return verification (selective checking):")
-            
-            # Determine which systems to check based on what worked during drag
-            check_characters = self.working_systems.get('characters') is True
-            check_putted = self.working_systems.get('putted') is True
-            
-            if not check_characters and not check_putted:
-                print(f"   ⚠️ No working systems tracked - falling back to both")
-                check_characters = before_chars is not None and after_chars is not None
-                check_putted = before_putted is not None and after_putted is not None
-            
-            print(f"   🎯 Will check: Characters={'✅' if check_characters else '❌'}, Putted={'✅' if check_putted else '❌'}")
-            
-            chars_success = False
-            putted_success = False
-            
-            # Check Characters Array (only if it was working)
-            if check_characters and before_chars is not None and after_chars is not None:
-                expected_chars = before_chars - 1
-                chars_success = (after_chars == expected_chars)
-                print(f"   📢 Characters: {before_chars} → {after_chars} (expected: {expected_chars}) = {'✅' if chars_success else '❌'} [CHECKED]")
-            else:
-                if before_chars is not None and after_chars is not None:
-                    print(f"   📢 Characters: {before_chars} → {after_chars} = ⏭️ [SKIPPED - didn't work in drag]")
-                else:
-                    print(f"   📢 Characters: N/A (not available)")
-            
-            # Check Putted Characters (only if it was working)  
-            if check_putted and before_putted is not None and after_putted is not None:
-                expected_putted = before_putted - 1
-                putted_success = (after_putted == expected_putted)
-                print(f"   🎯 Putted: {before_putted} → {after_putted} (expected: {expected_putted}) = {'✅' if putted_success else '❌'} [CHECKED]")
-            else:
-                if before_putted is not None and after_putted is not None:
-                    print(f"   🎯 Putted: {before_putted} → {after_putted} = ⏭️ [SKIPPED - didn't work in drag]")
-                else:
-                    print(f"   🎯 Putted: N/A (not available)")
-            
-            # SMART LOGIC: Success if any CHECKED system succeeded
-            overall_success = False
-            successful_systems = []
-            
-            if check_characters and chars_success:
-                overall_success = True
-                successful_systems.append("Characters Array")
-            
-            if check_putted and putted_success:
-                overall_success = True
-                successful_systems.append("Putted Characters")
-            
-            if overall_success:
-                print(f"   🎉 SMART DUAL SUCCESS via: {', '.join(successful_systems)}")
-                print(f"   🎯 Selective checking prevented false results")
-            else:
-                checked_systems = []
-                if check_characters: checked_systems.append("Characters Array")
-                if check_putted: checked_systems.append("Putted Characters")
-                print(f"   ❌ SMART DUAL FAILURE: Checked systems ({', '.join(checked_systems)}) failed")
-            
-            return overall_success
-            
-        except Exception as e:
-            print(f"❌ SMART DUAL verification error: {e}")
+            evaluation = self._evaluate_legacy_dual_transition(
+                before_chars,
+                after_chars,
+                before_putted,
+                after_putted,
+                "return",
+            )
+            print(
+                "Legacy return verification via shared policy: "
+                f"{evaluation.status.value} ({evaluation.message})"
+            )
+            return evaluation.status == OperationStatus.VERIFIED
+        except Exception as error:
+            print(f"Legacy shared return verification error: {error}")
             return False
 
     @staticmethod
@@ -14198,6 +14397,8 @@ class SprunkiGamePlayer:
             })
             return evidence
 
+        verification_inconclusive = False
+        last_inconclusive_details = {}
         for attempt_number, (level, icon_idx, slot_idx) in enumerate(candidates, start=1):
             if self.stop_event.is_set():
                 return {"result": self._operation_result(context, OperationStatus.STOPPED, "stop_requested")}
@@ -14235,6 +14436,11 @@ class SprunkiGamePlayer:
                 visual_target_slot=target_slot,
             )
             result.details = with_coordinate_evidence(result.details, icon_idx, slot_idx)
+            if result.status == OperationStatus.UNKNOWN or (
+                result.details or {}
+            ).get("visualFallbackStatus") == VISUAL_INCONCLUSIVE:
+                verification_inconclusive = True
+                last_inconclusive_details = dict(result.details or {})
 
             if result.status in {OperationStatus.VERIFIED, OperationStatus.ALREADY_PLACED}:
                 return {
@@ -14244,9 +14450,12 @@ class SprunkiGamePlayer:
                     "details": result.details,
                 }
 
-            # UNKNOWN means that the previous gesture may have landed.  Never
-            # send another physical gesture until a new operation reconciles it.
-            if result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
+            # A terminal STOPPED result cannot consume another physical
+            # candidate.  UNKNOWN is different: this attempt has already
+            # completed the runtime + visual verification chain, and the
+            # coordinator may continue only after proving that the complete
+            # semantic state stayed unchanged.
+            if result.status == OperationStatus.STOPPED:
                 return {"result": result}
 
             current_state = self._capture_stable_placement_snapshot(
@@ -14272,8 +14481,8 @@ class SprunkiGamePlayer:
                 )
                 return {"result": result}
 
-            # A failed gesture may still have changed another slot or an
-            # aggregate signal.  In that case the target's original
+            # A failed/unknown gesture may still have changed another slot or
+            # an aggregate signal.  In that case the target's original
             # precondition is no longer proven, so a new coordinate would be
             # a blind second gesture.  Continue searching only when this
             # candidate demonstrably left the complete semantic state alone.
@@ -14282,7 +14491,7 @@ class SprunkiGamePlayer:
                     "result": self._operation_result(
                         context,
                         OperationStatus.UNKNOWN,
-                        "state_changed_after_failed_drag_no_retry",
+                        "state_changed_after_drag_no_retry",
                     )
                 }
 
@@ -14290,23 +14499,35 @@ class SprunkiGamePlayer:
                 f"place:{context.target_slot}:no_transition",
                 progressed=False,
             )
-            if (
-                context.no_progress_cycles >= 2
-                or context.failure_counts.get(f"place:{context.target_slot}:no_transition", 0) >= 2
-            ):
-                return {
-                    "result": self._operation_result(
-                        context,
-                        OperationStatus.FAILED,
-                        "no_progress_after_two_attempts",
-                    )
-                }
+            print(
+                "      -> Verification chain produced no success; "
+                "continuing to the next drag candidate"
+            )
 
+        final_status = (
+            OperationStatus.UNKNOWN
+            if verification_inconclusive
+            else OperationStatus.FAILED
+        )
+        final_message = (
+            "all_five_drag_attempts_verification_inconclusive"
+            if verification_inconclusive
+            else "all_five_drag_attempts_exhausted"
+        )
         return {
             "result": self._operation_result(
                 context,
-                OperationStatus.FAILED,
-                "all_five_drag_attempts_exhausted",
+                final_status,
+                final_message,
+                details={
+                    **last_inconclusive_details,
+                    "verificationChain": (
+                        "UNRESOLVED"
+                        if verification_inconclusive
+                        else "EXHAUSTED"
+                    ),
+                    "dragCandidatesExhausted": True,
+                },
             )
         }
 
@@ -14464,14 +14685,17 @@ class SprunkiGamePlayer:
                         )
                 return self._finish_operation(context, cache_result)
 
-            if cache_result.status in {OperationStatus.UNKNOWN, OperationStatus.STOPPED}:
-                print(f"   [CACHE STOP] {cache_result.message}; no blind coordinate retry")
+            if cache_result.status == OperationStatus.STOPPED:
+                print(
+                    f"   [CACHE STOP] {cache_result.message}; "
+                    "operation is stopped before another physical method"
+                )
                 return self._finish_operation(context, cache_result)
 
             # The cached gesture is part of this same operation.  Before
             # spending the remaining drag budget on another coordinate, take
-            # a fresh stable read and prove that the failed gesture left the
-            # semantic board state unchanged.
+            # a fresh stable read and prove that the failed/unknown gesture
+            # left the semantic board state unchanged.
             cache_state_after = self._capture_stable_placement_snapshot(
                 timeout_ms=500,
                 context=context,
@@ -14505,7 +14729,11 @@ class SprunkiGamePlayer:
                     ),
                 )
 
-            print(f"   [CACHE INVALIDATION] ⚠️ Learned offset failed with known no-change state; searching remaining budget")
+            print(
+                "   [CACHE INVALIDATION] ⚠️ Learned offset did not produce a "
+                "verified transition; the complete verifier chain was "
+                "exhausted with no-change state. Searching remaining budget"
+            )
             self.slot_offset_lookup.pop(target_slot_index, None)
 
         print(f"   [CACHE MISS] No learned offset for slot {target_slot_index}. Activating Search Mode...")
@@ -18326,17 +18554,23 @@ class SprunkiGamePlayer:
                 )
                 or {}
             )
+            visual_evidence_by_slot = dict(
+                getattr(self, "_visual_carpet_visual_evidence", {}) or {}
+            )
             visual_fallback_attempted = bool(
                 getattr(self, "_visual_carpet_visual_attempted", False)
             )
+            target_visual_status = visual_evidence.get("visualFallbackStatus")
+            if target_visual_status == "VERIFIED":
+                visual_fallback_status = "VERIFIED"
+            elif visual_fallback_attempted:
+                visual_fallback_status = "INCONCLUSIVE"
+            else:
+                visual_fallback_status = "NOT_APPLICABLE"
             visual_fallback_details = {
                 "visualFallbackAttempted": visual_fallback_attempted,
-                "visualFallbackStatus": (
-                    "INCONCLUSIVE" if visual_fallback_attempted else None
-                ),
-                "visualFallbackEvidenceBySlot": dict(
-                    getattr(self, "_visual_carpet_visual_evidence", {}) or {}
-                ),
+                "visualFallbackStatus": visual_fallback_status,
+                "visualFallbackEvidenceBySlot": visual_evidence_by_slot,
             }
             after_snapshot = self._capture_stable_placement_snapshot(
                 timeout_ms=1000,
@@ -18352,6 +18586,7 @@ class SprunkiGamePlayer:
                         details={
                             "visualFallback": True,
                             "visualFallbackAttempted": True,
+                            "visualFallbackStatus": "VERIFIED",
                             "verificationMethod": "image_fallback",
                             "verificationConfidence": "visual",
                             "targetSpecific": True,
@@ -18414,6 +18649,7 @@ class SprunkiGamePlayer:
                     details={
                         "visualFallback": True,
                         "visualFallbackAttempted": True,
+                        "visualFallbackStatus": "VERIFIED",
                         "verificationMethod": "image_fallback",
                         "verificationConfidence": "visual",
                         "targetSpecific": True,

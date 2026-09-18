@@ -262,6 +262,76 @@ class VisualPlacementVerifierTests(unittest.TestCase):
         self.assertEqual(returned.details["verificationMethod"], "image_fallback")
         player._visual_capture_after_frames.assert_called_once_with(arm)
 
+    def test_visual_arm_unavailable_is_inconclusive_not_business_failure(self):
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        result = OperationResult(
+            OperationStatus.FAILED,
+            direction="place",
+            message="expected_transition_not_observed",
+            details={
+                "actionAttempted": True,
+                "actionDelivered": True,
+                "actionAmbiguous": False,
+            },
+        )
+
+        returned = player._visual_complete_fallback(
+            None,
+            result,
+            action_attempted=True,
+        )
+
+        self.assertEqual(returned.status, OperationStatus.UNKNOWN)
+        self.assertEqual(
+            returned.details["visualFallbackStatus"],
+            VISUAL_INCONCLUSIVE,
+        )
+        self.assertEqual(
+            returned.details["visualFallbackReason"],
+            "visual_arm_unavailable",
+        )
+        self.assertEqual(returned.details["verificationChain"]["visual"], VISUAL_INCONCLUSIVE)
+
+    def test_primary_success_skips_unavailable_image_as_not_applicable(self):
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        result = OperationResult(
+            OperationStatus.VERIFIED,
+            direction="place",
+            details={"targetSpecific": True},
+        )
+
+        returned = player._visual_complete_fallback(
+            None,
+            result,
+            action_attempted=True,
+        )
+
+        self.assertEqual(returned.status, OperationStatus.VERIFIED)
+        self.assertEqual(returned.details["visualFallbackStatus"], "NOT_APPLICABLE")
+        self.assertEqual(returned.details["verificationChain"]["primary"], "TARGET_SUCCESS")
+
+    def test_carpet_arm_unavailable_is_recorded_as_inconclusive(self):
+        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
+        player._visual_carpet_candidates = []
+        player._visual_carpet_visual_evidence = {}
+        player._visual_carpet_visual_attempted = False
+        context = OperationContext.begin("return", 3, operation_id="carpet-visual-1")
+        context.register_input()
+
+        self.assertTrue(
+            player._visual_record_carpet_candidate(
+                None,
+                3,
+                0,
+                context,
+            )
+        )
+        self.assertEqual(player._visual_evaluate_carpet_candidates(), 0)
+        evidence = player._visual_carpet_visual_evidence[3]
+        self.assertEqual(evidence["status"], VISUAL_INCONCLUSIVE)
+        self.assertEqual(evidence["visualFallbackReason"], "visual_arm_unavailable")
+        self.assertFalse(evidence["visualFallbackAttempted"])
+
     def test_unresolved_failed_action_is_not_limited_to_message_whitelist(self):
         player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
         player._visual_empty_references = {}

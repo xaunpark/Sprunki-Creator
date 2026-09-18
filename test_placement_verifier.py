@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from manual_prepare_timeline import (
     MAX_PREPARE_ACTIONS,
@@ -11,6 +11,7 @@ from placement_verifier import (
     OperationContext,
     OperationResult,
     OperationStatus,
+    PlacementSnapshot,
     classify_precondition,
     compare_polos_transition,
     evaluate_transition,
@@ -805,6 +806,106 @@ class ReturnActionPolicyTests(unittest.TestCase):
             "polos_array": polos,
             "characters_array": characters,
         }
+
+    def test_drag_unknown_runs_the_next_candidate_after_complete_verifier_chain(self):
+        player = object.__new__(SprunkiGamePlayer)
+        import threading
+
+        player.stop_event = threading.Event()
+        player.config = {"layout": {"slots": [{"index": 0}]}}
+        player.placement_verification_config = {}
+        player.generate_icon_coordinates = Mock(
+            return_value=[(10, 10), (11, 10), (12, 10), (13, 10)]
+        )
+        player._generate_slot_scan_coords = Mock(
+            return_value=[(100, 100), (101, 100), (102, 100)]
+        )
+        unchanged = PlacementSnapshot.from_mapping(
+            self._state(1, 128, ["0"], ["0"])
+        )
+        player._capture_stable_placement_snapshot = Mock(
+            return_value=unchanged
+        )
+        context = OperationContext.begin(
+            "place",
+            0,
+            max_input_attempts=5,
+            deadline_seconds=10,
+            operation_id="drag-unknown-continues",
+        )
+        player._attempt_single_drag = Mock(side_effect=[
+            OperationResult(
+                OperationStatus.UNKNOWN,
+                details={"visualFallbackStatus": "INCONCLUSIVE"},
+            ),
+            OperationResult(
+                OperationStatus.VERIFIED,
+                details={"targetSpecific": True},
+            ),
+        ])
+
+        with patch("builtins.print"):
+            result = player._find_optimal_drop_point(
+                {"x": 10, "y": 10},
+                {"index": 0, "x": 100, "y": 100},
+                False,
+                True,
+                "click_drag",
+                operation_context=context,
+            )["result"]
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertEqual(player._attempt_single_drag.call_count, 2)
+
+    def test_drag_keeps_unknown_when_all_candidates_are_inconclusive(self):
+        player = object.__new__(SprunkiGamePlayer)
+        import threading
+
+        player.stop_event = threading.Event()
+        player.config = {"layout": {"slots": [{"index": 0}]}}
+        player.placement_verification_config = {}
+        player.generate_icon_coordinates = Mock(
+            return_value=[(10, 10), (11, 10), (12, 10), (13, 10)]
+        )
+        player._generate_slot_scan_coords = Mock(
+            return_value=[(100, 100), (101, 100), (102, 100)]
+        )
+        unchanged = PlacementSnapshot.from_mapping(
+            self._state(1, 128, ["0"], ["0"])
+        )
+        player._capture_stable_placement_snapshot = Mock(
+            return_value=unchanged
+        )
+        context = OperationContext.begin(
+            "place",
+            0,
+            max_input_attempts=5,
+            deadline_seconds=10,
+            operation_id="drag-all-unknown",
+        )
+        player._attempt_single_drag = Mock(
+            return_value=OperationResult(
+                OperationStatus.UNKNOWN,
+                details={"visualFallbackStatus": "INCONCLUSIVE"},
+            )
+        )
+
+        with patch("builtins.print"):
+            result = player._find_optimal_drop_point(
+                {"x": 10, "y": 10},
+                {"index": 0, "x": 100, "y": 100},
+                False,
+                True,
+                "click_drag",
+                operation_context=context,
+            )["result"]
+
+        self.assertEqual(result.status, OperationStatus.UNKNOWN)
+        self.assertEqual(
+            result.message,
+            "all_five_drag_attempts_verification_inconclusive",
+        )
+        self.assertEqual(player._attempt_single_drag.call_count, 5)
 
     def test_empty_precondition_does_not_skip_return_click(self):
         player = self._player()

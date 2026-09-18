@@ -61,6 +61,25 @@ def _remove_config():
 
 
 class RemoveButtonReturnTests(unittest.TestCase):
+    def test_legacy_dual_verifier_uses_shared_one_of_three_policy(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.working_systems = {"characters": None, "putted": None}
+        player.last_operation_working_systems = {}
+
+        # Characters is unchanged, but Putted proves the placement.  The
+        # compatibility path must use the same aggregate policy as the active
+        # verifier instead of requiring both counters.
+        self.assertTrue(player.verify_drag_success_dual(128, 128, 4, 5))
+        self.assertEqual(player.last_operation_working_systems[next(iter(player.last_operation_working_systems))]["verificationPolicy"], "shared_any_valid_aggregate_signal")
+
+    def test_legacy_return_checks_all_available_signals(self):
+        player = object.__new__(SprunkiGamePlayer)
+        # Characters did not prove placement, but it can still prove return.
+        player.working_systems = {"characters": False, "putted": True}
+        player.last_operation_working_systems = {}
+
+        self.assertTrue(player.verify_return_success_dual(9, 8, 4, 4))
+
     def test_cdp_click_emits_complete_primary_button_gesture(self):
         commands = []
 
@@ -337,6 +356,86 @@ class RemoveButtonReturnTests(unittest.TestCase):
         second = player._execute_precision_return_click.call_args_list[1].args[0]
         self.assertEqual((first["x"], first["y"]), (386, 655))
         self.assertEqual((second["x"], second["y"]), (381, 655))
+
+    def test_remove_first_unknown_runs_the_next_bounded_verifier_candidate(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.config = _remove_config()
+        player.stop_event = threading.Event()
+        player.remove_button_verify_timeout_ms = 250
+
+        context = OperationContext.begin(
+            "return",
+            0,
+            max_input_attempts=20,
+            deadline_seconds=10,
+            operation_id="test-remove-unknown-continues",
+        )
+        player._active_operation_context = context
+        player._capture_stable_placement_snapshot = Mock(
+            return_value=_occupied_snapshot()
+        )
+        player._execute_precision_return_click = Mock(side_effect=[
+            OperationResult(
+                OperationStatus.UNKNOWN,
+                message="visual_fallback_inconclusive:visual_arm_unavailable",
+                details={"visualFallbackStatus": "INCONCLUSIVE"},
+            ),
+            OperationResult(
+                OperationStatus.VERIFIED,
+                details={"targetSpecific": True},
+                evidence=("characters_target",),
+            ),
+        ])
+
+        with patch("builtins.print"):
+            result = player._try_remove_button_return(
+                player.config["layout"]["slots"][0],
+                use_cdp=True,
+                operation_context=context,
+                before_snapshot=_occupied_snapshot(),
+                target_slot_index=0,
+            )
+
+        self.assertEqual(result.status, OperationStatus.VERIFIED)
+        self.assertEqual(player._execute_precision_return_click.call_count, 2)
+
+    def test_remove_first_preserves_unknown_when_all_candidates_are_inconclusive(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player.config = _remove_config()
+        player.stop_event = threading.Event()
+        player.remove_button_verify_timeout_ms = 250
+
+        context = OperationContext.begin(
+            "return",
+            0,
+            max_input_attempts=20,
+            deadline_seconds=10,
+            operation_id="test-remove-all-unknown",
+        )
+        player._active_operation_context = context
+        player._capture_stable_placement_snapshot = Mock(
+            return_value=_occupied_snapshot()
+        )
+        player._execute_precision_return_click = Mock(
+            return_value=OperationResult(
+                OperationStatus.UNKNOWN,
+                message="visual_fallback_inconclusive:visual_arm_unavailable",
+                details={"visualFallbackStatus": "INCONCLUSIVE"},
+            )
+        )
+
+        with patch("builtins.print"):
+            result = player._try_remove_button_return(
+                player.config["layout"]["slots"][0],
+                use_cdp=True,
+                operation_context=context,
+                before_snapshot=_occupied_snapshot(),
+                target_slot_index=0,
+            )
+
+        self.assertEqual(result.status, OperationStatus.UNKNOWN)
+        self.assertEqual(result.message, "remove_button_verification_inconclusive")
+        self.assertEqual(player._execute_precision_return_click.call_count, 9)
 
     def test_remove_first_stops_jitter_when_polos_shape_is_uncertain(self):
         player = object.__new__(SprunkiGamePlayer)
