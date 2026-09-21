@@ -36,6 +36,11 @@ try:
         placement_transaction_proves_progress,
         validate_playable_layout,
     )
+    from mini_remix_workflow import (
+        MINI_REMIX_MODE,
+        MiniRemixRequest,
+        run_mini_remix_workflow,
+    )
 except ImportError as e:
     print(f"❌ Import error: {e}")
     print("Make sure all required files are in the same directory!")
@@ -107,6 +112,13 @@ class ProcessingItem:
     # URL-indexed profile or a temporary profile file.
     manual_profile_context: Optional[ManualProfileJobContext] = None
 
+    # Mini-remix fields are appended after the legacy fields so existing
+    # positional ProcessingItem callers retain their argument order.
+    mini_remix_request: Optional[MiniRemixRequest] = None
+    mini_remix_error: Optional[str] = None
+    queue_id: Optional[Any] = None
+    output_namespace: Optional[str] = None
+
     def __post_init__(self) -> None:
         # Tracker's ``normal`` queue value and Creator's ``master`` workflow
         # are the same full-showcase operation.  Keep the received value for
@@ -142,7 +154,8 @@ class ProcessingItem:
             "master": "🎬",
             "individual": "🎭",
             "both": "💎",
-            "skip": "⭐"
+            "skip": "⭐",
+            "mini_remix": "🧩"
         }
         return mode_map.get(self.mode, "❓")
 
@@ -807,7 +820,18 @@ class UnifiedProcessingManager:
                 self.logger.addHandler(file_handler)
                 self.current_file_handlers.append(file_handler)
                 self.logger.info(f"📝 Individual mode log: {log_file}")
-                
+
+            elif mode == MINI_REMIX_MODE:
+                # Mini-remix has its own diagnostic namespace and never shares
+                # the legacy showcase/individual log names.
+                log_file = os.path.join(project_folder, f"{project_slug}-mini-remix.log")
+                file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+                file_handler.setLevel(logging.DEBUG)
+                file_handler.setFormatter(formatter)
+                self.logger.addHandler(file_handler)
+                self.current_file_handlers.append(file_handler)
+                self.logger.info(f"📝 Mini-remix log: {log_file}")
+
             elif mode == "both":
                 # Both master and individual logs for both mode
                 master_log = os.path.join(project_folder, f"{project_slug}-master.log")
@@ -1050,7 +1074,14 @@ class UnifiedProcessingManager:
 
             # Xác định thư mục output
             project_slug = item.project_slug or f"unknown-project-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            project_folder = os.path.join(self.config.output_base_dir, project_slug)
+            # Mini jobs get a queue-scoped artifact namespace.  Legacy modes
+            # retain their existing URL-slug folder and filenames.
+            manifest_slug = (
+                getattr(item, "output_namespace", None) or project_slug
+                if item.mode == MINI_REMIX_MODE
+                else project_slug
+            )
+            project_folder = os.path.join(self.config.output_base_dir, manifest_slug)
             
             if not os.path.exists(project_folder):
                 self.logger.warning(f"Project folder not found for manifest: {project_folder}, creating it.")
@@ -1070,15 +1101,22 @@ class UnifiedProcessingManager:
                 overall_status = item.status # pending, processing...
 
             # 2. Xây dựng cấu trúc manifest
+            project_info = {
+                "sourceUrl": source_url,
+                "projectSlug": manifest_slug,
+                "pageTitle": page_title,
+                "domain": domain,
+                "outputDirectory": project_folder,
+            }
+            if item.mode == MINI_REMIX_MODE:
+                project_info["sourceProjectSlug"] = item.project_slug
+
             manifest_data = {
                 "version": "1.1",
                 "sessionId": f"{item.project_slug}-{item.start_time.strftime('%Y%m%d%H%M%S')}" if item.start_time else "unknown",
                 "generatedAt": datetime.now().isoformat(),
                 "source": { "type": "url" if item.source_url else "json_file", "value": item.source_url or item.json_path },
-                "projectInfo": {
-                    "sourceUrl": source_url, "projectSlug": item.project_slug,
-                    "pageTitle": page_title, "domain": domain, "outputDirectory": project_folder
-                },
+                "projectInfo": project_info,
                 "layoutSummary": {
                     "recordingArea": getattr(item, 'recording_area', None) or manifest_json_data.get('layout', {}).get('recordingArea'),
                     "totalIcons": len(manifest_json_data.get('layout', {}).get('icons', [])),
@@ -1124,6 +1162,10 @@ class UnifiedProcessingManager:
                 ),
                 "outputs": {}, "errors": []
             }
+            if item.mode == MINI_REMIX_MODE:
+                manifest_data["processingSummary"]["statusDetails"]["miniRemix"] = (
+                    "success" if item.status == "completed" else "failure"
+                )
             
             # 3. Điền thông tin outputs và errors
             recording_area = manifest_data["layoutSummary"].get("recordingArea")
@@ -1146,6 +1188,8 @@ class UnifiedProcessingManager:
                 "recordedIdentity": None,
                 "recordedIdentityReview": [],
             }
+            if item.mode == MINI_REMIX_MODE:
+                outputs["miniRemixVideos"] = []
             if item.error_message:
                 manifest_data["errors"].append({"timestamp": datetime.now().isoformat(), "stage": "general", "message": item.error_message})
             if getattr(item, "failure_code", None):
@@ -1162,7 +1206,9 @@ class UnifiedProcessingManager:
                     "status": "success", "filename": filename, "path": str(file_path), "relativePath": f"./{filename}",
                     "fileSizeMb": round(os.path.getsize(file_path) / (1024*1024), 2) if os.path.exists(file_path) else 0
                 }
-                if 'showcase' in filename:
+                if item.mode == MINI_REMIX_MODE:
+                    outputs['miniRemixVideos'].append(file_info)
+                elif 'showcase' in filename:
                     outputs['masterVideo'] = file_info
                 elif 'remix' in filename:
                     outputs['remixVideos'].append(file_info)
@@ -1203,11 +1249,13 @@ class UnifiedProcessingManager:
                 if key != "identity" and os.path.exists(path)
             ]
             
-            log_slug = f"{item.project_slug}"
+            log_slug = f"{manifest_slug}"
             if os.path.exists(os.path.join(project_folder, f"{log_slug}-master.log")):
                 outputs['logFiles'].append({"type": "master", "filename": f"{log_slug}-master.log"})
             if os.path.exists(os.path.join(project_folder, f"{log_slug}-individual.log")):
                 outputs['logFiles'].append({"type": "individual", "filename": f"{log_slug}-individual.log"})
+            if os.path.exists(os.path.join(project_folder, f"{log_slug}-mini-remix.log")):
+                outputs['logFiles'].append({"type": "mini_remix", "filename": f"{log_slug}-mini-remix.log"})
 
             manifest_data['outputs'] = outputs
 
@@ -1719,7 +1767,10 @@ class UnifiedProcessingManager:
                 item.mode,
                 getattr(item, "requested_production_mode", None),
             )
-            if item.mode not in CREATOR_PRODUCTION_MODES and item.mode != "skip":
+            if item.mode not in CREATOR_PRODUCTION_MODES and item.mode not in {
+                "skip",
+                MINI_REMIX_MODE,
+            }:
                 self._record_quality_failure(
                     item,
                     "unsupported_production_mode",
@@ -1740,7 +1791,12 @@ class UnifiedProcessingManager:
             config_manager = self.master_controller.config_manager
             output_base_dir = config_manager.get('output.base_directory', "C:\\Output")
             project_slug = getattr(item, 'project_slug', 'default_project')
-            project_folder = os.path.join(output_base_dir, project_slug)
+            artifact_slug = (
+                getattr(item, "output_namespace", None) or project_slug
+                if item.mode == MINI_REMIX_MODE
+                else project_slug
+            )
+            project_folder = os.path.join(output_base_dir, artifact_slug)
             os.makedirs(project_folder, exist_ok=True)
             self.logger.info(f"✅ [MASTER] Project folder defined: {project_folder}")
 
@@ -1755,10 +1811,15 @@ class UnifiedProcessingManager:
                 return False
             
             # BƯỚC 2: Khởi tạo các component
+            init_kwargs = {
+                "manual_profile_context": getattr(item, "manual_profile_context", None),
+            }
+            if item.mode == MINI_REMIX_MODE:
+                init_kwargs["prepare_remix_data"] = False
             if not self.master_controller._initialize_components(
                 item.json_data,
                 self.stop_event,
-                manual_profile_context=getattr(item, "manual_profile_context", None),
+                **init_kwargs,
             ):
                 raise Exception("Failed to initialize components")
             
@@ -1786,11 +1847,15 @@ class UnifiedProcessingManager:
                 self.logger.info(f"   🎬 Showcase-only video: {project_slug}-showcase.mp4")
             
             # Setup mode-specific logging to project folder
-            self._setup_mode_specific_logging(project_folder, project_slug, item.mode)
+            self._setup_mode_specific_logging(project_folder, artifact_slug, item.mode)
             
             # Process based on mode with enhanced handling
             success = False
-            if item.mode == "master":
+            if item.mode == MINI_REMIX_MODE:
+                self.logger.info(f"🧩 Processing MINI-REMIX mode for {item.display_name}")
+                success = self._process_mini_remix_mode(item)
+
+            elif item.mode == "master":
                 self.logger.info(f"🎬 Processing MASTER mode for {item.display_name}")
                 success = self._process_master_mode(item)
                 
@@ -2322,6 +2387,52 @@ class UnifiedProcessingManager:
             except Exception as e:
                 self.logger.error(f"⚠️ Error during BOTH MODE final cleanup: {e}")
     
+    def _process_mini_remix_mode(self, item: ProcessingItem) -> bool:
+        """Run the independent Tracker mini-remix workflow.
+
+        The runner owns only mini-specific orchestration.  It receives the
+        existing SafeOperationManager through a factory, so drag verification,
+        OBS recording and bounded cleanup remain implemented in one shared
+        place without routing mini jobs through showcase/full-remix methods.
+        """
+
+        player = getattr(self.master_controller, "game_player", None)
+        obs_controller = getattr(self.master_controller, "obs_controller", None)
+        if player is None or obs_controller is None:
+            item.failure_code = item.failure_code or "runtime_verification_unknown"
+            item.error_message = item.error_message or "Mini-remix runtime components are unavailable."
+            item.status = "failed"
+            return False
+
+        try:
+            return run_mini_remix_workflow(
+                item,
+                game_player=player,
+                obs_controller=obs_controller,
+                logger=self.logger,
+                safe_operation_manager_factory=(
+                    lambda game, obs, logger, attempt_index: SafeOperationManager(
+                        game,
+                        obs,
+                        logger,
+                        attempt_index=attempt_index,
+                    )
+                ),
+                attempt_index=getattr(self, "workflow_attempt_index", 1),
+                output_namespace=(
+                    getattr(item, "output_namespace", None)
+                    or getattr(item, "project_slug", None)
+                ),
+            )
+        except Exception as exc:
+            self.logger.error("Mini-remix dispatcher failed: %s", exc, exc_info=True)
+            item.failure_code = item.failure_code or (
+                "workflow_stopped" if self.should_stop else "runtime_verification_unknown"
+            )
+            item.error_message = item.error_message or f"Mini-remix dispatcher failed: {exc}"
+            item.status = "failed"
+            return False
+
     def _process_master_mode(self, item: ProcessingItem) -> bool:
         """Enhanced Master mode that understands WorkflowReport."""
         game_environment_ready = False
@@ -3041,7 +3152,9 @@ class SprunkiUltimateMaster:
         
         Label(mode_frame, text="Mode:", font=("Arial", 9), bg="white").pack(side="left")
         
-        mode_var = StringVar(value=MODE_OPTIONS[item.mode]["display"])
+        mode_var = StringVar(
+            value=MODE_OPTIONS.get(item.mode, {"display": "🧩 Mini Remix"})["display"]
+        )
         mode_dropdown = Combobox(mode_frame, textvariable=mode_var, 
                                 values=[MODE_OPTIONS[key]["display"] for key in MODE_OPTIONS.keys()],
                                 state="readonly", width=15)
@@ -3118,7 +3231,7 @@ class SprunkiUltimateMaster:
                 if self.selected_queue_index < len(self.processing_manager.queue):
                     selected_item = self.processing_manager.queue[self.selected_queue_index]
                     summary_text += f"\n\n📋 Selected: {selected_item.display_name}"
-                    summary_text += f"\n   Mode: {MODE_OPTIONS[selected_item.mode]['display']}"
+                    summary_text += f"\n   Mode: {MODE_OPTIONS.get(selected_item.mode, {'display': '🧩 Mini Remix'})['display']}"
             
             self.queue_summary_var.set(summary_text)
         
@@ -3579,6 +3692,7 @@ class SprunkiUltimateMaster:
         config_data: Dict[str, Any],
         stop_event: Optional[threading.Event] = None,
         manual_profile_context: Optional[ManualProfileJobContext] = None,
+        prepare_remix_data: bool = True,
     ) -> bool:
         """
         [CHUẨN HÓA] Khởi tạo và liên kết các component cho một job.
@@ -3604,8 +3718,13 @@ class SprunkiUltimateMaster:
             has_horror = bool(game_settings.get('hasHorror', False))
             total_slots = len(config_data.get('layout', {}).get('slots', []))
             
-            self.game_player.generate_dynamic_patterns(total_slots)
-            self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
+            if prepare_remix_data:
+                self.game_player.generate_dynamic_patterns(total_slots)
+                self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
+            else:
+                # Mini-remix supplies its own ordered icon/slot selection and
+                # must not spend time creating the legacy remix library.
+                self.game_player.remix_library = []
             self.game_player.current_remix_index = 0
             
             # 4. Nạp config cho OBS controller

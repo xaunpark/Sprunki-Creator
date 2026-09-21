@@ -28,6 +28,29 @@ NON_RETRYABLE_FAILURE_CODES = frozenset(
         "skipped_by_policy",
         "unsupported_production_mode",
         "workflow_stopped",
+        # Mini-remix contract/profile/layout failures are deterministic.  A
+        # browser/OBS/drag failure intentionally uses the existing retryable
+        # runtime/placement codes instead.
+        "mini_remix_payload_invalid",
+        "mini_remix_mode_contract",
+        "mini_remix_block_missing",
+        "mini_remix_block_invalid",
+        "mini_remix_icon_indices_invalid",
+        "mini_remix_duplicate_icon_index",
+        "mini_remix_payload_forbidden_field",
+        "mini_remix_manual_profile_required",
+        "mini_remix_revision_required",
+        "mini_remix_revision_mismatch",
+        "mini_remix_profile_invalid",
+        "mini_remix_layout_invalid",
+        "mini_remix_no_icons",
+        "mini_remix_no_slots",
+        "mini_remix_icon_index_not_found",
+        "mini_remix_icon_disabled",
+        "mini_remix_slot_disabled",
+        "mini_remix_slot_invalid",
+        "mini_remix_slot_count_insufficient",
+        "mini_remix_mapping_not_verified",
     }
 )
 
@@ -499,6 +522,226 @@ def cleanup_can_be_non_blocking_for_content(report: WorkflowReport) -> bool:
     )
 
 
+def evaluate_mini_remix_report(
+    report: WorkflowReport,
+    *,
+    identity_status: Optional[str] = None,
+) -> QualityGateResult:
+    """Evaluate the exact evidence contract for one mini-remix recording.
+
+    This gate deliberately does not consult the legacy showcase/remix
+    counters.  A mini job has one ordered placement ledger and one 30-second
+    recording, so a partial ledger or a partial video can never pass by
+    satisfying an old ratio threshold.
+    """
+
+    identity = str(identity_status or report.identity_status or "not_started").lower()
+    report.identity_status = identity
+    coverage = dict(report.coverage or {})
+    coverage.setdefault("horror", "not_checked_by_policy")
+    evidence = report.evidence if isinstance(report.evidence, dict) else {}
+
+    if report.layout_icons <= 0:
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "no_icons",
+                coverage=coverage,
+                evidence={"layoutIcons": report.layout_icons, "layoutSlots": report.layout_slots},
+                message="Mini-remix layout has no icons.",
+            )
+        )
+    if report.layout_slots <= 0:
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "no_slots",
+                coverage=coverage,
+                evidence={"layoutIcons": report.layout_icons, "layoutSlots": report.layout_slots},
+                message="Mini-remix layout has no slots.",
+            )
+        )
+
+    selected_indices = evidence.get("selectedIconIndices")
+    target_slot_indices = evidence.get("targetSlotIndices")
+    placement_mapping = evidence.get("placementMapping")
+    expected_count = len(selected_indices) if isinstance(selected_indices, list) else 0
+    mapping_icons = [
+        entry.get("iconIndex")
+        for entry in placement_mapping
+        if isinstance(entry, dict)
+    ] if isinstance(placement_mapping, list) else []
+    mapping_slots = [
+        entry.get("slotIndex")
+        for entry in placement_mapping
+        if isinstance(entry, dict)
+    ] if isinstance(placement_mapping, list) else []
+    if (
+        expected_count <= 0
+        or not isinstance(target_slot_indices, list)
+        or len(target_slot_indices) != expected_count
+        or not isinstance(placement_mapping, list)
+        or len(placement_mapping) != expected_count
+        or mapping_icons != selected_indices
+        or mapping_slots != target_slot_indices
+    ):
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "mini_remix_mapping_not_verified",
+                retryable=False,
+                coverage=coverage,
+                evidence={
+                    "selectedIconIndices": selected_indices,
+                    "targetSlotIndices": target_slot_indices,
+                    "placementMapping": placement_mapping,
+                    "mappingIcons": mapping_icons,
+                    "mappingSlots": mapping_slots,
+                },
+                message="Mini-remix icon/slot mapping is incomplete.",
+            )
+        )
+
+    if report.runtime_state == UNKNOWN or not report.runtime_verified:
+        code = "runtime_verification_unknown" if report.runtime_state == UNKNOWN else "no_playable_entry"
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                code,
+                status=UNKNOWN if report.runtime_state == UNKNOWN else FAIL,
+                coverage=coverage,
+                evidence={"runtimeState": report.runtime_state, "entryCandidate": report.entry_candidate},
+                message="Mini-remix runtime playability was not proven.",
+            )
+        )
+
+    transactions = evidence.get("placementTransactions")
+    placement_evidence = evidence.get("placementEvidence")
+    expected_pairs = [
+        (entry.get("iconIndex"), entry.get("slotIndex"))
+        for entry in placement_mapping
+        if isinstance(entry, dict)
+    ]
+    actual_pairs = [
+        (entry.get("requestedIconIndex"), entry.get("targetSlotIndex"))
+        for entry in (placement_evidence if isinstance(placement_evidence, list) else [])
+        if isinstance(entry, dict)
+    ]
+    placement_ok = bool(
+        report.placement_verified
+        and isinstance(transactions, list)
+        and len(transactions) == expected_count
+        and isinstance(placement_evidence, list)
+        and len(placement_evidence) == expected_count
+        and actual_pairs == expected_pairs
+        and all(placement_transaction_proves_progress(entry) for entry in transactions)
+    )
+    if not placement_ok:
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "placement_not_verified",
+                retryable=bool(evidence.get("placementRetryable", True)),
+                coverage=coverage,
+                evidence={
+                    "expectedCount": expected_count,
+                    "placementTransactions": transactions,
+                    "placementEvidence": placement_evidence,
+                    "expectedPairs": expected_pairs,
+                    "actualPairs": actual_pairs,
+                    "cleanupRetryable": bool(evidence.get("placementRetryable", True)),
+                },
+                message="Mini-remix did not verify every requested icon placement.",
+            )
+        )
+
+    listen_seconds = evidence.get("listenSeconds")
+    requested_seconds = evidence.get("recordingRequestedSeconds", listen_seconds)
+    recording_ok = bool(
+        evidence.get("miniRemixRecordingCompleted") is True
+        and listen_seconds == 30
+        and requested_seconds == 30
+        and evidence.get("recordingStatus") == "PASS"
+    )
+    if not recording_ok:
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "mini_remix_recording_not_verified",
+                retryable=True,
+                coverage=coverage,
+                evidence={
+                    "listenSeconds": listen_seconds,
+                    "recordingRequestedSeconds": requested_seconds,
+                    "recordingStatus": evidence.get("recordingStatus"),
+                    "recordingCompleted": evidence.get("miniRemixRecordingCompleted"),
+                },
+                message="Mini-remix recording did not complete the required 30 seconds.",
+            )
+        )
+
+    output_files = evidence.get("outputFiles")
+    output_ok = bool(
+        evidence.get("outputVideoValid") is True
+        and isinstance(output_files, list)
+        and len(output_files) == 1
+    )
+    if not output_ok:
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "mini_remix_output_not_verified",
+                retryable=True,
+                coverage=coverage,
+                evidence={
+                    "outputFiles": output_files,
+                    "outputVideoValid": evidence.get("outputVideoValid"),
+                },
+                message="Mini-remix must produce exactly one valid output video.",
+            )
+        )
+
+    report.evidence["finalRemixContentComplete"] = True
+    report.evidence["contentSuccessWithUnverifiedCleanup"] = bool(
+        not report.cleanup_verified
+    )
+    report.content_success_with_unverified_cleanup = bool(
+        report.evidence["contentSuccessWithUnverifiedCleanup"]
+    )
+    cleanup_accepted = bool(
+        report.cleanup_verified or cleanup_can_be_non_blocking_for_content(report)
+    )
+    if not cleanup_accepted:
+        return report.apply_quality_gate(
+            QualityGateResult.failure(
+                "placement_not_verified",
+                retryable=bool(evidence.get("cleanupRetryable", False)),
+                coverage=coverage,
+                evidence={
+                    "cleanupVerified": report.cleanup_verified,
+                    "cleanupBoundaryCompleted": evidence.get("cleanupBoundaryCompleted"),
+                    "reRunAttempted": evidence.get("reRunAttempted"),
+                    "boardState": evidence.get("boardState") or report.cleanup_state,
+                },
+                message="Mini-remix cleanup was not verified after placement.",
+            )
+        )
+
+    coverage["normal"] = "verified"
+    return report.apply_quality_gate(
+        QualityGateResult.pass_result(
+            coverage=coverage,
+            evidence={
+                "effectiveMode": "mini_remix",
+                "runtimeVerified": report.runtime_verified,
+                "placementVerified": True,
+                "placementCount": expected_count,
+                "listenSeconds": 30,
+                "recordingCompleted": True,
+                "outputCount": 1,
+                "cleanupVerified": report.cleanup_verified,
+                "cleanupAcceptedByPolicy": not report.cleanup_verified,
+                "identityStatus": identity,
+                "identityVerified": identity == "verified",
+            },
+            message="Mini-remix passed the exact placement and 30-second recording gate.",
+        )
+    )
+
+
 def evaluate_workflow_report(
     report: WorkflowReport,
     *,
@@ -518,6 +761,9 @@ def evaluate_workflow_report(
     report.identity_status = identity
     coverage = dict(report.coverage or {})
     coverage.setdefault("horror", "not_checked_by_policy")
+
+    if effective_mode == "mini_remix":
+        return evaluate_mini_remix_report(report, identity_status=identity)
 
     if effective_mode not in CREATOR_PRODUCTION_MODES and effective_mode not in {
         "remix_only",

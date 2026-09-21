@@ -1026,7 +1026,7 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(outside["allowed"])
         self.assertEqual(outside["reason"], "outside_slot_hitbox")
 
-    def test_carpet_click_firewall_blocks_settings_and_open_panels(self):
+    def test_carpet_click_firewall_blocks_controls_but_ignores_decorative_back_targets(self):
         from sprunki_game_player import SprunkiGamePlayer
 
         player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
@@ -1088,9 +1088,10 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertFalse(blocked_control["allowed"])
         self.assertEqual(blocked_control["reason"], "control_hitbox")
 
+        control_layout["targets"][2]["visible"] = False
         control_layout["targets"].append(
             {
-                "name": "Close button",
+                "name": "back effect",
                 "visible": True,
                 "pixelX": 120,
                 "pixelY": 120,
@@ -1100,84 +1101,14 @@ class WorkflowQualityTests(unittest.TestCase):
                 "boundsHeight": 40,
             }
         )
-        blocked_panel = player._carpet_click_safety(
+        decorative_target = player._carpet_click_safety(
             120,
             120,
             slot_index=0,
             slot_center=(120, 120),
             runtime_layout=control_layout,
         )
-        self.assertFalse(blocked_panel["allowed"])
-        self.assertEqual(blocked_panel["reason"], "panel_open")
-
-    def test_panel_without_live_close_control_never_clicks_a_fallback_coordinate(self):
-        from unittest.mock import Mock
-
-        from sprunki_game_player import SprunkiGamePlayer
-
-        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
-        layout = {
-            "ok": True,
-            "targets": [
-                {
-                    "name": "Settings",
-                    "visible": True,
-                    "boundsX": 0,
-                    "boundsY": 0,
-                    "boundsWidth": 640,
-                    "boundsHeight": 360,
-                }
-            ],
-        }
-        player._inspect_runtime_layout_bounds = lambda: layout
-        player._execute_cdp_single_click = Mock(return_value=True)
-
-        result = player._close_carpet_panel_if_open(
-            layout,
-            use_cdp=True,
-            phase="test_panel_close",
-        )
-
-        self.assertFalse(result)
-        player._execute_cdp_single_click.assert_not_called()
-        self.assertEqual(
-            player._last_panel_recovery["reason"],
-            "close_control_unavailable",
-        )
-
-    def test_showcase_panel_close_failure_delegates_to_existing_rerun_boundary(self):
-        import threading
-
-        from placement_verifier import OperationResult, OperationStatus
-        from sprunki_game_player import SprunkiGamePlayer
-
-        player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
-        player.stop_event = threading.Event()
-        player.should_stop = False
-        player._guard_runtime_panel = lambda **kwargs: {
-            "phase": kwargs["phase"],
-            "status": "FAILED",
-            "reason": "close_control_unavailable",
-            "indicators": ["Settings/Panel"],
-        }
-        player._rerun_after_panel_failure = lambda *args, **kwargs: OperationResult(
-            OperationStatus.RECOVERED,
-            details={"reRunVerified": True},
-        )
-
-        result = player._prepare_showcase_panel_retry(
-            {"index": 0, "x": 10, "y": 20},
-            0,
-            "showcase_pre_listen",
-        )
-
-        self.assertTrue(result["retry"])
-        self.assertFalse(result["fatal"])
-        self.assertFalse(getattr(player, "_safety_stop", False))
-        self.assertEqual(
-            player._last_showcase_retry_request["reason"],
-            "panel_recovered_before_end_listen",
-        )
+        self.assertTrue(decorative_target["allowed"])
 
     def test_carpet_click_firewall_stops_without_proven_live_polo_bounds(self):
         from sprunki_game_player import SprunkiGamePlayer
@@ -1275,7 +1206,7 @@ class WorkflowQualityTests(unittest.TestCase):
             self.assertGreaterEqual(coord["y"], 104)
             self.assertLessEqual(coord["y"], 176)
 
-    def test_menu_screen_background_is_not_a_panel_or_control_hitbox(self):
+    def test_menu_screen_background_is_not_a_control_hitbox(self):
         from sprunki_game_player import SprunkiGamePlayer
 
         player = SprunkiGamePlayer.__new__(SprunkiGamePlayer)
@@ -1309,7 +1240,7 @@ class WorkflowQualityTests(unittest.TestCase):
         )
         self.assertTrue(result["allowed"])
 
-    def test_carpet_set_replays_once_after_panel_recovery(self):
+    def test_carpet_set_does_not_replay_after_generic_set_failure(self):
         import threading
         from unittest.mock import patch
 
@@ -1329,18 +1260,10 @@ class WorkflowQualityTests(unittest.TestCase):
             polos=("1",),
             characters=("1",),
         )
-        after = PlacementSnapshot(
-            2.0,
-            characters_count=0,
-            putted_count=0,
-            polos=("0",),
-            characters=("0",),
-        )
         context.set_baseline(before)
-        states = iter((before, after))
         attempts = []
 
-        player._read_comprehensive_state = lambda _context: next(states)
+        player._read_comprehensive_state = lambda _context: before
         player._get_board_progress_count = lambda state: state.characters_count
         player._is_board_state_clean = lambda state: state.characters_count == 0
         player.generate_simple_coordinate_set = lambda *args: [
@@ -1349,11 +1272,8 @@ class WorkflowQualityTests(unittest.TestCase):
 
         def fake_set(*args, **kwargs):
             attempts.append(True)
-            if len(attempts) == 1:
-                player._last_carpet_set_abort_reason = "panel_opened_during_set"
-                return False
-            player._last_carpet_set_abort_reason = None
-            return True
+            player._last_carpet_set_abort_reason = "runtime_layout_unknown"
+            return False
 
         player.execute_sequential_clicking_set = fake_set
         with patch("sprunki_game_player.time.sleep"):
@@ -1363,8 +1283,8 @@ class WorkflowQualityTests(unittest.TestCase):
                 operation_context=context,
             )
 
-        self.assertTrue(result)
-        self.assertEqual(len(attempts), 2)
+        self.assertFalse(result)
+        self.assertEqual(len(attempts), 1)
 
     def test_return_completion_event_is_emitted_for_every_success_method(self):
         from unittest.mock import Mock

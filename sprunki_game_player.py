@@ -227,23 +227,14 @@ class SprunkiGamePlayer:
 
     # Carpet bombing is deliberately conservative.  A slot coordinate is
     # allowed to reach only a visible Polo target; controls are protected even
-    # when their hitbox overlaps the configured slot area.  This is especially
-    # important for mods whose Settings/Options panel is drawn by the Scratch
-    # project itself rather than by an HTML overlay.
+    # when their hitbox overlaps the configured slot area.
     CARPET_CONTROL_RE = re.compile(
-        r"\b(?:settings?|options?|more|reset|gallery|credits?|close|back|exit)\b",
-        re.IGNORECASE,
-    )
-    CARPET_PANEL_RE = re.compile(
-        r"\b(?:settings?|options?)\b\s+(?:panel|screen)\b"
-        r"|\b(?:panel|screen)\b\s+(?:settings?|options?)\b",
+        r"\b(?:settings?|options?|more|reset|gallery|credits?)\b",
         re.IGNORECASE,
     )
     CARPET_CONTROL_PADDING_PX = 8.0
     CARPET_SLOT_PADDING_PX = 4.0
-    CARPET_PANEL_SURFACE_MIN_AREA_PX = 120000.0
     CARPET_FALLBACK_RADIUS_PX = 26.0
-    CARPET_SET_RERUN_LIMIT = 1
     # These are transport/entry retries inside one recovery transaction.  They
     # are not additional logical Re-runs and do not create a new board
     # generation.  A second logical boundary is still required before another
@@ -365,11 +356,6 @@ class SprunkiGamePlayer:
         self._last_cleanup_boundary_result = None
         self._board_contamination_carried_forward = False
         self._active_remix_final_cleanup_optional = False
-        # Panel/recovery state is deliberately separate from the ordinary
-        # retry state.  A panel may be recoverable before content is committed
-        # (replay the current unit), but an unverified recovery after content
-        # is committed must stop the workflow instead of replaying content.
-        self._last_panel_recovery = {}
         self._last_showcase_retry_request = None
         self._last_showcase_content_committed = False
         self._last_remix_content_committed = False
@@ -855,9 +841,6 @@ class SprunkiGamePlayer:
         except (TypeError, ValueError, AttributeError):
             max_sets = 3
         carpet_inputs = slot_count * sum(2 + set_index for set_index in range(max_sets))
-        # A panel may open after a valid click.  The recovered set is replayed
-        # once, so reserve a second bounded carpet pass in the shared budget.
-        carpet_inputs *= 1 + int(getattr(self, "CARPET_SET_RERUN_LIMIT", 1) > 0)
         try:
             recovery_rounds = max(
                 1, int(getattr(self, "verifier_targeted_cleanup_recovery_rounds", 2))
@@ -978,7 +961,6 @@ class SprunkiGamePlayer:
             "input_budget_or_deadline_exhausted",
             "remove_button_input_budget_exhausted",
             "runtime_layout_unknown",
-            "panel_recovery_layout_unknown",
             "slot_hitbox_unknown",
             "slot_target_unknown",
             "slot_bounds_unknown",
@@ -5487,8 +5469,21 @@ class SprunkiGamePlayer:
 
             foreground_title = self._get_foreground_window_title()
             if not self._is_game_browser_title(foreground_title):
-                print(f"   ⚠️ F11 skipped: foreground is not Chrome/Cocrea: {foreground_title[:80]!r}")
-                return False
+                # The normal production path remains fail-closed.  The local
+                # mini-remix canary may explicitly opt into this narrow
+                # fallback after _find_game_browser_window() has already
+                # identified a sufficiently large Cocrea/Chrome window.  A
+                # few Windows desktop/session hosts report an empty
+                # foreground title even after pygetwindow.activate() succeeds;
+                # skipping F11 there makes a valid 1920x1080 profile look like
+                # a viewport mismatch before the mini workflow can start.
+                if not getattr(self, "allow_unverified_f11_for_demo", False):
+                    print(f"   ⚠️ F11 skipped: foreground is not Chrome/Cocrea: {foreground_title[:80]!r}")
+                    return False
+                print(
+                    "   ⚠️ Foreground title was not readable; using the explicit "
+                    "local mini-remix demo F11 fallback."
+                )
 
             print(f"   ✅ F11 target confirmed: {foreground_title[:80]}...")
             pyautogui.press('f11')
@@ -7317,90 +7312,8 @@ class SprunkiGamePlayer:
         """Identify visible controls that must never receive a slot click."""
         return bool(cls.CARPET_CONTROL_RE.search(cls._carpet_target_label(target)))
 
-    @classmethod
-    def _carpet_panel_targets(cls, runtime_layout):
-        """Return visible targets indicating that a modal/panel is open.
-
-        ``Menu screen`` and other Scratch UI sprites can remain visible while
-        hidden behind the normal stage, so they are not treated as an open
-        panel by name alone.  A visible Settings/Options target, a close/back
-        control, or an explicitly named panel/screen is strong evidence that
-        the next stage click would be unsafe.
-        """
-        if not isinstance(runtime_layout, dict):
-            return []
-
-        visible_targets = [
-            target
-            for target in runtime_layout.get("targets") or []
-            if isinstance(target, dict) and target.get("visible") is not False
-        ]
-        has_close_control = any(
-            re.search(r"\b(?:close|back|exit)\b", cls._carpet_target_label(target), re.IGNORECASE)
-            for target in visible_targets
-        )
-
-        indicators = []
-        for target in visible_targets:
-            if not isinstance(target, dict) or target.get("visible") is False:
-                continue
-            name = str(target.get("name") or "").strip().lower()
-            label = cls._carpet_target_label(target).lower()
-            if re.search(r"\b(?:close|back|exit)\b", label):
-                indicators.append(target)
-                continue
-            if cls.CARPET_PANEL_RE.search(label):
-                indicators.append(target)
-                continue
-            if re.fullmatch(r"(?:settings?|options?)", name):
-                bounds = (
-                    target.get("boundsWidth"),
-                    target.get("boundsHeight"),
-                )
-                area = (
-                    float(bounds[0]) * float(bounds[1])
-                    if all(isinstance(value, (int, float)) and value > 0 for value in bounds)
-                    else 0.0
-                )
-                # A small visible Settings/Options sprite is normally just the
-                # button itself. Treat it as an open panel only when a close
-                # control is also visible or the target is large enough to be
-                # the panel surface rather than a button.
-                if has_close_control or area >= cls.CARPET_PANEL_SURFACE_MIN_AREA_PX:
-                    indicators.append(target)
-        return indicators
-
-    def _record_panel_recovery(
-        self,
-        *,
-        phase,
-        status,
-        reason,
-        indicators=None,
-        details=None,
-    ):
-        """Persist bounded evidence for one live panel inspection/recovery."""
-        evidence = {
-            "phase": phase,
-            "status": status,
-            "reason": reason,
-            "indicators": [
-                self._carpet_target_label(target)
-                for target in (indicators or [])[:5]
-            ],
-        }
-        if isinstance(details, dict):
-            evidence.update(details)
-        self._last_panel_recovery = evidence
-        return evidence
-
     def _mark_safety_stop(self, reason, *, phase=None, details=None):
-        """Stop all further gameplay input after an unverified recovery.
-
-        This is intentionally a latch.  Once a panel/recovery boundary is
-        UNKNOWN or FAILED, later workflow stages must not guess which screen
-        is focused and must not replay content on a possibly dirty board.
-        """
+        """Stop all further gameplay input after an unverified recovery."""
         self._safety_stop = True
         self._safety_stop_reason = str(reason)
         terminal_event = getattr(self, "terminal_stop_event", None)
@@ -7420,261 +7333,12 @@ class SprunkiGamePlayer:
         }
         if isinstance(details, dict):
             evidence.update(details)
-        current = dict(getattr(self, "_last_panel_recovery", {}) or {})
-        current.update(evidence)
-        self._last_panel_recovery = current
+        self._last_safety_stop_evidence = evidence
         print(
             "   🛑 SAFETY STOP: refusing further gameplay input after "
             f"{reason}"
         )
         return evidence
-
-    def _guard_runtime_panel(self, *, phase, use_cdp=True):
-        """Inspect and, only when proven open, close a live game panel.
-
-        ``CLEAR`` means a readable runtime contains no panel indicator.
-        ``CLOSED`` means a panel was found, a live close control was clicked,
-        and a fresh runtime scan proved it disappeared.  ``FAILED`` and
-        ``UNKNOWN`` are terminal for the current safety boundary; callers must
-        hand them to the existing cleanup/Re-Run coordinator or stop.
-        """
-        try:
-            layout = self._inspect_runtime_layout_bounds()
-        except Exception as error:
-            return self._record_panel_recovery(
-                phase=phase,
-                status="UNKNOWN",
-                reason="runtime_layout_exception",
-                details={"error": str(error)},
-            )
-
-        if not isinstance(layout, dict) or layout.get("ok") is not True:
-            return self._record_panel_recovery(
-                phase=phase,
-                status="UNKNOWN",
-                reason="runtime_layout_unknown",
-                details={
-                    "runtimeError": (
-                        layout.get("error")
-                        if isinstance(layout, dict)
-                        else "invalid_runtime_layout"
-                    )
-                },
-            )
-
-        indicators = self._carpet_panel_targets(layout)
-        if not indicators:
-            return self._record_panel_recovery(
-                phase=phase,
-                status="CLEAR",
-                reason="no_panel_indicator",
-            )
-
-        if not self._close_carpet_panel_if_open(
-            layout,
-            use_cdp=use_cdp,
-            phase=phase,
-        ):
-            return self._record_panel_recovery(
-                phase=phase,
-                status="FAILED",
-                reason="panel_close_unverified",
-                indicators=indicators,
-            )
-
-        try:
-            refreshed = self._inspect_runtime_layout_bounds()
-        except Exception as error:
-            return self._record_panel_recovery(
-                phase=phase,
-                status="UNKNOWN",
-                reason="panel_post_close_layout_exception",
-                indicators=indicators,
-                details={"error": str(error)},
-            )
-        if not isinstance(refreshed, dict) or refreshed.get("ok") is not True:
-            return self._record_panel_recovery(
-                phase=phase,
-                status="UNKNOWN",
-                reason="panel_post_close_layout_unknown",
-                indicators=indicators,
-            )
-        remaining = self._carpet_panel_targets(refreshed)
-        if remaining:
-            return self._record_panel_recovery(
-                phase=phase,
-                status="FAILED",
-                reason="panel_still_open",
-                indicators=remaining,
-            )
-        return self._record_panel_recovery(
-            phase=phase,
-            status="CLOSED",
-            reason="live_close_control_verified",
-            indicators=indicators,
-        )
-
-    def _rerun_after_panel_failure(self, target_slot, *, phase):
-        """Use the existing one-shot Re-Run boundary without screen guessing."""
-        target_slot_index = (
-            target_slot.get("index", -1)
-            if isinstance(target_slot, dict)
-            else -1
-        )
-        context = self._begin_operation(
-            "return",
-            target_slot_index,
-            max_input_attempts=self._cleanup_input_budget(),
-            deadline_seconds=self._cleanup_deadline_seconds(),
-        )
-        if context is None:
-            return OperationResult(
-                OperationStatus.UNKNOWN,
-                direction="return",
-                message="panel_rerun_context_unavailable",
-                details={"phase": phase, "forceReRun": True},
-            )
-
-        self._activate_recovery_scope(context)
-        try:
-            # This read is diagnostic only.  Passing ``forceReRun`` below is
-            # intentional: even if the board already looks clean, the panel
-            # has made the active screen untrusted, so the existing recovery
-            # coordinator must reset the page before a replay.
-            baseline = self._capture_stable_placement_snapshot(
-                timeout_ms=1000,
-                context=context,
-            )
-            if baseline is not None:
-                context.set_baseline(baseline)
-            result = self._run_cleanup_boundary_recovery(
-                context,
-                use_cdp=True,
-                baseline=baseline,
-                current_snapshot=baseline,
-                reason="panel_close_unavailable",
-                success_status=OperationStatus.ALREADY_EMPTY,
-                success_message="panel_recovered_after_rerun",
-                extra_details={
-                    "phase": phase,
-                    "targetSlotIndex": target_slot_index,
-                    "panelRecoveryFailed": True,
-                    "forceReRun": True,
-                },
-            )
-        except Exception as error:
-            result = self._operation_result(
-                context,
-                OperationStatus.FAILED,
-                f"panel_rerun_exception:{error}",
-                details={
-                    "phase": phase,
-                    "panelRecoveryFailed": True,
-                    "forceReRun": True,
-                },
-            )
-        if result.status not in {
-            OperationStatus.VERIFIED,
-            OperationStatus.ALREADY_EMPTY,
-        }:
-            self._mark_safety_stop(
-                "panel_recovery_rerun_unverified",
-                phase=phase,
-                details={
-                    "reRunResult": result.as_dict(),
-                    "forceReRun": True,
-                },
-            )
-        return self._finish_operation(context, result)
-
-    def _prepare_showcase_panel_retry(self, target_slot, icon_index, phase):
-        """Recover a pre-listen panel and request a retry of this icon only."""
-        guard = self._guard_runtime_panel(phase=phase, use_cdp=True)
-        if guard.get("status") == "CLEAR":
-            return {"retry": False, "fatal": False, "guard": guard}
-
-        if guard.get("status") == "UNKNOWN":
-            self._mark_safety_stop(
-                "showcase_panel_recovery_failed",
-                phase=phase,
-                details={"panelRecovery": guard},
-            )
-            return {"retry": False, "fatal": True, "guard": guard}
-
-        if guard.get("status") == "FAILED":
-            # A panel was positively detected, but its close control could not
-            # be proven.  Do not press Escape or a slot coordinate.  Delegate
-            # directly to the existing one-shot Re-Run boundary.
-            print(
-                "   ⚠️ Live panel close failed; delegating to the existing "
-                "return/Re-Run recovery boundary"
-            )
-        elif guard.get("status") != "CLOSED":
-            self._mark_safety_stop(
-                "showcase_panel_recovery_failed",
-                phase=phase,
-                details={"panelRecovery": guard},
-            )
-            return {"retry": False, "fatal": True, "guard": guard}
-
-        try:
-            cleanup_result = (
-                self._rerun_after_panel_failure(target_slot, phase=phase)
-                if guard.get("status") == "FAILED"
-                else self.corrected_return_icon(target_slot, use_cdp=True)
-            )
-        except Exception as error:
-            cleanup_result = None
-            self._mark_safety_stop(
-                "showcase_prelisten_cleanup_exception",
-                phase=phase,
-                details={"error": str(error), "panelRecovery": guard},
-            )
-            return {"retry": False, "fatal": True, "guard": guard}
-
-        cleanup_status = getattr(
-            getattr(cleanup_result, "status", None), "value", None
-        )
-        cleanup_details = dict(getattr(cleanup_result, "details", {}) or {})
-        cleanup_verified = cleanup_status in {
-            OperationStatus.VERIFIED.value,
-            OperationStatus.ALREADY_EMPTY.value,
-        } or (
-            cleanup_status == OperationStatus.RECOVERED.value
-            and cleanup_details.get("reRunVerified") is True
-        )
-        guard = dict(guard)
-        guard["cleanupResult"] = (
-            cleanup_result.as_dict()
-            if hasattr(cleanup_result, "as_dict")
-            else cleanup_result
-        )
-        self._last_panel_recovery = guard
-        if cleanup_verified:
-            retry_request = {
-                "scope": "showcase_icon",
-                "iconIndex": icon_index,
-                "phase": phase,
-                "reason": "panel_recovered_before_end_listen",
-                "panelRecovery": guard,
-            }
-            self._last_showcase_retry_request = retry_request
-            print(
-                f"   🔁 Panel recovery completed; retrying showcase icon "
-                f"{icon_index} from the beginning"
-            )
-            return {"retry": True, "fatal": False, "guard": guard}
-
-        self._mark_safety_stop(
-            "showcase_prelisten_cleanup_unverified",
-            phase=phase,
-            details={
-                "panelRecovery": guard,
-                "cleanupStatus": cleanup_status,
-            },
-        )
-        return {"retry": False, "fatal": True, "guard": guard}
-
     @staticmethod
     def _carpet_point_in_target(target, x, y, padding=0.0, inset=0.0):
         """Test a screen point against a live target bounds/center."""
@@ -8003,14 +7667,6 @@ class SprunkiGamePlayer:
                 "target": None,
             }
 
-        panel_targets = self._carpet_panel_targets(layout)
-        if panel_targets:
-            return {
-                "allowed": False,
-                "reason": "panel_open",
-                "target": self._carpet_target_label(panel_targets[0]),
-            }
-
         for target in layout.get("targets") or []:
             if not isinstance(target, dict) or target.get("visible") is False:
                 continue
@@ -8061,125 +7717,6 @@ class SprunkiGamePlayer:
                 }
 
         return {"allowed": True, "reason": "slot_safe", "target": None}
-
-    def _close_carpet_panel_if_open(
-        self,
-        runtime_layout=None,
-        use_cdp=True,
-        *,
-        phase="cleanup",
-    ):
-        """Close a Scratch Settings/Options panel before resuming slot input."""
-        layout = runtime_layout
-        if not isinstance(layout, dict) or layout.get("ok") is not True:
-            layout = self._inspect_runtime_layout_bounds()
-        if not isinstance(layout, dict) or layout.get("ok") is not True:
-            print("   🛑 Cannot inspect runtime before closing a carpet panel")
-            self._record_panel_recovery(
-                phase=phase,
-                status="UNKNOWN",
-                reason="runtime_layout_unknown_before_close",
-            )
-            return False
-
-        indicators = self._carpet_panel_targets(layout)
-        if not indicators:
-            self._record_panel_recovery(
-                phase=phase,
-                status="CLEAR",
-                reason="no_panel_indicator",
-            )
-            return True
-
-        print(
-            "   ⚠️ Carpet input guard detected an open panel: "
-            + ", ".join(self._carpet_target_label(target) for target in indicators[:3])
-        )
-
-        # Do not send Escape here.  This cleanup runs while Chrome may be in
-        # browser/game fullscreen, where Escape exits fullscreen instead of
-        # closing the Scratch panel.  Refresh the runtime and use only a
-        # live in-game close target below; otherwise fail closed.
-        refreshed = self._inspect_runtime_layout_bounds()
-        if isinstance(refreshed, dict) and refreshed.get("ok") is True:
-            if not self._carpet_panel_targets(refreshed):
-                print("   ✅ Settings/Options panel closed during runtime refresh")
-                self._record_panel_recovery(
-                    phase=phase,
-                    status="CLOSED",
-                    reason="runtime_refresh_proved_closed",
-                    indicators=indicators,
-                )
-                return True
-            layout = refreshed
-
-        # Some mods do not expose a panel state transition until their live
-        # close control is clicked.  Always use the validated CDP page target
-        # here, even when the surrounding cleanup uses PyAutoGUI, so a stale
-        # screen coordinate cannot hit Chrome's fullscreen UI.
-        close_targets = [
-            target
-            for target in layout.get("targets") or []
-            if re.search(
-                r"\b(?:close|back|exit)\b",
-                self._carpet_target_label(target),
-                re.IGNORECASE,
-            )
-        ]
-        close_targets.sort(
-            key=lambda target: (
-                target.get("layerOrder")
-                if isinstance(target.get("layerOrder"), (int, float))
-                else -1
-            ),
-            reverse=True,
-        )
-        if not close_targets:
-            self._record_panel_recovery(
-                phase=phase,
-                status="FAILED",
-                reason="close_control_unavailable",
-                indicators=indicators,
-            )
-            print("   🛑 Open panel has no live Close/Back/Exit target")
-            return False
-        for target in close_targets:
-            live_center = self._carpet_target_center(target)
-            if live_center is None:
-                continue
-            center_x, center_y = live_center
-            try:
-                closed = self._execute_cdp_single_click(
-                    int(round(center_x)), int(round(center_y))
-                )
-            except Exception:
-                closed = False
-            if not closed:
-                continue
-            time.sleep(0.25)
-            refreshed = self._inspect_runtime_layout_bounds()
-            if isinstance(refreshed, dict) and refreshed.get("ok") is True:
-                if not self._carpet_panel_targets(refreshed):
-                    print("   ✅ Settings/Options panel closed with live close control")
-                    self._record_panel_recovery(
-                        phase=phase,
-                        status="CLOSED",
-                        reason="live_close_control_verified",
-                        indicators=indicators,
-                        details={
-                            "closeControl": self._carpet_target_label(target),
-                        },
-                    )
-                    return True
-
-        print("   🛑 Settings/Options panel is still open; refusing more carpet clicks")
-        self._record_panel_recovery(
-            phase=phase,
-            status="FAILED",
-            reason="panel_still_open",
-            indicators=indicators,
-        )
-        return False
 
     def _find_runtime_character_candidate(self, before_layout, after_layout, target_slot, radius=360.0):
         before_by_id = {target.get("id"): target for target in (before_layout or {}).get("targets", [])}
@@ -10790,11 +10327,6 @@ class SprunkiGamePlayer:
                 )
             else:
                 print("   No unresolved slots remain; skipping empty carpet fallback")
-            failure_counts = getattr(context, "failure_counts", None)
-            panel_recovery_failed = bool(
-                isinstance(failure_counts, dict)
-                and failure_counts.get("panel_recovery_failed")
-            )
             final_snapshot = self._capture_stable_placement_snapshot(
                 timeout_ms=getattr(self, "verifier_snapshot_timeout_ms", 1500),
                 context=context,
@@ -10804,7 +10336,7 @@ class SprunkiGamePlayer:
                 print("   🛑 Final cleanup state is UNKNOWN")
                 return finish(OperationStatus.UNKNOWN, "cleanup_final_state_unknown")
             verified_clean = self._is_board_state_clean(final_snapshot)
-            if verified_clean and not panel_recovery_failed:
+            if verified_clean:
                 return finish(
                     OperationStatus.VERIFIED,
                     "cleanup_verified",
@@ -10822,16 +10354,10 @@ class SprunkiGamePlayer:
             # making the single Re-Run decision for the boundary.
             return finish(
                 OperationStatus.FAILED,
-                (
-                    "cleanup_panel_recovery_failed"
-                    if panel_recovery_failed
-                    else "cleanup_incomplete"
-                ),
+                "cleanup_incomplete",
                 details={
                     "initialCount": initial_count,
                     "carpetProgress": bool(success),
-                    "forceReRun": panel_recovery_failed,
-                    "panelRecoveryFailed": panel_recovery_failed,
                     **remove_batch_details,
                 },
             )
@@ -11317,13 +10843,9 @@ class SprunkiGamePlayer:
                 use_cdp,
                 operation_context=operation_context,
             )
-            force_re_run = bool(
-                (getattr(strategy_result, "details", {}) or {}).get("forceReRun")
-            )
             strategy_details = {
                 "strategy": strategy_result.as_dict(),
                 "cleanupBoundaryId": boundary_id,
-                "forceReRun": force_re_run,
             }
 
             # An explicit cancellation is a control state, not a board-state
@@ -11370,9 +10892,7 @@ class SprunkiGamePlayer:
                 context=operation_context,
                 stable_samples=self._cleanup_stable_sample_count(),
             )
-            if force_re_run:
-                cleanup_reason = "panel_recovery_failed"
-            elif strategy_result.status == OperationStatus.UNKNOWN:
+            if strategy_result.status == OperationStatus.UNKNOWN:
                 cleanup_reason = "cleanup_state_unknown"
             else:
                 cleanup_reason = "cleanup_return_cascade_incomplete"
@@ -11387,22 +10907,6 @@ class SprunkiGamePlayer:
                 success_message="cleanup_verified",
                 extra_details=strategy_details,
             )
-            if (
-                force_re_run
-                and boundary_result.status
-                not in {
-                    OperationStatus.VERIFIED,
-                    OperationStatus.ALREADY_EMPTY,
-                }
-            ):
-                self._mark_safety_stop(
-                    "panel_recovery_rerun_unverified",
-                    phase="cleanup_panel_recovery",
-                    details={
-                        "boundaryResult": boundary_result.as_dict(),
-                        "cleanupBoundaryId": boundary_id,
-                    },
-                )
             if owns_context:
                 self._finish_operation(operation_context, boundary_result)
 
@@ -11884,71 +11388,19 @@ class SprunkiGamePlayer:
                 
                 print(f"   ðŸ“Š Generated {len(coordinate_set)} total coordinates")
                 
-                # Execute sequential clicking for this set.  If a click
-                # opened a panel and the guard closed it, replay this same
-                # bounded set once; moving directly to the next progressive
-                # set would otherwise skip the coordinates that were blocked.
-                set_success = False
-                set_attempt = 0
-                while True:
-                    set_attempt += 1
-                    set_success = self.execute_sequential_clicking_set(
-                        coordinate_set,
-                        set_num,
-                        use_cdp,
-                        operation_context=context,
-                    )
-                    set_abort_reason = getattr(
-                        self,
-                        "_last_carpet_set_abort_reason",
-                        None,
-                    )
-                    if (
-                        not set_success
-                        and set_abort_reason == "panel_opened_during_set"
-                        and set_attempt <= self.CARPET_SET_RERUN_LIMIT
-                    ):
-                        # Reconcile any clicks delivered before the panel was
-                        # detected before replaying the bounded set.  The
-                        # replay must not erase evidence from that first set.
-                        self._visual_evaluate_carpet_candidates()
-                        print(
-                            f"      🔁 Panel recovery succeeded; re-running "
-                            f"carpet set {set_num} ({set_attempt}/{self.CARPET_SET_RERUN_LIMIT})"
-                        )
-                        time.sleep(0.25)
-                        continue
-                    break
-
-                if (
-                    not set_success
-                    and set_abort_reason == "panel_opened_during_set"
-                ):
-                    self._visual_evaluate_carpet_candidates()
-                    print(
-                        "   🛑 Panel recovery retry budget exhausted; "
-                        "stopping before the next carpet set"
-                    )
-                    return False
-                if set_abort_reason == "panel_recovery_failed":
-                    # Do not spend more carpet sets while a panel is still
-                    # covering the stage. The cleanup coordinator owns the
-                    # recovery decision and will use its single Re-Run path.
-                    failure_counts = getattr(context, "failure_counts", None)
-                    if isinstance(failure_counts, dict):
-                        failure_counts["panel_recovery_failed"] = (
-                            int(failure_counts.get("panel_recovery_failed", 0) or 0)
-                            + 1
-                        )
-                    print(
-                        "   🛑 Panel could not be closed; stopping carpet input "
-                        "and requesting coordinator Re-Run recovery"
-                    )
-                    self._visual_evaluate_carpet_candidates()
-                    return False
+                set_success = self.execute_sequential_clicking_set(
+                    coordinate_set,
+                    set_num,
+                    use_cdp,
+                    operation_context=context,
+                )
+                set_abort_reason = getattr(
+                    self,
+                    "_last_carpet_set_abort_reason",
+                    None,
+                )
                 if set_abort_reason in {
                     "runtime_layout_unknown",
-                    "panel_recovery_layout_unknown",
                     "post_click_layout_unknown",
                     "slot_hitbox_unknown",
                     "slot_target_unknown",
@@ -12152,8 +11604,7 @@ class SprunkiGamePlayer:
                 print("      🛑 Sequential clicks require the active OperationContext")
                 return False
 
-            # A panel-recovery replay is a new bounded set attempt.  Discard
-            # partial slot-group candidates from the interrupted attempt so a
+            # Each bounded set starts with a fresh visual candidate list so a
             # later set cannot attribute an old before/after pair to the new
             # physical click sequence.
             self._visual_carpet_candidates = []
@@ -12170,35 +11621,14 @@ class SprunkiGamePlayer:
             sorted_slot_indices = sorted(slots_coords.keys())
 
             # Take one live runtime snapshot before sending any input.  This
-            # both detects a panel left open by a previous action and gives
-            # every click in this bounded set the real Polo/control hitboxes.
+            # gives every click in this bounded set the real Polo/control
+            # hitboxes.
             runtime_layout = self._inspect_runtime_layout_bounds()
             if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
                 print(
                     "      🛑 Runtime layout unavailable; refusing carpet input"
                 )
                 self._last_carpet_set_abort_reason = "runtime_layout_unknown"
-                return False
-            elif self._carpet_panel_targets(runtime_layout):
-                if not self._close_carpet_panel_if_open(
-                    runtime_layout,
-                    use_cdp,
-                    phase="cleanup_set_start",
-                ):
-                    self._last_carpet_set_abort_reason = "panel_recovery_failed"
-                    return False
-                runtime_layout = self._inspect_runtime_layout_bounds()
-                if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
-                    print(
-                        "      🛑 Runtime layout unavailable after panel recovery; "
-                        "stopping this set"
-                    )
-                    self._last_carpet_set_abort_reason = "panel_recovery_layout_unknown"
-                    return False
-                # The panel interrupted the current logical set before its
-                # coordinates were proven complete.  Re-run this same set
-                # once; do not skip directly to a later set.
-                self._last_carpet_set_abort_reason = "panel_opened_during_set"
                 return False
             
             total_clicks = 0
@@ -12284,38 +11714,6 @@ class SprunkiGamePlayer:
                                 else ""
                             )
                         )
-                        if safety.get("reason") == "panel_open":
-                            if not self._close_carpet_panel_if_open(
-                                runtime_layout,
-                                use_cdp,
-                                phase="cleanup_set_input",
-                            ):
-                                self._last_carpet_set_abort_reason = "panel_recovery_failed"
-                                self._visual_record_carpet_candidate(
-                                    visual_arm,
-                                    slot_index,
-                                    group_input_start,
-                                    context,
-                                )
-                                return False
-                            runtime_layout = self._inspect_runtime_layout_bounds()
-                            if not isinstance(runtime_layout, dict) or runtime_layout.get("ok") is not True:
-                                self._last_carpet_set_abort_reason = "panel_recovery_layout_unknown"
-                                self._visual_record_carpet_candidate(
-                                    visual_arm,
-                                    slot_index,
-                                    group_input_start,
-                                    context,
-                                )
-                                return False
-                            self._last_carpet_set_abort_reason = "panel_opened_during_set"
-                            self._visual_record_carpet_candidate(
-                                visual_arm,
-                                slot_index,
-                                group_input_start,
-                                context,
-                            )
-                            return False
                         self._last_carpet_set_abort_reason = str(
                             safety.get("reason") or "unsafe_carpet_coordinate"
                         )
@@ -12346,11 +11744,8 @@ class SprunkiGamePlayer:
                     if click_success:
                         successful_clicks += 1
 
-                    # Do not send the next coordinate while a Settings or
-                    # Options panel may be covering the stage.  If an
-                    # unexpected control still opened, close it and abort the
-                    # remainder of this set so the outer verifier can re-read
-                    # the board before deciding whether to retry.
+                    # Refresh the live geometry after each click before
+                    # sending the next coordinate.
                     post_layout = self._inspect_runtime_layout_bounds()
                     if not isinstance(post_layout, dict) or post_layout.get("ok") is not True:
                         print(
@@ -12358,25 +11753,6 @@ class SprunkiGamePlayer:
                             "stopping before the next coordinate"
                         )
                         self._last_carpet_set_abort_reason = "post_click_layout_unknown"
-                        self._visual_record_carpet_candidate(
-                            visual_arm,
-                            slot_index,
-                            group_input_start,
-                            context,
-                        )
-                        return False
-                    if self._carpet_panel_targets(post_layout):
-                        print("      ⚠️ A panel opened during carpet bombing; closing and stopping this set")
-                        closed = self._close_carpet_panel_if_open(
-                            post_layout,
-                            use_cdp,
-                            phase="cleanup_set_post_click",
-                        )
-                        self._last_carpet_set_abort_reason = (
-                            "panel_opened_during_set"
-                            if closed
-                            else "panel_recovery_failed"
-                        )
                         self._visual_record_carpet_candidate(
                             visual_arm,
                             slot_index,
@@ -15042,8 +14418,6 @@ class SprunkiGamePlayer:
                 const icons = [];
                 const slots = [];
                 const playButtons = [];
-                const closeIndicators = [];
-                const panelIndicators = [];
 
                 function asItem(target, index) {
                     const name = target.sprite?.name || '';
@@ -15063,47 +14437,24 @@ class SprunkiGamePlayer:
                     };
                 }
 
-                function isCloseIndicator(name, costume) {
-                    const raw = `${name} ${costume}`.trim().toLowerCase();
-                    if (/\b(close|back|return|exit)\b/.test(raw)) return true;
-                    return /(^|[^a-z])x([^a-z]|$)/.test(raw) && /\b(button|btn|close)\b/.test(raw);
-                }
-
-                function isPanelIndicator(name, costume) {
-                    const raw = `${name} ${costume}`.trim().toLowerCase();
-                    if (/\bwarning\b/.test(raw)) {
-                        return /\b(gallery|credits?|settings?|menu|more)\b/.test(raw);
-                    }
-                    return /\b(gallery|credits?|settings?|menu|more)\b.*\b(screen|panel)\b/.test(raw)
-                        || /\b(screen|panel)\b.*\b(gallery|credits?|settings?|menu|more)\b/.test(raw)
-                        || /\bsettings?\b/.test(raw);
-                }
-
                 const targets = vm.runtime.targets || [];
                 for (let i = 0; i < targets.length; i++) {
                     const target = targets[i];
                     if (target.isStage || !target.sprite || !target.visible) continue;
                     const item = asItem(target, i);
                     const name = item.targetName;
-                    const costume = item.currentCostumeName;
 
                     if (/icons/i.test(name)) icons.push(item);
                     if (/^polo\s*\d+/i.test(name)) slots.push(item);
                     if (/^play button/i.test(name)) playButtons.push(item);
-                    if (isCloseIndicator(name, costume)) closeIndicators.push(item);
-                    if (isPanelIndicator(name, costume)) panelIndicators.push(item);
                 }
 
-                const openPanelIndicators = [...closeIndicators, ...panelIndicators];
                 resolve({
                     ok: true,
                     iconCount: icons.length,
                     slotCount: slots.length,
                     playButtonCount: playButtons.length,
-                    closeIndicators,
-                    panelIndicators,
-                    openPanelIndicators,
-                    playableCandidate: icons.length > 0 && slots.length > 0 && openPanelIndicators.length === 0
+                    playableCandidate: icons.length > 0 && slots.length > 0
                 });
             } catch (e) {
                 resolve({ ok: false, reason: 'error', error: String(e) });
@@ -15165,7 +14516,6 @@ class SprunkiGamePlayer:
                 "icons": icons,
                 "slots": slots,
                 "playButtons": int(state.get("playButtonCount") or 0),
-                "openIndicators": len(state.get("openPanelIndicators") or []),
             }
             self.entry_strategy["runtimeState"] = evidence
 
@@ -15216,18 +14566,10 @@ class SprunkiGamePlayer:
     def _summarize_entry_state(self, state):
         if not isinstance(state, dict):
             return "state unavailable"
-        indicators = state.get('openPanelIndicators') or []
-        indicator_names = [
-            f"{item.get('targetName')}/{item.get('currentCostumeName')}@({item.get('x')},{item.get('y')})"
-            for item in indicators[:6]
-        ]
-        summary = (
+        return (
             f"icons={state.get('iconCount')}, slots={state.get('slotCount')}, "
-            f"playButtons={state.get('playButtonCount')}, openIndicators={len(indicators)}"
+            f"playButtons={state.get('playButtonCount')}"
         )
-        if indicator_names:
-            summary += f" [{'; '.join(indicator_names)}]"
-        return summary
 
     @staticmethod
     def _normalized_nonnegative_count(value):
@@ -15892,28 +15234,6 @@ class SprunkiGamePlayer:
         )
         return verified
 
-    def _rollback_open_entry_panel_via_ws(self, ws, state):
-        if not isinstance(state, dict):
-            return False
-
-        close_buttons = state.get('closeIndicators') or []
-        if not close_buttons:
-            return False
-        close_button = sorted(
-            close_buttons,
-            key=lambda item: item.get('layerOrder') if item.get('layerOrder') is not None else -1,
-            reverse=True
-        )[0]
-        print(
-            "   Rolling back opened panel via "
-            f"{close_button.get('targetName')}/{close_button.get('currentCostumeName')} "
-            f"@ ({close_button.get('x')}, {close_button.get('y')})"
-        )
-        if not self._simulate_click_via_cdp(ws, int(close_button['x']), int(close_button['y'])):
-            return False
-        time.sleep(0.8)
-        return True
-
     def _trial_action_buttons_via_ws(self, ws, buttons):
         if not buttons:
             return {"selected": None, "tested": [], "success": False, "reason": "no_buttons"}
@@ -15937,24 +15257,13 @@ class SprunkiGamePlayer:
             after_state = self._evaluate_entry_state_via_ws(ws)
             print(f"      After click: {self._summarize_entry_state(after_state)}")
 
-            opened_panel = bool(after_state and after_state.get('openPanelIndicators'))
             playable_candidate = bool(after_state and after_state.get('playableCandidate'))
             result = {
                 "button": button,
                 "before": before_state,
                 "after": after_state,
-                "openedPanel": opened_panel,
                 "playableCandidate": playable_candidate
             }
-
-            if opened_panel:
-                result["result"] = "panel_opened"
-                self._rollback_open_entry_panel_via_ws(ws, after_state)
-                post_rollback = self._evaluate_entry_state_via_ws(ws)
-                result["afterRollback"] = post_rollback
-                print(f"      After rollback: {self._summarize_entry_state(post_rollback)}")
-                tested.append(result)
-                continue
 
             if playable_candidate:
                 result["result"] = "selected"
@@ -16456,7 +15765,7 @@ class SprunkiGamePlayer:
                     if not buttons:
                         print(f"   \u2139\ufe0f No action buttons found in round {scan_round}")
                         if smart_clicks_performed > 0:
-                            print("   \u2705 Previous clicks were made, panels likely cleared")
+                            print("   \u2705 Previous clicks were made; continuing scan")
                         break
                     
                     print(f"   \U0001f3af Found {len(buttons)} action button(s):")
@@ -17175,7 +16484,6 @@ class SprunkiGamePlayer:
             self._cleanup_boundary_states = {}
             self._last_cleanup_boundary_evidence = {}
             self._last_cleanup_boundary_result = None
-            self._last_panel_recovery = {}
             self._last_showcase_retry_request = None
             self._last_showcase_content_committed = False
             self._last_remix_content_committed = False
@@ -18881,18 +18189,6 @@ class SprunkiGamePlayer:
                 )
             )
 
-            # A drop can open a Scratch panel before the listening segment is
-            # committed.  Resolve that state before logging ``start_listen``;
-            # if recovery is verified, the outer loop retries this icon from
-            # the beginning instead of duplicating only part of its segment.
-            panel_recovery = self._prepare_showcase_panel_retry(
-                target_slot,
-                icon_index,
-                "showcase_pre_listen",
-            )
-            if panel_recovery.get("retry") or panel_recovery.get("fatal"):
-                return False
-
             if not drag_verified and allow_operation_rerun:
                 rerun_result = self._rerun_after_operation_failure(
                     direction="place",
@@ -19736,9 +19032,8 @@ class SprunkiGamePlayer:
                     self.logger.warning("Stop event detected, aborting icon showcase.")
                     break
 
-                # A panel recovered before ``end_listen`` invalidates the
-                # current icon attempt, not the whole showcase and not the
-                # next icon.  Give this same icon one bounded replay.
+                # A verified placement recovery invalidates the current icon
+                # attempt, so give this same icon one bounded replay.
                 icon_attempt = 0
                 while True:
                     self._allow_current_showcase_operation_rerun = (
@@ -19780,7 +19075,7 @@ class SprunkiGamePlayer:
                     print(f"⚠️ Failed to showcase icon {icon_index}, but continuing with the next one.")
                     if getattr(self, "_safety_stop", False):
                         raise WorkflowIncompatibleError(
-                            "Showcase stopped by safety boundary after panel/recovery failure"
+                            "Showcase stopped by safety boundary after recovery failure"
                         )
                     last_result = getattr(self, "last_operation_result", None)
                     last_status = getattr(getattr(last_result, "status", None), "value", None)
@@ -19826,7 +19121,6 @@ class SprunkiGamePlayer:
         try:
             self._last_remix_content_committed = False
             self._last_remix_failure_phase = None
-            self._last_panel_recovery = {}
             self._last_remix_reset_result = None
             if not self.config or not remix_data:
                 return False
@@ -19888,34 +19182,6 @@ class SprunkiGamePlayer:
                     False,
                     use_cdp=True,
                 )
-
-                # Inspect immediately, even when the drag result is failed or
-                # aggregate-only.  A panel can open during the gesture and a
-                # false result must not send the ordinary cleanup coordinates
-                # across that now-untrusted surface.
-                panel_recovery = self._guard_runtime_panel(
-                    phase="remix_pre_playback",
-                    use_cdp=True,
-                )
-                if panel_recovery.get("status") != "CLEAR":
-                    panel_status = panel_recovery.get("status")
-                    if panel_status == "CLOSED":
-                        self._last_remix_failure_phase = (
-                            "pre_playback_panel_recovered"
-                        )
-                    elif panel_status == "FAILED":
-                        self._last_remix_failure_phase = (
-                            "pre_playback_panel_recovery_failed"
-                        )
-                    else:
-                        self._last_remix_failure_phase = (
-                            "pre_playback_runtime_unknown"
-                        )
-                    print(
-                        "   🛑 Remix placement interrupted by panel state; "
-                        "deferring to whole-remix cleanup/retry"
-                    )
-                    return False
 
                 if getattr(drag_result, "status", None) == OperationStatus.ALREADY_PLACED:
                     skipped_count += 1
@@ -20296,45 +19562,6 @@ class SprunkiGamePlayer:
                 total_attempted = int(reusable_cleanup.get("totalAttempted", 0) or 0)
                 errors = list(reusable_cleanup.get("errors") or [])
                 cleanup_source = "attempt_cleanup_reused"
-            elif getattr(self, "_last_remix_failure_phase", None) == (
-                "pre_playback_panel_recovery_failed"
-            ):
-                # The panel is still the active surface.  Do not enter the
-                # ordinary precision/carpet cascade, because its configured
-                # slot coordinate would be untrusted.  Reuse the same direct
-                # one-shot Re-Run boundary as showcase pre-listen recovery.
-                layout_slots = (
-                    (self.config or {}).get("layout", {}).get("slots", [])
-                    if isinstance(getattr(self, "config", None), dict)
-                    else []
-                )
-                rerun_slot = (
-                    layout_slots[0]
-                    if isinstance(layout_slots, list) and layout_slots
-                    else {"index": -1}
-                )
-                rerun_result = self._rerun_after_panel_failure(
-                    rerun_slot,
-                    phase="remix_pre_playback_panel",
-                )
-                cleanup_boundary_evidence = dict(
-                    getattr(rerun_result, "details", {}) or {}
-                )
-                if rerun_result.status in {
-                    OperationStatus.VERIFIED,
-                    OperationStatus.ALREADY_EMPTY,
-                }:
-                    success_count, total_attempted, errors = 1, 1, []
-                else:
-                    success_count, total_attempted, errors = (
-                        0,
-                        1,
-                        [
-                            f"panel_rerun_{rerun_result.status.value.lower()}"
-                            f":{rerun_result.message}"
-                        ],
-                    )
-                cleanup_source = "panel_rerun"
             else:
                 # Remix retries also use the same whole-game reset policy.
                 # Returning individual slots here would reintroduce the
@@ -20547,8 +19774,8 @@ class SprunkiGamePlayer:
                 return True, attempt_details
 
             # Once playback reached ``end_remix_playback``, the content has
-            # already been recorded.  A failed return/panel recovery is a
-            # terminal cleanup result for this remix; calling the partial
+            # already been recorded.  A failed return/recovery is a terminal
+            # cleanup result for this remix; calling the partial
             # cleanup helper and replaying the whole remix would duplicate the
             # video segment and violate the phase boundary.
             if getattr(self, "_last_remix_content_committed", False):
@@ -20594,22 +19821,6 @@ class SprunkiGamePlayer:
                 detail["retryBlockedReason"] = "cleanup_not_verified"
             attempt_details.append(detail)
 
-            if (
-                not cleanup_verified
-                and str(getattr(self, "_last_remix_failure_phase", "") or "").startswith(
-                    "pre_playback_panel"
-                )
-            ):
-                self._mark_safety_stop(
-                    "remix_pre_playback_panel_cleanup_unverified",
-                    phase=getattr(
-                        self,
-                        "_last_remix_failure_phase",
-                        "pre_playback_panel",
-                    ),
-                    details={"remixName": remix_name, "attempt": attempt},
-                )
-
             if not cleanup_verified or not input_valid:
                 return False, attempt_details
             if attempt >= max_attempts:
@@ -20632,7 +19843,6 @@ class SprunkiGamePlayer:
         self.last_workflow_report = report
         self._workflow_placement_transactions = []
         self._reset_cleanup_guard()
-        self._last_panel_recovery = {}
         self._last_showcase_retry_request = None
         self._last_showcase_content_committed = False
         self._last_remix_content_committed = False

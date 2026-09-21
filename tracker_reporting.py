@@ -129,6 +129,56 @@ _FAILURE_CONTEXT = {
         "Production mode không được Creator hỗ trợ.",
         "Kiểm tra mode do Tracker gửi và mapping alias normal/master.",
     ),
+    "mini_remix_mode_contract": (
+        "mini_remix",
+        "Payload mini-remix không có production_mode=mini_remix hợp lệ.",
+        "Tracker cần gửi đúng mode và không được fallback sang showcase.",
+    ),
+    "mini_remix_block_missing": (
+        "mini_remix",
+        "Job mini-remix thiếu block mini_remix.",
+        "Gửi mini_remix.icon_indices cùng manual profile snapshot.",
+    ),
+    "mini_remix_manual_profile_required": (
+        "manual_profile",
+        "Mini-remix thiếu manual profile bắt buộc từ Tracker.",
+        "Chỉ dispatch mini cho Creator khi có snapshot manual profile và revision id.",
+    ),
+    "mini_remix_profile_invalid": (
+        "manual_profile",
+        "Manual profile v3 của mini-remix không hợp lệ.",
+        "Kiểm tra revision, hash, URL và viewport của snapshot Tracker.",
+    ),
+    "mini_remix_icon_index_not_found": (
+        "mini_remix",
+        "Icon marker index được yêu cầu không tồn tại trong profile.",
+        "Tracker cần gửi marker index có trong manual profile snapshot.",
+    ),
+    "mini_remix_icon_disabled": (
+        "mini_remix",
+        "Icon marker index được yêu cầu đang bị disable.",
+        "Chọn lại icon marker playable trong manual profile.",
+    ),
+    "mini_remix_slot_count_insufficient": (
+        "mini_remix",
+        "Số icon mini-remix vượt quá số slot playable.",
+        "Giảm số icon trong combo hoặc cập nhật manual profile.",
+    ),
+    "mini_remix_mapping_not_verified": (
+        "placement",
+        "Mapping icon-slot của mini-remix chưa đầy đủ.",
+        "Kiểm tra selected icon indices, slot trung tâm và placement ledger.",
+    ),
+    "mini_remix_recording_not_verified": (
+        "recording",
+        "Mini-remix chưa tạo được video đủ 30 giây.",
+        "Kiểm tra OBS, output video và trạng thái recording trước khi retry.",
+    ),
+    "mini_remix_output_not_verified": (
+        "recording",
+        "Mini-remix không có đúng một output video hợp lệ.",
+        "Kiểm tra OBS output path và file validator.",
+    ),
 }
 
 
@@ -613,12 +663,23 @@ def _attempt_output_references(item: Any, final_status: str) -> Dict[str, Any]:
     if not isinstance(attempts, dict):
         return {}
     current_attempt = int(getattr(item, "workflow_attempt", 1) or 1)
+    current_item_outputs = {
+        os.path.abspath(str(path))
+        for path in (getattr(item, "output_files", []) or [])
+        if path
+    }
+    mini_mode = getattr(item, "mode", None) == "mini_remix"
     output_attempts = []
     for raw_attempt in sorted(attempts, key=lambda value: int(value)):
         try:
             attempt_number = int(raw_attempt)
         except (TypeError, ValueError):
             continue
+        attempt_paths = [
+            os.path.abspath(str(raw_path))
+            for raw_path in list(attempts.get(raw_attempt) or [])[:32]
+            if raw_path
+        ]
         files = []
         for raw_path in list(attempts.get(raw_attempt) or [])[:32]:
             normalized = os.path.abspath(str(raw_path)) if raw_path else ""
@@ -638,7 +699,12 @@ def _attempt_output_references(item: Any, final_status: str) -> Dict[str, Any]:
             {
                 "attempt": attempt_number,
                 "published": bool(
-                    final_status == "completed" and attempt_number == current_attempt
+                    final_status == "completed"
+                    and attempt_number == current_attempt
+                    and (
+                        not mini_mode
+                        or bool(set(attempt_paths) & current_item_outputs)
+                    )
                 ),
                 "file_count": len(list(attempts.get(raw_attempt) or [])),
                 "files": files,
@@ -668,6 +734,34 @@ def build_tracker_diagnostic_report(
     terminal_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the complete Creator-to-Tracker diagnostic envelope."""
+
+    requested_mode = (
+        (job or {}).get("production_mode")
+        or getattr(item, "requested_production_mode", None)
+        or getattr(item, "mode", None)
+        or getattr(workflow_report, "mode", None)
+    )
+    if (
+        "mini_remix" in (job or {})
+        or normalize_production_mode(requested_mode, allow_skip=True) == "mini_remix"
+        or getattr(item, "mode", None) == "mini_remix"
+    ):
+        return build_mini_tracker_diagnostic_report(
+            job,
+            item,
+            workflow_report,
+            manifest_data=manifest_data,
+            manifest_path=manifest_path,
+            log_snapshot=log_snapshot,
+            output_files_payload=output_files_payload,
+            report_id=report_id,
+            attempt_nonce=attempt_nonce,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            generated_at=generated_at,
+            terminal_status=terminal_status,
+            terminal_error=terminal_error,
+        )
 
     job = job or {}
     report = _report_dict(workflow_report)
@@ -1183,5 +1277,335 @@ def build_tracker_diagnostic_report(
             "blocking_stage": context[0] if final_status != "completed" else None,
             "failed_checks": failed_checks,
         },
+    }
+    return json_safe(diagnostic)
+
+
+def build_mini_tracker_diagnostic_report(
+    job: Optional[Dict[str, Any]],
+    item: Any,
+    workflow_report: Any,
+    *,
+    manifest_data: Optional[Dict[str, Any]] = None,
+    manifest_path: Optional[str] = None,
+    log_snapshot: Optional[Dict[str, Any]] = None,
+    output_files_payload: Optional[Dict[str, Any]] = None,
+    report_id: Optional[str] = None,
+    attempt_nonce: Optional[str] = None,
+    attempt: int = 1,
+    max_attempts: Optional[int] = None,
+    generated_at: Optional[datetime] = None,
+    terminal_status: Optional[str] = None,
+    terminal_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the exact diagnostic envelope for a mini-remix attempt."""
+
+    job = job or {}
+    report = _report_dict(workflow_report)
+    gate = report.get("quality_gate") if isinstance(report.get("quality_gate"), dict) else {}
+    evidence = report.get("evidence") if isinstance(report.get("evidence"), dict) else {}
+    item_json = getattr(item, "json_data", None) if item is not None else None
+    item_json = item_json if isinstance(item_json, dict) else {}
+    layout = item_json.get("layout") if isinstance(item_json.get("layout"), dict) else {}
+    icons = layout.get("icons") if isinstance(layout.get("icons"), list) else []
+    slots = layout.get("slots") if isinstance(layout.get("slots"), list) else []
+
+    source_url = (
+        getattr(item, "source_url", None)
+        or item_json.get("currentUrl")
+        or job.get("mod_game_url")
+        or ""
+    )
+    project_slug = (
+        getattr(item, "output_namespace", None)
+        or getattr(item, "project_slug", None)
+        or job.get("project_slug")
+    )
+    requested_mode = job.get("production_mode") or getattr(item, "requested_production_mode", None) or "mini_remix"
+    selected_indices = evidence.get("selectedIconIndices")
+    if not isinstance(selected_indices, list):
+        request = getattr(item, "mini_remix_request", None) if item is not None else None
+        selected_indices = list(getattr(request, "icon_indices", []) or [])
+    target_slot_indices = evidence.get("targetSlotIndices")
+    if not isinstance(target_slot_indices, list):
+        target_slot_indices = []
+    placement_mapping = evidence.get("placementMapping")
+    if not isinstance(placement_mapping, list):
+        placement_mapping = []
+    placement_evidence = evidence.get("placementEvidence")
+    if not isinstance(placement_evidence, list):
+        placement_evidence = []
+    transactions = evidence.get("placementTransactions")
+    if not isinstance(transactions, list):
+        transactions = []
+
+    expected_pairs = [
+        (entry.get("iconIndex"), entry.get("slotIndex"))
+        for entry in placement_mapping
+        if isinstance(entry, dict)
+    ]
+    mapping_icons = [pair[0] for pair in expected_pairs]
+    mapping_slots = [pair[1] for pair in expected_pairs]
+    actual_pairs = [
+        (entry.get("requestedIconIndex"), entry.get("targetSlotIndex"))
+        for entry in placement_evidence
+        if isinstance(entry, dict)
+    ]
+    placement_ok = bool(
+        report.get("placement_verified") is True
+        and len(selected_indices) > 0
+        and len(target_slot_indices) == len(selected_indices)
+        and len(placement_mapping) == len(selected_indices)
+        and len(transactions) == len(selected_indices)
+        and len(placement_evidence) == len(selected_indices)
+        and mapping_icons == selected_indices
+        and mapping_slots == target_slot_indices
+        and actual_pairs == expected_pairs
+    )
+    placement_status = PASS if placement_ok else FAIL if workflow_report else NOT_STARTED
+
+    recording_ok = bool(
+        evidence.get("miniRemixRecordingCompleted") is True
+        and evidence.get("listenSeconds") == 30
+        and evidence.get("recordingRequestedSeconds", 30) == 30
+        and evidence.get("recordingStatus") == "PASS"
+    )
+    recording_status = PASS if recording_ok else FAIL if workflow_report else NOT_STARTED
+
+    raw_video_payload = output_files_payload if isinstance(output_files_payload, dict) else {}
+    mini_video_files = raw_video_payload.get("mini_remix")
+    if not isinstance(mini_video_files, list):
+        mini_video_files = []
+    output_ok = bool(evidence.get("outputVideoValid") is True and len(mini_video_files) == 1)
+    output_status = PASS if output_ok else FAIL if workflow_report else NOT_STARTED
+
+    runtime_status = _phase_status_from_report(report, runtime=True)
+    runtime_ok = runtime_status == PASS
+    cleanup_decision_complete = bool(
+        evidence.get("cleanupDecisionComplete") or evidence.get("cleanupBoundaryCompleted")
+    )
+    rerun_attempted = bool(
+        report.get("rerun_attempted")
+        or evidence.get("reRunAttempted")
+        or evidence.get("rerunAttempted")
+    )
+    board_state = str(
+        evidence.get("boardState") or report.get("cleanup_state") or ""
+    ).upper()
+    content_complete = runtime_ok and placement_ok and recording_ok and output_ok
+    cleanup_accepted = bool(
+        report.get("cleanup_verified") is not True
+        and content_complete
+        and cleanup_decision_complete
+        and rerun_attempted
+        and board_state in {"DIRTY", "UNKNOWN"}
+    )
+    cleanup_ok = bool(report.get("cleanup_verified") is True or cleanup_accepted)
+    cleanup_status = PASS if report.get("cleanup_verified") is True else FAIL if workflow_report else NOT_STARTED
+
+    failure_code = (
+        getattr(item, "failure_code", None)
+        or report.get("failure_code")
+        or gate.get("failure_code")
+    )
+    if not workflow_report and not failure_code:
+        failure_code = "runtime_verification_unknown"
+    requested_status = str(
+        terminal_status or ("completed" if gate.get("passed") is True else "failed")
+    ).lower()
+    gate_passed = bool(
+        gate.get("passed") is True
+        and bool(icons)
+        and bool(slots)
+        and runtime_ok
+        and placement_ok
+        and recording_ok
+        and output_ok
+        and cleanup_ok
+    )
+    final_status = requested_status
+    if requested_status == "completed" and not gate_passed:
+        final_status = "failed"
+        if not failure_code:
+            if not runtime_ok:
+                failure_code = "runtime_verification_unknown"
+            elif not placement_ok:
+                failure_code = "placement_not_verified"
+            elif not recording_ok:
+                failure_code = "mini_remix_recording_not_verified"
+            elif not output_ok:
+                failure_code = "mini_remix_output_not_verified"
+            else:
+                failure_code = "workflow_stopped"
+    if final_status != "completed" and not failure_code:
+        failure_code = "workflow_stopped"
+    if final_status == "completed" and gate_passed:
+        failure_code = None
+    retryable = bool(gate.get("retryable", report.get("retryable", False)))
+    if failure_code == "watchdog_timeout" and final_status != "completed":
+        retryable = True
+
+    identity_status = str(
+        getattr(item, "recorded_identity_status", None)
+        or report.get("identity_status")
+        or "not_started"
+    ).lower()
+    phase_statuses = {
+        "json_generation": _phase_from_item(
+            getattr(item, "json_generation_status", None) if item is not None else None
+        ),
+        "runtime_entry": runtime_status,
+        "mini_remix": PASS if content_complete else FAIL if workflow_report else NOT_STARTED,
+        "placement": placement_status,
+        "recording": recording_status,
+        "cleanup": cleanup_status,
+        "identity": _identity_phase_status(identity_status),
+    }
+    checks = [
+        _check(
+            "layout",
+            PASS if icons and slots else FAIL,
+            failure_code=None if icons and slots else ("no_icons" if not icons else "no_slots"),
+            evidence={"icon_count": len(icons), "slot_count": len(slots)},
+        ),
+        _check(
+            "runtime_verification",
+            runtime_status,
+            evidence={
+                "runtime_state": report.get("runtime_state"),
+                "runtime_verified": report.get("runtime_verified"),
+                "entry_candidate": report.get("entry_candidate"),
+            },
+        ),
+        _check(
+            "mini_remix_mapping",
+            placement_status,
+            evidence={
+                "selected_icon_indices": selected_indices,
+                "target_slot_indices": target_slot_indices,
+                "mapping": placement_mapping,
+                "placement_evidence": placement_evidence,
+                "transactions": transactions,
+            },
+        ),
+        _check(
+            "recording_30_seconds",
+            recording_status,
+            evidence={
+                "listen_seconds": evidence.get("listenSeconds"),
+                "requested_seconds": evidence.get("recordingRequestedSeconds"),
+                "recording_status": evidence.get("recordingStatus"),
+                "output_path": evidence.get("recordingOutputPath"),
+            },
+        ),
+        _check(
+            "single_output_video",
+            output_status,
+            evidence={
+                "valid": evidence.get("outputVideoValid"),
+                "count": len(mini_video_files),
+                "files": mini_video_files,
+            },
+        ),
+        _check(
+            "cleanup",
+            cleanup_status,
+            accepted_by_policy=cleanup_accepted,
+            evidence={
+                "cleanup_verified": report.get("cleanup_verified"),
+                "accepted_by_policy": cleanup_accepted,
+                "cleanup_boundary_completed": evidence.get("cleanupBoundaryCompleted"),
+                "re_run_attempted": rerun_attempted,
+                "board_state": board_state,
+            },
+        ),
+        _check("horror", NOT_CHECKED_BY_POLICY, required=False, accepted_by_policy=True),
+        _check(
+            "recorded_identity",
+            phase_statuses["identity"],
+            required=False,
+            evidence={
+                "status": identity_status,
+                "reason": getattr(item, "recorded_identity_reason", None) if item is not None else None,
+                "files": getattr(item, "recorded_identity_files", []) if item is not None else [],
+            },
+        ),
+    ]
+    failed_checks = [
+        check["name"]
+        for check in checks
+        if check["required"]
+        and not check["passed"]
+        and not (check["name"] == "cleanup" and cleanup_accepted)
+    ]
+
+    context = _FAILURE_CONTEXT.get(
+        failure_code,
+        (
+            "mini_remix",
+            "Mini-remix chưa đạt quality gate.",
+            "Kiểm tra manual profile, mapping icon-slot, OBS recording và cleanup.",
+        ),
+    )
+    if final_status == "completed" and gate_passed:
+        headline, root_cause, next_action = "Mini-remix completed with verified gameplay evidence.", "", ""
+        severity, confidence = "info", "high"
+    else:
+        headline = context[1]
+        root_cause = terminal_error or getattr(item, "error_message", None) or report.get("message") or context[1]
+        next_action = context[2]
+        severity, confidence = "error", "high" if failure_code else "medium"
+
+    generated = generated_at or datetime.now()
+    generated_iso = generated.isoformat() if isinstance(generated, datetime) else str(generated)
+    report_id = report_id or str(uuid.uuid4())
+    attempt_nonce = attempt_nonce or str(uuid.uuid4())
+    start_time = getattr(item, "start_time", None) if item is not None else None
+    end_time = getattr(item, "end_time", None) if item is not None else None
+    duration_ms = None
+    if isinstance(start_time, datetime) and isinstance(end_time, datetime):
+        duration_ms = max(0, int((end_time - start_time).total_seconds() * 1000))
+    if log_snapshot is None:
+        log_snapshot = {"upload_status": "not_available", "full_log_ref": _log_file_reference(None), "excerpt": "", "truncated": False, "line_count": 0, "file_name": None, "relative_path": None, "size_bytes": 0, "sha256": None, "redactions": []}
+    log_snapshot = compact_log_snapshot(log_snapshot)
+    attempt_output_refs = _attempt_output_references(item, final_status)
+    attempts = _normalise_attempts(evidence.get("retryAttempts", []))
+    manifest_ref = _manifest_reference(manifest_data, manifest_path)
+    empty_payload = {
+        "master": [],
+        "individual": [],
+        "mini_remix": [],
+        "validation_summary": {"total_files": 0, "valid_files": 0, "invalid_files": 0, "success_rate": 0.0, "master_files": 0, "individual_files": 0, "mini_remix_files": 0},
+    }
+    published_payload = raw_video_payload if final_status == "completed" and gate_passed else empty_payload
+    mini_details = {
+        "selectedIconIndices": selected_indices,
+        "targetSlotIndices": target_slot_indices,
+        "placementEvidence": placement_evidence,
+        "placementTransactions": transactions,
+        "listenSeconds": 30,
+        "recordingStatus": evidence.get("recordingStatus"),
+        "recordingCompleted": evidence.get("miniRemixRecordingCompleted"),
+        "outputVideoValid": evidence.get("outputVideoValid"),
+        "cleanupStatus": cleanup_status,
+        "cleanupVerified": report.get("cleanup_verified"),
+    }
+    diagnostic = {
+        "schema_version": SCHEMA_VERSION,
+        "report_id": report_id,
+        "attempt_nonce": attempt_nonce,
+        "generated_at": generated_iso,
+        "status": final_status,
+        "job": {"queue_id": job.get("id"), "tracker_job_id": job.get("tracker_job_id") or job.get("id"), "mod_id": job.get("mod_id"), "attempt": attempt, "max_attempts": max_attempts, "mode": requested_mode, "effective_mode": "mini_remix", "internal_action": None, "producer": job.get("producer") or job.get("service_name")},
+        "mod": {"source_url": source_url, "domain": urlparse(source_url).netloc.replace("www.", "") if source_url else "", "project_slug": project_slug, "page_title": item_json.get("pageTitle"), "layout": {"icon_count": len(icons), "slot_count": len(slots), "recording_area": layout.get("recordingArea"), "icons": icons, "slots": slots}, "game_settings": item_json.get("gameSettings", {}), "coverage": report.get("coverage") or gate.get("coverage") or {"normal": "unknown", "horror": NOT_CHECKED_BY_POLICY}, "input_snapshot": json_safe(item_json)},
+        "mini_remix": mini_details,
+        "summary": {"status": final_status, "outcome": final_status, "headline": headline, "blocking_stage": context[0] if final_status != "completed" else None, "failure_code": failure_code, "retryable": retryable, "severity": severity, "root_cause": root_cause, "next_action": next_action, "confidence": confidence, "watchdog": json_safe(getattr(item, "watchdog_evidence", {}) if item is not None else {}), "attempt_output_references": attempt_output_refs},
+        "timing": {"started_at": start_time.isoformat() if isinstance(start_time, datetime) else None, "ended_at": end_time.isoformat() if isinstance(end_time, datetime) else None, "duration_ms": duration_ms},
+        "phases": {"statuses": phase_statuses, "watchdog": json_safe(getattr(item, "watchdog_evidence", {}) if item is not None else {}), "attempt_output_references": attempt_output_refs, "json_generation": {"status": phase_statuses["json_generation"], "failure_code": failure_code if phase_statuses["json_generation"] == FAIL else None}, "runtime_entry": {"status": runtime_status, "entry_candidate": report.get("entry_candidate"), "tested_candidates": report.get("tested_candidates", []), "runtime_state": report.get("runtime_state"), "runtime_verified": report.get("runtime_verified"), "evidence": evidence.get("entryStrategy", {})}, "mini_remix": mini_details, "placement": {"status": placement_status, "before": report.get("placement_before"), "after": report.get("placement_after"), "verified": report.get("placement_verified"), "transactions": transactions}, "recording": {"status": recording_status, "listen_seconds": evidence.get("listenSeconds"), "requested_seconds": evidence.get("recordingRequestedSeconds"), "output_video_valid": evidence.get("outputVideoValid")}, "cleanup": {"status": cleanup_status, "verified": report.get("cleanup_verified"), "accepted_by_policy": cleanup_accepted, "boundary": evidence.get("cleanupBoundary", {})}, "identity": {"status": phase_statuses["identity"], "identity_status": identity_status, "reason": getattr(item, "recorded_identity_reason", None) if item is not None else None, "retryable": getattr(item, "recorded_identity_retryable", False) if item is not None else False, "files": getattr(item, "recorded_identity_files", []) if item is not None else []}},
+        "quality_gate": {"passed": bool(gate_passed and final_status == "completed"), "status": _normalise_status(gate.get("status") or (PASS if gate_passed else FAIL)), "failure_code": failure_code, "retryable": retryable, "coverage": report.get("coverage") or gate.get("coverage") or {}, "failed_checks": failed_checks, "checks": checks, "evidence": evidence},
+        "attempts": attempts,
+        "outputs": {"manifest_ref": manifest_ref, "manifest_snapshot": json_safe(_strip_artifact_quality_fields(manifest_data)) if manifest_data else None, "video_files": json_safe(published_payload), "attempt_output_references": attempt_output_refs},
+        "logs": json_safe(log_snapshot),
+        "tracker_ui": {"badge": "COMPLETED" if final_status == "completed" and gate_passed else "FAILED", "display_title": headline, "display_message": root_cause or headline, "action_required": bool(final_status != "completed"), "blocking_stage": context[0] if final_status != "completed" else None, "failed_checks": failed_checks},
     }
     return json_safe(diagnostic)

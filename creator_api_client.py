@@ -23,6 +23,14 @@ from sprunki_game_player import SprunkiGamePlayer
 from sprunki_obs_controller import SprunkiController
 # --- FIX: Import ProcessingConfig to create the configuration object ---
 from sprunki_ultimate_master import ProcessingConfig
+from mini_remix_workflow import (
+    MINI_REMIX_MODE,
+    MiniRemixRequest,
+    MiniRemixValidationError,
+    parse_mini_remix_request,
+    resolve_mini_remix_layout,
+    validate_tracker_manual_profile_context,
+)
 
 from collections.abc import Callable
 from smart_retry_manager import SmartRetryManager
@@ -245,6 +253,9 @@ class TrackerAPIClient:
             'normal': True,
             'individual': True, 
             'both': True,
+            # Tracker must filter mini-remix jobs to creators that expose the
+            # dedicated, fail-closed workflow contract.
+            'mini_remix_v1': True,
             'max_concurrent': 1,
             'version': self.config.get('application', {}).get('version', '1.0')
         }
@@ -1701,6 +1712,7 @@ class CreatorService:
         config_data: Dict[str, Any],
         job_stop_event: threading.Event,
         manual_profile_context: Optional[ManualProfileJobContext] = None,
+        prepare_remix_data: bool = True,
     ) -> bool:
         """
         [REVISED] Initialize game player and OBS controller for a specific job,
@@ -1748,16 +1760,23 @@ class CreatorService:
             layout_data = config_data.get('layout', {})
             total_slots = len(layout_data.get('slots', []))
             
-            if total_slots > 0:
+            if total_slots > 0 and prepare_remix_data:
                 print(f"✅ Detected {total_slots} slots. Generating dynamic remix patterns...")
                 self.game_player.generate_dynamic_patterns(total_slots)
             else:
-                print("⚠️ Warning: No slots detected in JSON. Remixes may not be generated correctly.")
+                if prepare_remix_data:
+                    print("⚠️ Warning: No slots detected in JSON. Remixes may not be generated correctly.")
+                else:
+                    print("🧩 Mini-remix: skipping legacy dynamic remix pattern generation.")
             
             game_settings = config_data.get('gameSettings', {})
             has_horror = game_settings.get('hasHorror', False)
             
-            self.game_player.remix_library = self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
+            self.game_player.remix_library = (
+                self.game_player.generate_random_remixes(avoid_horror_icon=has_horror)
+                if prepare_remix_data
+                else []
+            )
             self.game_player.current_remix_index = 0
             
             print("🎥 Initializing OBS controller for service mode...")
@@ -2791,6 +2810,11 @@ class CreatorService:
         report = getattr(item, "workflow_report", None)
         if report is None:
             return False
+        if normalize_production_mode(getattr(item, "mode", None), allow_skip=True) == MINI_REMIX_MODE:
+            # Mini-remix has no partial-success policy: an idle timeout before
+            # its single 30-second recording/quality gate completes is a
+            # failed attempt and may only enter the normal bounded retry path.
+            return False
 
         timeout_reason = timeout_event.get("reason") if isinstance(timeout_event, dict) else None
         output_recorded = self._has_recorded_video_output(item, cleanup)
@@ -3350,7 +3374,7 @@ class CreatorService:
                     )
 
                 try:
-                    video_files_payload = self._organize_output_files(item.output_files)
+                    video_files_payload = self._organize_output_files_for_item(item, item.output_files)
                 except Exception as output_error:
                     self.logger.warning(
                         "⚠️ Output organization failed for %s; sending empty video_files payload: %s",
@@ -3421,7 +3445,7 @@ class CreatorService:
                 if final_status != "completed":
                     # Failed attempts remain on disk for diagnostics, but are
                     # never published as Tracker video_files.
-                    video_files_payload = self._organize_output_files([])
+                    video_files_payload = self._organize_output_files_for_item(item, [])
 
                 diagnostic_report = build_tracker_diagnostic_report(
                     job,
@@ -3460,7 +3484,24 @@ class CreatorService:
                         # Do not publish outputs when the authoritative report
                         # says the required quality gate failed. Rebuild the
                         # report so its output section matches the status too.
-                        video_files_payload = self._organize_output_files([])
+                        if item.mode == MINI_REMIX_MODE:
+                            # A stale/invalid transport artifact must not
+                            # remain in the mini manifest snapshot either.
+                            item.output_files = []
+                            item.status = "failed"
+                            item.failure_code = (
+                                diagnostic_report.get("summary", {}).get("failure_code")
+                                or item.failure_code
+                            )
+                            try:
+                                manifest_data = self.processing_manager._generate_manifest_for_item(item)
+                            except Exception as manifest_error:
+                                self.logger.warning(
+                                    "⚠️ Could not refresh failed mini-remix manifest for %s: %s",
+                                    queue_id,
+                                    manifest_error,
+                                )
+                        video_files_payload = self._organize_output_files_for_item(item, [])
                         diagnostic_report = build_tracker_diagnostic_report(
                             job,
                             item,
@@ -3655,11 +3696,97 @@ class CreatorService:
             details["reason"] = error_message
         return details
 
+    def _validate_mini_remix_preflight(self, item: Any, queue_id: int) -> bool:
+        """Validate mini contract/profile before local JSON override lookup."""
+
+        if normalize_production_mode(getattr(item, "mode", None), allow_skip=True) != MINI_REMIX_MODE:
+            return True
+
+        error_code = None
+        error_message = None
+        evidence: Dict[str, Any] = {
+            "effectiveMode": MINI_REMIX_MODE,
+            "queueId": queue_id,
+        }
+        try:
+            attached_error = getattr(item, "mini_remix_error", None)
+            if attached_error:
+                error_code, _, error_message = str(attached_error).partition(":")
+                raise MiniRemixValidationError(
+                    error_code or "mini_remix_payload_invalid",
+                    error_message or str(attached_error),
+                )
+
+            request = getattr(item, "mini_remix_request", None)
+            if not isinstance(request, MiniRemixRequest):
+                raise MiniRemixValidationError(
+                    "mini_remix_block_missing",
+                    "No validated mini-remix request is attached to the job.",
+                )
+            validate_tracker_manual_profile_context(
+                getattr(item, "manual_profile_context", None),
+                expected_url=getattr(item, "source_url", None),
+            )
+            evidence["selectedIconIndices"] = list(request.icon_indices)
+
+            # After JSON generation this verifies that the selected marker
+            # indices survived materialization.  It is deliberately performed
+            # before component/game initialization and does not consult local
+            # profile or JSON files.
+            if isinstance(getattr(item, "json_data", None), dict):
+                plan = resolve_mini_remix_layout(item.json_data, request)
+                evidence["targetSlotIndices"] = list(plan.target_slot_indices)
+                evidence["placementMapping"] = list(plan.mapping)
+            return True
+        except MiniRemixValidationError as exc:
+            error_code = exc.code
+            error_message = str(exc)
+            evidence.update(exc.evidence)
+        except Exception as exc:
+            error_code = "mini_remix_profile_invalid"
+            error_message = f"Mini-remix preflight failed: {exc}"
+            evidence["error"] = str(exc)
+
+        # Even when a caller supplied stale JSON, the mini contract/profile
+        # preflight is the authoritative input gate and must be visible as a
+        # deterministic generation/preflight failure.
+        item.json_generation_status = "failure"
+        self.processing_manager._record_quality_failure(
+            item,
+            error_code or "mini_remix_payload_invalid",
+            error_message or "Mini-remix preflight failed.",
+            evidence={"miniRemix": evidence},
+            retryable=False,
+        )
+        self.api_client.update_job_progress(
+            queue_id,
+            "preflight",
+            "mini_remix_validation",
+            0.0,
+            "failed",
+            metadata={"miniRemix": evidence, "failure_code": error_code},
+            error_details=item.error_message,
+        )
+        return False
+
     def _process_with_smart_retry(self, item, queue_id: int) -> bool:
         """Process with smart retry for individual steps - PHASE 2"""
         try:
+            # Mini-remix is fail-closed and must never inspect or accept a
+            # local JSON override.  This check intentionally precedes the
+            # legacy override branch below.
+            if not self._validate_mini_remix_preflight(item, queue_id):
+                return False
+
             # --- STEP 0: CHECK MANUAL OVERRIDE ---
-            manual_data, manual_path = self._check_for_manual_json_override(item.project_slug, queue_id)
+            if item.mode == MINI_REMIX_MODE:
+                # Tracker's manual-profile snapshot and generated JSON are the
+                # only input sources for mini-remix.  Do not even inspect the
+                # legacy local JSON directory.
+                self._manual_json_failure = None
+                manual_data, manual_path = None, None
+            else:
+                manual_data, manual_path = self._check_for_manual_json_override(item.project_slug, queue_id)
 
             if getattr(self, "_manual_json_failure", None):
                 failure = self._manual_json_failure
@@ -4065,7 +4192,13 @@ class CreatorService:
         return False
     
     def _convert_job_to_processing_item(self, job: Dict):
-        """[FIXED] Convert Tracker job to ProcessingItem using URL for slug."""
+        """Convert one Tracker job without allowing mini to fall through.
+
+        A missing mode and missing mini block retain the legacy master/default
+        path.  Any mini-shaped payload is represented as ``mini_remix`` even
+        when malformed, so the preflight can emit a deterministic failure
+        instead of silently executing a showcase job.
+        """
         from sprunki_ultimate_master import ProcessingItem
         
         game_url = job.get('mod_game_url')
@@ -4075,19 +4208,41 @@ class CreatorService:
         url_for_slug = game_url or ""
 
         requested_mode = job.get('production_mode')
-        effective_mode = normalize_production_mode(requested_mode, allow_skip=True)
+        mini_request = None
+        mini_remix_error = None
+        has_mini_shape = "mini_remix" in job or requested_mode == MINI_REMIX_MODE
+        if has_mini_shape:
+            try:
+                mini_request = parse_mini_remix_request(job)
+            except MiniRemixValidationError as exc:
+                mini_remix_error = f"{exc.code}:{exc}"
+            effective_mode = MINI_REMIX_MODE
+        elif requested_mode is None:
+            # Tracker's omitted mode is the legacy Creator default.
+            effective_mode = "master"
+        else:
+            effective_mode = normalize_production_mode(requested_mode, allow_skip=True)
         manual_profile_context = build_manual_profile_context(
             job.get("manual_profile") if "manual_profile" in job else None,
             field_present="manual_profile" in job,
             expected_revision_id=job.get("manual_profile_revision_id"),
         )
+        project_slug = self._create_slug_from_url(url_for_slug)
+        queue_id = job.get("id")
+        output_namespace = None
+        if effective_mode == MINI_REMIX_MODE:
+            queue_token = re.sub(r"[^A-Za-z0-9_-]+", "-", str(queue_id or uuid.uuid4().hex[:12]))
+            output_namespace = f"{project_slug}-queue-{queue_token}-mini-remix"
         item = ProcessingItem(
             source_url=game_url,
             manual_profile_context=manual_profile_context,
             mode=effective_mode,
             requested_production_mode=requested_mode,
-            # SỬA ĐỔI QUAN TRỌNG: Gọi hàm mới và truyền URL vào
-            project_slug=self._create_slug_from_url(url_for_slug)
+            project_slug=project_slug,
+            mini_remix_request=mini_request,
+            mini_remix_error=mini_remix_error,
+            queue_id=queue_id,
+            output_namespace=output_namespace,
         )
         return item
     
@@ -4180,6 +4335,8 @@ class CreatorService:
                         item.mode,
                         getattr(item, "requested_production_mode", None),
                     )
+                if item.mode == MINI_REMIX_MODE and not self._validate_mini_remix_preflight(item, queue_id):
+                    return False
                 if item.mode == "skip":
                     self.processing_manager._record_quality_failure(
                         item,
@@ -4248,10 +4405,15 @@ class CreatorService:
                 job_stop_event = self.processing_manager.stop_event 
 
                 # Truyền cờ stop vào hàm _initialize_components
+                init_kwargs = {
+                    "manual_profile_context": getattr(item, "manual_profile_context", None),
+                }
+                if item.mode == MINI_REMIX_MODE:
+                    init_kwargs["prepare_remix_data"] = False
                 if not self._initialize_components(
                     item.json_data,
                     job_stop_event,
-                    manual_profile_context=getattr(item, "manual_profile_context", None),
+                    **init_kwargs,
                 ):
                 # === KẾT THÚC SỬA ĐỔI ===
                     error_details = "Failed to initialize components (GamePlayer/OBS)."
@@ -4368,7 +4530,7 @@ class CreatorService:
                         'active',
                         metadata={'output_files_count': len(item.output_files)},
                     )
-                    video_files = self._organize_output_files(item.output_files) or {}
+                    video_files = self._organize_output_files_for_item(item, item.output_files) or {}
                     validation_summary = video_files.get('validation_summary', {}) if isinstance(video_files, dict) else {}
                 except Exception as output_error:
                     self.logger.warning(
@@ -4437,7 +4599,15 @@ class CreatorService:
                 )
                 return False
 
-            if mode not in CREATOR_PRODUCTION_MODES:
+            if mode == MINI_REMIX_MODE:
+                self._touch_watchdog(queue_id, "video_processing", "mini_remix_mode")
+                self.api_client.update_job_progress(
+                    queue_id, "video_processing", "mini_remix_mode", 60.0, "active"
+                )
+                self.performance_analyzer.record_job_progress(queue_id, "retry", 0.0)
+                success = self.processing_manager._process_mini_remix_mode(item)
+
+            elif mode not in CREATOR_PRODUCTION_MODES:
                 error_details = f"Unsupported production mode: {mode}"
                 self.processing_manager._record_quality_failure(
                     item,
@@ -4459,7 +4629,11 @@ class CreatorService:
                 )
                 return False
             
-            if mode == "master":
+            if mode == MINI_REMIX_MODE:
+                # The mini dispatcher ran above; keep it out of every legacy
+                # showcase/remix branch.
+                pass
+            elif mode == "master":
                 self._touch_watchdog(queue_id, "video_processing", "master_mode")
                 self.api_client.update_job_progress(
                     queue_id, 'video_processing', 'master_mode', 60.0, 'active'
@@ -4543,11 +4717,58 @@ class CreatorService:
 
             return False
 
-    def _organize_output_files(self, output_files: list) -> dict:
+    def _organize_output_files_for_item(self, item: Any, output_files: list) -> dict:
+        """Pass mode only for mini; preserve legacy test/double call shape."""
+
+        if normalize_production_mode(getattr(item, "mode", None), allow_skip=True) == MINI_REMIX_MODE:
+            return self._organize_output_files(output_files, MINI_REMIX_MODE)
+        return self._organize_output_files(output_files)
+
+    def _organize_mini_remix_output_files(self, output_files: list) -> dict:
+        """Validate mini output in its dedicated transport namespace."""
+
+        payload = {
+            "master": [],
+            "individual": [],
+            "mini_remix": [],
+            "validation_summary": {
+                "total_files": 0,
+                "valid_files": 0,
+                "invalid_files": 0,
+                "success_rate": 0.0,
+                "master_files": 0,
+                "individual_files": 0,
+                "mini_remix_files": 0,
+            },
+        }
+        if not output_files:
+            return payload
+
+        validation = self.file_validator.validate_batch(list(output_files), "video")
+        payload["mini_remix"] = self._process_validation_results(validation)
+        summary = validation.get("summary", {}) if isinstance(validation, dict) else {}
+        total_files = int(summary.get("total_files", len(output_files)) or 0)
+        valid_files = len(payload["mini_remix"])
+        payload["validation_summary"] = {
+            "total_files": total_files,
+            "valid_files": valid_files,
+            "invalid_files": max(0, total_files - valid_files),
+            "success_rate": round((valid_files / max(total_files, 1)) * 100, 1),
+            "master_files": 0,
+            "individual_files": 0,
+            "mini_remix_files": valid_files,
+        }
+        return payload
+
+    def _organize_output_files(self, output_files: list, mode: Optional[str] = None) -> dict:
         """
         [FIXED] Organize and validate output files - PHASE 3 Enhanced.
         Ensures consistent structure and handles single-file cases correctly.
         """
+        if normalize_production_mode(mode, allow_skip=True) == MINI_REMIX_MODE:
+            self.logger.info("🧩 Organizing output in the mini_remix namespace.")
+            return self._organize_mini_remix_output_files(output_files)
+
         self.logger.info(f"📁 Organizing and validating {len(output_files)} output files...")
         
         # --- START OF FIX ---
@@ -4684,9 +4905,12 @@ class CreatorService:
             # Giả định file individual được đặt tên là n-xx.mp4 hoặc h-xx.mp4
             # Logic này cần sự nhất quán từ sprunki_ultimate_master.py -> _process_individual_mode
             individual_files_actual = validation_summary.get('individual_files', 0)
+            mini_remix_files_actual = validation_summary.get('mini_remix_files', 0)
             
             # --- Áp dụng quy tắc cho từng chế độ ---
-            if mode == "master":
+            if mode == MINI_REMIX_MODE:
+                return mini_remix_files_actual == 1
+            elif mode == "master":
                 # Master mode: Phải có đúng 1 video master và nó phải hợp lệ.
                 return master_files_actual >= 1
 
