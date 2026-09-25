@@ -695,14 +695,20 @@ def evaluate_mini_remix_report(
         )
 
     report.evidence["finalRemixContentComplete"] = True
+    cleanup_not_required = bool(
+        report.evidence.get("cleanupNotRequired") is True
+        and report.evidence.get("cleanupPolicy") == "single_final_mini_remix"
+    )
     report.evidence["contentSuccessWithUnverifiedCleanup"] = bool(
-        not report.cleanup_verified
+        not report.cleanup_verified and not cleanup_not_required
     )
     report.content_success_with_unverified_cleanup = bool(
         report.evidence["contentSuccessWithUnverifiedCleanup"]
     )
     cleanup_accepted = bool(
-        report.cleanup_verified or cleanup_can_be_non_blocking_for_content(report)
+        report.cleanup_verified
+        or cleanup_not_required
+        or cleanup_can_be_non_blocking_for_content(report)
     )
     if not cleanup_accepted:
         return report.apply_quality_gate(
@@ -712,6 +718,8 @@ def evaluate_mini_remix_report(
                 coverage=coverage,
                 evidence={
                     "cleanupVerified": report.cleanup_verified,
+                    "cleanupNotRequired": cleanup_not_required,
+                    "cleanupPolicy": report.evidence.get("cleanupPolicy"),
                     "cleanupBoundaryCompleted": evidence.get("cleanupBoundaryCompleted"),
                     "reRunAttempted": evidence.get("reRunAttempted"),
                     "boardState": evidence.get("boardState") or report.cleanup_state,
@@ -733,7 +741,15 @@ def evaluate_mini_remix_report(
                 "recordingCompleted": True,
                 "outputCount": 1,
                 "cleanupVerified": report.cleanup_verified,
-                "cleanupAcceptedByPolicy": not report.cleanup_verified,
+                "cleanupNotRequired": cleanup_not_required,
+                "cleanupPolicy": report.evidence.get("cleanupPolicy"),
+                "cleanupAcceptedByPolicy": bool(
+                    cleanup_not_required
+                    or (
+                        not report.cleanup_verified
+                        and cleanup_can_be_non_blocking_for_content(report)
+                    )
+                ),
                 "identityStatus": identity,
                 "identityVerified": identity == "verified",
             },

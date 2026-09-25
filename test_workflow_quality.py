@@ -217,6 +217,55 @@ class WorkflowQualityTests(unittest.TestCase):
         self.assertEqual(result.failure_code, "placement_not_verified")
         self.assertTrue(result.retryable)
 
+    def test_final_mini_remix_does_not_require_board_reset(self):
+        report = WorkflowReport(
+            mode="mini_remix",
+            runtime_state=PASS,
+            runtime_verified=True,
+            layout_icons=3,
+            layout_slots=9,
+            placement_before=0,
+            placement_after=3,
+            placement_verified=True,
+            cleanup_verified=False,
+        )
+        report.evidence.update(
+            {
+                "selectedIconIndices": [0, 4, 6],
+                "targetSlotIndices": [3, 4, 5],
+                "placementMapping": [
+                    {"iconIndex": 0, "slotIndex": 3},
+                    {"iconIndex": 4, "slotIndex": 4},
+                    {"iconIndex": 6, "slotIndex": 5},
+                ],
+                "placementTransactions": [
+                    {"status": "VERIFIED", "targetVerified": True, "before": 0, "after": 1},
+                    {"status": "VERIFIED", "targetVerified": True, "before": 1, "after": 2},
+                    {"status": "VERIFIED", "targetVerified": True, "before": 2, "after": 3},
+                ],
+                "placementEvidence": [
+                    {"requestedIconIndex": 0, "targetSlotIndex": 3},
+                    {"requestedIconIndex": 4, "targetSlotIndex": 4},
+                    {"requestedIconIndex": 6, "targetSlotIndex": 5},
+                ],
+                "listenSeconds": 30,
+                "recordingRequestedSeconds": 30,
+                "miniRemixRecordingCompleted": True,
+                "recordingStatus": "PASS",
+                "outputVideoValid": True,
+                "outputFiles": ["final-mini-remix.mp4"],
+                "cleanupNotRequired": True,
+                "cleanupPolicy": "single_final_mini_remix",
+            }
+        )
+
+        result = evaluate_workflow_report(report, mode="mini_remix", require_identity=False)
+
+        self.assertTrue(result.passed)
+        self.assertTrue(result.evidence["cleanupNotRequired"])
+        self.assertFalse(result.evidence["cleanupVerified"])
+        self.assertFalse(report.content_success_with_unverified_cleanup)
+
     def test_final_cleanup_optional_flag_needs_completed_rerun_decision(self):
         report = verified_report("remix_only")
         report.cleanup_verified = False

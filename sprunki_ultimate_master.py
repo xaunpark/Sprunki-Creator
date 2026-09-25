@@ -331,14 +331,28 @@ class SafeOperationManager:
             # 🔥 CRITICAL: ALWAYS CLEANUP
             self._cleanup_operation(icon_placed, recording_started, target_slot)
     
-    def safe_remix_operation(self, remix_icons, slots, filename, recording_duration=20):
+    def safe_remix_operation(
+        self,
+        remix_icons,
+        slots,
+        filename,
+        recording_duration=20,
+        cleanup_after_recording=True,
+    ):
         """
-        Safe operation cho remix với multiple icons cleanup
+        Safe operation cho remix với multiple icons cleanup.
+
+        ``cleanup_after_recording`` remains enabled by default so all legacy
+        showcase/full-remix callers keep their existing board-reset behavior.
+        A final mini-remix may disable it; even then, cleanup is still forced
+        on every failure path and when OBS does not return an output path.
+
         Returns: (success, output_path, error_message)
         """
         icons_placed = []
         transactions = []
         recording_started = False
+        recording_completed = False
         output_path = None
 
         if not isinstance(remix_icons, (list, tuple)) or not remix_icons:
@@ -403,8 +417,11 @@ class SafeOperationManager:
             
             if not stop_success:
                 raise Exception("Failed to stop remix recording")
-            
+
             recording_started = False
+            # A missing output path is not a completed recording for the
+            # mini-remix no-cleanup policy; leave the board recoverable.
+            recording_completed = bool(output_path)
             self.game_player._touch_watchdog_progress(
                 "recording", "stopped", output_path_present=bool(output_path)
             )
@@ -418,8 +435,15 @@ class SafeOperationManager:
             return False, output_path, error_msg
             
         finally:
-            # 🔥 CRITICAL: CLEANUP ALL ICONS
-            self._cleanup_remix_operation(icons_placed, recording_started)
+            # Legacy callers keep the original cleanup/re-run behavior.  The
+            # only exception is a completed final mini-remix, whose caller
+            # closes the game immediately and has no next workflow to protect.
+            if cleanup_after_recording or not recording_completed:
+                self._cleanup_remix_operation(icons_placed, recording_started)
+            else:
+                self.logger.info(
+                    "✅ Final remix recording completed; skipping board reset cleanup"
+                )
     
     def _cleanup_operation(self, icon_placed, recording_started, target_slot):
         """Cleanup cho single icon operation"""

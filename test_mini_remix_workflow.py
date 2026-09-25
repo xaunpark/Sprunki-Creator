@@ -135,9 +135,19 @@ class _FakeSafeOps:
         self.output_path = str(output_path)
         self.complete = complete
         self.calls = []
+        self.cleanup_after_recording = None
+        self.emergency_cleanup_calls = 0
 
-    def safe_remix_operation(self, icons, slots, filename, recording_duration=20):
+    def safe_remix_operation(
+        self,
+        icons,
+        slots,
+        filename,
+        recording_duration=20,
+        cleanup_after_recording=True,
+    ):
         self.calls.append((list(icons), list(slots), filename, recording_duration))
+        self.cleanup_after_recording = cleanup_after_recording
         for position, slot in enumerate(slots if self.complete else slots[:-1]):
             self.player._workflow_placement_transactions.append(
                 {
@@ -154,6 +164,7 @@ class _FakeSafeOps:
         return True, self.output_path, None
 
     def emergency_cleanup_all(self):
+        self.emergency_cleanup_calls += 1
         return None
 
 
@@ -194,6 +205,8 @@ def test_runner_calls_shared_safe_remix_once_for_exact_combo_and_30_seconds(tmp_
     assert icons == [1, 2, 0]
     assert [slot["index"] for slot in slots] == [3, 4, 5]
     assert duration == 30
+    assert safe.cleanup_after_recording is False
+    assert safe.emergency_cleanup_calls == 0
     assert len(item.output_files) == 1
     assert item.workflow_report.mode == "mini_remix"
     assert item.workflow_report.quality_gate.passed is True
@@ -217,6 +230,7 @@ def test_partial_placement_cannot_publish_video(tmp_path):
     ) is False
     assert item.output_files == []
     assert item.failure_code == "placement_not_verified"
+    assert safe.emergency_cleanup_calls == 1
 
 
 def test_retry_resets_ledger_and_uses_a_new_attempt_bucket(tmp_path):
@@ -250,6 +264,7 @@ def test_retry_resets_ledger_and_uses_a_new_attempt_bucket(tmp_path):
     assert item.workflow_attempt == 2
     assert set(item.attempt_outputs) == {1, 2}
     assert len(player._workflow_placement_transactions) == 3
+    assert safe.emergency_cleanup_calls == 1
 
 
 def test_mini_runner_requires_tracker_profile_before_obs_or_safe_operation(tmp_path):

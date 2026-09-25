@@ -1393,15 +1393,28 @@ def build_mini_tracker_diagnostic_report(
         evidence.get("boardState") or report.get("cleanup_state") or ""
     ).upper()
     content_complete = runtime_ok and placement_ok and recording_ok and output_ok
+    cleanup_not_required = bool(
+        evidence.get("cleanupNotRequired") is True
+        and evidence.get("cleanupPolicy") == "single_final_mini_remix"
+    )
     cleanup_accepted = bool(
-        report.get("cleanup_verified") is not True
-        and content_complete
-        and cleanup_decision_complete
-        and rerun_attempted
-        and board_state in {"DIRTY", "UNKNOWN"}
+        cleanup_not_required
+        or (
+            report.get("cleanup_verified") is not True
+            and content_complete
+            and cleanup_decision_complete
+            and rerun_attempted
+            and board_state in {"DIRTY", "UNKNOWN"}
+        )
     )
     cleanup_ok = bool(report.get("cleanup_verified") is True or cleanup_accepted)
-    cleanup_status = PASS if report.get("cleanup_verified") is True else FAIL if workflow_report else NOT_STARTED
+    cleanup_status = (
+        PASS
+        if report.get("cleanup_verified") is True or cleanup_not_required
+        else FAIL
+        if workflow_report
+        else NOT_STARTED
+    )
 
     failure_code = (
         getattr(item, "failure_code", None)
@@ -1513,6 +1526,8 @@ def build_mini_tracker_diagnostic_report(
             accepted_by_policy=cleanup_accepted,
             evidence={
                 "cleanup_verified": report.get("cleanup_verified"),
+                "cleanup_not_required": cleanup_not_required,
+                "cleanup_policy": evidence.get("cleanupPolicy"),
                 "accepted_by_policy": cleanup_accepted,
                 "cleanup_boundary_completed": evidence.get("cleanupBoundaryCompleted"),
                 "re_run_attempted": rerun_attempted,
@@ -1589,6 +1604,8 @@ def build_mini_tracker_diagnostic_report(
         "outputVideoValid": evidence.get("outputVideoValid"),
         "cleanupStatus": cleanup_status,
         "cleanupVerified": report.get("cleanup_verified"),
+        "cleanupNotRequired": cleanup_not_required,
+        "cleanupPolicy": evidence.get("cleanupPolicy"),
     }
     diagnostic = {
         "schema_version": SCHEMA_VERSION,

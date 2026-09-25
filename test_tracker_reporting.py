@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from tracker_reporting import (
     SCHEMA_VERSION,
     build_log_snapshot,
+    build_mini_tracker_diagnostic_report,
     build_tracker_diagnostic_report,
 )
 from workflow_quality import (
@@ -17,6 +18,7 @@ from workflow_quality import (
     QualityGateResult,
     WorkflowReport,
     evaluate_idle_timeout_partial_success,
+    evaluate_workflow_report,
 )
 
 
@@ -53,6 +55,90 @@ def passing_report() -> WorkflowReport:
 
 
 class TrackerReportingTests(unittest.TestCase):
+    def test_final_mini_remix_reports_cleanup_as_not_required(self):
+        item = SimpleNamespace(
+            source_url="https://cocrea.world/@author/mini-final",
+            project_slug="mini-final",
+            output_namespace="mini-final",
+            json_data={
+                "currentUrl": "https://cocrea.world/@author/mini-final",
+                "layout": {
+                    "icons": [{"index": 0}, {"index": 4}, {"index": 6}],
+                    "slots": [{"index": index} for index in range(9)],
+                },
+            },
+            failure_code=None,
+            error_message=None,
+            start_time=datetime(2026, 8, 20, 10, 0, 0),
+            end_time=datetime(2026, 8, 20, 10, 0, 35),
+            output_files=["mini-final.mp4"],
+            attempt_outputs={},
+            recorded_identity_status="not_started",
+            recorded_identity_reason=None,
+            recorded_identity_retryable=False,
+            recorded_identity_files=[],
+            watchdog_evidence={},
+        )
+        report = WorkflowReport(
+            mode="mini_remix",
+            runtime_state=PASS,
+            runtime_verified=True,
+            layout_icons=3,
+            layout_slots=9,
+            placement_before=0,
+            placement_after=3,
+            placement_verified=True,
+            cleanup_verified=False,
+        )
+        report.evidence.update(
+            {
+                "selectedIconIndices": [0, 4, 6],
+                "targetSlotIndices": [3, 4, 5],
+                "placementMapping": [
+                    {"iconIndex": 0, "slotIndex": 3},
+                    {"iconIndex": 4, "slotIndex": 4},
+                    {"iconIndex": 6, "slotIndex": 5},
+                ],
+                "placementTransactions": [
+                    {"status": "VERIFIED", "targetVerified": True, "before": 0, "after": 1},
+                    {"status": "VERIFIED", "targetVerified": True, "before": 1, "after": 2},
+                    {"status": "VERIFIED", "targetVerified": True, "before": 2, "after": 3},
+                ],
+                "placementEvidence": [
+                    {"requestedIconIndex": 0, "targetSlotIndex": 3},
+                    {"requestedIconIndex": 4, "targetSlotIndex": 4},
+                    {"requestedIconIndex": 6, "targetSlotIndex": 5},
+                ],
+                "listenSeconds": 30,
+                "recordingRequestedSeconds": 30,
+                "miniRemixRecordingCompleted": True,
+                "recordingStatus": "PASS",
+                "outputVideoValid": True,
+                "outputFiles": ["mini-final.mp4"],
+                "cleanupNotRequired": True,
+                "cleanupPolicy": "single_final_mini_remix",
+            }
+        )
+        evaluate_workflow_report(report, mode="mini_remix", require_identity=False)
+
+        diagnostic = build_mini_tracker_diagnostic_report(
+            {"id": 3042, "production_mode": "mini_remix"},
+            item,
+            report,
+            output_files_payload={"mini_remix": ["mini-final.mp4"]},
+            terminal_status="completed",
+        )
+
+        self.assertEqual(diagnostic["status"], "completed")
+        self.assertTrue(diagnostic["quality_gate"]["passed"])
+        cleanup_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "cleanup"
+        )
+        self.assertEqual(cleanup_check["status"], "PASS")
+        self.assertTrue(cleanup_check["evidence"]["cleanup_not_required"])
+        self.assertFalse(cleanup_check["evidence"]["re_run_attempted"])
+
     def test_idle_timeout_partial_acceptance_remains_completed_in_tracker_report(self):
         item = SimpleNamespace(
             source_url="https://cocrea.world/@author/idle-partial",

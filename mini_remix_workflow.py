@@ -38,6 +38,7 @@ from workflow_quality import (
 
 MINI_REMIX_MODE = "mini_remix"
 MINI_REMIX_DURATION_SECONDS = 30
+MINI_REMIX_FINAL_CLEANUP_POLICY = "single_final_mini_remix"
 _VIDEO_EXTENSIONS = {".mkv", ".mp4", ".webm", ".mov", ".avi"}
 
 
@@ -485,6 +486,7 @@ class MiniRemixWorkflow:
         self.plan: Optional[MiniRemixPlan] = None
         self.output_path: Optional[str] = None
         self.safe_operation_called = False
+        self.final_cleanup_not_required = False
 
     def _log(self, level: str, message: str, *args: Any) -> None:
         method = getattr(self.logger, level, None)
@@ -625,7 +627,34 @@ class MiniRemixWorkflow:
             and _valid_video_output(self.output_path)
         )
         self.report.evidence["finalRemixContentComplete"] = content_complete
-        self.report.evidence["finalCleanupOptional"] = False
+        self.report.evidence["finalCleanupOptional"] = bool(
+            self.report.evidence.get("cleanupNotRequired", False)
+        )
+
+    def _mark_final_cleanup_not_required(self) -> None:
+        """Record that this one-shot mini job has no board to preserve.
+
+        This is deliberately set only after the exact placement ledger and
+        valid 30-second output have passed.  Any earlier failure still uses
+        the normal bounded cleanup/Re-Run recovery path.
+        """
+
+        self.final_cleanup_not_required = True
+        self.report.evidence.update(
+            {
+                "cleanupNotRequired": True,
+                "cleanupRequired": False,
+                "cleanupPolicy": MINI_REMIX_FINAL_CLEANUP_POLICY,
+                "cleanupSkipReason": "single_mini_remix_job_complete",
+                # Keep the existing field for consumers that already render
+                # final cleanup policy decisions.
+                "finalCleanupOptional": True,
+            }
+        )
+        self._log(
+            "info",
+            "Mini-remix content is complete; skipping board reset/Re-Run because this job has no follow-up workflow.",
+        )
 
     def _create_safe_operation_manager(self) -> Any:
         if self.safe_operation_manager is not None:
@@ -780,6 +809,7 @@ class MiniRemixWorkflow:
                 list(self.plan.target_slots),
                 filename,
                 recording_duration=MINI_REMIX_DURATION_SECONDS,
+                cleanup_after_recording=False,
             )
             self.output_path = output_path
             self._preserve_attempt_output(output_path)
@@ -816,6 +846,12 @@ class MiniRemixWorkflow:
                 )
                 return False
 
+            # The video is the only artifact this mini job produces.  Once it
+            # is valid and every requested placement is verified, there is no
+            # subsequent remix/showcase that needs a clean board.  The game
+            # window is still closed in finally; only the reset/Re-Run is
+            # intentionally skipped.
+            self._mark_final_cleanup_not_required()
             self.item.output_files = [str(output_path)]
             return True
 
@@ -832,7 +868,7 @@ class MiniRemixWorkflow:
             )
             return False
         finally:
-            if safe_ops is not None:
+            if safe_ops is not None and not self.final_cleanup_not_required:
                 try:
                     safe_ops.emergency_cleanup_all()
                 except Exception as cleanup_error:
