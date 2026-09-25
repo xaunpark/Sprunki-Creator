@@ -5469,21 +5469,8 @@ class SprunkiGamePlayer:
 
             foreground_title = self._get_foreground_window_title()
             if not self._is_game_browser_title(foreground_title):
-                # The normal production path remains fail-closed.  The local
-                # mini-remix canary may explicitly opt into this narrow
-                # fallback after _find_game_browser_window() has already
-                # identified a sufficiently large Cocrea/Chrome window.  A
-                # few Windows desktop/session hosts report an empty
-                # foreground title even after pygetwindow.activate() succeeds;
-                # skipping F11 there makes a valid 1920x1080 profile look like
-                # a viewport mismatch before the mini workflow can start.
-                if not getattr(self, "allow_unverified_f11_for_demo", False):
-                    print(f"   ⚠️ F11 skipped: foreground is not Chrome/Cocrea: {foreground_title[:80]!r}")
-                    return False
-                print(
-                    "   ⚠️ Foreground title was not readable; using the explicit "
-                    "local mini-remix demo F11 fallback."
-                )
+                print(f"   ⚠️ F11 skipped: foreground is not Chrome/Cocrea: {foreground_title[:80]!r}")
+                return False
 
             print(f"   ✅ F11 target confirmed: {foreground_title[:80]}...")
             pyautogui.press('f11')

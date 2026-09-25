@@ -362,9 +362,6 @@ def run_creator_canary(job: Mapping[str, Any], timeout_seconds: float) -> int:
     from creator_api_client import CreatorService
 
     service = CreatorService(f"http://127.0.0.1:{server.server_port}")
-    # Only the local canary opts into the narrowly scoped F11 fallback.  All
-    # legacy jobs retain the existing foreground-title safety guard.
-    service.processing_manager.json_generator.game_player.allow_unverified_f11_for_demo = True
     print(f"[DemoTracker] listening at http://127.0.0.1:{server.server_port}")
     print("[DemoTracker] starting the real CreatorService...")
 
