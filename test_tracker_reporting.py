@@ -55,6 +55,61 @@ def passing_report() -> WorkflowReport:
 
 
 class TrackerReportingTests(unittest.TestCase):
+    def test_creator_deduplicates_same_output_with_different_path_spellings(self):
+        from creator_api_client import CreatorService
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "mini-remix.mkv"
+            output_path.write_bytes(b"video")
+            backslash_path = str(output_path)
+            slash_path = backslash_path.replace("\\", "/")
+            item = SimpleNamespace(output_files=[slash_path])
+
+            appended = CreatorService._append_unique_output(item, backslash_path)
+
+            self.assertFalse(appended)
+            self.assertEqual(item.output_files, [slash_path])
+
+    def test_mini_output_transport_validates_one_canonical_file(self):
+        from creator_api_client import CreatorService
+
+        class Validator:
+            def __init__(self):
+                self.received = None
+
+            def validate_batch(self, paths, expected_type):
+                self.received = list(paths)
+                return {
+                    "summary": {
+                        "total_files": len(paths),
+                        "valid_files": len(paths),
+                    },
+                    "individual_results": [
+                        {
+                            "file_path": path,
+                            "is_valid": True,
+                            "size_mb": 1,
+                            "quality_score": 100,
+                            "quality_grade": "valid",
+                        }
+                        for path in paths
+                    ],
+                }
+
+        service = CreatorService.__new__(CreatorService)
+        service.file_validator = Validator()
+        output_path = str(Path(tempfile.gettempdir()) / "mini-remix.mkv")
+        slash_path = output_path.replace("\\", "/")
+
+        payload = service._organize_mini_remix_output_files(
+            [slash_path, output_path]
+        )
+
+        self.assertEqual(len(service.file_validator.received), 1)
+        self.assertEqual(payload["validation_summary"]["total_files"], 1)
+        self.assertEqual(payload["validation_summary"]["mini_remix_files"], 1)
+        self.assertEqual(len(payload["mini_remix"]), 1)
+
     def test_final_mini_remix_reports_cleanup_as_not_required(self):
         item = SimpleNamespace(
             source_url="https://cocrea.world/@author/mini-final",

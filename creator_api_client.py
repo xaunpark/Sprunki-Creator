@@ -2326,19 +2326,39 @@ class CreatorService:
         return thread
 
     @staticmethod
+    def _canonical_output_path(output_path: Any) -> str:
+        """Return one stable local representation for an output path."""
+
+        return os.path.normpath(os.path.abspath(str(output_path)))
+
+    @staticmethod
     def _append_unique_output(item: Any, output_path: Optional[str]) -> bool:
         if not output_path:
             return False
         try:
-            normalized = os.path.abspath(str(output_path))
+            normalized = CreatorService._canonical_output_path(output_path)
             if not os.path.isfile(normalized) or os.path.getsize(normalized) <= 0:
                 return False
         except (OSError, TypeError, ValueError):
             return False
-        if normalized not in getattr(item, "output_files", []):
-            item.output_files.append(normalized)
-            return True
-        return False
+
+        output_files = getattr(item, "output_files", None)
+        if not isinstance(output_files, list):
+            output_files = []
+            item.output_files = output_files
+
+        normalized_key = os.path.normcase(normalized)
+        for existing_path in output_files:
+            try:
+                if os.path.normcase(
+                    CreatorService._canonical_output_path(existing_path)
+                ) == normalized_key:
+                    return False
+            except (OSError, TypeError, ValueError):
+                continue
+
+        output_files.append(normalized)
+        return True
 
     def _collect_attempt_outputs(
         self,
@@ -4744,10 +4764,28 @@ class CreatorService:
         if not output_files:
             return payload
 
-        validation = self.file_validator.validate_batch(list(output_files), "video")
+        # A successful mini job produces one video.  The same file can arrive
+        # from both the workflow result and the OBS folder scan with different
+        # slash/case spellings; canonicalize before validation so transport
+        # cannot turn one artifact into two mini-remix outputs.
+        unique_output_files = []
+        seen_output_keys = set()
+        for output_path in list(output_files):
+            try:
+                canonical_path = self._canonical_output_path(output_path)
+                output_key = os.path.normcase(canonical_path)
+            except (OSError, TypeError, ValueError):
+                canonical_path = output_path
+                output_key = ("raw", repr(output_path))
+            if output_key in seen_output_keys:
+                continue
+            seen_output_keys.add(output_key)
+            unique_output_files.append(canonical_path)
+
+        validation = self.file_validator.validate_batch(unique_output_files, "video")
         payload["mini_remix"] = self._process_validation_results(validation)
         summary = validation.get("summary", {}) if isinstance(validation, dict) else {}
-        total_files = int(summary.get("total_files", len(output_files)) or 0)
+        total_files = int(summary.get("total_files", len(unique_output_files)) or 0)
         valid_files = len(payload["mini_remix"])
         payload["validation_summary"] = {
             "total_files": total_files,
