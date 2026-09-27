@@ -1491,7 +1491,11 @@ def build_mini_tracker_diagnostic_report(
             },
         ),
         _check(
-            "mini_remix_mapping",
+            # Tracker validates the canonical quality-check names shared by
+            # legacy reports.  Keep the mini-remix-specific mapping details
+            # in evidence, but expose the required check as ``placement`` so
+            # a completed mini-remix is not rejected as missing placement.
+            "placement",
             placement_status,
             evidence={
                 "selected_icon_indices": selected_indices,

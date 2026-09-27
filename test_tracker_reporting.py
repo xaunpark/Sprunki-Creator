@@ -186,6 +186,23 @@ class TrackerReportingTests(unittest.TestCase):
 
         self.assertEqual(diagnostic["status"], "completed")
         self.assertTrue(diagnostic["quality_gate"]["passed"])
+        placement_check = next(
+            check for check in diagnostic["quality_gate"]["checks"]
+            if check["name"] == "placement"
+        )
+        self.assertEqual(placement_check["status"], "PASS")
+        self.assertEqual(
+            placement_check["evidence"]["mapping"],
+            [
+                {"iconIndex": 0, "slotIndex": 3},
+                {"iconIndex": 4, "slotIndex": 4},
+                {"iconIndex": 6, "slotIndex": 5},
+            ],
+        )
+        self.assertNotIn(
+            "mini_remix_mapping",
+            {check["name"] for check in diagnostic["quality_gate"]["checks"]},
+        )
         cleanup_check = next(
             check for check in diagnostic["quality_gate"]["checks"]
             if check["name"] == "cleanup"
