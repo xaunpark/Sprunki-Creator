@@ -792,6 +792,12 @@ class TrackerAPIClient:
             outputs["attempt_output_references"] = cls._bound_transport_value(
                 outputs_source.get("attempt_output_references"), aggressive=True
             )
+        if isinstance(outputs_source.get("miniRemixVideos"), list):
+            # Tracker validates this field at outputs.miniRemixVideos even
+            # after the terminal report has been reduced to its minimal form.
+            outputs["miniRemixVideos"] = cls._bound_transport_value(
+                outputs_source.get("miniRemixVideos"), aggressive=True
+            )
 
         logs = compact_log_snapshot(
             source.get("logs") if isinstance(source.get("logs"), dict) else {},
@@ -840,12 +846,27 @@ class TrackerAPIClient:
         if cls._payload_size_bytes(compact) <= max_bytes:
             return compact
 
+        diagnostic = compact.get("diagnostic_report")
+        diagnostic_job = (
+            diagnostic.get("job")
+            if isinstance(diagnostic, dict)
+            else None
+        )
+        is_mini_remix = bool(
+            isinstance(diagnostic_job, dict)
+            and str(
+                diagnostic_job.get("effective_mode")
+                or diagnostic_job.get("mode")
+                or ""
+            ).strip().lower()
+            == MINI_REMIX_MODE
+        )
+
         # These fields are useful during ordinary progress reporting but are
         # optional for a terminal contract.  Remove them before reducing the
         # required diagnostic sections.
         for key in (
             "details",
-            "video_files",
             "error_log",
             "manifest_ref",
             "log_ref",
@@ -856,7 +877,15 @@ class TrackerAPIClient:
             if cls._payload_size_bytes(compact) <= max_bytes:
                 return compact
 
-        diagnostic = compact.get("diagnostic_report")
+        # Tracker requires the mini output namespace on the terminal callback
+        # itself.  It is a tiny, required field, so retain it while trimming
+        # optional transport metadata.  Legacy modes keep the old compaction
+        # behavior below.
+        if not is_mini_remix:
+            compact.pop("video_files", None)
+            if cls._payload_size_bytes(compact) <= max_bytes:
+                return compact
+
         compact["diagnostic_report"] = cls._minimal_diagnostic_report(
             diagnostic,
             log_excerpt_bytes=min(48 * 1024, max(8 * 1024, max_bytes // 16)),
@@ -873,10 +902,22 @@ class TrackerAPIClient:
             if isinstance(minimal_diagnostic.get("outputs"), dict)
             else {}
         )
+        minimal_mini_videos = (
+            minimal_diagnostic.get("outputs", {}).get("miniRemixVideos")
+            if isinstance(minimal_diagnostic.get("outputs"), dict)
+            else None
+        )
         minimal_diagnostic["outputs"] = {
             "video_files": {},
             "attempt_output_references": minimal_attempt_refs,
         }
+        if isinstance(minimal_mini_videos, list):
+            minimal_diagnostic["outputs"]["miniRemixVideos"] = minimal_mini_videos
+        minimal_video_files = compact.get("video_files") if is_mini_remix else {}
+        if is_mini_remix:
+            minimal_diagnostic["outputs"]["video_files"] = (
+                minimal_video_files if isinstance(minimal_video_files, dict) else {}
+            )
         minimal_diagnostic["attempts"] = []
         minimal_diagnostic["logs"] = compact_log_snapshot(
             minimal_diagnostic.get("logs"), excerpt_bytes=8 * 1024
@@ -892,6 +933,11 @@ class TrackerAPIClient:
             "sequence": compact.get("sequence"),
             "final": True,
             "diagnostic_report": minimal_diagnostic,
+            **(
+                {"video_files": minimal_video_files}
+                if is_mini_remix and isinstance(minimal_video_files, dict)
+                else {}
+            ),
         }
 
     def _tracker_outbox_directory(self) -> str:
@@ -4748,8 +4794,6 @@ class CreatorService:
         """Validate mini output in its dedicated transport namespace."""
 
         payload = {
-            "master": [],
-            "individual": [],
             "mini_remix": [],
             "validation_summary": {
                 "total_files": 0,

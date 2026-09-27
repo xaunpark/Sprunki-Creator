@@ -148,6 +148,46 @@ class TrackerCallbackDeliveryTests(unittest.TestCase):
             self.assertEqual(client.last_callback_metrics["http_status"], 201)
             self.assertEqual(client.last_callback_metrics["retry_count"], 0)
 
+    def test_mini_terminal_fallback_keeps_tracker_output_contract(self):
+        with tempfile.TemporaryDirectory() as outbox:
+            client = make_client(FakeSession(), outbox)
+            report = diagnostic()
+            report["job"] = {
+                "queue_id": 3118,
+                "mod_id": 123,
+                "mode": "mini_remix",
+                "effective_mode": "mini_remix",
+            }
+            report["outputs"]["miniRemixVideos"] = [{"filename": "mini.mp4"}]
+            report["outputs"]["video_files"] = {
+                "mini_remix": ["mini.mp4"]
+            }
+            payload = {
+                "status": "completed",
+                "schema_version": SCHEMA_VERSION,
+                "report_id": "report-3118",
+                "attempt_nonce": "nonce-3118",
+                "sequence": 10,
+                "final": True,
+                "video_files": {"mini_remix": ["mini.mp4"]},
+                "diagnostic_report": report,
+            }
+
+            compact = client._fit_terminal_payload_to_limit(payload, max_bytes=1)
+
+            self.assertEqual(
+                compact["video_files"],
+                {"mini_remix": ["mini.mp4"]},
+            )
+            self.assertEqual(
+                compact["diagnostic_report"]["outputs"]["miniRemixVideos"],
+                [{"filename": "mini.mp4"}],
+            )
+            self.assertEqual(
+                compact["diagnostic_report"]["outputs"]["video_files"],
+                {"mini_remix": ["mini.mp4"]},
+            )
+
     def test_completed_terminal_status_is_downgraded_for_failed_quality_report(self):
         """Do not reproduce Tracker's 422 for a stale completed callback."""
 

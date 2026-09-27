@@ -106,6 +106,8 @@ class TrackerReportingTests(unittest.TestCase):
         )
 
         self.assertEqual(len(service.file_validator.received), 1)
+        self.assertNotIn("master", payload)
+        self.assertNotIn("individual", payload)
         self.assertEqual(payload["validation_summary"]["total_files"], 1)
         self.assertEqual(payload["validation_summary"]["mini_remix_files"], 1)
         self.assertEqual(len(payload["mini_remix"]), 1)
@@ -180,6 +182,13 @@ class TrackerReportingTests(unittest.TestCase):
             {"id": 3042, "production_mode": "mini_remix"},
             item,
             report,
+            manifest_data={
+                "outputs": {
+                    "miniRemixVideos": [
+                        {"filename": "mini-final.mp4"}
+                    ]
+                }
+            },
             output_files_payload={"mini_remix": ["mini-final.mp4"]},
             terminal_status="completed",
         )
@@ -195,6 +204,10 @@ class TrackerReportingTests(unittest.TestCase):
                 {"iconIndex": 4, "slotIndex": 4},
                 {"iconIndex": 6, "slotIndex": 5},
             ],
+        )
+        self.assertEqual(
+            diagnostic["outputs"]["miniRemixVideos"],
+            [{"filename": "mini-final.mp4"}],
         )
         placement_check = next(
             check for check in diagnostic["quality_gate"]["checks"]

@@ -1597,6 +1597,14 @@ def build_mini_tracker_diagnostic_report(
         "validation_summary": {"total_files": 0, "valid_files": 0, "invalid_files": 0, "success_rate": 0.0, "master_files": 0, "individual_files": 0, "mini_remix_files": 0},
     }
     published_payload = raw_video_payload if final_status == "completed" and gate_passed else empty_payload
+    manifest_outputs = {}
+    if isinstance(manifest_data, dict):
+        raw_manifest_outputs = manifest_data.get("outputs")
+        if isinstance(raw_manifest_outputs, dict):
+            manifest_outputs = raw_manifest_outputs
+    mini_manifest_videos = manifest_outputs.get("miniRemixVideos")
+    if not isinstance(mini_manifest_videos, list):
+        mini_manifest_videos = []
     mini_details = {
         "selectedIconIndices": selected_indices,
         "targetSlotIndices": target_slot_indices,
@@ -1632,7 +1640,17 @@ def build_mini_tracker_diagnostic_report(
         "phases": {"statuses": phase_statuses, "watchdog": json_safe(getattr(item, "watchdog_evidence", {}) if item is not None else {}), "attempt_output_references": attempt_output_refs, "json_generation": {"status": phase_statuses["json_generation"], "failure_code": failure_code if phase_statuses["json_generation"] == FAIL else None}, "runtime_entry": {"status": runtime_status, "entry_candidate": report.get("entry_candidate"), "tested_candidates": report.get("tested_candidates", []), "runtime_state": report.get("runtime_state"), "runtime_verified": report.get("runtime_verified"), "evidence": evidence.get("entryStrategy", {})}, "mini_remix": mini_details, "placement": {"status": placement_status, "before": report.get("placement_before"), "after": report.get("placement_after"), "verified": report.get("placement_verified"), "transactions": transactions}, "recording": {"status": recording_status, "listen_seconds": evidence.get("listenSeconds"), "requested_seconds": evidence.get("recordingRequestedSeconds"), "output_video_valid": evidence.get("outputVideoValid")}, "cleanup": {"status": cleanup_status, "verified": report.get("cleanup_verified"), "accepted_by_policy": cleanup_accepted, "boundary": evidence.get("cleanupBoundary", {})}, "identity": {"status": phase_statuses["identity"], "identity_status": identity_status, "reason": getattr(item, "recorded_identity_reason", None) if item is not None else None, "retryable": getattr(item, "recorded_identity_retryable", False) if item is not None else False, "files": getattr(item, "recorded_identity_files", []) if item is not None else []}},
         "quality_gate": {"passed": bool(gate_passed and final_status == "completed"), "status": _normalise_status(gate.get("status") or (PASS if gate_passed else FAIL)), "failure_code": failure_code, "retryable": retryable, "coverage": report.get("coverage") or gate.get("coverage") or {}, "failed_checks": failed_checks, "checks": checks, "evidence": evidence},
         "attempts": attempts,
-        "outputs": {"manifest_ref": manifest_ref, "manifest_snapshot": json_safe(_strip_artifact_quality_fields(manifest_data)) if manifest_data else None, "video_files": json_safe(published_payload), "attempt_output_references": attempt_output_refs},
+        "outputs": {
+            "manifest_ref": manifest_ref,
+            "manifest_snapshot": json_safe(_strip_artifact_quality_fields(manifest_data)) if manifest_data else None,
+            "video_files": json_safe(published_payload),
+            "attempt_output_references": attempt_output_refs,
+            **(
+                {"miniRemixVideos": json_safe(mini_manifest_videos)}
+                if requested_mode == "mini_remix"
+                else {}
+            ),
+        },
         "logs": json_safe(log_snapshot),
         "tracker_ui": {"badge": "COMPLETED" if final_status == "completed" and gate_passed else "FAILED", "display_title": headline, "display_message": root_cause or headline, "action_required": bool(final_status != "completed"), "blocking_stage": context[0] if final_status != "completed" else None, "failed_checks": failed_checks},
     }
