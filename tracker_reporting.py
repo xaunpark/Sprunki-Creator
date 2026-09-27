@@ -1600,6 +1600,13 @@ def build_mini_tracker_diagnostic_report(
     mini_details = {
         "selectedIconIndices": selected_indices,
         "targetSlotIndices": target_slot_indices,
+        # Tracker's terminal Mini-Remix contract requires an explicit
+        # mapping verdict in the mini_remix block.  The detailed transaction
+        # list remains below as evidence; this boolean is the authoritative
+        # acknowledgement that the ordered icon/slot mapping was verified.
+        "mappingVerified": placement_ok,
+        "placementVerified": placement_ok,
+        "placementMapping": placement_mapping,
         "placementEvidence": placement_evidence,
         "placementTransactions": transactions,
         "listenSeconds": 30,
