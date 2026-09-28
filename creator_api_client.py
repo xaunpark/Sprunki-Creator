@@ -4,6 +4,7 @@ Replaces tkinter GUI with API-based job polling
 """
 
 import json
+import hashlib
 import re
 import threading
 import time
@@ -93,6 +94,15 @@ _TRANSPORT_PATH_KEYS = frozenset(
         "outputdirectory",
     }
 )
+
+
+def _sha256_file_bytes(path_value: str) -> str:
+    """Return the lowercase SHA-256 digest of the exact file bytes."""
+    digest = hashlib.sha256()
+    with open(path_value, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
 
 
 class _TeeStream:
@@ -4827,7 +4837,10 @@ class CreatorService:
             unique_output_files.append(canonical_path)
 
         validation = self.file_validator.validate_batch(unique_output_files, "video")
-        payload["mini_remix"] = self._process_validation_results(validation)
+        payload["mini_remix"] = self._process_validation_results(
+            validation,
+            include_sha256=True,
+        )
         summary = validation.get("summary", {}) if isinstance(validation, dict) else {}
         total_files = int(summary.get("total_files", len(unique_output_files)) or 0)
         valid_files = len(payload["mini_remix"])
@@ -4917,7 +4930,12 @@ class CreatorService:
         
         return final_payload
 
-    def _process_validation_results(self, validation_results: dict) -> list:
+    def _process_validation_results(
+        self,
+        validation_results: dict,
+        *,
+        include_sha256: bool = False,
+    ) -> list:
         """Process validation results and return only valid files with metadata"""
         valid_files = []
         
@@ -4931,6 +4949,21 @@ class CreatorService:
                     'quality_grade': result.get('quality_grade', 'unknown'),
                     'validation_time': result.get('validation_time', 0)
                 }
+                if include_sha256:
+                    try:
+                        # This digest is over the bytes of the validated
+                        # output file, never over its path or metadata.  The
+                        # Tracker maps it to source.asset_sha256.
+                        file_info['sha256'] = _sha256_file_bytes(result['file_path'])
+                    except (OSError, TypeError, ValueError) as exc:
+                        getattr(self, 'logger', logging.getLogger(__name__)).error(
+                            "Could not hash validated Mini-Remix output %s: %s",
+                            result.get('file_path'),
+                            exc,
+                        )
+                        # Do not publish an apparently valid asset without a
+                        # verifiable byte digest.
+                        continue
                 
                 # Add technical details if available
                 tech = result.get('technical_analysis', {})

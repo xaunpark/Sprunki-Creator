@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
@@ -99,6 +100,8 @@ class TrackerReportingTests(unittest.TestCase):
         service = CreatorService.__new__(CreatorService)
         service.file_validator = Validator()
         output_path = str(Path(tempfile.gettempdir()) / "mini-remix.mkv")
+        Path(output_path).write_bytes(b"mini-remix-test")
+        self.addCleanup(lambda: Path(output_path).unlink(missing_ok=True))
         slash_path = output_path.replace("\\", "/")
 
         payload = service._organize_mini_remix_output_files(
@@ -111,6 +114,8 @@ class TrackerReportingTests(unittest.TestCase):
         self.assertEqual(payload["validation_summary"]["total_files"], 1)
         self.assertEqual(payload["validation_summary"]["mini_remix_files"], 1)
         self.assertEqual(len(payload["mini_remix"]), 1)
+        expected_hash = hashlib.sha256(b"mini-remix-test").hexdigest()
+        self.assertEqual(payload["mini_remix"][0]["sha256"], expected_hash)
 
     def test_final_mini_remix_reports_cleanup_as_not_required(self):
         item = SimpleNamespace(

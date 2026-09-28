@@ -3,6 +3,7 @@
 # QUY TRÌNH: URL List → Auto JSON Generation → Batch Processing → Video Output
 
 import json
+import hashlib
 import time
 import threading
 import os
@@ -20,6 +21,15 @@ from pathlib import Path
 from config_manager import initialize_config, get_config
 from watchdog_state import attempt_scoped_filename
 from manual_profile_v3 import ManualProfileJobContext
+
+
+def _sha256_file_bytes(path_value: str) -> str:
+    """Return the lowercase SHA-256 digest of the exact output bytes."""
+    digest = hashlib.sha256()
+    with open(path_value, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
 
 # Import required modules
 try:
@@ -1231,6 +1241,17 @@ class UnifiedProcessingManager:
                     "fileSizeMb": round(os.path.getsize(file_path) / (1024*1024), 2) if os.path.exists(file_path) else 0
                 }
                 if item.mode == MINI_REMIX_MODE:
+                    try:
+                        # Keep the manifest's asset identity tied to the
+                        # exact approved video bytes.  Tracker maps this to
+                        # source.asset_sha256 for assembly workers.
+                        file_info["sha256"] = _sha256_file_bytes(file_path)
+                    except (OSError, TypeError, ValueError) as exc:
+                        self.logger.error(
+                            "Could not hash Mini-Remix output %s: %s",
+                            file_path,
+                            exc,
+                        )
                     outputs['miniRemixVideos'].append(file_info)
                 elif 'showcase' in filename:
                     outputs['masterVideo'] = file_info
