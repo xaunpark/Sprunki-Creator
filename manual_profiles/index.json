@@ -1,9 +1,11 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-10T03:46:06.074346Z",
+  "updatedAt": "2026-10-10T15:17:38.949771Z",
   "canonicalUrls": {
     "https://www.cocrea.world/@Lucad0510/MyProject2cd": "profiles/1e3ebdafde41.json",
     "https://www.cocrea.world/@lucad0510/myproject2cd": "profiles/1e3ebdafde41.json",
+    "https://www.cocrea.world/@arthur_blueyboy/JTAftermath": "profiles/24a9dfaf95dc.json",
+    "https://www.cocrea.world/@arthur_blueyboy/jtaftermath": "profiles/24a9dfaf95dc.json",
     "https://www.cocrea.world/@arthur_blueyboy/TheFinalBrawl": "profiles/58943d451375.json",
     "https://www.cocrea.world/@arthur_blueyboy/thefinalbrawl": "profiles/58943d451375.json",
     "https://www.cocrea.world/@SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas": "profiles/5e0206481bb8.json",
@@ -24,12 +26,14 @@
     "https://www.cocrea.world/@arthur_blueyboy/jevintreatphase6": "profiles/d86c3486b0f2.json",
     "https://www.cocrea.world/@TheReal_AlexRuby/UntitledProject44": "profiles/f9df772bd1a3.json",
     "https://www.cocrea.world/@thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json",
-    "https://www.cocrea.world/@arthur_blueyboy/JTAftermath": "profiles/24a9dfaf95dc.json",
-    "https://www.cocrea.world/@arthur_blueyboy/jtaftermath": "profiles/24a9dfaf95dc.json"
+    "https://www.cocrea.world/@TheSprunkiWorld/Carlsprunkehorrortemplate2": "profiles/5f6aa22a5ff1.json",
+    "https://www.cocrea.world/@thesprunkiworld/carlsprunkehorrortemplate2": "profiles/5f6aa22a5ff1.json"
   },
   "urlKeys": {
     "Lucad0510/MyProject2cd": "profiles/1e3ebdafde41.json",
     "lucad0510/myproject2cd": "profiles/1e3ebdafde41.json",
+    "arthur_blueyboy/JTAftermath": "profiles/24a9dfaf95dc.json",
+    "arthur_blueyboy/jtaftermath": "profiles/24a9dfaf95dc.json",
     "arthur_blueyboy/TheFinalBrawl": "profiles/58943d451375.json",
     "arthur_blueyboy/thefinalbrawl": "profiles/58943d451375.json",
     "SprunkiSimonTimeYa/Hyper-ShiftedPhase5TRIPLESWAPPEDTheChoas": "profiles/5e0206481bb8.json",
@@ -50,7 +54,7 @@
     "arthur_blueyboy/jevintreatphase6": "profiles/d86c3486b0f2.json",
     "TheReal_AlexRuby/UntitledProject44": "profiles/f9df772bd1a3.json",
     "thereal_alexruby/untitledproject44": "profiles/f9df772bd1a3.json",
-    "arthur_blueyboy/JTAftermath": "profiles/24a9dfaf95dc.json",
-    "arthur_blueyboy/jtaftermath": "profiles/24a9dfaf95dc.json"
+    "TheSprunkiWorld/Carlsprunkehorrortemplate2": "profiles/5f6aa22a5ff1.json",
+    "thesprunkiworld/carlsprunkehorrortemplate2": "profiles/5f6aa22a5ff1.json"
   }
 }

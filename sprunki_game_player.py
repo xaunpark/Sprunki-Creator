@@ -224,6 +224,8 @@ class SprunkiGamePlayer:
     )
     REMOVE_BUTTON_MAX_ATTEMPTS = len(REMOVE_BUTTON_OFFSETS)
     REMOVE_BUTTON_SCHEMA_VERSION = 1
+    REMOVE_BUTTON_HOVER_DWELL_MS = 750
+    WINDOWS_RETURN_CLICK_HOLD_MS = 100
 
     # Carpet bombing is deliberately conservative.  A slot coordinate is
     # allowed to reach only a visible Polo target; controls are protected even
@@ -308,9 +310,9 @@ class SprunkiGamePlayer:
         self.chrome_process = None
         self.ws_url = None
         self.game_url = None
-        # Remove-button input is bound to one exact CDP page for the lifetime
-        # of the cleanup operation.  It must never fall back to the first
-        # visible Chrome window or to an arbitrary Cocrea tab.
+        # Recovery inputs that still use CDP are bound to one exact game page.
+        # Remove-button returns use the Windows mouse and do not use this
+        # operation-scoped browser session.
         self._remove_cdp_session = None
         self._remove_cdp_target_id = None
         self._last_remove_click_delivery = {}
@@ -1803,7 +1805,9 @@ class SprunkiGamePlayer:
                 remove_button_input=True,
                 visual_target_slot=target_slot,
             )
-            delivery = dict(getattr(self, "_last_remove_click_delivery", {}) or {})
+            delivery = dict(
+                getattr(self, "_last_return_click_delivery", {}) or {}
+            )
             attempt = {
                 "attempt": attempt_index,
                 "x": candidate["x"],
@@ -1813,12 +1817,19 @@ class SprunkiGamePlayer:
                 "runtimeX": delivery.get("runtimeX", candidate["x"]),
                 "runtimeY": delivery.get("runtimeY", candidate["y"]),
                 "coordinateSystem": "reference-screen-1920x1080",
-                "runtimeCoordinateSystem": "page-viewport-css",
-                "useCdp": True,
-                "transport": delivery.get("transport", "cdp_exact_game_page"),
+                "runtimeCoordinateSystem": delivery.get(
+                    "coordinateSystem", "windows-screen-px"
+                ),
+                "requestedUseCdp": bool(use_cdp),
+                "useCdp": str(delivery.get("transport", "")).startswith("cdp"),
+                "transport": delivery.get("transport", "pyautogui_windows"),
                 "targetId": delivery.get("targetId"),
                 "runtimeIndex": delivery.get("runtimeIndex"),
                 "pageUrl": delivery.get("pageUrl"),
+                "preClickHoverMs": delivery.get("preClickHoverMs"),
+                "configuredHoverDwellMs": delivery.get(
+                    "configuredHoverDwellMs"
+                ),
                 "offsetX": candidate["offsetX"],
                 "offsetY": candidate["offsetY"],
                 "status": result.status.value,
@@ -5461,7 +5472,7 @@ class SprunkiGamePlayer:
         """Press F11 only when the Cocrea/Chrome game window is definitely foreground."""
         try:
             print("   -> Preparing Chrome focus before F11 true fullscreen...")
-            game_window = self._find_game_browser_window()
+            game_window = next((w for w in gw.getWindowsWithTitle('cocrea.world') or gw.getWindowsWithTitle('Chrome') if w.title), None)
             if not game_window:
                 print("   ⚠️ F11 skipped: no safe Cocrea/Chrome game window found.")
                 return False
@@ -5762,7 +5773,7 @@ class SprunkiGamePlayer:
             print(f"   -> Waiting {self.page_load_wait}s for page to initialize...")
             time.sleep(self.page_load_wait)
             
-            game_window = next((w for w in gw.getWindowsWithTitle('cocrea.world') or gw.getWindowsWithTitle('Chrome') if w.title), None)
+            game_window = self._find_game_browser_window()
             if not game_window:
                 raise RuntimeError("Critical Error: Could not find the game window.")
             
@@ -12756,8 +12767,8 @@ class SprunkiGamePlayer:
         """Return the unique DevTools page for the current game URL.
 
         This deliberately does not fall back to an arbitrary Cocrea tab.  A
-        Remove click is destructive input, so an ambiguous or missing target
-        must stop the input path instead of clicking another game.
+        recovery click is destructive input, so an ambiguous or missing
+        target must stop the input path instead of clicking another game.
         """
         expected_url = self._normalize_cdp_page_url(self.game_url)
         if not expected_url:
@@ -12846,7 +12857,7 @@ class SprunkiGamePlayer:
             pass
 
     def _get_remove_cdp_session(self, operation_context):
-        """Bind Remove input to one exact, validated game page."""
+        """Bind a recovery input to one exact, validated game page."""
         operation_id = getattr(operation_context, "operation_id", None)
         session = getattr(self, "_remove_cdp_session", None)
 
@@ -13322,7 +13333,8 @@ class SprunkiGamePlayer:
         operation_context=None,
     ):
         """
-        UPDATED: Always use CDP first for game operations with fallback
+        Return clicks use the Windows mouse so hover and click share the same
+        OS input path as drag-and-drop.
         """
         try:
             self._last_return_click_delivery = {
@@ -13334,83 +13346,52 @@ class SprunkiGamePlayer:
             if getattr(self, "_active_operation_context", None) is None:
                 print("❌ Return click rejected without an active OperationContext")
                 return False
-            if isinstance(target_slot, dict) and isinstance(
+            is_remove_button = isinstance(target_slot, dict) and isinstance(
                 target_slot.get("removeButton"), dict
-            ):
-                # Remove controls are never sent through the screen-level
-                # PyAutoGUI path.  The live target resolver below binds this
-                # click to the current game page and current Remove costume.
-                context = operation_context or getattr(
-                    self, "_active_operation_context", None
-                )
-                print(
-                    f"🌐 Using strict CDP Remove input at reference "
-                    f"({click_x}, {click_y})"
-                )
-                delivered = self._execute_remove_button_cdp_click(
-                    click_x,
-                    click_y,
-                    target_slot,
-                    context,
-                )
-                delivery = dict(
-                    getattr(self, "_last_remove_click_delivery", {}) or {}
-                )
-                gesture_started = "gestureSuccess" in delivery
-                self._last_return_click_delivery = {
-                    **delivery,
-                    "transport": delivery.get(
-                        "transport", "cdp_exact_game_page"
-                    ),
-                    "actionAttempted": bool(gesture_started),
-                    "actionDelivered": bool(delivered),
-                    "actionAmbiguous": bool(gesture_started and not delivered),
-                }
-                return delivered
-            # 🌐 Choose the transport before sending input.  If a browser
-            # target exists but CDP becomes inconclusive, a second PyAutoGUI
-            # click could duplicate a partially delivered return gesture.
-            ws_url = self._get_websocket_url() if use_cdp else None
-            if ws_url:
-                print(f"🌐 Using CDP for game click at ({click_x}, {click_y})")
-                self._last_return_click_delivery = {
-                    "transport": "cdp_game_page",
-                    "actionAttempted": True,
-                    "actionDelivered": False,
-                    "actionAmbiguous": True,
-                }
-                cdp_success = self._execute_cdp_single_click(click_x, click_y)
-                self._last_return_click_delivery.update(
-                    {
-                        "actionDelivered": bool(cdp_success),
-                        "actionAmbiguous": not bool(cdp_success),
-                    }
-                )
-                print("✅ CDP click successful" if cdp_success else "🛑 CDP click inconclusive; no duplicate fallback")
-                return bool(cdp_success)
-
-            print(f"🖱️ Using PyAutoGUI for game click at ({click_x}, {click_y})")
-            pyautogui_success = self._execute_pyautogui_single_click(
+            )
+            hover_dwell_ms = (
+                self.REMOVE_BUTTON_HOVER_DWELL_MS if is_remove_button else 100
+            )
+            print(
+                f"🖱️ Using Windows mouse for {'Remove' if is_remove_button else 'return'} "
+                f"at ({click_x}, {click_y}); hover dwell={hover_dwell_ms} ms"
+            )
+            delivered = self._execute_pyautogui_single_click(
                 click_x,
                 click_y,
                 domain_adj,
+                pre_click_hover_ms=hover_dwell_ms,
+                require_focus=True,
             )
             delivery = dict(
                 getattr(self, "_last_return_click_delivery", {}) or {}
             )
+            action_attempted = bool(
+                delivery.get("actionAttempted") or delivered
+            )
             self._last_return_click_delivery = {
                 **delivery,
-                "transport": "pyautogui",
-                "actionAttempted": bool(
-                    delivery.get("actionAttempted", pyautogui_success)
-                ),
-                "actionDelivered": bool(pyautogui_success),
+                "transport": "pyautogui_windows",
+                "requestedUseCdp": bool(use_cdp),
+                "coordinateSystem": "windows-screen-px",
+                "referenceX": int(round(click_x)),
+                "referenceY": int(round(click_y)),
+                "runtimeX": int(round(click_x)),
+                "runtimeY": int(round(click_y)),
+                "preClickHoverMs": delivery.get("preClickHoverMs", 0),
+                "configuredHoverDwellMs": hover_dwell_ms,
+                "actionAttempted": action_attempted,
+                "actionDelivered": bool(delivered),
                 "actionAmbiguous": bool(
                     delivery.get("actionAmbiguous")
-                    or (delivery.get("actionAttempted") and not pyautogui_success)
+                    or (action_attempted and not delivered)
                 ),
             }
-            return bool(pyautogui_success)
+            if is_remove_button:
+                self._last_remove_click_delivery = dict(
+                    self._last_return_click_delivery
+                )
+            return bool(delivered)
                 
         except Exception as e:
             print(f"❌ Single return click execution error: {e}")
@@ -16907,12 +16888,16 @@ class SprunkiGamePlayer:
             chrome_windows = gw.getWindowsWithTitle('cocrea.world')
             if not chrome_windows:
                 chrome_windows = gw.getWindowsWithTitle('Chrome')
-            
+
             if chrome_windows:
                 target_window = chrome_windows[0]
                 try:
+                    # Restore only a minimized window.  Restoring a maximized
+                    # or F11 game window can change its viewport and invalidate
+                    # fixed 1920x1080 manual-profile coordinates.
+                    if bool(getattr(target_window, "isMinimized", False)):
+                        target_window.restore()
                     target_window.activate()
-                    target_window.restore()
                     time.sleep(0.3)
                     print("   âœ… Light focus completed - no clicks performed")
                     return True
@@ -18085,7 +18070,16 @@ class SprunkiGamePlayer:
         """Execute single return click using PyAutoGUI"""
         return self._execute_pyautogui_single_click(click_x, click_y, domain_adj)
 
-    def _execute_pyautogui_single_click(self, click_x, click_y, domain_adj):
+    def _execute_pyautogui_single_click(
+        self,
+        click_x,
+        click_y,
+        domain_adj,
+        *,
+        pre_click_hover_ms=100,
+        require_focus=False,
+    ):
+        mouse_button_down = False
         if not isinstance(getattr(self, "_last_return_click_delivery", None), dict):
             self._last_return_click_delivery = {}
         # 🔥 KIỂM TRA AN TOÀN TỌA ĐỘ TRƯỚC KHI THỰC HIỆN
@@ -18096,21 +18090,52 @@ class SprunkiGamePlayer:
             print(f"ðŸ–±ï¸  Executing PyAutoGUI single click at ({click_x}, {click_y})")
             
             # ðŸ”§ SAFE: Ensure focus before click (use light focus Ä‘á»ƒ trÃ¡nh click nháº§m)
-            self._ensure_focus_before_operation("single click", focus_type="light")
+            focus_ready = self._ensure_focus_before_operation(
+                "single click", focus_type="light"
+            )
+            self._last_return_click_delivery["focusReady"] = bool(focus_ready)
+            if require_focus and not focus_ready:
+                self._last_return_click_delivery.update(
+                    {
+                        "transport": "pyautogui_windows",
+                        "actionAttempted": False,
+                        "actionDelivered": False,
+                        "actionAmbiguous": False,
+                    }
+                )
+                print("   ❌ Windows mouse click stopped because game focus was not confirmed.")
+                return False
             
             # âœ… NO VARIATION: Use exact coordinates
             pyautogui.moveTo(click_x, click_y, duration=0.15)  # â† CHÃNH XÃC 100%
-            time.sleep(0.1)
-            
-            # Single click
+            try:
+                hover_wait_ms = max(0, int(pre_click_hover_ms))
+            except (TypeError, ValueError, OverflowError):
+                hover_wait_ms = 100
+            self._last_return_click_delivery["preClickHoverMs"] = hover_wait_ms
+            time.sleep(hover_wait_ms / 1000.0)
+
+            # Keep the Windows button-down state long enough for the game
+            # runtime to observe it on a frame before releasing. PyAutoGUI's
+            # click() sends down/up back-to-back, which can be shorter than a
+            # Scratch/Gandi frame and leave a hovered control unactivated.
+            click_hold_ms = max(
+                25,
+                min(250, int(self.WINDOWS_RETURN_CLICK_HOLD_MS)),
+            )
             self._last_return_click_delivery.update(
                 {
                     "transport": "pyautogui",
                     "actionAttempted": True,
                     "actionAmbiguous": True,
+                    "clickHoldMs": click_hold_ms,
                 }
             )
-            pyautogui.click(button='left')
+            pyautogui.mouseDown(button="left")
+            mouse_button_down = True
+            time.sleep(click_hold_ms / 1000.0)
+            pyautogui.mouseUp(button="left")
+            mouse_button_down = False
             self._last_return_click_delivery.update(
                 {
                     "actionDelivered": True,
@@ -18126,6 +18151,12 @@ class SprunkiGamePlayer:
             return True
             
         except Exception as e:
+            if mouse_button_down:
+                try:
+                    pyautogui.mouseUp(button="left")
+                    mouse_button_down = False
+                except Exception:
+                    pass
             print(f"âŒ PyAutoGUI single click failed: {e}")
             self._last_return_click_delivery.update(
                 {

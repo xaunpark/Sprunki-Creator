@@ -236,7 +236,7 @@ class RemoveButtonReturnTests(unittest.TestCase):
         self.assertEqual(delivery["targetId"], "target-right")
         self.assertEqual((delivery["runtimeX"], delivery["runtimeY"]), (700, 600))
 
-    def test_remove_input_uses_strict_cdp_even_when_cleanup_caller_requests_legacy_transport(self):
+    def test_remove_input_uses_windows_mouse_even_when_cdp_is_requested(self):
         player = object.__new__(SprunkiGamePlayer)
         player._active_operation_context = object()
         player._execute_remove_button_cdp_click = Mock(return_value=True)
@@ -254,8 +254,70 @@ class RemoveButtonReturnTests(unittest.TestCase):
             )
 
         self.assertTrue(result)
-        player._execute_remove_button_cdp_click.assert_called_once()
-        player._execute_pyautogui_single_click.assert_not_called()
+        player._execute_remove_button_cdp_click.assert_not_called()
+        player._execute_pyautogui_single_click.assert_called_once_with(
+            386,
+            655,
+            {},
+            pre_click_hover_ms=SprunkiGamePlayer.REMOVE_BUTTON_HOVER_DWELL_MS,
+            require_focus=True,
+        )
+        self.assertEqual(
+            player._last_return_click_delivery["transport"],
+            "pyautogui_windows",
+        )
+        self.assertEqual(
+            player._last_return_click_delivery["configuredHoverDwellMs"],
+            750,
+        )
+
+    def test_legacy_return_input_uses_windows_mouse_when_cdp_is_available(self):
+        player = object.__new__(SprunkiGamePlayer)
+        player._active_operation_context = object()
+        player._get_websocket_url = Mock(return_value="ws://game-page")
+        player._execute_cdp_single_click = Mock(return_value=True)
+        player._execute_pyautogui_single_click = Mock(return_value=True)
+
+        with patch("builtins.print"):
+            result = player._execute_single_return_click(
+                386,
+                655,
+                use_cdp=True,
+                domain_adj={},
+                target_slot=None,
+                operation_context=player._active_operation_context,
+            )
+
+        self.assertTrue(result)
+        player._execute_cdp_single_click.assert_not_called()
+        player._execute_pyautogui_single_click.assert_called_once_with(
+            386,
+            655,
+            {},
+            pre_click_hover_ms=100,
+            require_focus=True,
+        )
+        self.assertEqual(
+            player._last_return_click_delivery["transport"],
+            "pyautogui_windows",
+        )
+        self.assertTrue(
+            player._last_return_click_delivery["requestedUseCdp"]
+        )
+
+    def test_light_focus_preserves_non_minimized_game_window_state(self):
+        player = object.__new__(SprunkiGamePlayer)
+        window = Mock()
+        window.isMinimized = False
+        window.title = "Cocrea game"
+
+        with patch("sprunki_game_player.gw.getWindowsWithTitle", return_value=[window]), \
+             patch("sprunki_game_player.time.sleep"), \
+             patch("builtins.print"):
+            self.assertTrue(player.ensure_game_focus_light())
+
+        window.activate.assert_called_once()
+        window.restore.assert_not_called()
 
     def test_rerun_click_is_bound_to_visible_current_game_page(self):
         from types import SimpleNamespace

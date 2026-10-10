@@ -1,0 +1,243 @@
+{
+  "version": 2,
+  "sourceUrl": "https://www.cocrea.world/@TheSprunkiWorld/Carlsprunkehorrortemplate2",
+  "canonicalUrl": "https://www.cocrea.world/@TheSprunkiWorld/Carlsprunkehorrortemplate2",
+  "urlKey": "TheSprunkiWorld/Carlsprunkehorrortemplate2",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "coordinateSpace": "screen_1920x1080_with_menu",
+  "prepareActions": [
+    {
+      "type": "click",
+      "x": 946,
+      "y": 379,
+      "delayMs": 1031,
+      "pressDurationMs": 63
+    },
+    {
+      "type": "click",
+      "x": 1052,
+      "y": 502,
+      "delayMs": 3109,
+      "pressDurationMs": 110
+    },
+    {
+      "type": "click",
+      "x": 1468,
+      "y": 408,
+      "delayMs": 1360,
+      "pressDurationMs": 109
+    },
+    {
+      "type": "click",
+      "x": 1030,
+      "y": 611,
+      "delayMs": 2015,
+      "pressDurationMs": 110
+    },
+    {
+      "type": "click",
+      "x": 1032,
+      "y": 440,
+      "delayMs": 4250,
+      "pressDurationMs": 110
+    },
+    {
+      "type": "click",
+      "x": 991,
+      "y": 452,
+      "delayMs": 4766,
+      "pressDurationMs": 94
+    },
+    {
+      "type": "click",
+      "x": 835,
+      "y": 346,
+      "delayMs": 4656,
+      "pressDurationMs": 125
+    }
+  ],
+  "prepareTiming": {
+    "endDelayMs": 2063,
+    "durationMs": 23250
+  },
+  "layout": {
+    "icons": [
+      {
+        "index": 0,
+        "label": "n-1",
+        "x": 444,
+        "y": 826
+      },
+      {
+        "index": 1,
+        "label": "n-2",
+        "x": 570,
+        "y": 824
+      },
+      {
+        "index": 2,
+        "label": "n-3",
+        "x": 694,
+        "y": 824
+      },
+      {
+        "index": 3,
+        "label": "n-4",
+        "x": 814,
+        "y": 826
+      },
+      {
+        "index": 4,
+        "label": "n-5",
+        "x": 941,
+        "y": 823
+      },
+      {
+        "index": 5,
+        "label": "n-6",
+        "x": 1071,
+        "y": 821
+      },
+      {
+        "index": 6,
+        "label": "n-7",
+        "x": 1183,
+        "y": 818
+      },
+      {
+        "index": 7,
+        "label": "n-8",
+        "x": 1306,
+        "y": 827
+      },
+      {
+        "index": 8,
+        "label": "n-9",
+        "x": 1442,
+        "y": 825
+      },
+      {
+        "index": 9,
+        "label": "n-10",
+        "x": 1566,
+        "y": 823
+      },
+      {
+        "index": 10,
+        "label": "n-11",
+        "x": 431,
+        "y": 937
+      },
+      {
+        "index": 11,
+        "label": "n-12",
+        "x": 575,
+        "y": 937
+      },
+      {
+        "index": 12,
+        "label": "n-13",
+        "x": 683,
+        "y": 933
+      },
+      {
+        "index": 13,
+        "label": "n-14",
+        "x": 815,
+        "y": 937
+      },
+      {
+        "index": 14,
+        "label": "n-15",
+        "x": 944,
+        "y": 942
+      },
+      {
+        "index": 15,
+        "label": "n-16",
+        "x": 1069,
+        "y": 939
+      },
+      {
+        "index": 16,
+        "label": "n-17",
+        "x": 1183,
+        "y": 937
+      },
+      {
+        "index": 17,
+        "label": "n-18",
+        "x": 1305,
+        "y": 935
+      },
+      {
+        "index": 18,
+        "label": "n-19",
+        "x": 1432,
+        "y": 931
+      },
+      {
+        "index": 19,
+        "label": "n-20",
+        "x": 1553,
+        "y": 940
+      }
+    ],
+    "slots": [
+      {
+        "index": 0,
+        "x": 251,
+        "y": 497
+      },
+      {
+        "index": 1,
+        "x": 444,
+        "y": 504
+      },
+      {
+        "index": 2,
+        "x": 636,
+        "y": 497
+      },
+      {
+        "index": 3,
+        "x": 824,
+        "y": 493
+      },
+      {
+        "index": 4,
+        "x": 1007,
+        "y": 492
+      },
+      {
+        "index": 5,
+        "x": 1198,
+        "y": 481
+      },
+      {
+        "index": 6,
+        "x": 1383,
+        "y": 489
+      },
+      {
+        "index": 7,
+        "x": 1563,
+        "y": 488
+      },
+      {
+        "index": 8,
+        "x": 1751,
+        "y": 480
+      }
+    ]
+  },
+  "settings": {
+    "gameControlType": "unknown"
+  },
+  "notes": "",
+  "createdAt": "2026-10-10T15:17:38.042185Z",
+  "updatedAt": "2026-10-10T15:17:38.042185Z"
+}
