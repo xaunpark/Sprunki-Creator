@@ -181,20 +181,91 @@ def version_score(path: Path, project_name: str) -> int:
     return -1 if path.name.startswith(f"{project_name}-showcase") else -2
 
 
-def find_timestamps(project: Path, explicit: Optional[str]) -> Optional[Path]:
+def _timestamp_path_from_video_filename(project: Path, filename: Any) -> Optional[Path]:
+    if not filename:
+        return None
+    name = str(filename).replace("\\", "/").rsplit("/", 1)[-1]
+    candidate_name = name if name.endswith(".timestamps.json") else f"{Path(name).stem}.timestamps.json"
+    candidate = project / candidate_name
+    return candidate if candidate.is_file() else None
+
+
+def _md5_file(path: Path) -> Optional[str]:
+    digest = hashlib.md5()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _cache_timestamp_hashes(project: Path) -> set[str]:
+    hashes = set()
+    for relative_path in (
+        "preprocessed_assets/comparison_assets.json",
+        "preprocessed_assets_short_comparison/short_comparison_assets.json",
+    ):
+        manifest_path = project / relative_path
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = read_json(manifest_path)
+            value = manifest.get("source_timestamps_hash") if isinstance(manifest, dict) else None
+        except (OSError, ValueError, AttributeError, json.JSONDecodeError):
+            continue
+        if value:
+            hashes.add(str(value).lower())
+    return hashes
+
+
+def find_timestamps(
+    project: Path,
+    explicit: Optional[str],
+    manifest: Optional[Dict[str, Any]] = None,
+) -> Optional[Path]:
     if explicit:
         path = Path(explicit)
         return path if path.exists() else None
-    candidates = []
-    for path in list(project.glob("*showcase*.timestamps.json")) + list(project.glob("*.timestamps.json")):
-        video_stem = path.name.replace(".timestamps.json", "")
-        if (project / f"{video_stem}.mp4").exists() or (project / f"{video_stem}.mkv").exists():
-            candidates.append(path)
-    if not candidates:
-        candidates = list(project.glob("*.timestamps.json"))
+
+    outputs = (manifest or {}).get("outputs") or {}
+    master_video = outputs.get("masterVideo") or {}
+    manifest_candidate = None
+    if isinstance(master_video, dict):
+        manifest_candidate = _timestamp_path_from_video_filename(
+            project,
+            master_video.get("filename") or master_video.get("path"),
+        )
+
+    candidates = list(project.glob("*.timestamps.json"))
+    if manifest_candidate:
+        candidates.append(manifest_candidate)
+    candidates = list(dict.fromkeys(candidates))
     if not candidates:
         return None
-    return max(candidates, key=lambda p: (version_score(p, project.name), p.stat().st_mtime))
+
+    cache_hashes = _cache_timestamp_hashes(project)
+    if cache_hashes:
+        # Different cache profiles referring to different recordings are
+        # ambiguous. Do not silently select the manifest/latest timestamps.
+        if len(cache_hashes) != 1:
+            return None
+        matching = [path for path in candidates if _md5_file(path) in cache_hashes]
+        if matching:
+            return max(
+                matching,
+                key=lambda path: (version_score(path, project.name), path.stat().st_mtime_ns),
+            )
+        # A cache exists but none of the local timestamp files match it. A
+        # manifest/latest fallback here could create an identity for a
+        # different retry recording.
+        return None
+
+    if manifest_candidate:
+        return manifest_candidate
+
+    return max(candidates, key=lambda path: (version_score(path, project.name), path.stat().st_mtime_ns))
 
 
 def extract_icon_index_segments(timestamps: Dict[str, Any]) -> Dict[int, str]:
@@ -542,7 +613,7 @@ def apply_segment_override_to_row(row: Dict[str, Any], override: Dict[str, Any])
         out["status"] = "unknown"
         return out
 
-    if canonical_id:
+    if canonical_id in {value for value, _label in CANONICAL_CHARACTERS}:
         display_name = next(
             (display for cid, display in CANONICAL_CHARACTERS if cid == canonical_id),
             str(canonical_id),
@@ -552,6 +623,12 @@ def apply_segment_override_to_row(row: Dict[str, Any], override: Dict[str, Any])
         out["status"] = "matched"
         out["identityUsable"] = True
         out["identityUnusableReason"] = None
+    elif status == "matched":
+        out["canonicalId"] = None
+        out["displayName"] = None
+        out["status"] = "unknown"
+        out["identityUsable"] = False
+        out["identityUnusableReason"] = "invalid_manual_canonical_id"
     return out
 
 
@@ -578,6 +655,28 @@ def build_payload(
     canonical_preference = (overrides or {}).get("segmentByCanonicalPreference") or {}
     segment_overrides = segment_overrides_by_key(overrides)
     segment_metadata = segment_metadata or {}
+    manual_review_complete = (overrides or {}).get("manualReviewComplete") is True
+
+    if manual_review_complete:
+        override_rows = (overrides or {}).get("segmentOverrides") or []
+        override_keys = [str(row.get("segmentKey") or "") for row in override_rows]
+        duplicate_override_keys = sorted({key for key in override_keys if key and override_keys.count(key) > 1})
+        if duplicate_override_keys:
+            errors.append("duplicate_manual_override_segments:" + ",".join(duplicate_override_keys[:20]))
+        expected_segment_keys = {str(value) for value in icon_segments.values()}
+        missing_manual_segments = sorted(expected_segment_keys - set(segment_overrides))
+        if missing_manual_segments:
+            errors.append(
+                "manual_review_incomplete_segments:"
+                + ",".join(missing_manual_segments[:20])
+            )
+        standard_ids = {value for value, _label in CANONICAL_CHARACTERS}
+        for segment_key, override in segment_overrides.items():
+            override_status = str(override.get("status") or "").lower()
+            if override_status not in {"matched", "extra", "unknown"}:
+                errors.append(f"invalid_manual_override_status:{segment_key}")
+            elif override_status == "matched" and override.get("canonicalId") not in standard_ids:
+                errors.append(f"invalid_manual_override_character:{segment_key}")
 
     for icon_index, segment_key in sorted(icon_segments.items()):
         source_icon = source_icons.get(icon_index, {"iconIndex": icon_index})
@@ -616,6 +715,9 @@ def build_payload(
             "identityUnusableReason": "search_mode_without_runtime_coordinates" if is_runtime_ambiguous else None,
             "runtimeCoordinateWarning": "search_mode_without_runtime_coordinates" if missing_runtime_pickup else None,
         }
+        row["autoValue"] = row["canonicalId"] or (
+            "extra" if row["status"] == "extra" else "unknown"
+        )
         override = segment_overrides.get(segment_key)
         if override:
             row = apply_segment_override_to_row(row, override)
@@ -637,7 +739,7 @@ def build_payload(
     if not icon_segments and "missing_timestamps" not in errors:
         errors.append("timestamps_have_no_icon_segments")
     missing_identity = [idx for idx in icon_segments if idx not in icon_identity_map]
-    if missing_identity:
+    if missing_identity and not manual_review_complete:
         warnings.append(f"missing_identity_for_icon_indexes:{','.join(map(str, missing_identity[:12]))}")
     search_without_runtime_coordinates = sorted(
         row["segmentKey"]
@@ -681,11 +783,22 @@ def build_payload(
 
     review_reason = None
     if status != "verified":
-        blocking_warnings = [
-            warning for warning in warnings
-            if not str(warning).startswith("used_headless_vm_costume_evidence")
-        ]
-        review_reason = errors[0] if errors else (blocking_warnings[0] if blocking_warnings else (warnings[0] if warnings else None))
+        if errors:
+            review_reason = errors[0]
+        elif unexpected_duplicate_canonicals:
+            review_reason = "duplicate_canonical_ids:" + ",".join(unexpected_duplicate_canonicals)
+        elif standard_count < 5:
+            review_reason = "insufficient_standard_icons"
+        else:
+            blocking_warnings = [
+                warning for warning in warnings
+                if not str(warning).startswith((
+                    "used_headless_vm_costume_evidence",
+                    "manual_override_segment:",
+                    "duplicate_costume_names:",
+                ))
+            ]
+            review_reason = blocking_warnings[0] if blocking_warnings else "identity_needs_review"
     retryable = is_retryable_identity_result(status, review_reason, errors, warnings)
 
     return {
@@ -694,6 +807,7 @@ def build_payload(
         "status": status,
         "needsReviewReason": review_reason,
         "retryable": retryable,
+        "manualReviewComplete": manual_review_complete,
         "rule": {
             "id": RULE_ID,
             "description": "Join recorded timestamps to source JSON icon indexes, then map those icons to Scratch costume names and canonical Sprunki identities.",
@@ -735,7 +849,7 @@ def resolve(project: Path, source_json_arg: Optional[str], timestamps_arg: Optio
     manifest_path = project / "manifest.json"
     manifest = read_json(manifest_path) if manifest_path.exists() else {}
     source_json_path = find_source_json(project, source_json_arg)
-    timestamps_path = find_timestamps(project, timestamps_arg)
+    timestamps_path = find_timestamps(project, timestamps_arg, manifest)
 
     source_json = None
     timestamps = None
@@ -758,31 +872,36 @@ def resolve(project: Path, source_json_arg: Optional[str], timestamps_arg: Optio
     source_icons = source_icons_by_index(source_json or {})
     source_hash = file_sha256(source_json_path)
 
+    overrides = load_overrides(project)
+    manual_review_complete = overrides.get("manualReviewComplete") is True
     icon_map: Dict[int, Dict[str, Any]] = {}
     evidence_source = None
-    sidecar_path = locate_sidecar(source_json_path, sidecar_arg)
-    icon_map, sidecar_warnings, sidecar_source = load_sidecar_icon_map(sidecar_path, source_hash)
-    warnings.extend(sidecar_warnings)
-    if icon_map:
-        evidence_source = sidecar_source
 
-    if not icon_map:
-        icon_map, evidence_source = smoke_artifact_icon_map(project)
+    if manual_review_complete:
+        evidence_source = "manual_segment_review"
+    else:
+        sidecar_path = locate_sidecar(source_json_path, sidecar_arg)
+        icon_map, sidecar_warnings, sidecar_source = load_sidecar_icon_map(sidecar_path, source_hash)
+        warnings.extend(sidecar_warnings)
+        if icon_map:
+            evidence_source = sidecar_source
 
-    if not icon_map and not errors:
-        icon_map, evidence_source, headless_warnings = headless_vm_icon_map(project, manifest, source_icons)
-        warnings.extend(headless_warnings)
+        if not icon_map:
+            icon_map, evidence_source = smoke_artifact_icon_map(project)
 
-    if not icon_map:
-        icon_map, evidence_source, legacy_warnings = legacy_identity_icon_map(project, source_icons)
-        warnings.extend(legacy_warnings)
+        if not icon_map and not errors:
+            icon_map, evidence_source, headless_warnings = headless_vm_icon_map(project, manifest, source_icons)
+            warnings.extend(headless_warnings)
 
-    if not icon_map and "missing_costume_evidence" not in warnings:
-        warnings.append("missing_costume_evidence")
+        if not icon_map:
+            icon_map, evidence_source, legacy_warnings = legacy_identity_icon_map(project, source_icons)
+            warnings.extend(legacy_warnings)
 
-    overrides = load_overrides(project)
-    if overrides:
-        warnings.extend(apply_icon_overrides(icon_map, overrides))
+        if not icon_map and "missing_costume_evidence" not in warnings:
+            warnings.append("missing_costume_evidence")
+
+        if overrides:
+            warnings.extend(apply_icon_overrides(icon_map, overrides))
 
     return build_payload(
         project=project,

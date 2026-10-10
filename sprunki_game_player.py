@@ -4258,22 +4258,27 @@ class SprunkiGamePlayer:
             print(f"âŒ Edge reinforcement error: {e}")
             return 0
 
-    def _execute_verification_js(self, js_code):
-        """Execute JavaScript for verification via WebSocket/CDP"""
+    def _execute_verification_js(self, js_code, timeout=10):
+        """Execute JavaScript for verification via WebSocket/CDP.
+
+        Verification probes run against a page whose main thread may still be
+        loading a game. Keep each probe bounded so the caller can retry until
+        its overall page/game deadline instead of mistaking one slow response
+        for a broken page.
+        """
+        ws = None
         try:
             ws_url = self._get_websocket_url()
             if not ws_url:  # âœ… CHECK None trÆ°á»›c
                 print("âš ï¸ WebSocket not available for verification, skipping JS check")
                 return None
             
-            ws = websocket.create_connection(ws_url, timeout=10)  # â† ÄÃƒ SAFE
+            ws = websocket.create_connection(ws_url, timeout=timeout)
             
             response = self._send_cdp_command(ws, {
                 "method": "Runtime.evaluate",
                 "params": {"expression": js_code, "awaitPromise": True, "returnByValue": True}
-            })
-            
-            ws.close()
+            }, timeout=timeout)
             
             if response and 'result' in response:
                 result = response.get('result', {}).get('result', {}).get('value')
@@ -4285,6 +4290,12 @@ class SprunkiGamePlayer:
         except Exception as e:
             print(f"âš ï¸ Error executing verification JavaScript: {e}")
             return None
+        finally:
+            try:
+                if ws:
+                    ws.close()
+            except Exception:
+                pass
 
     def preflight_url_playable(self, target_url):
         """Fail fast for URLs that are definitely unavailable before launching Chrome."""
@@ -4378,7 +4389,7 @@ class SprunkiGamePlayer:
         """
 
         try:
-            result = self._execute_verification_js(error_page_js)
+            result = self._execute_verification_js(error_page_js, timeout=5)
             if not isinstance(result, dict):
                 return QualityGateResult.failure(
                     "runtime_verification_unknown",
@@ -4823,20 +4834,22 @@ class SprunkiGamePlayer:
             }})();
             """
             
-            start_time = time.time()
-            max_attempts = 20
-            
-            for attempt in range(1, max_attempts + 1):
+            start_time = time.monotonic()
+            deadline = start_time + max(0.0, float(timeout))
+            attempt = 0
+
+            while time.monotonic() < deadline:
+                attempt += 1
                 if self.stop_event.is_set():
                     return QualityGateResult.failure(
                         "workflow_stopped",
                         message="Game verification stopped by the job.",
                     )
                 
-                print(f"ðŸŽ® Game verification attempt {attempt}/{max_attempts}")
+                print(f"ðŸŽ® Game verification attempt {attempt}")
                 
                 # Execute game verification JavaScript
-                game_result = self._execute_verification_js(game_verification_js)
+                game_result = self._execute_verification_js(game_verification_js, timeout=5)
                 
                 if game_result:
                     game_containers = game_result.get('gameContainers', [])
@@ -4871,7 +4884,7 @@ class SprunkiGamePlayer:
                     print(f"   ðŸŽ¯ Overall game ready: {'âœ… YES' if overall_ready else 'âŒ NO'}")
                     
                     if overall_ready:
-                        elapsed = time.time() - start_time
+                        elapsed = time.monotonic() - start_time
                         print(f"âœ… GAME VERIFICATION SUCCESSFUL! (took {elapsed:.1f}s)")
                         print("="*70)
                         return QualityGateResult.pass_result(
@@ -4889,31 +4902,25 @@ class SprunkiGamePlayer:
                 else:
                     print(f"   âš ï¸ Game verification JavaScript failed")
                 
-                # [MODIFIED] Check timeout using the determined timeout value
-                elapsed = time.time() - start_time
-                if elapsed > timeout:
-                    print(f"âš ï¸  Game verification timeout ({timeout}s exceeded)")
-                    return QualityGateResult.failure(
-                        "runtime_verification_unknown",
-                        status="UNKNOWN",
-                        retryable=True,
-                        evidence={"attempt": attempt, "timeoutSeconds": timeout},
-                        message="Game component verification timed out.",
-                    )
-                
-                # Wait before next attempt
-                if attempt < max_attempts:
-                    print(f"   â ³ Waiting {self.game_verification_interval}s before next check...")
-                    time.sleep(self.game_verification_interval)
-            
-            # All attempts failed within the timeout
-            print(f"âš ï¸  Game verification failed after {max_attempts} attempts")
+                # Check the configured deadline after each bounded probe.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+
+                # Poll until the configured deadline. A fixed attempt count
+                # could expire before the timeout when CDP probes are slow.
+                interval = max(0.1, float(self.game_verification_interval))
+                print(f"   â ³ Waiting {min(interval, remaining):.1f}s before next check...")
+                time.sleep(min(interval, remaining))
+
+            elapsed = time.monotonic() - start_time
+            print(f"âš ï¸  Game verification timeout ({elapsed:.1f}s elapsed; limit {timeout}s)")
             return QualityGateResult.failure(
                 "runtime_verification_unknown",
                 status="UNKNOWN",
                 retryable=True,
-                evidence={"attempts": max_attempts},
-                message="Game component verification remained inconclusive.",
+                evidence={"attempts": attempt, "timeoutSeconds": timeout},
+                message="Game components were not confirmed before the verification deadline.",
             )
             
         except Exception as e:
@@ -5768,7 +5775,11 @@ class SprunkiGamePlayer:
             # Đây là logic cốt lõi. Nếu trang là 404, nó sẽ không có component game và sẽ timeout.
             # Nếu là trang game, nó sẽ chờ cho đến khi component xuất hiện.
             error_page_result = self.detect_cocrea_error_page_fast()
-            if not isinstance(error_page_result, QualityGateResult) or error_page_result.status != "PASS":
+            if (
+                isinstance(error_page_result, QualityGateResult)
+                and error_page_result.failure_code == "no_playable_entry"
+                and error_page_result.status == "FAIL"
+            ):
                 self.last_setup_result = error_page_result
                 print(
                     "[FAIL] SETUP FAILED: Cocrea error-page verification did not pass: "
@@ -5777,16 +5788,28 @@ class SprunkiGamePlayer:
                 self.cleanup_chrome_complete()
                 return False
 
+            if not isinstance(error_page_result, QualityGateResult) or error_page_result.status != "PASS":
+                print(
+                    "[WARN] Cocrea error-page check is inconclusive; "
+                    "continuing with patient game-component verification."
+                )
+
             print(f"PHASE 2: Patiently Verifying Game Components (Timeout: {self.game_verification_timeout}s)...")
             
             # Chúng ta sẽ gọi hàm verify_game_components_ready với timeout mặc định (dài) từ config
             component_result = self.verify_game_components_ready()
             if not component_result:
                 self.last_setup_result = component_result
-                # Nếu sau 120 giây mà vẫn không tìm thấy component game, chúng ta có thể chắc chắn
-                # đây là trang lỗi (404, sign-in) hoặc một game bị hỏng nặng.
-                print(f"❌ SETUP FAILED: Game components did not appear within {self.game_verification_timeout}s.")
-                print("   This could be a 404/error page or a broken game mod.")
+                if (
+                    isinstance(component_result, QualityGateResult)
+                    and component_result.status == "UNKNOWN"
+                ):
+                    print(
+                        f"[WARN] Game readiness is still unconfirmed after "
+                        f"{self.game_verification_timeout}s; this is not a confirmed error page."
+                    )
+                else:
+                    print("[FAIL] Game component verification failed.")
                 self.cleanup_chrome_complete()
                 return False
             
@@ -6124,35 +6147,65 @@ class SprunkiGamePlayer:
             print(f"❌ CDP verification error: {e}")
             return False
 
-    def _send_cdp_command(self, ws, command):
+    def _send_cdp_command(self, ws, command, timeout=30):
         """Send CDP command via WebSocket"""
+        original_socket_timeout = None
+        set_socket_timeout = getattr(ws, "settimeout", None)
+        get_socket_timeout = getattr(ws, "gettimeout", None)
+        if callable(get_socket_timeout):
+            try:
+                original_socket_timeout = get_socket_timeout()
+            except Exception:
+                pass
+
         try:
             command_id = random.randint(1, 1000000)
             command['id'] = command_id
             ws.send(json.dumps(command))
             
-            max_wait_time = 30 
-            start_time = time.time()
+            max_wait_time = max(0.1, float(timeout))
+            start_time = time.monotonic()
+            timeout_logged = False
             
-            while time.time() - start_time < max_wait_time:
+            while time.monotonic() - start_time < max_wait_time:
                 try:
+                    remaining = max_wait_time - (time.monotonic() - start_time)
+                    if callable(set_socket_timeout):
+                        read_timeout = remaining
+                        if original_socket_timeout is not None:
+                            read_timeout = min(float(original_socket_timeout), remaining)
+                        set_socket_timeout(max(0.1, read_timeout))
                     response_str = ws.recv()
                     response_data = json.loads(response_str)
                     if response_data.get('id') == command_id:
                         return response_data
                 except Exception as timeout_e:
-                    if "timeout" in str(timeout_e).lower():
-                        print("WARNING: WebSocket timeout, continuing to wait...")
+                    error_text = str(timeout_e).lower()
+                    is_read_timeout = (
+                        isinstance(timeout_e, TimeoutError)
+                        or "timeout" in error_text
+                        or "timed out" in error_text
+                    )
+                    if is_read_timeout:
+                        if not timeout_logged:
+                            print("WARNING: WebSocket read timed out; waiting for the CDP response...")
+                            timeout_logged = True
                         continue
                     else:
                         raise timeout_e
                     
-            print(f"ERROR: CDP command timeout after {max_wait_time}s")
+            print(f"WARNING: CDP command did not respond within {max_wait_time:g}s")
             return None
             
         except Exception as e:
             print(f"ERROR: CDP command error: {e}")
             return None
+        finally:
+            if callable(set_socket_timeout):
+                try:
+                    set_socket_timeout(original_socket_timeout)
+                except Exception:
+                    pass
 
     def _inspect_runtime_layout_bounds(self):
         """Read compact visible target bounds from the live Scratch runtime."""

@@ -87,18 +87,44 @@ def _review_pc_project_folder(project: Path) -> str:
     return source
 
 
-def build_recorded_review_payload(identity: Dict[str, Any], project: Path) -> Dict[str, Any]:
+def _override_value(override: Dict[str, Any]) -> str:
+    status = str(override.get("status") or "").lower()
+    if status == "extra":
+        return "extra"
+    if status == "unknown":
+        return "unknown"
+    canonical_id = str(override.get("canonicalId") or "").strip()
+    return canonical_id or "unknown"
+
+
+def build_recorded_review_payload(
+    identity: Dict[str, Any],
+    project: Path,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    overrides = overrides or {}
+    overrides_by_segment = {
+        str(item.get("segmentKey")): item
+        for item in overrides.get("segmentOverrides") or []
+        if item.get("segmentKey")
+    }
     rows = []
     for index, row in enumerate(sorted(identity.get("segmentIdentities") or [], key=_segment_sort_key), start=1):
-        value = _identity_value(row)
+        value = str(row.get("autoValue") or _identity_value(row))
+        segment_key = str(row.get("segmentKey"))
+        selected_value = (
+            _override_value(overrides_by_segment[segment_key])
+            if segment_key in overrides_by_segment
+            else _identity_value(row)
+        )
         status = row.get("status") or ("matched" if row.get("canonicalId") else "unknown")
         rows.append({
             "order": index,
             "segmentKey": row.get("segmentKey"),
             "autoValue": value,
             "autoLabel": _display_for_value(value),
-            "selectedValue": value,
-            "selectedLabel": _display_for_value(value),
+            "selectedValue": selected_value,
+            "selectedLabel": _display_for_value(selected_value),
             "status": status,
             "costumeName": row.get("costumeName"),
             "canonicalId": row.get("canonicalId"),
@@ -117,6 +143,8 @@ def build_recorded_review_payload(identity: Dict[str, Any], project: Path) -> Di
         "identityStatus": identity.get("status"),
         "needsReviewReason": identity.get("needsReviewReason"),
         "identityGeneratedAt": identity.get("generatedAt"),
+        "manualReviewComplete": overrides.get("manualReviewComplete") is True,
+        "existingSegmentOverrides": list(overrides.get("segmentOverrides") or []),
         "evidence": identity.get("evidence") or {},
         "validation": identity.get("validation") or {},
         "characters": [{"value": value, "label": label} for value, label in CHARACTER_OPTIONS],
@@ -239,11 +267,13 @@ def _render_html(payload: Dict[str, Any]) -> str:
     Do <b>not</b> press Ctrl+S and do <b>not</b> save this HTML file.
     Save or move the downloaded file to the project folder as:
     <code id="overridePath"></code>
+    <br>For a complete manual review, check the box below after reviewing every segment. That makes the manual choices authoritative and disables automatic identity mapping.
   </div>
   <div class="toolbar">
     <button class="primary" onclick="downloadOverrides()">Save manual overrides (download JSON)</button>
     <button onclick="unlockAll()">Unlock all rows</button>
     <button onclick="resetAll()">Reset to auto</button>
+    <label><input type="checkbox" id="manualReviewComplete"> I reviewed every segment; use only my manual mapping</label>
     <span id="changedCount" class="badge">0 changed</span>
     <span id="fillMessage" class="badge"></span>
   </div>
@@ -282,6 +312,7 @@ function render() {{
   document.getElementById('project').textContent = REVIEW_DATA.projectFolder || '';
   document.getElementById('status').textContent = REVIEW_DATA.identityStatus || 'n/a';
   document.getElementById('reason').textContent = REVIEW_DATA.needsReviewReason || 'n/a';
+  document.getElementById('manualReviewComplete').checked = Boolean(REVIEW_DATA.manualReviewComplete);
   document.getElementById('overridePath').textContent = `${{REVIEW_DATA.projectFolder || ''}}\\\\recorded_identity_overrides.json`;
   document.getElementById('command').textContent = `python G:\\\\VS-Project\\\\Sprunki\\\\recorded_identity_resolver.py --project "${{REVIEW_DATA.projectFolder}}" --force`;
   const tbody = document.getElementById('rows');
@@ -337,6 +368,7 @@ function resetAll() {{
     document.querySelector(`tr[data-index="${{idx}}"]`).classList.remove('changed', 'auto-filled');
   }});
   document.getElementById('fillMessage').textContent = '';
+  document.getElementById('manualReviewComplete').checked = false;
   refreshContinueButtons();
   updateChangedCount();
 }}
@@ -402,14 +434,11 @@ function updateChangedCount() {{
 }}
 
 function downloadOverrides() {{
-  const segmentOverrides = [];
+  const manualReviewComplete = document.getElementById('manualReviewComplete').checked;
+  const merged = new Map((REVIEW_DATA.existingSegmentOverrides || []).map(item => [item.segmentKey, item]));
   rows.forEach((row, idx) => {{
     const value = document.getElementById(`sel-${{idx}}`).value;
-    if (value === (row.autoValue || 'unknown')) return;
-    const override = {{
-      segmentKey: row.segmentKey,
-      reason: 'manual_review'
-    }};
+    const override = {{ segmentKey: row.segmentKey, reason: 'manual_review' }};
     if (value === 'extra') {{
       override.status = 'extra';
       override.canonicalId = null;
@@ -420,13 +449,29 @@ function downloadOverrides() {{
       override.status = 'matched';
       override.canonicalId = value;
     }}
-    segmentOverrides.push(override);
+    if (manualReviewComplete || value !== (row.autoValue || 'unknown')) merged.set(row.segmentKey, override);
+    else merged.delete(row.segmentKey);
   }});
+  const segmentOverrides = manualReviewComplete
+    ? rows.map((row, idx) => {{
+        const value = document.getElementById(`sel-${{idx}}`).value;
+        const override = {{ segmentKey: row.segmentKey, reason: 'manual_review' }};
+        if (value === 'extra' || value === 'unknown') {{
+          override.status = value;
+          override.canonicalId = null;
+        }} else {{
+          override.status = 'matched';
+          override.canonicalId = value;
+        }}
+        return override;
+      }})
+    : Array.from(merged.values());
   const payload = {{
     schemaVersion: 1,
     rule: 'manual_segment_identity_override',
     generatedAt: new Date().toISOString(),
     projectFolder: REVIEW_DATA.projectFolder,
+    manualReviewComplete,
     segmentOverrides
   }};
   if (segmentOverrides.length === 0) {{
@@ -452,7 +497,12 @@ render();
 
 
 def write_recorded_identity_review(project: Path, identity: Dict[str, Any]) -> Dict[str, Path]:
-    payload = build_recorded_review_payload(identity, project)
+    overrides_path = project / "recorded_identity_overrides.json"
+    try:
+        overrides = json.loads(overrides_path.read_text(encoding="utf-8-sig")) if overrides_path.is_file() else {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        overrides = {}
+    payload = build_recorded_review_payload(identity, project, overrides)
     json_path = project / "recorded_identity_review.json"
     html_path = project / "recorded_identity_review.html"
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
