@@ -1131,6 +1131,7 @@ class TrackerAPIClient:
         payload: Dict[str, Any],
         final: bool,
         original_request_bytes: Optional[int] = None,
+        remove_outbox_on_success: bool = True,
     ) -> bool:
         """Send a callback with bounded retries and durable terminal replay."""
 
@@ -1205,10 +1206,10 @@ class TrackerAPIClient:
                     original_request_bytes=original_request_bytes,
                 )
                 print(
-                    f"[Tracker] Callback accepted: queue_id={queue_id} endpoint={endpoint} "
+                    f"[Tracker] Callback returned 2xx: queue_id={queue_id} endpoint={endpoint} "
                     f"HTTP {status_code} request_bytes={request_bytes} retry_count={retry_count}"
                 )
-                if final:
+                if final and remove_outbox_on_success:
                     self._remove_terminal_outbox(queue_id)
                 return True
 
@@ -1269,6 +1270,147 @@ class TrackerAPIClient:
             if final and not outbox_saved:
                 self._save_terminal_outbox(queue_id, current_payload)
             return False
+
+    def _read_queue_status(self, queue_id: int) -> Optional[Dict[str, Any]]:
+        """Read Tracker's committed queue state after a terminal callback."""
+        getter = getattr(self.session, "get", None)
+        if not callable(getter):
+            return None
+        try:
+            response = getter(
+                f"{self.tracker_url}/api/queue/status/{queue_id}",
+                timeout=min(float(getattr(self, "timeout", 30)), 5.0),
+            )
+        except Exception as exc:
+            print(
+                f"[Tracker] Terminal status read-back failed: queue_id={queue_id} "
+                f"error={self._redact_callback_message(exc)}"
+            )
+            return None
+
+        if getattr(response, "status_code", None) != 200:
+            error_code, message = self._response_error(response)
+            print(
+                f"[Tracker] Terminal status read-back failed: queue_id={queue_id} "
+                f"HTTP {getattr(response, 'status_code', 'unknown')} "
+                f"error_code={error_code} message={message}"
+            )
+            return None
+        try:
+            snapshot = response.json()
+        except Exception:
+            return None
+        return snapshot if isinstance(snapshot, dict) else None
+
+    def _send_terminal_callback_until_confirmed(
+        self,
+        queue_id: int,
+        payload: Dict[str, Any],
+        *,
+        original_request_bytes: Optional[int] = None,
+    ) -> bool:
+        """Keep replaying the same terminal event until Tracker reads it back."""
+        endpoint = f"/api/queue/status/{queue_id}"
+        getter = getattr(self.session, "get", None)
+        # Lightweight adapter sessions used by local tools may only implement
+        # PUT/POST. Keep their existing callback contract; production
+        # requests.Session always has GET and requires state read-back.
+        if not callable(getter):
+            return self._send_callback_with_retry(
+                queue_id=queue_id,
+                method="PUT",
+                endpoint=endpoint,
+                payload=payload,
+                final=True,
+                original_request_bytes=original_request_bytes,
+            )
+
+        expected_status = str(payload.get("status") or "").strip().lower()
+        expected_report_id = str(payload.get("report_id") or "")
+        expected_attempt_nonce = str(payload.get("attempt_nonce") or "")
+        try:
+            confirmation_rounds = max(
+                1,
+                int(getattr(self, "terminal_confirmation_rounds", 2)),
+            )
+        except (TypeError, ValueError):
+            confirmation_rounds = 2
+        retry_delays = tuple(
+            getattr(self, "callback_retry_delays", CALLBACK_RETRY_DELAYS_SECONDS)
+        )
+        sleep_fn = getattr(self, "_sleep", time.sleep)
+
+        for round_index in range(confirmation_rounds):
+            sent = self._send_callback_with_retry(
+                queue_id=queue_id,
+                method="PUT",
+                endpoint=endpoint,
+                payload=payload,
+                final=True,
+                original_request_bytes=original_request_bytes,
+                remove_outbox_on_success=False,
+            )
+            if not sent:
+                return False
+
+            snapshot = self._read_queue_status(queue_id)
+            if snapshot and (
+                int(snapshot.get("queue_id") or 0) == int(queue_id)
+                and str(snapshot.get("queue_status") or "").strip().lower() == expected_status
+                and str(snapshot.get("report_id") or "") == expected_report_id
+                and str(snapshot.get("attempt_nonce") or "") == expected_attempt_nonce
+                and snapshot.get("diagnostic_state") == "accepted"
+                and snapshot.get("terminal_source") == "diagnostic"
+            ):
+                try:
+                    confirmed_sequence = int(snapshot.get("sequence") or 0)
+                    expected_sequence = int(payload.get("sequence") or 0)
+                except (TypeError, ValueError):
+                    confirmed_sequence = -1
+                    expected_sequence = 0
+                if confirmed_sequence >= expected_sequence:
+                    self._remove_terminal_outbox(queue_id)
+                    print(
+                        f"[Tracker] Terminal status verified: queue_id={queue_id} "
+                        f"status={expected_status} sequence={confirmed_sequence}"
+                    )
+                    return True
+
+            if snapshot:
+                current_status = str(snapshot.get("queue_status") or "").strip().lower()
+                current_report_id = str(snapshot.get("report_id") or "")
+                current_attempt_nonce = str(snapshot.get("attempt_nonce") or "")
+                if current_status in {"completed", "failed", "cancelled"}:
+                    print(
+                        f"[Tracker] Terminal status conflicts with callback: queue_id={queue_id} "
+                        f"callback_status={expected_status} tracker_status={current_status}; "
+                        "leaving terminal outbox for review."
+                    )
+                    return False
+                if (
+                    current_report_id != expected_report_id
+                    or current_attempt_nonce != expected_attempt_nonce
+                ):
+                    print(
+                        f"[Tracker] Terminal callback identity is no longer active: "
+                        f"queue_id={queue_id}; leaving terminal outbox for review."
+                    )
+                    return False
+
+            if round_index + 1 < confirmation_rounds:
+                delay = retry_delays[min(round_index, len(retry_delays) - 1)]
+                print(
+                    f"[Tracker] Terminal callback not reflected in queue state; "
+                    f"replaying same event: queue_id={queue_id} "
+                    f"round={round_index + 2}/{confirmation_rounds}"
+                )
+                sleep_fn(delay)
+
+        print(
+            f"[Tracker] Terminal callback was not confirmed by queue read-back: "
+            f"queue_id={queue_id}; durable outbox retained."
+        )
+        return False
 
     def resend_terminal_callback(
         self,
@@ -1356,12 +1498,9 @@ class TrackerAPIClient:
             state["next_sequence"] = max(int(state.get("next_sequence", 0)), sequence + 1)
         except (KeyError, TypeError, ValueError):
             pass
-        return self._send_callback_with_retry(
-            queue_id=queue_id,
-            method="PUT",
-            endpoint=f"/api/queue/status/{queue_id}",
-            payload=compact,
-            final=True,
+        return self._send_terminal_callback_until_confirmed(
+            queue_id,
+            compact,
             original_request_bytes=self._payload_size_bytes(replay),
         )
     
@@ -1388,6 +1527,49 @@ class TrackerAPIClient:
         except Exception as e:
             print(f"❌ Registration error: {e}")
             return False
+
+    def retry_pending_terminal_callback(self) -> bool:
+        """Replay the newest unconfirmed terminal outbox before claiming work."""
+        directory = self._tracker_outbox_directory()
+        try:
+            candidates = []
+            for filename in os.listdir(directory):
+                match = re.fullmatch(r"job-(\d+)-terminal\.json", filename)
+                if not match:
+                    continue
+                path = os.path.join(directory, filename)
+                try:
+                    candidates.append((os.path.getmtime(path), int(match.group(1))))
+                except OSError:
+                    continue
+        except OSError:
+            return False
+        if not candidates:
+            return False
+
+        retry_after = getattr(self, "_terminal_retry_after", {})
+        now = time.monotonic()
+        attempts = getattr(self, "_terminal_retry_attempts", {})
+        for _, queue_id in sorted(candidates, reverse=True):
+            if retry_after.get(queue_id, 0.0) > now:
+                continue
+            payload = self._load_terminal_outbox(queue_id)
+            if not isinstance(payload, dict):
+                continue
+            print(f"[Tracker] Replaying unconfirmed terminal callback before queue claim: queue_id={queue_id}")
+            accepted = self.resend_terminal_callback(queue_id, payload)
+            if accepted:
+                retry_after.pop(queue_id, None)
+                print(f"[Tracker] Pending terminal callback confirmed: queue_id={queue_id}")
+                return True
+
+            attempt_count = int(attempts.get(queue_id, 0)) + 1
+            attempts[queue_id] = attempt_count
+            retry_after[queue_id] = now + min(300.0, 30.0 * (2 ** min(attempt_count - 1, 3)))
+            self._terminal_retry_attempts = attempts
+            self._terminal_retry_after = retry_after
+            return False
+        return False
     
     def send_heartbeat(self, status="online", current_job_id=None, performance_stats=None) -> bool:
         """Send heartbeat to Tracker"""
@@ -1413,6 +1595,7 @@ class TrackerAPIClient:
     def get_next_job(self) -> Optional[Dict]:
         """Get next job from Tracker queue"""
         try:
+            self.retry_pending_terminal_callback()
             response = self.session.post(
                 f"{self.tracker_url}/api/queue/next", 
                 json={
@@ -1526,16 +1709,26 @@ class TrackerAPIClient:
                     raw_payload,
                     aggressive=original_request_bytes > TERMINAL_MAX_REQUEST_BYTES,
                 )
-            result = self._send_callback_with_retry(
-                queue_id=queue_id,
-                method="PUT",
-                endpoint=f"/api/queue/status/{queue_id}",
-                payload=payload,
-                final=bool(final),
-                original_request_bytes=original_request_bytes,
-            )
+            if final:
+                result = self._send_terminal_callback_until_confirmed(
+                    queue_id,
+                    payload,
+                    original_request_bytes=original_request_bytes,
+                )
+            else:
+                result = self._send_callback_with_retry(
+                    queue_id=queue_id,
+                    method="PUT",
+                    endpoint=f"/api/queue/status/{queue_id}",
+                    payload=payload,
+                    final=False,
+                    original_request_bytes=original_request_bytes,
+                )
             if result:
-                print(f"[Tracker] Updated job {queue_id} status: {status}")
+                print(
+                    f"[Tracker] Status callback returned 2xx: queue_id={queue_id} "
+                    f"requested_status={status}"
+                )
             return result
         except Exception as e:
             print(f"❌ Status update error: {e}")
