@@ -6770,7 +6770,14 @@ class SprunkiGamePlayer:
         if not action_attempted:
             return "action_not_attempted"
         details = dict(getattr(result, "details", {}) or {})
-        if details.get("aggregateFallback"):
+        if (
+            details.get("aggregateFallback")
+            and result.status in {
+                OperationStatus.VERIFIED,
+                OperationStatus.ALREADY_PLACED,
+                OperationStatus.ALREADY_EMPTY,
+            }
+        ):
             return "primary_aggregate_success"
         if result.status in {
             OperationStatus.VERIFIED,
@@ -6780,24 +6787,21 @@ class SprunkiGamePlayer:
             return "primary_success"
         if result.status == OperationStatus.STOPPED and not self._visual_stop_allows_read_only_fallback(result):
             return "terminal_stop"
-        if details.get("actionDelivered") is False and not details.get("actionAmbiguous"):
-            return "action_not_delivered"
-        return "primary_result_not_eligible"
+        return "primary_result_unresolved"
 
     def _visual_fallback_eligible(self, result, action_attempted):
-        """Allow visual fallback for every unresolved delivered gesture.
+        """Allow visual fallback for every unresolved attempted gesture.
 
-        The semantic verifier remains primary.  ``aggregateFallback`` is an
-        accepted primary success under the current policy, so it deliberately
-        skips image verification.  For an actual delivered (or transport-
-        ambiguous) action, however, the image check is not restricted to a
-        message whitelist: UNKNOWN, semantic FAILED, and recoverable STOPPED
-        results must all get one final read-only visual opportunity.
+        The semantic verifier remains primary.  A completed aggregate result
+        is accepted as success under the current policy and skips image
+        verification.  An aggregateFallback marker on an unresolved UNKNOWN
+        result is not itself success. Every non-success result after an
+        attempted gesture gets one final read-only visual opportunity, even
+        when the input transport reported that delivery failed; the screenshot
+        is the final check for whether the board nevertheless changed. An
+        explicit terminal stop remains authoritative.
         """
         if not action_attempted or result is None:
-            return False
-        details = dict(getattr(result, "details", {}) or {})
-        if details.get("aggregateFallback"):
             return False
         if result.status in {
             OperationStatus.VERIFIED,
@@ -6805,36 +6809,7 @@ class SprunkiGamePlayer:
             OperationStatus.ALREADY_EMPTY,
         }:
             return False
-        if result.status not in {
-            OperationStatus.UNKNOWN,
-            OperationStatus.FAILED,
-            OperationStatus.STOPPED,
-        }:
-            return False
         if result.status == OperationStatus.STOPPED and not self._visual_stop_allows_read_only_fallback(result):
-            return False
-
-        action_delivered = details.get("actionDelivered")
-        action_ambiguous = bool(details.get("actionAmbiguous"))
-        if action_delivered is False and not action_ambiguous:
-            return False
-
-        # These messages describe a failure before a physical gesture could
-        # be sent.  They are kept as a guard for callers that do not yet carry
-        # explicit action metadata.
-        message = str(getattr(result, "message", "") or "").strip().lower()
-        if message in {
-            "invalid_target_slot",
-            "input_budget_exhausted",
-            "input_budget_or_deadline_exhausted",
-            "drag_execution_failed",
-            "precision_click_execution_failed",
-            "remove_button_input_budget_exhausted",
-            "runtime_layout_unknown",
-            "slot_hitbox_unknown",
-            "slot_target_unknown",
-            "slot_bounds_unknown",
-        } and not action_ambiguous:
             return False
         return True
 
@@ -6848,11 +6823,11 @@ class SprunkiGamePlayer:
     ):
         """Record an unavailable visual verifier without hiding the gap.
 
-        A delivered physical action with no usable visual arm is not a
+        An attempted action with no usable visual arm is not a proven
         business ``FAILED`` result: the final verifier was technically
-        inconclusive.  Convert only that case to ``UNKNOWN`` so the normal
-        recovery path can reconcile the board.  A pre-action failure remains
-        ``FAILED`` and is explicitly marked as not applicable instead.
+        inconclusive. Convert that case to ``UNKNOWN`` so the normal recovery
+        path can reconcile the board. A pre-action failure remains ``FAILED``
+        and is explicitly marked as not applicable instead.
         """
         if result is None:
             return result
@@ -6879,10 +6854,9 @@ class SprunkiGamePlayer:
             }
         )
 
-        # Do not turn a terminal stop or an action that was never delivered
-        # into an UNKNOWN result.  Those are handled by their own safety or
-        # input-delivery paths.  Only a delivered/ambiguous action whose
-        # visual verifier was unavailable needs recovery reconciliation.
+        # A terminal stop remains authoritative. For any attempted action,
+        # however, an unavailable final verifier leaves the outcome unknown
+        # even if the input transport reported that delivery failed.
         if (
             visual_applicable
             and bool(action_attempted)
@@ -7148,17 +7122,11 @@ class SprunkiGamePlayer:
                 }
                 return result
             if result is not None and action_attempted:
-                primary_details = dict(getattr(result, "details", {}) or {})
-                action_delivered = primary_details.get("actionDelivered")
-                action_ambiguous = bool(primary_details.get("actionAmbiguous"))
-                visual_applicable = not (
-                    action_delivered is False and not action_ambiguous
-                )
                 return self._visual_mark_inconclusive(
                     result,
                     reason="visual_arm_unavailable",
                     action_attempted=action_attempted,
-                    visual_applicable=visual_applicable,
+                    visual_applicable=True,
                 )
             return result
         if not self._visual_fallback_eligible(result, action_attempted):
@@ -7204,14 +7172,7 @@ class SprunkiGamePlayer:
                         },
                     }
                 elif action_attempted:
-                    action_delivered = primary_details.get("actionDelivered")
-                    action_ambiguous = bool(
-                        primary_details.get("actionAmbiguous")
-                    )
-                    visual_applicable = not (
-                        skip_reason in {"terminal_stop", "action_not_delivered"}
-                        or (action_delivered is False and not action_ambiguous)
-                    )
+                    visual_applicable = skip_reason != "terminal_stop"
                     return self._visual_mark_inconclusive(
                         result,
                         reason=skip_reason,
